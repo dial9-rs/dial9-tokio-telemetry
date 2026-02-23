@@ -12,6 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::runtime::{Handle, RuntimeMetrics};
 
+/// Sentinel location for tokio-internal tasks (spawned before our callbacks).
+static TOKIO_INTERNAL_LOCATION: &std::panic::Location<'static> = std::panic::Location::caller();
+
 /// Sentinel value for events from non-worker threads
 const UNKNOWN_WORKER: usize = 255;
 
@@ -47,13 +50,21 @@ fn resolve_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> Option<usize>
     })
 }
 
+/// Get the current worker ID as u8 (255 if unknown). Used by Traced waker.
+pub(crate) fn current_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> u8 {
+    match resolve_worker_id(metrics) {
+        Some(id) if id <= 254 => id as u8,
+        _ => 255,
+    }
+}
+
 /// Shared state accessed lock-free by callbacks on the hot path.
 /// No spawn location tracking here — all interning happens in the flush thread.
-struct SharedState {
-    enabled: AtomicBool,
-    collector: CentralCollector,
-    start_time: Instant,
-    metrics: ArcSwap<Option<RuntimeMetrics>>,
+pub(crate) struct SharedState {
+    pub(crate) enabled: AtomicBool,
+    pub(crate) collector: CentralCollector,
+    pub(crate) start_time: Instant,
+    pub(crate) metrics: ArcSwap<Option<RuntimeMetrics>>,
 }
 
 impl SharedState {
@@ -74,7 +85,11 @@ impl SharedState {
             let mut buf = buf.borrow_mut();
             buf.record_event(event);
             // Determine event type for flush decision
-            let should_flush = buf.should_flush() || matches!(event, RawEvent::WorkerPark { .. });
+            let should_flush = buf.should_flush()
+                || matches!(
+                    event,
+                    RawEvent::WorkerPark { .. } | RawEvent::TaskSpawn { .. }
+                );
             if should_flush {
                 self.collector.accept_flush(buf.flush());
             }
@@ -185,12 +200,17 @@ impl FlushState {
         let id = SpawnLocationId(self.next_id);
         self.next_id += 1;
         self.intern_map.insert(ptr, id);
-        self.intern_strings.push(format!(
-            "{}:{}:{}",
-            location.file(),
-            location.line(),
-            location.column()
-        ));
+        if location == TOKIO_INTERNAL_LOCATION {
+            self.intern_strings
+                .push("<tokio internal (io driver, etc.>".to_string());
+        } else {
+            self.intern_strings.push(format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            ));
+        }
         id
     }
 
@@ -228,9 +248,23 @@ impl TelemetryRecorder {
         }
     }
 
-    pub fn initialize(&mut self, handle: Handle) {
+    pub fn initialize(&mut self, handle: Handle, task_tracking_enabled: bool) {
         let metrics = handle.metrics();
+        let num_workers = metrics.num_workers();
         self.shared.metrics.store(Arc::new(Some(metrics)));
+
+        // Tokio spawns internal tasks (IDs 1..=num_workers) during runtime build,
+        // before our on_task_spawn callback fires. Register them synthetically.
+        if task_tracking_enabled {
+            for id in 1..=num_workers as u32 {
+                self.shared
+                    .collector
+                    .accept_flush(vec![RawEvent::TaskSpawn {
+                        task_id: TaskId::from_u32(id),
+                        location: TOKIO_INTERNAL_LOCATION,
+                    }]);
+            }
+        }
     }
 
     fn flush(&mut self) {
@@ -342,6 +376,22 @@ impl TelemetryRecorder {
                     self.flush_state.on_rotate();
                 }
             }
+            RawEvent::WakeEvent {
+                timestamp_nanos,
+                waker_task_id,
+                woken_task_id,
+                target_worker,
+            } => {
+                self.writer.write_event(&TelemetryEvent::WakeEvent {
+                    timestamp_nanos,
+                    waker_task_id,
+                    woken_task_id,
+                    target_worker,
+                })?;
+                if self.writer.take_rotated() {
+                    self.flush_state.on_rotate();
+                }
+            }
         }
         Ok(())
     }
@@ -386,6 +436,7 @@ impl TelemetryRecorder {
         if task_tracking_enabled {
             let s5 = shared.clone();
             builder.on_task_spawn(move |meta| {
+                println!("meta: {:?}", meta.id());
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
                 s5.record_event(RawEvent::TaskSpawn { task_id, location });
@@ -456,6 +507,29 @@ impl TelemetryHandle {
         self.shared.enabled.store(false, Ordering::Relaxed);
         self.recorder.lock().unwrap().flush();
     }
+
+    /// Get a handle for creating `Traced<F>` future wrappers.
+    pub fn traced_handle(&self) -> crate::traced::TracedHandle {
+        crate::traced::TracedHandle {
+            shared: self.shared.clone(),
+        }
+    }
+
+    /// Spawn a future wrapped in [`Traced`](crate::traced::Traced) for wake-event capture.
+    #[track_caller]
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let traced_handle = self.traced_handle();
+        tokio::spawn(async move {
+            let task_id = tokio::task::try_id()
+                .map(TaskId::from)
+                .unwrap_or(TaskId::from_u32(0));
+            crate::traced::Traced::new(future, traced_handle, task_id).await
+        })
+    }
 }
 
 /// RAII guard returned by [`TracedRuntimeBuilder::build`].
@@ -484,6 +558,16 @@ impl TelemetryGuard {
     /// Stop recording telemetry events and flush any buffered data.
     pub fn disable(&self) {
         self.handle.disable();
+    }
+
+    /// Spawn a future wrapped in [`Traced`](crate::traced::Traced) for wake-event capture.
+    #[track_caller]
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.handle.spawn(future)
     }
 }
 
@@ -518,7 +602,7 @@ impl TracedRuntimeBuilder {
         recorder
             .lock()
             .unwrap()
-            .initialize(runtime.handle().clone());
+            .initialize(runtime.handle().clone(), self.task_tracking_enabled);
 
         let stop = Arc::new(AtomicBool::new(false));
 

@@ -192,6 +192,7 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
                 stats.max_sched_wait_ns = stats.max_sched_wait_ns.max(*sched_wait_delta_nanos);
             }
             TelemetryEvent::SpawnLocationDef { .. } | TelemetryEvent::TaskSpawn { .. } => {}
+            TelemetryEvent::WakeEvent { .. } => {}
         }
     }
 
@@ -207,6 +208,52 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
         },
         spawn_location_stats,
     }
+}
+
+/// Compute wake→poll scheduling delays from wake events and poll starts.
+/// Returns a sorted vec of delay durations in nanoseconds.
+pub fn compute_wake_to_poll_delays(events: &[TelemetryEvent]) -> Vec<u64> {
+    // Index: task_id → sorted vec of wake timestamps
+    let mut wakes_by_task: HashMap<TaskId, Vec<u64>> = HashMap::new();
+    for e in events {
+        if let TelemetryEvent::WakeEvent {
+            timestamp_nanos,
+            woken_task_id,
+            ..
+        } = e
+        {
+            wakes_by_task
+                .entry(*woken_task_id)
+                .or_default()
+                .push(*timestamp_nanos);
+        }
+    }
+    for v in wakes_by_task.values_mut() {
+        v.sort_unstable();
+    }
+
+    let mut delays = Vec::new();
+    for e in events {
+        if let TelemetryEvent::PollStart {
+            timestamp_nanos,
+            task_id,
+            ..
+        } = e
+        {
+            if let Some(wakes) = wakes_by_task.get(task_id) {
+                // Binary search for last wake <= poll start
+                let idx = wakes.partition_point(|&t| t <= *timestamp_nanos);
+                if idx > 0 {
+                    let delay = timestamp_nanos - wakes[idx - 1];
+                    if delay > 0 && delay < 1_000_000_000 {
+                        delays.push(delay);
+                    }
+                }
+            }
+        }
+    }
+    delays.sort_unstable();
+    delays
 }
 
 /// An active period between WorkerUnpark and WorkerPark, with scheduling ratio.

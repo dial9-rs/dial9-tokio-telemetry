@@ -15,12 +15,20 @@ impl Serialize for TaskId {
 
 impl From<tokio::task::Id> for TaskId {
     fn from(id: tokio::task::Id) -> Self {
-        // Hash the tokio::task::Id to get a stable u64 representation
-        use std::collections::hash_map::DefaultHasher;
-        let mut hasher = DefaultHasher::new();
-        id.hash(&mut hasher);
-        TaskId(hasher.finish())
+        // Extract the raw u64 from tokio's opaque Id using a capturing hasher
+        let mut extractor = U64Extractor(0);
+        id.hash(&mut extractor);
+        TaskId(extractor.0)
     }
+}
+
+/// A Hasher that captures the first u64 written to it.
+struct U64Extractor(u64);
+
+impl Hasher for U64Extractor {
+    fn write(&mut self, _bytes: &[u8]) {}
+    fn write_u64(&mut self, val: u64) { self.0 = val; }
+    fn finish(&self) -> u64 { self.0 }
 }
 
 impl TaskId {
