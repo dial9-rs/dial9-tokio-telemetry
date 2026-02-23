@@ -1,0 +1,22 @@
+name: Build
+on: [pull_request]
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain:
+          - stable
+          - nightly
+    env:
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        uses: ./.github/actions/rust-build
+        with:
+          toolchain: ${{ matrix.toolchain }}

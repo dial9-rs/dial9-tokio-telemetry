@@ -1,0 +1,28 @@
+name: "Rust builds"
+description: "Builds and tests rust code"
+inputs:
+  toolchain:
+    required: true
+    description: "the Rust toolchain to use"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+    - uses: Swatinem/rust-cache@v2
+    - name: Build
+      shell: bash
+      env:
+        RUSTFLAGS: "--cfg tokio_unstable"
+      run: |
+        if [ "${{ inputs.toolchain }}" != stable ]; then
+            rm -fv Cargo.lock
+        fi
+        cargo build --verbose
+    - name: Run tests
+      shell: bash
+      env:
+        RUSTFLAGS: "--cfg tokio_unstable"
+      run: cargo test --verbose

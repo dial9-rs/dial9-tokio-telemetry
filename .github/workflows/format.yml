@@ -1,0 +1,28 @@
+name: Formatting and Linting
+on: [pull_request]
+
+jobs:
+  fmt:
+    name: Cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Run fmt check
+        shell: bash
+        run: cargo fmt --all -- --check
+  clippy:
+    name: Cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run clippy check
+        shell: bash
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: cargo clippy --workspace -- -D warnings
