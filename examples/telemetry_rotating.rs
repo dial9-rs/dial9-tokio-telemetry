@@ -32,7 +32,7 @@ fn main() -> std::io::Result<()> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let (runtime, _guard) = TracedRuntime::build_and_start(builder, Box::new(writer))?;
+    let (runtime, _guard) = TracedRuntime::builder().build_and_start(builder, Box::new(writer))?;
 
     runtime.block_on(async {
         println!("Starting rotating-writer telemetry demo...");

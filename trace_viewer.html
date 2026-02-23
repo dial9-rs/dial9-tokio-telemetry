@@ -67,7 +67,7 @@
                 color: #6c63ff;
             }
             #toolbar .filename::after {
-                content: " v12";
+                content: " v13";
                 font-size: 0.7em;
                 color: #888;
             }
@@ -145,6 +145,24 @@
                 position: relative;
             }
 
+            #task-detail {
+                display: none;
+                height: 140px;
+                background: #16213e;
+                border-top: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+            #task-detail .chart-label {
+                position: absolute;
+                top: 4px;
+                left: 8px;
+                font-size: 0.75em;
+                color: #888;
+                z-index: 2;
+            }
+
             #queue-chart {
                 height: 120px;
                 background: #16213e;
@@ -212,7 +230,6 @@
                 <span style="flex: 1"></span>
                 <select id="poi-filter">
                     <option value="sched">Kernel Scheduling Delays</option>
-                    <option value="long-park">Long Parks (>10ms)</option>
                     <option value="long-poll">Long Polls (>1ms)</option>
                 </select>
                 <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer">
@@ -233,6 +250,10 @@
                     <canvas id="timeline-canvas"></canvas>
                 </div>
                 <div id="lanes-container" id="lanes"></div>
+                <div id="task-detail">
+                    <span class="chart-label" id="task-detail-label">Task Detail</span>
+                    <canvas id="task-detail-canvas"></canvas>
+                </div>
                 <div id="queue-chart">
                     <span class="chart-label"
                         >Queue Depth (global=blue, local max=orange)</span
@@ -245,15 +266,15 @@
         <div id="tooltip"></div>
 
         <script>
-            // ── Binary Parser (v6 format) ──
+            // ── Binary Parser (v8 format) ──
             // Wire codes:
-            //   0: PollStart   (local_queue=0)  → code(1) + ts(4) + worker(1)                                            = 6 bytes
-            //   1: PollEnd     (local_queue=0)  → code(1) + ts(4) + worker(1)                                            = 6 bytes
-            //   2: WorkerPark                   → code(1) + ts(4) + worker(1) + local_q(1) + cpu_us(4)                   = 11 bytes
-            //   3: WorkerUnpark                 → code(1) + ts(4) + worker(1) + local_q(1) + cpu_us(4) + sched_wait_us(4) = 15 bytes
-            //   4: QueueSample                  → code(1) + ts(4) + global_q(1)                                          = 6 bytes
-            //   5: PollStart   (local_queue>0)  → code(1) + ts(4) + worker(1) + local_q(1)                               = 7 bytes
-            //   6: PollEnd     (local_queue>0)  → code(1) + ts(4) + worker(1) + local_q(1)                               = 7 bytes
+            //   0: PollStart        → code(1) + ts(4) + worker(1) + local_q(1) + task_id(4) + spawn_loc_id(2) = 13 bytes
+            //   1: PollEnd          → code(1) + ts(4) + worker(1)                                              = 6 bytes
+            //   2: WorkerPark       → code(1) + ts(4) + worker(1) + local_q(1) + cpu_us(4)                    = 11 bytes
+            //   3: WorkerUnpark     → code(1) + ts(4) + worker(1) + local_q(1) + cpu_us(4) + sched_wait_us(4) = 15 bytes
+            //   4: QueueSample      → code(1) + ts(4) + global_q(1)                                           = 6 bytes
+            //   5: SpawnLocationDef → code(1) + spawn_loc_id(2) + string_len(2) + string_bytes(N)
+            //   6: TaskSpawn        → code(1) + task_id(4) + spawn_loc_id(2)                                  = 7 bytes
             const MAX_EVENTS = 2_000_000; // cap parsed events to keep UI responsive
 
             function parseTrace(buffer) {
@@ -267,47 +288,85 @@
                 off += 4;
                 if (magic !== "TOKIOTRC")
                     throw new Error("Not a TOKIOTRC file (got: " + magic + ")");
-                const hasCpuTime = version >= 5; // v5+ has cpu_us on park/unpark
-                const hasSchedWait = version >= 6; // v6+ has sched_wait_us on unpark
+                if (version !== 8) {
+                    console.warn(`Expected version 8, got ${version}. Spawn location data may be missing.`);
+                }
+                const hasCpuTime = version >= 5;
+                const hasSchedWait = version >= 6;
+                const hasTaskTracking = version >= 7;
 
                 const events = [];
+                const spawnLocations = new Map(); // SpawnLocationId (number) → string
+                const taskSpawnLocs = new Map();  // taskId (number) → SpawnLocationId (number)
+                const decoder = new TextDecoder();
                 while (off < buffer.byteLength && events.length < MAX_EVENTS) {
                     if (off + 1 > buffer.byteLength) break;
                     const wireCode = view.getUint8(off);
                     off += 1;
-                    if (wireCode > 6) break;
 
-                    // All codes have a 4-byte timestamp next
+                    // SpawnLocationDef and TaskSpawn have no timestamp — handle before reading ts
+                    if (wireCode === 5) {
+                        if (off + 4 > buffer.byteLength) break;
+                        const spawnLocId = view.getUint16(off, true); off += 2;
+                        const strLen = view.getUint16(off, true); off += 2;
+                        if (off + strLen > buffer.byteLength) break;
+                        spawnLocations.set(spawnLocId, decoder.decode(new Uint8Array(buffer, off, strLen)));
+                        off += strLen;
+                        continue;
+                    }
+                    if (wireCode === 6) {
+                        if (off + 6 > buffer.byteLength) break;
+                        const taskId = view.getUint32(off, true); off += 4;
+                        const spawnLocId = view.getUint16(off, true); off += 2;
+                        taskSpawnLocs.set(taskId, spawnLocId);
+                        continue;
+                    }
+
+                    if (wireCode > 4) break; // unknown code
+
+                    // All regular codes have a 4-byte timestamp next
                     if (off + 4 > buffer.byteLength) break;
                     const timestampUs = view.getUint32(off, true);
                     off += 4;
-                    const timestamp = timestampUs * 1000; // convert to nanoseconds for display
+                    const timestamp = timestampUs * 1000;
 
                     let eventType,
                         workerId = 0,
                         globalQueue = 0,
                         localQueue = 0,
                         cpuTime = 0,
-                        schedWait = 0;
+                        schedWait = 0,
+                        taskId = 0,
+                        spawnLocId = 0;
                     switch (wireCode) {
-                        case 0: // PollStart, local_queue=0
-                        case 1: // PollEnd, local_queue=0
+                        case 0: // PollStart
+                            if (hasTaskTracking) {
+                                // v8: worker(1) + lq(1) + task_id(4) + spawn_loc_id(2) = 8
+                                if (off + 8 > buffer.byteLength) break;
+                                eventType = 0;
+                                workerId = view.getUint8(off); off += 1;
+                                localQueue = view.getUint8(off); off += 1;
+                                taskId = view.getUint32(off, true); off += 4;
+                                spawnLocId = view.getUint16(off, true); off += 2;
+                            } else {
+                                if (off + 1 > buffer.byteLength) break;
+                                eventType = 0;
+                                workerId = view.getUint8(off); off += 1;
+                            }
+                            break;
+                        case 1: // PollEnd
                             if (off + 1 > buffer.byteLength) break;
-                            eventType = wireCode; // 0=PollStart, 1=PollEnd
-                            workerId = view.getUint8(off);
-                            off += 1;
+                            eventType = 1;
+                            workerId = view.getUint8(off); off += 1;
                             break;
                         case 2: { // WorkerPark
                             const need = hasCpuTime ? 6 : 2;
                             if (off + need > buffer.byteLength) break;
                             eventType = 2;
-                            workerId = view.getUint8(off);
-                            off += 1;
-                            localQueue = view.getUint8(off);
-                            off += 1;
+                            workerId = view.getUint8(off); off += 1;
+                            localQueue = view.getUint8(off); off += 1;
                             if (hasCpuTime) {
-                                cpuTime = view.getUint32(off, true) * 1000;
-                                off += 4;
+                                cpuTime = view.getUint32(off, true) * 1000; off += 4;
                             }
                             break;
                         }
@@ -315,54 +374,30 @@
                             const need = hasCpuTime ? (hasSchedWait ? 10 : 6) : 2;
                             if (off + need > buffer.byteLength) break;
                             eventType = 3;
-                            workerId = view.getUint8(off);
-                            off += 1;
-                            localQueue = view.getUint8(off);
-                            off += 1;
+                            workerId = view.getUint8(off); off += 1;
+                            localQueue = view.getUint8(off); off += 1;
                             if (hasCpuTime) {
-                                cpuTime = view.getUint32(off, true) * 1000;
-                                off += 4;
+                                cpuTime = view.getUint32(off, true) * 1000; off += 4;
                             }
                             if (hasSchedWait) {
-                                schedWait = view.getUint32(off, true); // microseconds
-                                off += 4;
+                                schedWait = view.getUint32(off, true); off += 4;
                             }
                             break;
                         }
-                        case 4: // QueueSample (runtime-level, no worker_id)
+                        case 4: // QueueSample
                             if (off + 1 > buffer.byteLength) break;
                             eventType = 4;
-                            globalQueue = view.getUint8(off);
-                            off += 1;
-                            break;
-                        case 5: // PollStart, local_queue>0
-                            if (off + 2 > buffer.byteLength) break;
-                            eventType = 0; // map back to PollStart
-                            workerId = view.getUint8(off);
-                            off += 1;
-                            localQueue = view.getUint8(off);
-                            off += 1;
-                            break;
-                        case 6: // PollEnd, local_queue>0
-                            if (off + 2 > buffer.byteLength) break;
-                            eventType = 1; // map back to PollEnd
-                            workerId = view.getUint8(off);
-                            off += 1;
-                            localQueue = view.getUint8(off);
-                            off += 1;
+                            globalQueue = view.getUint8(off); off += 1;
                             break;
                     }
                     events.push({
-                        eventType,
-                        timestamp,
-                        workerId,
-                        globalQueue,
-                        localQueue,
-                        cpuTime,
-                        schedWait,
+                        eventType, timestamp, workerId,
+                        globalQueue, localQueue, cpuTime, schedWait,
+                        taskId, spawnLocId,
+                        spawnLoc: spawnLocations.get(spawnLocId) ?? null,
                     });
                 }
-                return { magic, version, events, truncated: events.length >= MAX_EVENTS, hasCpuTime, hasSchedWait };
+                return { magic, version, events, truncated: events.length >= MAX_EVENTS, hasCpuTime, hasSchedWait, hasTaskTracking, spawnLocations, taskSpawnLocs };
             }
 
             // ── Event type helpers ──
@@ -401,6 +436,8 @@
             // Points of interest for navigation
             let pointsOfInterest = [];
             let currentPoiIndex = -1;
+            // Task selection state
+            let selectedTaskId = null;
 
             const LABEL_W = 100;
             const LANE_H = 60;
@@ -484,6 +521,7 @@
                 const openPoll = {},
                     openPark = {},
                     openUnpark = {}; // track {timestamp, cpuTime} at unpark
+                const openPollMeta = {}; // track {taskId, spawnLocId} at PollStart
                 for (const w of workerIds) {
                     workerSpans[w] = { polls: [], parks: [], actives: [] };
                 }
@@ -507,11 +545,16 @@
                     for (const e of wEvents) {
                         if (e.eventType === ET.PollStart) {
                             openPoll[w] = e.timestamp;
+                            openPollMeta[w] = { taskId: e.taskId, spawnLocId: e.spawnLocId, spawnLoc: e.spawnLoc };
                         } else if (e.eventType === ET.PollEnd) {
                             if (openPoll[w] != null) {
+                                const meta = openPollMeta[w] || { taskId: 0, spawnLocId: 0, spawnLoc: null };
                                 workerSpans[w].polls.push({
                                     start: openPoll[w],
                                     end: e.timestamp,
+                                    taskId: meta.taskId,
+                                    spawnLocId: meta.spawnLocId,
+                                    spawnLoc: meta.spawnLoc,
                                 });
                                 openPoll[w] = null;
                             }
@@ -569,22 +612,24 @@
                     .map((e) => ({ t: e.timestamp, global: e.globalQueue }));
                 console.log(`Found ${queueSamples.length} global queue samples`);
 
-                // Per-worker local queue samples (from all worker events)
+                // Per-worker local queue samples (from events that have local_queue)
                 workerQueueSamples = {};
                 maxLocalQueue = 1;
                 for (const w of workerIds) {
                     workerQueueSamples[w] = [];
                 }
-                for (const e of evts) {
-                    if (e.eventType === ET.QueueSample) continue;
-                    if (!workerQueueSamples[e.workerId])
-                        workerQueueSamples[e.workerId] = [];
-                    workerQueueSamples[e.workerId].push({
-                        t: e.timestamp,
-                        local: e.localQueue,
-                    });
-                    if (e.localQueue > maxLocalQueue)
-                        maxLocalQueue = e.localQueue;
+                for (const [w, wEvents] of Object.entries(perWorker)) {
+                    for (const e of wEvents) {
+                        if (e.eventType === ET.PollStart || e.eventType === ET.WorkerPark || e.eventType === ET.WorkerUnpark) {
+                            workerQueueSamples[w] ??= [];
+                            workerQueueSamples[w].push({
+                                t: e.timestamp,
+                                local: e.localQueue,
+                            });
+                            if (e.localQueue > maxLocalQueue)
+                                maxLocalQueue = e.localQueue;
+                        }
+                    }
                 }
             }
 
@@ -620,20 +665,6 @@
                                     worker: w,
                                     type: "sched",
                                     value: s.schedWait,
-                                    span: s
-                                });
-                            }
-                        }
-                    } else if (filterType === "long-park") {
-                        // Parks longer than 10ms
-                        for (const s of spans.parks) {
-                            const durMs = (s.end - s.start) / 1e6;
-                            if (durMs > 10) {
-                                pointsOfInterest.push({
-                                    time: s.start,
-                                    worker: w,
-                                    type: "long-park",
-                                    value: durMs,
                                     span: s
                                 });
                             }
@@ -719,6 +750,7 @@
                     const content = document.createElement("div");
                     content.className = "lane-content";
                     const canvas = document.createElement("canvas");
+                    canvas.id = `worker-${w}-canvas`;
                     content.appendChild(canvas);
                     lane.appendChild(label);
                     lane.appendChild(content);
@@ -751,6 +783,7 @@
 
                 renderTimeline(drawW);
                 for (const w of workerIds) renderLane(w, drawW);
+                renderTaskDetail();
                 renderQueueChart(drawW);
             }
 
@@ -807,6 +840,10 @@
 
             function renderLane(workerId, drawW) {
                 const c = laneCanvases[workerId];
+                if (!c) {
+                    console.error(`No canvas for worker ${workerId}`);
+                    return;
+                }
                 const parent = c.parentElement;
                 const dpr = devicePixelRatio || 1;
                 const pw = parent.clientWidth,
@@ -887,36 +924,68 @@
                 }
 
                 // Draw poll spans (solid blue bars, center band)
+                // When a task is selected, draw in two passes: dim first, selected on top
                 const bandTop = 10,
                     bandH = 20;
-                ctx.fillStyle = "#4fc3f7";
-                for (const s of spans.polls) {
-                    if (s.end < viewStart || s.start > viewEnd) continue;
-                    const x1 = Math.max(0, nsToX(s.start, pw));
-                    const x2 = Math.min(pw, nsToX(s.end, pw));
-                    ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
+                const poiSpan = (currentPoiIndex >= 0) ? pointsOfInterest[currentPoiIndex].span : null;
+                if (selectedTaskId) {
+                    ctx.fillStyle = "#2a3a4a";
+                    for (const s of spans.polls) {
+                        if (s.end < viewStart || s.start > viewEnd || s.taskId === selectedTaskId) continue;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
+                    }
+                    ctx.fillStyle = "#ffeb3b";
+                    for (const s of spans.polls) {
+                        if (s.end < viewStart || s.start > viewEnd || s.taskId !== selectedTaskId) continue;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
+                    }
+                } else {
+                    ctx.fillStyle = "#4fc3f7";
+                    for (const s of spans.polls) {
+                        if (s.end < viewStart || s.start > viewEnd) continue;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
+                    }
+                }
+                // Highlight current POI span
+                if (poiSpan) {
+                    for (const s of spans.polls) {
+                        if (s !== poiSpan || s.end < viewStart || s.start > viewEnd) continue;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        const w = Math.max(x2 - x1, 5);
+                        ctx.fillStyle = "#ff4444";
+                        ctx.fillRect(x1, bandTop, w, bandH);
+                        ctx.strokeStyle = "#ffffff";
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(x1, bandTop, w, bandH);
+                    }
                 }
 
                 // Overlay local queue depth as a step chart in the bottom portion
                 const samples = workerQueueSamples[workerId];
-                if (samples.length) {
+                if (samples && samples.length) {
                     // Find visible range with one sample before and after for continuity
                     let iStart = 0,
                         iEnd = samples.length - 1;
-                    // Binary-ish search for first sample >= viewStart
+                    // Find first sample >= viewStart
                     for (let i = 0; i < samples.length; i++) {
                         if (samples[i].t >= viewStart) {
                             iStart = Math.max(0, i - 1);
                             break;
                         }
-                        iStart = i;
                     }
+                    // Find last sample <= viewEnd
                     for (let i = samples.length - 1; i >= 0; i--) {
                         if (samples[i].t <= viewEnd) {
                             iEnd = Math.min(samples.length - 1, i + 1);
                             break;
                         }
-                        iEnd = i;
                     }
 
                     // Store visible range for later max calculation
@@ -935,36 +1004,28 @@
                     ctx.textAlign = "left";
                     ctx.fillText("q:" + laneMaxQ, 2, qTop + 8);
 
-                    // Draw step chart
+                    // Draw step chart - stroke only, no fill to avoid artifacts
                     ctx.beginPath();
-                    let lastX = 0,
-                        lastY = qTop + qH;
+                    let started = false;
+                    let lastY = qTop + qH;
                     for (let i = iStart; i <= iEnd; i++) {
-                        const x = nsToX(samples[i].t, pw);
-                        const y =
-                            qTop + qH - (samples[i].local / laneMaxQ) * qH;
-                        if (i === iStart) {
+                        const x = Math.max(0, Math.min(pw, nsToX(samples[i].t, pw)));
+                        const y = qTop + qH - (samples[i].local / laneMaxQ) * qH;
+                        
+                        if (!started) {
                             ctx.moveTo(x, y);
+                            started = true;
                         } else {
                             ctx.lineTo(x, lastY);
                             ctx.lineTo(x, y);
                         }
-                        lastX = x;
                         lastY = y;
                     }
-                    // Extend to right edge at last known value
                     ctx.lineTo(pw, lastY);
-                    ctx.strokeStyle = "rgba(255,200,50,0.8)";
+                    const colors = ["rgba(255,200,50,0.8)", "rgba(50,255,200,0.8)", "rgba(255,50,200,0.8)", "rgba(200,50,255,0.8)"];
+                    ctx.strokeStyle = colors[workerId % colors.length];
                     ctx.lineWidth = 1.5;
                     ctx.stroke();
-
-                    // Fill under the step chart
-                    const firstX = nsToX(samples[iStart].t, pw);
-                    ctx.lineTo(pw, qTop + qH);
-                    ctx.lineTo(firstX, qTop + qH);
-                    ctx.closePath();
-                    ctx.fillStyle = "rgba(255,200,50,0.15)";
-                    ctx.fill();
                 }
 
                 // Separator line between poll band and queue area
@@ -974,6 +1035,107 @@
                 ctx.moveTo(0, 33);
                 ctx.lineTo(pw, 33);
                 ctx.stroke();
+            }
+
+            function renderTaskDetail() {
+                const panel = document.getElementById("task-detail");
+                const c = document.getElementById("task-detail-canvas");
+                if (!selectedTaskId) {
+                    panel.style.display = "none";
+                    return;
+                }
+
+                // Collect all polls for this task across all workers, sorted by start time
+                const polls = [];
+                for (const w of workerIds) {
+                    for (const s of workerSpans[w].polls) {
+                        if (s.taskId === selectedTaskId) polls.push(s);
+                    }
+                }
+                polls.sort((a, b) => a.start - b.start);
+                if (polls.length < 1) { panel.style.display = "none"; return; }
+
+                panel.style.display = "block";
+                const loc = trace.spawnLocations.get(polls[0].spawnLocId);
+                document.getElementById("task-detail-label").textContent =
+                    `Task 0x${selectedTaskId.toString(16)}${loc ? " — " + loc : ""} · ${polls.length} polls`;
+
+                const parent = c.parentElement;
+                const dpr = devicePixelRatio || 1;
+                const pw = parent.clientWidth, ph = parent.clientHeight;
+                c.width = pw * dpr;
+                c.height = ph * dpr;
+                c.style.width = pw + "px";
+                c.style.height = ph + "px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+
+                ctx.fillStyle = "#16213e";
+                ctx.fillRect(0, 0, pw, ph);
+
+                const drawW = pw - LABEL_W;
+                if (drawW <= 0) return;
+
+                function fmtDur(ns) {
+                    if (ns >= 1e6) return (ns / 1e6).toFixed(2) + "ms";
+                    if (ns >= 1e3) return (ns / 1e3).toFixed(1) + "µs";
+                    return ns.toFixed(0) + "ns";
+                }
+
+                const bandTop = 40, bandH = 30;
+                ctx.font = "9px monospace";
+                ctx.textAlign = "center";
+
+                // Draw poll spans
+                for (const s of polls) {
+                    if (s.end < viewStart || s.start > viewEnd) continue;
+                    const x1 = LABEL_W + Math.max(0, nsToX(s.start, drawW));
+                    const x2 = LABEL_W + Math.min(drawW, nsToX(s.end, drawW));
+                    const w = Math.max(x2 - x1, 1);
+                    ctx.fillStyle = "#4fc3f7";
+                    ctx.fillRect(x1, bandTop, w, bandH);
+                    if (w > 35) {
+                        ctx.fillStyle = "#000";
+                        ctx.fillText(fmtDur(s.end - s.start), x1 + w / 2, bandTop + bandH / 2 + 3);
+                    }
+                }
+
+                // Draw idle gaps between consecutive polls
+                for (let i = 0; i < polls.length - 1; i++) {
+                    const gapStart = polls[i].end;
+                    const gapEnd = polls[i + 1].start;
+                    if (gapEnd < viewStart || gapStart > viewEnd) continue;
+                    const x1 = LABEL_W + Math.max(0, nsToX(gapStart, drawW));
+                    const x2 = LABEL_W + Math.min(drawW, nsToX(gapEnd, drawW));
+                    const w = Math.max(x2 - x1, 0);
+                    if (w < 1) continue;
+                    ctx.fillStyle = "#2a2a4a";
+                    ctx.fillRect(x1, bandTop, w, bandH);
+                    ctx.strokeStyle = "#444";
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([3, 3]);
+                    ctx.strokeRect(x1, bandTop, w, bandH);
+                    ctx.setLineDash([]);
+                    // Duration label
+                    const dur = gapEnd - gapStart;
+                    ctx.fillStyle = dur > 1e6 ? "#ff8a65" : "#888";
+                    if (w > 35) {
+                        ctx.fillText(fmtDur(dur), x1 + w / 2, bandTop - 6);
+                    } else if (w > 8) {
+                        ctx.save();
+                        ctx.translate(x1 + w / 2, bandTop - 4);
+                        ctx.rotate(-Math.PI / 4);
+                        ctx.textAlign = "right";
+                        ctx.fillText(fmtDur(dur), 0, 0);
+                        ctx.restore();
+                    }
+                }
+
+                // Label area
+                ctx.fillStyle = "#aaa";
+                ctx.font = "0.8em monospace";
+                ctx.textAlign = "left";
+                ctx.fillText("Task", 12, bandTop + bandH / 2 + 4);
             }
 
             function renderQueueChart(drawW) {
@@ -1176,11 +1338,13 @@
             let dragging = false,
                 dragStartX = 0,
                 dragViewStart = 0,
-                dragViewEnd = 0;
+                dragViewEnd = 0,
+                dragMoved = false;
             document
                 .getElementById("main-area")
                 .addEventListener("mousedown", (e) => {
                     dragging = true;
+                    dragMoved = false;
                     dragStartX = e.clientX;
                     dragViewStart = viewStart;
                     dragViewEnd = viewEnd;
@@ -1188,6 +1352,7 @@
                 });
             window.addEventListener("mousemove", (e) => {
                 if (!dragging) return;
+                if (Math.abs(e.clientX - dragStartX) > 3) dragMoved = true;
                 const rect = lanesContainer.getBoundingClientRect();
                 const drawW = rect.width - LABEL_W;
                 const dx = e.clientX - dragStartX;
@@ -1213,11 +1378,42 @@
                 document.body.style.cursor = "";
             });
 
+            // Click on a poll to highlight all polls for the same task
+            document.getElementById("main-area").addEventListener("click", (e) => {
+                if (dragMoved) return; // was a drag, not a click
+                // Only handle clicks inside the lanes container
+                const lanesRect = lanesContainer.getBoundingClientRect();
+                if (e.clientY < lanesRect.top || e.clientY > lanesRect.bottom ||
+                    e.clientX < lanesRect.left || e.clientX > lanesRect.right) return;
+                const mouseX = e.clientX - lanesRect.left - LABEL_W;
+                const mouseY = e.clientY - lanesRect.top;
+                const drawW = lanesRect.width - LABEL_W;
+                if (mouseX < 0 || mouseX > drawW) { selectedTaskId = null; renderAll(); return; }
+
+                const ns = viewStart + (mouseX / drawW) * (viewEnd - viewStart);
+                const laneIdx = Math.floor((mouseY + lanesContainer.scrollTop) / LANE_H);
+                if (laneIdx < 0 || laneIdx >= workerIds.length) { selectedTaskId = null; renderAll(); return; }
+
+                const w = workerIds[laneIdx];
+                const spans = workerSpans[w];
+                let found = null;
+                for (const s of spans.polls) {
+                    if (ns >= s.start && ns <= s.end && s.taskId) { found = s.taskId; break; }
+                }
+                selectedTaskId = (found && found !== selectedTaskId) ? found : null;
+                renderAll();
+            });
+
             // ── Keyboard navigation ──
             window.addEventListener("keydown", (e) => {
                 if (!trace) return;
                 const viewDur = viewEnd - viewStart;
                 switch (e.key) {
+                    case "Escape":
+                        e.preventDefault();
+                        selectedTaskId = null;
+                        renderAll();
+                        break;
                     case "ArrowUp":
                         e.preventDefault();
                         zoom(0.5);
@@ -1331,6 +1527,12 @@
                             const durUs = (s.end - s.start) / 1e3;
                             state = "⚡ Polling";
                             pollInfo = `<span class="label">Poll duration:</span> <span class="value">${durUs.toFixed(1)}µs</span><br>`;
+                            if (trace.hasTaskTracking && s.taskId) {
+                                pollInfo += `<span class="label">Task ID:</span> <span class="value">0x${s.taskId.toString(16)}</span><br>`;
+                                if (s.spawnLoc) {
+                                    pollInfo += `<span class="label">Spawned at:</span> <span class="value">${s.spawnLoc}</span><br>`;
+                                }
+                            }
                             break;
                         }
                     }
@@ -1373,7 +1575,7 @@
                     tooltip.style.left =
                         Math.min(e.clientX + 12, window.innerWidth - 340) +
                         "px";
-                    tooltip.style.top = e.clientY - 60 + "px";
+                    tooltip.style.top = e.clientY + 130 + "px";
                 });
             document
                 .getElementById("main-area")
@@ -1399,6 +1601,7 @@
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a1520;border-top:3px solid #cc5533;display:inline-block;border-radius:2px"></span>Parked</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff0000;display:inline-block;border-radius:2px"></span>Kernel Sched Delay</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
+    <span style="color:#666;margin-left:8px">│ ↑↓ zoom · ←→ pan · click poll for task timeline · esc close</span>
   `;
                 tb.insertBefore(leg, document.getElementById("btn-zoom-in"));
             })();

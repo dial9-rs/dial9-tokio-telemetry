@@ -30,11 +30,14 @@ fn main() {
     builder.worker_threads(4).enable_all();
 
     let writer = Box::new(SimpleBinaryWriter::new("workload_trace.bin").unwrap());
-    let (runtime, _guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
+    let (runtime, _guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .build_and_start(builder, writer)
+        .unwrap();
 
     println!("Running workload...");
     runtime.block_on(async {
-        let tasks: Vec<_> = (0..20).map(|i| tokio::spawn(mixed_task(i))).collect();
+        let tasks: Vec<_> = (0..200).map(|i| tokio::spawn(mixed_task(i))).collect();
         for task in tasks {
             let _ = task.await;
         }

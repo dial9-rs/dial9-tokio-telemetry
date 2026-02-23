@@ -1,11 +1,16 @@
-use crate::telemetry::events::{EventType, TelemetryEvent};
+use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::format;
+use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Result};
 
 pub struct TraceReader {
     reader: BufReader<File>,
+    /// Spawn location definitions accumulated during reading.
+    pub spawn_locations: HashMap<SpawnLocationId, String>,
+    /// Task ID → spawn location ID mapping built from TaskSpawn events.
+    pub task_spawn_locs: HashMap<TaskId, SpawnLocationId>,
 }
 
 impl TraceReader {
@@ -13,6 +18,8 @@ impl TraceReader {
         let file = File::open(path)?;
         Ok(Self {
             reader: BufReader::new(file),
+            spawn_locations: HashMap::new(),
+            task_spawn_locs: HashMap::new(),
         })
     }
 
@@ -20,8 +27,24 @@ impl TraceReader {
         format::read_header(&mut self.reader)
     }
 
+    /// Read the next runtime telemetry event, automatically accumulating
+    /// SpawnLocationDef and TaskSpawn metadata records.
     pub fn read_event(&mut self) -> Result<Option<TelemetryEvent>> {
-        format::read_event(&mut self.reader)
+        loop {
+            match format::read_event(&mut self.reader)? {
+                None => return Ok(None),
+                Some(TelemetryEvent::SpawnLocationDef { id, location }) => {
+                    self.spawn_locations.insert(id, location);
+                }
+                Some(TelemetryEvent::TaskSpawn {
+                    task_id,
+                    spawn_loc_id,
+                }) => {
+                    self.task_spawn_locs.insert(task_id, spawn_loc_id);
+                }
+                Some(e) => return Ok(Some(e)),
+            }
+        }
     }
 
     pub fn read_all(&mut self) -> Result<Vec<TelemetryEvent>> {
@@ -44,6 +67,12 @@ pub struct WorkerStats {
     pub total_sched_wait_ns: u64,
 }
 
+#[derive(Debug, Default)]
+pub struct SpawnLocationStats {
+    pub poll_count: usize,
+    pub total_poll_time_ns: u64,
+}
+
 #[derive(Debug)]
 pub struct TraceAnalysis {
     pub total_events: usize,
@@ -51,14 +80,21 @@ pub struct TraceAnalysis {
     pub worker_stats: HashMap<usize, WorkerStats>,
     pub max_global_queue: usize,
     pub avg_global_queue: f64,
+    /// Per-spawn-location statistics (only populated when task tracking is enabled).
+    pub spawn_location_stats: HashMap<SpawnLocationId, SpawnLocationStats>,
 }
 
 /// Build a sorted list of (timestamp, global_queue_depth) from QueueSample events.
 fn build_global_queue_timeline(events: &[TelemetryEvent]) -> Vec<(u64, usize)> {
     let mut timeline: Vec<(u64, usize)> = events
         .iter()
-        .filter(|e| e.event_type == EventType::QueueSample)
-        .map(|e| (e.metrics.timestamp_nanos, e.metrics.global_queue_depth))
+        .filter_map(|e| match e {
+            TelemetryEvent::QueueSample {
+                timestamp_nanos,
+                global_queue_depth,
+            } => Some((*timestamp_nanos, *global_queue_depth)),
+            _ => None,
+        })
         .collect();
     timeline.sort_by_key(|&(ts, _)| ts);
     timeline
@@ -77,59 +113,85 @@ fn lookup_global_queue_depth(timeline: &[(u64, usize)], timestamp: u64) -> usize
 pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
     let mut worker_stats: HashMap<usize, WorkerStats> = HashMap::new();
     let mut poll_starts: HashMap<usize, u64> = HashMap::new();
+    // Track spawn_loc_id at PollStart for computing per-location poll time at PollEnd
+    let mut poll_start_locs: HashMap<usize, SpawnLocationId> = HashMap::new();
+    let mut spawn_location_stats: HashMap<SpawnLocationId, SpawnLocationStats> = HashMap::new();
     let mut max_global_queue = 0;
     let mut global_queue_sum = 0u64;
     let mut global_queue_count = 0u64;
 
     let start_time = events
         .first()
-        .map(|e| e.metrics.timestamp_nanos)
+        .and_then(|e| e.timestamp_nanos())
         .unwrap_or(0);
-    let end_time = events
-        .last()
-        .map(|e| e.metrics.timestamp_nanos)
-        .unwrap_or(0);
+    let end_time = events.last().and_then(|e| e.timestamp_nanos()).unwrap_or(0);
 
     for event in events {
-        match event.event_type {
-            EventType::QueueSample => {
-                // QueueSample is a runtime-level event (no worker_id).
-                // Track global queue stats from it directly.
-                let gq = event.metrics.global_queue_depth;
-                max_global_queue = max_global_queue.max(gq);
-                global_queue_sum += gq as u64;
+        match event {
+            TelemetryEvent::QueueSample {
+                global_queue_depth, ..
+            } => {
+                max_global_queue = max_global_queue.max(*global_queue_depth);
+                global_queue_sum += *global_queue_depth as u64;
                 global_queue_count += 1;
             }
-            _ => {
-                // Per-worker event — track worker stats.
-                let stats = worker_stats.entry(event.metrics.worker_id).or_default();
-                stats.max_local_queue = stats
-                    .max_local_queue
-                    .max(event.metrics.worker_local_queue_depth);
-
-                match event.event_type {
-                    EventType::PollStart => {
-                        stats.poll_count += 1;
-                        poll_starts.insert(event.metrics.worker_id, event.metrics.timestamp_nanos);
-                    }
-                    EventType::PollEnd => {
-                        if let Some(start) = poll_starts.get(&event.metrics.worker_id) {
-                            stats.total_poll_time_ns +=
-                                event.metrics.timestamp_nanos.saturating_sub(*start);
-                        }
-                    }
-                    EventType::WorkerPark => {
-                        stats.park_count += 1;
-                    }
-                    EventType::WorkerUnpark => {
-                        stats.unpark_count += 1;
-                        let sw = event.metrics.sched_wait_delta_nanos;
-                        stats.total_sched_wait_ns += sw;
-                        stats.max_sched_wait_ns = stats.max_sched_wait_ns.max(sw);
-                    }
-                    EventType::QueueSample => unreachable!(),
+            TelemetryEvent::PollStart {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                spawn_loc_id,
+                ..
+            } => {
+                let stats = worker_stats.entry(*worker_id).or_default();
+                stats.max_local_queue = stats.max_local_queue.max(*worker_local_queue_depth);
+                stats.poll_count += 1;
+                poll_starts.insert(*worker_id, *timestamp_nanos);
+                if spawn_loc_id.as_u16() != 0 {
+                    spawn_location_stats
+                        .entry(*spawn_loc_id)
+                        .or_default()
+                        .poll_count += 1;
+                    poll_start_locs.insert(*worker_id, *spawn_loc_id);
                 }
             }
+            TelemetryEvent::PollEnd {
+                timestamp_nanos,
+                worker_id,
+            } => {
+                let stats = worker_stats.entry(*worker_id).or_default();
+                if let Some(start) = poll_starts.get(worker_id) {
+                    let duration = timestamp_nanos.saturating_sub(*start);
+                    stats.total_poll_time_ns += duration;
+                    if let Some(loc_id) = poll_start_locs.remove(worker_id) {
+                        spawn_location_stats
+                            .entry(loc_id)
+                            .or_default()
+                            .total_poll_time_ns += duration;
+                    }
+                }
+            }
+            TelemetryEvent::WorkerPark {
+                worker_id,
+                worker_local_queue_depth,
+                ..
+            } => {
+                let stats = worker_stats.entry(*worker_id).or_default();
+                stats.max_local_queue = stats.max_local_queue.max(*worker_local_queue_depth);
+                stats.park_count += 1;
+            }
+            TelemetryEvent::WorkerUnpark {
+                worker_id,
+                worker_local_queue_depth,
+                sched_wait_delta_nanos,
+                ..
+            } => {
+                let stats = worker_stats.entry(*worker_id).or_default();
+                stats.max_local_queue = stats.max_local_queue.max(*worker_local_queue_depth);
+                stats.unpark_count += 1;
+                stats.total_sched_wait_ns += sched_wait_delta_nanos;
+                stats.max_sched_wait_ns = stats.max_sched_wait_ns.max(*sched_wait_delta_nanos);
+            }
+            TelemetryEvent::SpawnLocationDef { .. } | TelemetryEvent::TaskSpawn { .. } => {}
         }
     }
 
@@ -143,6 +205,7 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
         } else {
             0.0
         },
+        spawn_location_stats,
     }
 }
 
@@ -165,27 +228,33 @@ pub fn compute_active_periods(events: &[TelemetryEvent]) -> Vec<ActivePeriod> {
     let mut unpark_state: HashMap<usize, (u64, u64)> = HashMap::new();
 
     for event in events {
-        match event.event_type {
-            EventType::WorkerUnpark => {
-                unpark_state.insert(
-                    event.metrics.worker_id,
-                    (event.metrics.timestamp_nanos, event.metrics.cpu_time_nanos),
-                );
+        match event {
+            TelemetryEvent::WorkerUnpark {
+                timestamp_nanos,
+                worker_id,
+                cpu_time_nanos,
+                ..
+            } => {
+                unpark_state.insert(*worker_id, (*timestamp_nanos, *cpu_time_nanos));
             }
-            EventType::WorkerPark => {
-                if let Some((start_wall, start_cpu)) = unpark_state.remove(&event.metrics.worker_id)
-                {
-                    let wall_delta = event.metrics.timestamp_nanos.saturating_sub(start_wall);
-                    let cpu_delta = event.metrics.cpu_time_nanos.saturating_sub(start_cpu);
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos,
+                worker_id,
+                cpu_time_nanos,
+                ..
+            } => {
+                if let Some((start_wall, start_cpu)) = unpark_state.remove(worker_id) {
+                    let wall_delta = timestamp_nanos.saturating_sub(start_wall);
+                    let cpu_delta = cpu_time_nanos.saturating_sub(start_cpu);
                     let ratio = if wall_delta > 0 {
                         (cpu_delta as f64 / wall_delta as f64).min(1.0)
                     } else {
                         1.0
                     };
                     periods.push(ActivePeriod {
-                        worker_id: event.metrics.worker_id,
+                        worker_id: *worker_id,
                         start_ns: start_wall,
-                        end_ns: event.metrics.timestamp_nanos,
+                        end_ns: *timestamp_nanos,
                         cpu_delta_ns: cpu_delta,
                         scheduling_ratio: ratio,
                     });
@@ -197,7 +266,10 @@ pub fn compute_active_periods(events: &[TelemetryEvent]) -> Vec<ActivePeriod> {
     periods
 }
 
-pub fn print_analysis(analysis: &TraceAnalysis) {
+pub fn print_analysis(
+    analysis: &TraceAnalysis,
+    spawn_locations: &HashMap<SpawnLocationId, String>,
+) {
     println!("\n=== Trace Analysis ===");
     println!("Total events: {}", analysis.total_events);
     println!(
@@ -230,6 +302,27 @@ pub fn print_analysis(analysis: &TraceAnalysis) {
             );
         }
     }
+
+    if !analysis.spawn_location_stats.is_empty() {
+        println!("\n=== Spawn Locations (by poll count) ===");
+        let mut locs: Vec<_> = analysis.spawn_location_stats.iter().collect();
+        locs.sort_by(|a, b| b.1.poll_count.cmp(&a.1.poll_count));
+        for (id, stats) in locs {
+            let name = spawn_locations
+                .get(id)
+                .map(|s| s.as_str())
+                .unwrap_or("<unknown>");
+            let avg_poll_us = if stats.poll_count > 0 {
+                stats.total_poll_time_ns as f64 / stats.poll_count as f64 / 1000.0
+            } else {
+                0.0
+            };
+            println!(
+                "  {} — {} polls, avg {:.2}µs",
+                name, stats.poll_count, avg_poll_us
+            );
+        }
+    }
 }
 
 /// Detect periods where a worker was parked while the global queue had pending work.
@@ -242,23 +335,25 @@ pub fn detect_idle_workers(events: &[TelemetryEvent]) -> Vec<(usize, u64, usize)
     let mut worker_park_times: HashMap<usize, u64> = HashMap::new();
 
     for event in events {
-        match event.event_type {
-            EventType::WorkerPark => {
-                worker_park_times.insert(event.metrics.worker_id, event.metrics.timestamp_nanos);
+        match event {
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos,
+                worker_id,
+                ..
+            } => {
+                worker_park_times.insert(*worker_id, *timestamp_nanos);
             }
-            EventType::WorkerUnpark => {
-                if let Some(park_time) = worker_park_times.remove(&event.metrics.worker_id) {
-                    let idle_duration = event.metrics.timestamp_nanos.saturating_sub(park_time);
-                    let global_queue_at_unpark = lookup_global_queue_depth(
-                        &global_queue_timeline,
-                        event.metrics.timestamp_nanos,
-                    );
+            TelemetryEvent::WorkerUnpark {
+                timestamp_nanos,
+                worker_id,
+                ..
+            } => {
+                if let Some(park_time) = worker_park_times.remove(worker_id) {
+                    let idle_duration = timestamp_nanos.saturating_sub(park_time);
+                    let global_queue_at_unpark =
+                        lookup_global_queue_depth(&global_queue_timeline, *timestamp_nanos);
                     if idle_duration > 1_000_000 && global_queue_at_unpark > 0 {
-                        idle_periods.push((
-                            event.metrics.worker_id,
-                            idle_duration,
-                            global_queue_at_unpark,
-                        ));
+                        idle_periods.push((*worker_id, idle_duration, global_queue_at_unpark));
                     }
                 }
             }
@@ -272,7 +367,7 @@ pub fn detect_idle_workers(events: &[TelemetryEvent]) -> Vec<(usize, u64, usize)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::events::MetricsSnapshot;
+    use crate::telemetry::task_metadata::{UNKNOWN_SPAWN_LOCATION_ID, UNKNOWN_TASK_ID};
 
     #[test]
     fn test_analyze_empty() {
@@ -285,39 +380,21 @@ mod tests {
     #[test]
     fn test_global_queue_from_samples_only() {
         let events = vec![
-            TelemetryEvent::new(
-                EventType::PollStart,
-                MetricsSnapshot {
-                    timestamp_nanos: 1_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 3,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            TelemetryEvent::new(
-                EventType::QueueSample,
-                MetricsSnapshot {
-                    timestamp_nanos: 2_000_000,
-                    worker_id: 0, // ignored for QueueSample
-                    global_queue_depth: 42,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            TelemetryEvent::new(
-                EventType::PollEnd,
-                MetricsSnapshot {
-                    timestamp_nanos: 3_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 2,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
+            TelemetryEvent::PollStart {
+                timestamp_nanos: 1_000_000,
+                worker_id: 0,
+                worker_local_queue_depth: 3,
+                task_id: UNKNOWN_TASK_ID,
+                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+            },
+            TelemetryEvent::QueueSample {
+                timestamp_nanos: 2_000_000,
+                global_queue_depth: 42,
+            },
+            TelemetryEvent::PollEnd {
+                timestamp_nanos: 3_000_000,
+                worker_id: 0,
+            },
         ];
         let analysis = analyze_trace(&events);
         assert_eq!(analysis.max_global_queue, 42);
@@ -329,28 +406,17 @@ mod tests {
     #[test]
     fn test_local_queue_tracked_on_all_worker_events() {
         let events = vec![
-            TelemetryEvent::new(
-                EventType::PollStart,
-                MetricsSnapshot {
-                    timestamp_nanos: 1_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 10,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            TelemetryEvent::new(
-                EventType::PollEnd,
-                MetricsSnapshot {
-                    timestamp_nanos: 2_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 8,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
+            TelemetryEvent::PollStart {
+                timestamp_nanos: 1_000_000,
+                worker_id: 0,
+                worker_local_queue_depth: 10,
+                task_id: UNKNOWN_TASK_ID,
+                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+            },
+            TelemetryEvent::PollEnd {
+                timestamp_nanos: 2_000_000,
+                worker_id: 0,
+            },
         ];
         let analysis = analyze_trace(&events);
         let stats = analysis.worker_stats.get(&0).unwrap();
@@ -374,50 +440,27 @@ mod tests {
     #[test]
     fn test_detect_idle_workers_with_samples() {
         let events = vec![
-            TelemetryEvent::new(
-                EventType::QueueSample,
-                MetricsSnapshot {
-                    timestamp_nanos: 1_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 15,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            TelemetryEvent::new(
-                EventType::WorkerPark,
-                MetricsSnapshot {
-                    timestamp_nanos: 2_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            TelemetryEvent::new(
-                EventType::QueueSample,
-                MetricsSnapshot {
-                    timestamp_nanos: 5_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 20,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            TelemetryEvent::new(
-                EventType::WorkerUnpark,
-                MetricsSnapshot {
-                    timestamp_nanos: 6_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
+            TelemetryEvent::QueueSample {
+                timestamp_nanos: 1_000_000,
+                global_queue_depth: 15,
+            },
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos: 2_000_000,
+                worker_id: 0,
+                worker_local_queue_depth: 0,
+                cpu_time_nanos: 0,
+            },
+            TelemetryEvent::QueueSample {
+                timestamp_nanos: 5_000_000,
+                global_queue_depth: 20,
+            },
+            TelemetryEvent::WorkerUnpark {
+                timestamp_nanos: 6_000_000,
+                worker_id: 0,
+                worker_local_queue_depth: 0,
+                cpu_time_nanos: 0,
+                sched_wait_delta_nanos: 0,
+            },
         ];
         let idle = detect_idle_workers(&events);
         assert_eq!(idle.len(), 1);
@@ -429,39 +472,23 @@ mod tests {
     #[test]
     fn test_detect_idle_workers_no_queue_pressure() {
         let events = vec![
-            TelemetryEvent::new(
-                EventType::QueueSample,
-                MetricsSnapshot {
-                    timestamp_nanos: 1_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 0, // no queue pressure
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            TelemetryEvent::new(
-                EventType::WorkerPark,
-                MetricsSnapshot {
-                    timestamp_nanos: 2_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            TelemetryEvent::new(
-                EventType::WorkerUnpark,
-                MetricsSnapshot {
-                    timestamp_nanos: 6_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
+            TelemetryEvent::QueueSample {
+                timestamp_nanos: 1_000_000,
+                global_queue_depth: 0, // no queue pressure
+            },
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos: 2_000_000,
+                worker_id: 0,
+                worker_local_queue_depth: 0,
+                cpu_time_nanos: 0,
+            },
+            TelemetryEvent::WorkerUnpark {
+                timestamp_nanos: 6_000_000,
+                worker_id: 0,
+                worker_local_queue_depth: 0,
+                cpu_time_nanos: 0,
+                sched_wait_delta_nanos: 0,
+            },
         ];
         let idle = detect_idle_workers(&events);
         assert!(idle.is_empty()); // no idle periods flagged because global queue was empty

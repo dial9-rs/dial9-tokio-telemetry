@@ -1,4 +1,4 @@
-use dial9_tokio_telemetry::telemetry::{SimpleBinaryWriter, TelemetryRecorder};
+use dial9_tokio_telemetry::telemetry::{SimpleBinaryWriter, TracedRuntime};
 use std::time::Duration;
 
 fn main() {
@@ -6,17 +6,11 @@ fn main() {
     builder.worker_threads(4).enable_all();
 
     let writer = Box::new(SimpleBinaryWriter::new("telemetry_trace.bin").unwrap());
-    let recorder = TelemetryRecorder::install(&mut builder, writer);
-    let runtime = builder.build().unwrap();
-
-    recorder
-        .lock()
-        .unwrap()
-        .initialize(runtime.handle().clone());
+    let (runtime, _guard) = TracedRuntime::builder()
+        .build_and_start(builder, writer)
+        .unwrap();
 
     runtime.block_on(async {
-        let _flush = TelemetryRecorder::start_flush_task(recorder.clone(), Duration::from_secs(1));
-
         println!("Starting telemetry demo...");
 
         let tasks: Vec<_> = (0..10)
@@ -40,7 +34,5 @@ fn main() {
         println!("All tasks completed");
     });
 
-    drop(runtime);
-    drop(recorder);
     println!("Trace written to telemetry_trace.bin");
 }

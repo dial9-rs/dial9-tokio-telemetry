@@ -167,11 +167,16 @@ fn main() {
         "telemetry" => {
             let writer =
                 Box::new(SimpleBinaryWriter::new("/tmp/overhead_bench_trace.bin").unwrap());
-            let (rt, g) = TracedRuntime::build_and_start(builder, writer).unwrap();
+            let (rt, g) = TracedRuntime::builder()
+                .with_task_tracking(true)
+                .build_and_start(builder, writer)
+                .unwrap();
             (rt, Some(g))
         }
         "noop" => {
-            let (rt, g) = TracedRuntime::build_and_start(builder, Box::new(NullWriter)).unwrap();
+            let (rt, g) = TracedRuntime::builder()
+                .build_and_start(builder, Box::new(NullWriter))
+                .unwrap();
             (rt, Some(g))
         }
         "baseline" => (builder.build().unwrap(), None),

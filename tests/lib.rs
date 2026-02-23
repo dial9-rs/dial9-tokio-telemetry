@@ -20,7 +20,8 @@ fn test_worker_ids_match_tokio() {
 
     struct CapturingWriter(Arc<Mutex<Vec<TelemetryEvent>>>);
     impl TraceWriter for CapturingWriter {
-        fn write_event(&mut self, _event: &TelemetryEvent) -> std::io::Result<()> {
+        fn write_event(&mut self, event: &TelemetryEvent) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(event.clone());
             Ok(())
         }
         fn write_batch(&mut self, events: &[TelemetryEvent]) -> std::io::Result<()> {
@@ -39,7 +40,9 @@ fn test_worker_ids_match_tokio() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(num_workers).enable_all();
 
-    let (runtime, guard) = TracedRuntime::build_and_start(builder, Box::new(writer)).unwrap();
+    let (runtime, guard) = TracedRuntime::builder()
+        .build_and_start(builder, Box::new(writer))
+        .unwrap();
 
     runtime.block_on(async {
         // Spawn work on each worker to generate events
@@ -62,16 +65,16 @@ fn test_worker_ids_match_tokio() {
     assert!(!events.is_empty(), "should have captured events");
 
     for event in events.iter() {
-        // QueueSample uses worker_id 0 as a placeholder, skip it
-        if event.event_type == dial9_tokio_telemetry::telemetry::events::EventType::QueueSample {
-            continue;
+        // Only check worker_id on events that have one;
+        // QueueSample, SpawnLocationDef, and TaskSpawn don't carry a worker_id.
+        if let Some(worker_id) = event.worker_id() {
+            assert!(
+                worker_id < num_workers,
+                "worker_id {} should be < num_workers {} (event: {:?})",
+                worker_id,
+                num_workers,
+                event,
+            );
         }
-        assert!(
-            event.metrics.worker_id < num_workers,
-            "worker_id {} should be < num_workers {} (event type: {:?})",
-            event.metrics.worker_id,
-            num_workers,
-            event.event_type,
-        );
     }
 }

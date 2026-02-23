@@ -5,18 +5,9 @@
 //!
 //! If output is omitted, writes to stdout.
 
-use dial9_tokio_telemetry::telemetry::{EventType, TraceReader};
+use dial9_tokio_telemetry::telemetry::TraceReader;
+use serde_json;
 use std::io::{BufWriter, Write};
-
-fn event_type_str(et: EventType) -> &'static str {
-    match et {
-        EventType::PollStart => "PollStart",
-        EventType::PollEnd => "PollEnd",
-        EventType::WorkerPark => "WorkerPark",
-        EventType::WorkerUnpark => "WorkerUnpark",
-        EventType::QueueSample => "QueueSample",
-    }
-}
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -42,29 +33,9 @@ fn main() -> std::io::Result<()> {
 
     let mut count = 0u64;
     while let Some(e) = reader.read_event()? {
-        let cpu_field = match e.event_type {
-            EventType::WorkerPark | EventType::WorkerUnpark => {
-                format!(",\"cpu_ns\":{}", e.metrics.cpu_time_nanos)
-            }
-            _ => String::new(),
-        };
-        let sched_field = match e.event_type {
-            EventType::WorkerUnpark => {
-                format!(",\"sched_wait_ns\":{}", e.metrics.sched_wait_delta_nanos)
-            }
-            _ => String::new(),
-        };
-        write!(
-            w,
-            "{{\"event\":\"{}\",\"timestamp_ns\":{},\"worker\":{},\"global_q\":{},\"local_q\":{}{}{}}}\n",
-            event_type_str(e.event_type),
-            e.metrics.timestamp_nanos,
-            e.metrics.worker_id,
-            e.metrics.global_queue_depth,
-            e.metrics.worker_local_queue_depth,
-            cpu_field,
-            sched_field,
-        )?;
+        serde_json::to_writer(&mut w, &e)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        w.write_all(b"\n")?;
         count += 1;
     }
     w.flush()?;

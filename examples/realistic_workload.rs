@@ -72,7 +72,9 @@ fn main() {
     builder.worker_threads(4).enable_all();
 
     let writer = Box::new(SimpleBinaryWriter::new("realistic_trace.bin").unwrap());
-    let (runtime, _guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
+    let (runtime, _guard) = TracedRuntime::builder()
+        .build_and_start(builder, writer)
+        .unwrap();
 
     println!("Running realistic workload...");
     runtime.block_on(async {

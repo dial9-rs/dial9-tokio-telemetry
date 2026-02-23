@@ -9,6 +9,11 @@ pub trait TraceWriter: Send {
     fn write_event(&mut self, event: &TelemetryEvent) -> std::io::Result<()>;
     fn write_batch(&mut self, events: &[TelemetryEvent]) -> std::io::Result<()>;
     fn flush(&mut self) -> std::io::Result<()>;
+    /// Returns true if the writer rotated to a new file since the last call to this method.
+    /// Used by the flush path to know when to re-emit SpawnLocationDefs.
+    fn take_rotated(&mut self) -> bool {
+        false
+    }
 }
 
 pub struct SimpleBinaryWriter {
@@ -76,6 +81,8 @@ pub struct RotatingWriter {
     next_index: u32,
     /// Set when we've hit the total size cap; silently drops further events.
     stopped: bool,
+    /// Set to true when a rotation occurs; cleared by `take_rotated`.
+    rotated: bool,
 }
 
 impl RotatingWriter {
@@ -107,6 +114,7 @@ impl RotatingWriter {
             current_size: header_size,
             next_index: 1,
             stopped: false,
+            rotated: false,
         })
     }
 
@@ -132,6 +140,7 @@ impl RotatingWriter {
         self.current_size = header_size;
         self.total_size += header_size;
         self.files.push_back((new_path, header_size));
+        self.rotated = true;
 
         self.evict_oldest()?;
         Ok(())
@@ -197,27 +206,28 @@ impl TraceWriter for RotatingWriter {
         }
         Ok(())
     }
+
+    fn take_rotated(&mut self) -> bool {
+        std::mem::replace(&mut self.rotated, false)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::telemetry::analysis::TraceReader;
-    use crate::telemetry::events::{EventType, MetricsSnapshot};
     use crate::telemetry::format;
+    use crate::telemetry::task_metadata::{UNKNOWN_SPAWN_LOCATION_ID, UNKNOWN_TASK_ID};
     use std::io::Read;
     use tempfile::TempDir;
 
     fn park_event() -> TelemetryEvent {
-        let metrics = MetricsSnapshot {
+        TelemetryEvent::WorkerPark {
             timestamp_nanos: 1000,
             worker_id: 0,
-            global_queue_depth: 5,
             worker_local_queue_depth: 2,
             cpu_time_nanos: 0,
-            sched_wait_delta_nanos: 0,
-        };
-        TelemetryEvent::new(EventType::WorkerPark, metrics)
+        }
     }
 
     fn rotating_file(base: &std::path::Path, i: u32) -> String {
@@ -272,24 +282,27 @@ mod tests {
         let path = dir.path().join("test_batch_v2.bin");
         let mut writer = SimpleBinaryWriter::new(&path).unwrap();
 
-        let metrics = MetricsSnapshot {
-            timestamp_nanos: 1000,
-            worker_id: 0,
-            global_queue_depth: 5,
-            worker_local_queue_depth: 2,
-            cpu_time_nanos: 0,
-            sched_wait_delta_nanos: 0,
-        };
         let events = vec![
-            TelemetryEvent::new(EventType::PollStart, metrics), // 7 bytes (lq>0)
-            TelemetryEvent::new(EventType::WorkerPark, metrics), // 11 bytes
+            TelemetryEvent::PollStart {
+                timestamp_nanos: 1000,
+                worker_id: 0,
+                worker_local_queue_depth: 2,
+                task_id: UNKNOWN_TASK_ID,
+                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+            }, // 13 bytes
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos: 1000,
+                worker_id: 0,
+                worker_local_queue_depth: 2,
+                cpu_time_nanos: 0,
+            }, // 11 bytes
         ];
 
         writer.write_batch(&events).unwrap();
         writer.flush().unwrap();
 
         let metadata = std::fs::metadata(&path).unwrap();
-        assert_eq!(metadata.len(), (format::HEADER_SIZE + 7 + 11) as u64);
+        assert_eq!(metadata.len(), (format::HEADER_SIZE + 13 + 11) as u64); // 12 + 13 + 11 = 36
     }
 
     #[test]
@@ -389,7 +402,9 @@ mod tests {
         assert!(
             usage <= max_total_size + event_size,
             "disk usage {} exceeds budget {} + one event {}",
-            usage, max_total_size, event_size
+            usage,
+            max_total_size,
+            event_size
         );
         // File must be readable, not corrupted
         let events = read_trace_events(&rotating_file(&base, 0));
@@ -485,19 +500,27 @@ mod tests {
         let max_file_size = header + 15;
         let mut writer = RotatingWriter::new(&base, max_file_size, 100000).unwrap();
 
-        let metrics = MetricsSnapshot {
-            timestamp_nanos: 1000,
-            worker_id: 0,
-            global_queue_depth: 5,
-            worker_local_queue_depth: 2,
-            cpu_time_nanos: 0,
-            sched_wait_delta_nanos: 0,
-        };
-
         let events = [
-            TelemetryEvent::new(EventType::WorkerPark, metrics),   // 11 bytes
-            TelemetryEvent::new(EventType::PollStart, metrics),    // 7 bytes (lq>0)
-            TelemetryEvent::new(EventType::WorkerUnpark, metrics), // 15 bytes
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos: 1000,
+                worker_id: 0,
+                worker_local_queue_depth: 2,
+                cpu_time_nanos: 0,
+            }, // 11 bytes
+            TelemetryEvent::PollStart {
+                timestamp_nanos: 1000,
+                worker_id: 0,
+                worker_local_queue_depth: 2,
+                task_id: UNKNOWN_TASK_ID,
+                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+            }, // 13 bytes
+            TelemetryEvent::WorkerUnpark {
+                timestamp_nanos: 1000,
+                worker_id: 0,
+                worker_local_queue_depth: 2,
+                cpu_time_nanos: 0,
+                sched_wait_delta_nanos: 0,
+            }, // 15 bytes
         ];
         for e in &events {
             writer.write_event(e).unwrap();
@@ -512,7 +535,13 @@ mod tests {
         // No file should exceed max_file_size
         for i in 0..3 {
             let size = std::fs::metadata(rotating_file(&base, i)).unwrap().len();
-            assert!(size <= max_file_size, "file {} is {} > max {}", i, size, max_file_size);
+            assert!(
+                size <= max_file_size,
+                "file {} is {} > max {}",
+                i,
+                size,
+                max_file_size
+            );
         }
     }
 

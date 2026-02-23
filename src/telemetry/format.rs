@@ -1,17 +1,17 @@
-//! Binary trace wire format (v6).
+//! Binary trace wire format (v8).
 //!
 //! ## File layout
 //! ```text
 //! Header:  MAGIC (8 bytes) + VERSION (u32 LE) = 12 bytes
 //!
 //! Wire codes:
-//!   0: PollStart   (local_queue=0)  → code(u8) + timestamp_us(u32) + worker_id(u8)                                                    = 6 bytes
-//!   1: PollEnd     (local_queue=0)  → code(u8) + timestamp_us(u32) + worker_id(u8)                                                    = 6 bytes
-//!   2: WorkerPark                   → code(u8) + timestamp_us(u32) + worker_id(u8) + local_queue(u8) + cpu_us(u32)                     = 11 bytes
+//!   0: PollStart                    → code(u8) + timestamp_us(u32) + worker_id(u8) + local_queue(u8) + task_id(u32) + spawn_loc_id(u16) = 13 bytes
+//!   1: PollEnd                      → code(u8) + timestamp_us(u32) + worker_id(u8)                                                       = 6 bytes
+//!   2: WorkerPark                   → code(u8) + timestamp_us(u32) + worker_id(u8) + local_queue(u8) + cpu_us(u32)                      = 11 bytes
 //!   3: WorkerUnpark                 → code(u8) + timestamp_us(u32) + worker_id(u8) + local_queue(u8) + cpu_us(u32) + sched_wait_us(u32) = 15 bytes
-//!   4: QueueSample                  → code(u8) + timestamp_us(u32) + global_queue(u8)                                                  = 6 bytes
-//!   5: PollStart   (local_queue>0)  → code(u8) + timestamp_us(u32) + worker_id(u8) + local_queue(u8)                                  = 7 bytes
-//!   6: PollEnd     (local_queue>0)  → code(u8) + timestamp_us(u32) + worker_id(u8) + local_queue(u8)                                  = 7 bytes
+//!   4: QueueSample                  → code(u8) + timestamp_us(u32) + global_queue(u8)                                                   = 6 bytes
+//!   5: SpawnLocationDef             → code(u8) + spawn_loc_id(u16) + string_len(u16) + string_bytes(N)                                 = 5 + N bytes
+//!   6: TaskSpawn                    → code(u8) + task_id(u32) + spawn_loc_id(u16)                                                       = 7 bytes
 //! ```
 //!
 //! Timestamps are microseconds since trace start. u32 micros supports traces up to ~71 minutes.
@@ -19,40 +19,40 @@
 //! `sched_wait_us` is the scheduling wait delta from schedstat during the park period.
 //! In-memory representation remains nanoseconds; conversion happens at the wire boundary.
 //!
-//! ### v5 → v6 changes
-//! - WorkerUnpark now carries `sched_wait_us(u32)` — scheduling wait delta from
-//!   `/proc/self/task/<tid>/schedstat` measured across the park period. This reveals
-//!   OS-level scheduling delay between wakeup signal and thread actually running.
+//! ### v7 → v8 changes
+//! - Added TaskSpawn (code 6): emitted once per task, maps task_id → spawn_loc_id
+//! - SpawnLocationDef moved to code 5 (was 7)
+//! - Interning now happens in the flush thread, not in SharedState
+//! - Workers carry &'static Location in RawEvents; flush thread interns to SpawnLocationId
+//! - PollStart spawn_loc_id is resolved by flush thread from the TaskSpawn mapping
 
-use crate::telemetry::events::{EventType, MetricsSnapshot, TelemetryEvent};
+use crate::telemetry::events::TelemetryEvent;
+use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::io::{Read, Result, Write};
 
 pub const MAGIC: &[u8; 8] = b"TOKIOTRC";
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 8;
 pub const HEADER_SIZE: usize = 12; // 8 magic + 4 version
 
-// Wire codes — these are NOT the same as EventType repr values for codes 5/6.
+// Wire codes
 const WIRE_POLL_START: u8 = 0;
 const WIRE_POLL_END: u8 = 1;
 const WIRE_WORKER_PARK: u8 = 2;
 const WIRE_WORKER_UNPARK: u8 = 3;
 const WIRE_QUEUE_SAMPLE: u8 = 4;
-const WIRE_POLL_START_WITH_QUEUE: u8 = 5;
-const WIRE_POLL_END_WITH_QUEUE: u8 = 6;
+const WIRE_SPAWN_LOCATION_DEF: u8 = 5;
+const WIRE_TASK_SPAWN: u8 = 6;
 
-/// Returns the wire size of an event. For PollStart/PollEnd this depends on local_queue.
+/// Returns the wire size of an event.
 pub fn wire_event_size(event: &TelemetryEvent) -> usize {
-    match event.event_type {
-        EventType::PollStart | EventType::PollEnd => {
-            if event.metrics.worker_local_queue_depth == 0 {
-                6
-            } else {
-                7
-            }
-        }
-        EventType::QueueSample => 6,
-        EventType::WorkerPark => 11,
-        EventType::WorkerUnpark => 15,
+    match event {
+        TelemetryEvent::PollStart { .. } => 13,
+        TelemetryEvent::PollEnd { .. } => 6,
+        TelemetryEvent::QueueSample { .. } => 6,
+        TelemetryEvent::WorkerPark { .. } => 11,
+        TelemetryEvent::WorkerUnpark { .. } => 15,
+        TelemetryEvent::SpawnLocationDef { location, .. } => 1 + 2 + 2 + location.len(),
+        TelemetryEvent::TaskSpawn { .. } => 7,
     }
 }
 
@@ -61,55 +61,87 @@ pub fn write_header(w: &mut impl Write) -> Result<()> {
     w.write_all(&VERSION.to_le_bytes())
 }
 
+/// Write any event to the wire format.
 pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
-    let timestamp_us = (event.metrics.timestamp_nanos / 1000) as u32;
-    let lq = event.metrics.worker_local_queue_depth;
-
-    match event.event_type {
-        EventType::PollStart if lq == 0 => {
+    match event {
+        TelemetryEvent::PollStart {
+            timestamp_nanos,
+            worker_id,
+            worker_local_queue_depth,
+            task_id,
+            spawn_loc_id,
+        } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
             w.write_all(&[WIRE_POLL_START])?;
             w.write_all(&timestamp_us.to_le_bytes())?;
-            w.write_all(&[event.metrics.worker_id as u8])?;
+            w.write_all(&[*worker_id as u8])?;
+            w.write_all(&[*worker_local_queue_depth as u8])?;
+            w.write_all(&task_id.to_u32().to_le_bytes())?;
+            w.write_all(&spawn_loc_id.as_u16().to_le_bytes())?;
         }
-        EventType::PollEnd if lq == 0 => {
+        TelemetryEvent::PollEnd {
+            timestamp_nanos,
+            worker_id,
+        } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
             w.write_all(&[WIRE_POLL_END])?;
             w.write_all(&timestamp_us.to_le_bytes())?;
-            w.write_all(&[event.metrics.worker_id as u8])?;
+            w.write_all(&[*worker_id as u8])?;
         }
-        EventType::PollStart => {
-            w.write_all(&[WIRE_POLL_START_WITH_QUEUE])?;
-            w.write_all(&timestamp_us.to_le_bytes())?;
-            w.write_all(&[event.metrics.worker_id as u8])?;
-            w.write_all(&[lq as u8])?;
-        }
-        EventType::PollEnd => {
-            w.write_all(&[WIRE_POLL_END_WITH_QUEUE])?;
-            w.write_all(&timestamp_us.to_le_bytes())?;
-            w.write_all(&[event.metrics.worker_id as u8])?;
-            w.write_all(&[lq as u8])?;
-        }
-        EventType::WorkerPark => {
+        TelemetryEvent::WorkerPark {
+            timestamp_nanos,
+            worker_id,
+            worker_local_queue_depth,
+            cpu_time_nanos,
+        } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
             w.write_all(&[WIRE_WORKER_PARK])?;
             w.write_all(&timestamp_us.to_le_bytes())?;
-            w.write_all(&[event.metrics.worker_id as u8])?;
-            w.write_all(&[lq as u8])?;
-            let cpu_us = (event.metrics.cpu_time_nanos / 1000) as u32;
+            w.write_all(&[*worker_id as u8])?;
+            w.write_all(&[*worker_local_queue_depth as u8])?;
+            let cpu_us = (*cpu_time_nanos / 1000) as u32;
             w.write_all(&cpu_us.to_le_bytes())?;
         }
-        EventType::WorkerUnpark => {
+        TelemetryEvent::WorkerUnpark {
+            timestamp_nanos,
+            worker_id,
+            worker_local_queue_depth,
+            cpu_time_nanos,
+            sched_wait_delta_nanos,
+        } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
             w.write_all(&[WIRE_WORKER_UNPARK])?;
             w.write_all(&timestamp_us.to_le_bytes())?;
-            w.write_all(&[event.metrics.worker_id as u8])?;
-            w.write_all(&[lq as u8])?;
-            let cpu_us = (event.metrics.cpu_time_nanos / 1000) as u32;
+            w.write_all(&[*worker_id as u8])?;
+            w.write_all(&[*worker_local_queue_depth as u8])?;
+            let cpu_us = (*cpu_time_nanos / 1000) as u32;
             w.write_all(&cpu_us.to_le_bytes())?;
-            let sched_wait_us = (event.metrics.sched_wait_delta_nanos / 1000) as u32;
+            let sched_wait_us = (*sched_wait_delta_nanos / 1000) as u32;
             w.write_all(&sched_wait_us.to_le_bytes())?;
         }
-        EventType::QueueSample => {
+        TelemetryEvent::QueueSample {
+            timestamp_nanos,
+            global_queue_depth,
+        } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
             w.write_all(&[WIRE_QUEUE_SAMPLE])?;
             w.write_all(&timestamp_us.to_le_bytes())?;
-            w.write_all(&[event.metrics.global_queue_depth as u8])?;
+            w.write_all(&[*global_queue_depth as u8])?;
+        }
+        TelemetryEvent::SpawnLocationDef { id, location } => {
+            w.write_all(&[WIRE_SPAWN_LOCATION_DEF])?;
+            w.write_all(&id.as_u16().to_le_bytes())?;
+            let len = location.len() as u16;
+            w.write_all(&len.to_le_bytes())?;
+            w.write_all(location.as_bytes())?;
+        }
+        TelemetryEvent::TaskSpawn {
+            task_id,
+            spawn_loc_id,
+        } => {
+            w.write_all(&[WIRE_TASK_SPAWN])?;
+            w.write_all(&task_id.to_u32().to_le_bytes())?;
+            w.write_all(&spawn_loc_id.as_u16().to_le_bytes())?;
         }
     }
     Ok(())
@@ -126,59 +158,75 @@ pub fn read_header(r: &mut impl Read) -> Result<(String, u32)> {
     ))
 }
 
-/// Read one event. Returns `Ok(None)` at EOF.
+/// Read one event from the wire. Returns `Ok(None)` at EOF.
+///
+/// All event types are returned, including `SpawnLocationDef` and `TaskSpawn`.
+/// Callers that want to filter metadata records can check
+/// [`TelemetryEvent::is_runtime_event()`].
 pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
     let mut tag = [0u8; 1];
     if r.read_exact(&mut tag).is_err() {
         return Ok(None);
     }
 
+    // SpawnLocationDef and TaskSpawn have no timestamp — handle before reading ts
+    if tag[0] == WIRE_SPAWN_LOCATION_DEF {
+        let mut spawn_loc_id_bytes = [0u8; 2];
+        r.read_exact(&mut spawn_loc_id_bytes)?;
+        let id = SpawnLocationId::from_u16(u16::from_le_bytes(spawn_loc_id_bytes));
+
+        let mut len_bytes = [0u8; 2];
+        r.read_exact(&mut len_bytes)?;
+        let len = u16::from_le_bytes(len_bytes) as usize;
+
+        let mut string_bytes = vec![0u8; len];
+        r.read_exact(&mut string_bytes)?;
+        let location = String::from_utf8(string_bytes)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8"))?;
+
+        return Ok(Some(TelemetryEvent::SpawnLocationDef { id, location }));
+    }
+    if tag[0] == WIRE_TASK_SPAWN {
+        let mut task_id_bytes = [0u8; 4];
+        let mut spawn_loc_id_bytes = [0u8; 2];
+        r.read_exact(&mut task_id_bytes)?;
+        r.read_exact(&mut spawn_loc_id_bytes)?;
+        return Ok(Some(TelemetryEvent::TaskSpawn {
+            task_id: TaskId::from_u32(u32::from_le_bytes(task_id_bytes)),
+            spawn_loc_id: SpawnLocationId::from_u16(u16::from_le_bytes(spawn_loc_id_bytes)),
+        }));
+    }
+
     let mut ts = [0u8; 4];
     r.read_exact(&mut ts)?;
     let timestamp_nanos = u32::from_le_bytes(ts) as u64 * 1000;
 
-    match tag[0] {
-        WIRE_POLL_START | WIRE_POLL_END => {
-            let mut wid = [0u8; 1];
-            r.read_exact(&mut wid)?;
-            let event_type = if tag[0] == WIRE_POLL_START {
-                EventType::PollStart
-            } else {
-                EventType::PollEnd
-            };
-            Ok(Some(TelemetryEvent::new(
-                event_type,
-                MetricsSnapshot {
-                    timestamp_nanos,
-                    worker_id: wid[0] as usize,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            )))
-        }
-        WIRE_POLL_START_WITH_QUEUE | WIRE_POLL_END_WITH_QUEUE => {
+    let event = match tag[0] {
+        WIRE_POLL_START => {
             let mut wid = [0u8; 1];
             let mut lq = [0u8; 1];
+            let mut task_id_bytes = [0u8; 4];
+            let mut spawn_loc_id_bytes = [0u8; 2];
             r.read_exact(&mut wid)?;
             r.read_exact(&mut lq)?;
-            let event_type = if tag[0] == WIRE_POLL_START_WITH_QUEUE {
-                EventType::PollStart
-            } else {
-                EventType::PollEnd
-            };
-            Ok(Some(TelemetryEvent::new(
-                event_type,
-                MetricsSnapshot {
-                    timestamp_nanos,
-                    worker_id: wid[0] as usize,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: lq[0] as usize,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            )))
+            r.read_exact(&mut task_id_bytes)?;
+            r.read_exact(&mut spawn_loc_id_bytes)?;
+
+            TelemetryEvent::PollStart {
+                timestamp_nanos,
+                worker_id: wid[0] as usize,
+                worker_local_queue_depth: lq[0] as usize,
+                task_id: TaskId::from_u32(u32::from_le_bytes(task_id_bytes)),
+                spawn_loc_id: SpawnLocationId::from_u16(u16::from_le_bytes(spawn_loc_id_bytes)),
+            }
+        }
+        WIRE_POLL_END => {
+            let mut wid = [0u8; 1];
+            r.read_exact(&mut wid)?;
+            TelemetryEvent::PollEnd {
+                timestamp_nanos,
+                worker_id: wid[0] as usize,
+            }
         }
         WIRE_WORKER_PARK => {
             let mut wid = [0u8; 1];
@@ -188,17 +236,12 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
             let mut cpu = [0u8; 4];
             r.read_exact(&mut cpu)?;
             let cpu_time_nanos = u32::from_le_bytes(cpu) as u64 * 1000;
-            Ok(Some(TelemetryEvent::new(
-                EventType::WorkerPark,
-                MetricsSnapshot {
-                    timestamp_nanos,
-                    worker_id: wid[0] as usize,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: lq[0] as usize,
-                    cpu_time_nanos,
-                    sched_wait_delta_nanos: 0,
-                },
-            )))
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos,
+                worker_id: wid[0] as usize,
+                worker_local_queue_depth: lq[0] as usize,
+                cpu_time_nanos,
+            }
         }
         WIRE_WORKER_UNPARK => {
             let mut wid = [0u8; 1];
@@ -211,233 +254,251 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
             let mut sw = [0u8; 4];
             r.read_exact(&mut sw)?;
             let sched_wait_delta_nanos = u32::from_le_bytes(sw) as u64 * 1000;
-            Ok(Some(TelemetryEvent::new(
-                EventType::WorkerUnpark,
-                MetricsSnapshot {
-                    timestamp_nanos,
-                    worker_id: wid[0] as usize,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: lq[0] as usize,
-                    cpu_time_nanos,
-                    sched_wait_delta_nanos,
-                },
-            )))
+            TelemetryEvent::WorkerUnpark {
+                timestamp_nanos,
+                worker_id: wid[0] as usize,
+                worker_local_queue_depth: lq[0] as usize,
+                cpu_time_nanos,
+                sched_wait_delta_nanos,
+            }
         }
         WIRE_QUEUE_SAMPLE => {
             let mut gq = [0u8; 1];
             r.read_exact(&mut gq)?;
-            Ok(Some(TelemetryEvent::new(
-                EventType::QueueSample,
-                MetricsSnapshot {
-                    timestamp_nanos,
-                    worker_id: 0,
-                    global_queue_depth: gq[0] as usize,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            )))
+            TelemetryEvent::QueueSample {
+                timestamp_nanos,
+                global_queue_depth: gq[0] as usize,
+            }
         }
-        _ => Ok(None),
-    }
+        _ => return Ok(None),
+    };
+    Ok(Some(event))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::task_metadata::{
+        SpawnLocationId, TaskId, UNKNOWN_SPAWN_LOCATION_ID, UNKNOWN_TASK_ID,
+    };
     use std::io::Cursor;
 
+    /// Write an event and read it back, asserting the wire size matches.
     fn roundtrip(event: &TelemetryEvent) -> TelemetryEvent {
         let mut buf = Vec::new();
         write_event(&mut buf, event).unwrap();
         assert_eq!(buf.len(), wire_event_size(event));
-        read_event(&mut Cursor::new(buf)).unwrap().unwrap()
+        let decoded = read_event(&mut Cursor::new(buf)).unwrap().unwrap();
+        decoded
+    }
+
+    /// Helper: read the next runtime event, skipping metadata records.
+    fn read_runtime_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
+        loop {
+            match read_event(r)? {
+                None => return Ok(None),
+                Some(e) if e.is_runtime_event() => return Ok(Some(e)),
+                Some(_) => continue,
+            }
+        }
     }
 
     #[test]
     fn test_poll_start_zero_queue_roundtrip() {
-        let event = TelemetryEvent::new(
-            EventType::PollStart,
-            MetricsSnapshot {
-                timestamp_nanos: 123_456_000,
-                worker_id: 3,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
-        assert_eq!(wire_event_size(&event), 6);
+        let event = TelemetryEvent::PollStart {
+            timestamp_nanos: 123_456_000,
+            worker_id: 3,
+            worker_local_queue_depth: 0,
+            task_id: UNKNOWN_TASK_ID,
+            spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+        };
+        assert_eq!(wire_event_size(&event), 13);
         let decoded = roundtrip(&event);
-        assert_eq!(decoded.event_type, EventType::PollStart);
-        assert_eq!(decoded.metrics.timestamp_nanos, 123_456_000);
-        assert_eq!(decoded.metrics.worker_id, 3);
-        assert_eq!(decoded.metrics.worker_local_queue_depth, 0);
+        match decoded {
+            TelemetryEvent::PollStart {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                ..
+            } => {
+                assert_eq!(timestamp_nanos, 123_456_000);
+                assert_eq!(worker_id, 3);
+                assert_eq!(worker_local_queue_depth, 0);
+            }
+            _ => panic!("expected PollStart"),
+        }
     }
 
     #[test]
     fn test_poll_start_with_queue_roundtrip() {
-        let event = TelemetryEvent::new(
-            EventType::PollStart,
-            MetricsSnapshot {
-                timestamp_nanos: 123_456_000,
-                worker_id: 3,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 17,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
-        assert_eq!(wire_event_size(&event), 7);
+        let event = TelemetryEvent::PollStart {
+            timestamp_nanos: 123_456_000,
+            worker_id: 3,
+            worker_local_queue_depth: 17,
+            task_id: UNKNOWN_TASK_ID,
+            spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+        };
+        assert_eq!(wire_event_size(&event), 13);
         let decoded = roundtrip(&event);
-        assert_eq!(decoded.event_type, EventType::PollStart);
-        assert_eq!(decoded.metrics.timestamp_nanos, 123_456_000);
-        assert_eq!(decoded.metrics.worker_id, 3);
-        assert_eq!(decoded.metrics.worker_local_queue_depth, 17);
+        match decoded {
+            TelemetryEvent::PollStart {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                ..
+            } => {
+                assert_eq!(timestamp_nanos, 123_456_000);
+                assert_eq!(worker_id, 3);
+                assert_eq!(worker_local_queue_depth, 17);
+            }
+            _ => panic!("expected PollStart"),
+        }
     }
 
     #[test]
     fn test_poll_end_zero_queue_roundtrip() {
-        let event = TelemetryEvent::new(
-            EventType::PollEnd,
-            MetricsSnapshot {
-                timestamp_nanos: 999_000,
-                worker_id: 1,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
+        let event = TelemetryEvent::PollEnd {
+            timestamp_nanos: 999_000,
+            worker_id: 1,
+        };
         assert_eq!(wire_event_size(&event), 6);
         let decoded = roundtrip(&event);
-        assert_eq!(decoded.event_type, EventType::PollEnd);
-        assert_eq!(decoded.metrics.worker_id, 1);
-        assert_eq!(decoded.metrics.worker_local_queue_depth, 0);
+        match decoded {
+            TelemetryEvent::PollEnd {
+                worker_id,
+                timestamp_nanos,
+            } => {
+                assert_eq!(worker_id, 1);
+                assert_eq!(timestamp_nanos, 999_000);
+            }
+            _ => panic!("expected PollEnd"),
+        }
     }
 
     #[test]
     fn test_poll_end_with_queue_roundtrip() {
-        let event = TelemetryEvent::new(
-            EventType::PollEnd,
-            MetricsSnapshot {
-                timestamp_nanos: 999_000,
-                worker_id: 1,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 42,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
-        assert_eq!(wire_event_size(&event), 7);
+        // PollEnd doesn't carry local_queue on the wire, so the value is lost
+        let event = TelemetryEvent::PollEnd {
+            timestamp_nanos: 999_000,
+            worker_id: 1,
+        };
+        assert_eq!(wire_event_size(&event), 6);
         let decoded = roundtrip(&event);
-        assert_eq!(decoded.event_type, EventType::PollEnd);
-        assert_eq!(decoded.metrics.worker_id, 1);
-        assert_eq!(decoded.metrics.worker_local_queue_depth, 42);
+        match decoded {
+            TelemetryEvent::PollEnd { worker_id, .. } => {
+                assert_eq!(worker_id, 1);
+            }
+            _ => panic!("expected PollEnd"),
+        }
     }
 
     #[test]
     fn test_sub_microsecond_truncation() {
-        let event = TelemetryEvent::new(
-            EventType::PollStart,
-            MetricsSnapshot {
-                timestamp_nanos: 123_456_789,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
+        let event = TelemetryEvent::PollStart {
+            timestamp_nanos: 123_456_789,
+            worker_id: 0,
+            worker_local_queue_depth: 0,
+            task_id: UNKNOWN_TASK_ID,
+            spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+        };
         let decoded = roundtrip(&event);
         // Sub-microsecond precision is lost: 123_456_789 -> 123_456_000
-        assert_eq!(decoded.metrics.timestamp_nanos, 123_456_000);
+        assert_eq!(decoded.timestamp_nanos(), Some(123_456_000));
     }
 
     #[test]
     fn test_park_roundtrip() {
-        let event = TelemetryEvent::new(
-            EventType::WorkerPark,
-            MetricsSnapshot {
-                timestamp_nanos: 5_000_000_000,
-                worker_id: 7,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 200,
-                cpu_time_nanos: 1_234_567_000,
-                sched_wait_delta_nanos: 0,
-            },
-        );
+        let event = TelemetryEvent::WorkerPark {
+            timestamp_nanos: 5_000_000_000,
+            worker_id: 7,
+            worker_local_queue_depth: 200,
+            cpu_time_nanos: 1_234_567_000,
+        };
         assert_eq!(wire_event_size(&event), 11);
         let decoded = roundtrip(&event);
-        assert_eq!(decoded.event_type, EventType::WorkerPark);
-        assert_eq!(decoded.metrics.timestamp_nanos, 5_000_000_000);
-        assert_eq!(decoded.metrics.worker_id, 7);
-        assert_eq!(decoded.metrics.worker_local_queue_depth, 200);
-        assert_eq!(decoded.metrics.cpu_time_nanos, 1_234_567_000);
+        match decoded {
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                cpu_time_nanos,
+            } => {
+                assert_eq!(timestamp_nanos, 5_000_000_000);
+                assert_eq!(worker_id, 7);
+                assert_eq!(worker_local_queue_depth, 200);
+                assert_eq!(cpu_time_nanos, 1_234_567_000);
+            }
+            _ => panic!("expected WorkerPark"),
+        }
     }
 
     #[test]
     fn test_park_zero_queue_roundtrip() {
-        // Park with local_queue=0 is still 11 bytes (no special wire code for park)
-        let event = TelemetryEvent::new(
-            EventType::WorkerPark,
-            MetricsSnapshot {
-                timestamp_nanos: 1_000_000,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
+        let event = TelemetryEvent::WorkerPark {
+            timestamp_nanos: 1_000_000,
+            worker_id: 0,
+            worker_local_queue_depth: 0,
+            cpu_time_nanos: 0,
+        };
         assert_eq!(wire_event_size(&event), 11);
         let decoded = roundtrip(&event);
-        assert_eq!(decoded.event_type, EventType::WorkerPark);
-        assert_eq!(decoded.metrics.worker_local_queue_depth, 0);
+        match decoded {
+            TelemetryEvent::WorkerPark {
+                worker_local_queue_depth,
+                ..
+            } => {
+                assert_eq!(worker_local_queue_depth, 0);
+            }
+            _ => panic!("expected WorkerPark"),
+        }
     }
 
     #[test]
     fn test_unpark_roundtrip() {
-        let event = TelemetryEvent::new(
-            EventType::WorkerUnpark,
-            MetricsSnapshot {
-                timestamp_nanos: 1_000_000,
-                worker_id: 2,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 55,
-                cpu_time_nanos: 999_000,
-                sched_wait_delta_nanos: 42_000,
-            },
-        );
+        let event = TelemetryEvent::WorkerUnpark {
+            timestamp_nanos: 1_000_000,
+            worker_id: 2,
+            worker_local_queue_depth: 55,
+            cpu_time_nanos: 999_000,
+            sched_wait_delta_nanos: 42_000,
+        };
         assert_eq!(wire_event_size(&event), 15);
         let decoded = roundtrip(&event);
-        assert_eq!(decoded.event_type, EventType::WorkerUnpark);
-        assert_eq!(decoded.metrics.worker_id, 2);
-        assert_eq!(decoded.metrics.worker_local_queue_depth, 55);
-        assert_eq!(decoded.metrics.cpu_time_nanos, 999_000);
-        assert_eq!(decoded.metrics.sched_wait_delta_nanos, 42_000);
+        match decoded {
+            TelemetryEvent::WorkerUnpark {
+                worker_id,
+                worker_local_queue_depth,
+                cpu_time_nanos,
+                sched_wait_delta_nanos,
+                ..
+            } => {
+                assert_eq!(worker_id, 2);
+                assert_eq!(worker_local_queue_depth, 55);
+                assert_eq!(cpu_time_nanos, 999_000);
+                assert_eq!(sched_wait_delta_nanos, 42_000);
+            }
+            _ => panic!("expected WorkerUnpark"),
+        }
     }
 
     #[test]
     fn test_queue_sample_roundtrip() {
-        let event = TelemetryEvent::new(
-            EventType::QueueSample,
-            MetricsSnapshot {
-                timestamp_nanos: 10_000_000_000,
-                worker_id: 0,
-                global_queue_depth: 128,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
+        let event = TelemetryEvent::QueueSample {
+            timestamp_nanos: 10_000_000_000,
+            global_queue_depth: 128,
+        };
         assert_eq!(wire_event_size(&event), 6);
         let decoded = roundtrip(&event);
-        assert_eq!(decoded.event_type, EventType::QueueSample);
-        assert_eq!(decoded.metrics.timestamp_nanos, 10_000_000_000);
-        assert_eq!(decoded.metrics.global_queue_depth, 128);
-        assert_eq!(decoded.metrics.worker_id, 0);
-        assert_eq!(decoded.metrics.worker_local_queue_depth, 0);
+        match decoded {
+            TelemetryEvent::QueueSample {
+                timestamp_nanos,
+                global_queue_depth,
+            } => {
+                assert_eq!(timestamp_nanos, 10_000_000_000);
+                assert_eq!(global_queue_depth, 128);
+            }
+            _ => panic!("expected QueueSample"),
+        }
     }
 
     #[test]
@@ -452,170 +513,118 @@ mod tests {
 
     #[test]
     fn test_wire_event_sizes() {
-        // PollStart/PollEnd with zero queue = 6 bytes
-        let poll_zero = TelemetryEvent::new(
-            EventType::PollStart,
-            MetricsSnapshot {
-                timestamp_nanos: 0,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
-        assert_eq!(wire_event_size(&poll_zero), 6);
+        // PollStart always 13 bytes
+        let poll_zero = TelemetryEvent::PollStart {
+            timestamp_nanos: 0,
+            worker_id: 0,
+            worker_local_queue_depth: 0,
+            task_id: UNKNOWN_TASK_ID,
+            spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+        };
+        assert_eq!(wire_event_size(&poll_zero), 13);
 
-        // PollStart/PollEnd with non-zero queue = 7 bytes
-        let poll_nonzero = TelemetryEvent::new(
-            EventType::PollStart,
-            MetricsSnapshot {
-                timestamp_nanos: 0,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 1,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
-        assert_eq!(wire_event_size(&poll_nonzero), 7);
+        let poll_nonzero = TelemetryEvent::PollStart {
+            timestamp_nanos: 0,
+            worker_id: 0,
+            worker_local_queue_depth: 1,
+            task_id: UNKNOWN_TASK_ID,
+            spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+        };
+        assert_eq!(wire_event_size(&poll_nonzero), 13);
 
         // Park always 11 bytes
-        let park = TelemetryEvent::new(
-            EventType::WorkerPark,
-            MetricsSnapshot {
-                timestamp_nanos: 0,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
+        let park = TelemetryEvent::WorkerPark {
+            timestamp_nanos: 0,
+            worker_id: 0,
+            worker_local_queue_depth: 0,
+            cpu_time_nanos: 0,
+        };
         assert_eq!(wire_event_size(&park), 11);
 
-        // Unpark always 15 bytes (includes sched_wait_us)
-        let unpark = TelemetryEvent::new(
-            EventType::WorkerUnpark,
-            MetricsSnapshot {
-                timestamp_nanos: 0,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
+        // Unpark always 15 bytes
+        let unpark = TelemetryEvent::WorkerUnpark {
+            timestamp_nanos: 0,
+            worker_id: 0,
+            worker_local_queue_depth: 0,
+            cpu_time_nanos: 0,
+            sched_wait_delta_nanos: 0,
+        };
         assert_eq!(wire_event_size(&unpark), 15);
 
         // QueueSample always 6 bytes
-        let qs = TelemetryEvent::new(
-            EventType::QueueSample,
-            MetricsSnapshot {
-                timestamp_nanos: 0,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
+        let qs = TelemetryEvent::QueueSample {
+            timestamp_nanos: 0,
+            global_queue_depth: 0,
+        };
         assert_eq!(wire_event_size(&qs), 6);
+
+        // TaskSpawn always 7 bytes
+        let ts = TelemetryEvent::TaskSpawn {
+            task_id: TaskId::from_u32(1),
+            spawn_loc_id: SpawnLocationId::from_u16(1),
+        };
+        assert_eq!(wire_event_size(&ts), 7);
+
+        // SpawnLocationDef is 5 + N bytes
+        let def = TelemetryEvent::SpawnLocationDef {
+            id: SpawnLocationId::from_u16(1),
+            location: "src/main.rs:10:5".to_string(),
+        };
+        assert_eq!(wire_event_size(&def), 5 + 16);
+
+        let def_empty = TelemetryEvent::SpawnLocationDef {
+            id: SpawnLocationId::from_u16(1),
+            location: String::new(),
+        };
+        assert_eq!(wire_event_size(&def_empty), 5);
     }
 
     #[test]
     fn test_max_timestamp() {
         // u32 micros max = 4_294_967_295 µs ≈ 71.6 minutes
-        let event = TelemetryEvent::new(
-            EventType::PollEnd,
-            MetricsSnapshot {
-                timestamp_nanos: 4_294_967_295_000,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
+        let event = TelemetryEvent::PollEnd {
+            timestamp_nanos: 4_294_967_295_000,
+            worker_id: 0,
+        };
         let decoded = roundtrip(&event);
-        assert_eq!(decoded.metrics.timestamp_nanos, 4_294_967_295_000);
+        assert_eq!(decoded.timestamp_nanos(), Some(4_294_967_295_000));
     }
 
     #[test]
     fn test_mixed_event_stream() {
-        let events = vec![
-            // PollStart with local_queue=0: 6 bytes
-            TelemetryEvent::new(
-                EventType::PollStart,
-                MetricsSnapshot {
-                    timestamp_nanos: 1_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            // QueueSample: 6 bytes
-            TelemetryEvent::new(
-                EventType::QueueSample,
-                MetricsSnapshot {
-                    timestamp_nanos: 2_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 42,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            // PollEnd with local_queue>0: 7 bytes
-            TelemetryEvent::new(
-                EventType::PollEnd,
-                MetricsSnapshot {
-                    timestamp_nanos: 3_000_000,
-                    worker_id: 0,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 4,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            // WorkerPark: 11 bytes
-            TelemetryEvent::new(
-                EventType::WorkerPark,
-                MetricsSnapshot {
-                    timestamp_nanos: 4_000_000,
-                    worker_id: 1,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 500_000_000,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            // PollStart with local_queue>0: 7 bytes
-            TelemetryEvent::new(
-                EventType::PollStart,
-                MetricsSnapshot {
-                    timestamp_nanos: 5_000_000,
-                    worker_id: 2,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 10,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
-            // PollEnd with local_queue=0: 6 bytes
-            TelemetryEvent::new(
-                EventType::PollEnd,
-                MetricsSnapshot {
-                    timestamp_nanos: 6_000_000,
-                    worker_id: 2,
-                    global_queue_depth: 0,
-                    worker_local_queue_depth: 0,
-                    cpu_time_nanos: 0,
-                    sched_wait_delta_nanos: 0,
-                },
-            ),
+        let events: Vec<TelemetryEvent> = vec![
+            TelemetryEvent::PollStart {
+                timestamp_nanos: 1_000_000,
+                worker_id: 0,
+                worker_local_queue_depth: 0,
+                task_id: UNKNOWN_TASK_ID,
+                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+            },
+            TelemetryEvent::QueueSample {
+                timestamp_nanos: 2_000_000,
+                global_queue_depth: 42,
+            },
+            TelemetryEvent::PollEnd {
+                timestamp_nanos: 3_000_000,
+                worker_id: 0,
+            },
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos: 4_000_000,
+                worker_id: 1,
+                worker_local_queue_depth: 0,
+                cpu_time_nanos: 500_000_000,
+            },
+            TelemetryEvent::PollStart {
+                timestamp_nanos: 5_000_000,
+                worker_id: 2,
+                worker_local_queue_depth: 10,
+                task_id: UNKNOWN_TASK_ID,
+                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+            },
+            TelemetryEvent::PollEnd {
+                timestamp_nanos: 6_000_000,
+                worker_id: 2,
+            },
         ];
 
         let mut buf = Vec::new();
@@ -623,100 +632,266 @@ mod tests {
             write_event(&mut buf, e).unwrap();
         }
 
-        // 6 + 6 + 7 + 11 + 7 + 6 = 43
-        assert_eq!(buf.len(), 43);
+        // 13 + 6 + 6 + 11 + 13 + 6 = 55
+        assert_eq!(buf.len(), 55);
 
         let mut cursor = Cursor::new(buf);
         let d0 = read_event(&mut cursor).unwrap().unwrap();
-        assert_eq!(d0.event_type, EventType::PollStart);
-        assert_eq!(d0.metrics.worker_local_queue_depth, 0);
+        assert!(matches!(
+            d0,
+            TelemetryEvent::PollStart {
+                worker_local_queue_depth: 0,
+                ..
+            }
+        ));
 
         let d1 = read_event(&mut cursor).unwrap().unwrap();
-        assert_eq!(d1.event_type, EventType::QueueSample);
-        assert_eq!(d1.metrics.global_queue_depth, 42);
+        assert!(matches!(
+            d1,
+            TelemetryEvent::QueueSample {
+                global_queue_depth: 42,
+                ..
+            }
+        ));
 
         let d2 = read_event(&mut cursor).unwrap().unwrap();
-        assert_eq!(d2.event_type, EventType::PollEnd);
-        assert_eq!(d2.metrics.worker_local_queue_depth, 4);
+        assert!(matches!(d2, TelemetryEvent::PollEnd { .. }));
 
         let d3 = read_event(&mut cursor).unwrap().unwrap();
-        assert_eq!(d3.event_type, EventType::WorkerPark);
-        assert_eq!(d3.metrics.worker_id, 1);
-        assert_eq!(d3.metrics.cpu_time_nanos, 500_000_000);
+        assert!(matches!(
+            d3,
+            TelemetryEvent::WorkerPark {
+                worker_id: 1,
+                cpu_time_nanos: 500_000_000,
+                ..
+            }
+        ));
 
         let d4 = read_event(&mut cursor).unwrap().unwrap();
-        assert_eq!(d4.event_type, EventType::PollStart);
-        assert_eq!(d4.metrics.worker_local_queue_depth, 10);
+        assert!(matches!(
+            d4,
+            TelemetryEvent::PollStart {
+                worker_local_queue_depth: 10,
+                ..
+            }
+        ));
 
         let d5 = read_event(&mut cursor).unwrap().unwrap();
-        assert_eq!(d5.event_type, EventType::PollEnd);
-        assert_eq!(d5.metrics.worker_local_queue_depth, 0);
+        assert!(matches!(d5, TelemetryEvent::PollEnd { .. }));
 
         assert!(read_event(&mut cursor).unwrap().is_none());
     }
 
     #[test]
     fn test_wire_codes_are_correct() {
-        // Verify that zero-queue polls use codes 0/1 and non-zero use 5/6
         let mut buf = Vec::new();
 
-        let poll_zero = TelemetryEvent::new(
-            EventType::PollStart,
-            MetricsSnapshot {
-                timestamp_nanos: 0,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
-        write_event(&mut buf, &poll_zero).unwrap();
+        let poll_start = TelemetryEvent::PollStart {
+            timestamp_nanos: 0,
+            worker_id: 0,
+            worker_local_queue_depth: 0,
+            task_id: UNKNOWN_TASK_ID,
+            spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+        };
+        write_event(&mut buf, &poll_start).unwrap();
         assert_eq!(buf[0], WIRE_POLL_START);
 
         buf.clear();
-        let poll_nonzero = TelemetryEvent::new(
-            EventType::PollStart,
-            MetricsSnapshot {
-                timestamp_nanos: 0,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 5,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
-        write_event(&mut buf, &poll_nonzero).unwrap();
-        assert_eq!(buf[0], WIRE_POLL_START_WITH_QUEUE);
+        let poll_start_nonzero = TelemetryEvent::PollStart {
+            timestamp_nanos: 0,
+            worker_id: 0,
+            worker_local_queue_depth: 5,
+            task_id: UNKNOWN_TASK_ID,
+            spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+        };
+        write_event(&mut buf, &poll_start_nonzero).unwrap();
+        assert_eq!(buf[0], WIRE_POLL_START);
 
         buf.clear();
-        let end_zero = TelemetryEvent::new(
-            EventType::PollEnd,
-            MetricsSnapshot {
-                timestamp_nanos: 0,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        );
-        write_event(&mut buf, &end_zero).unwrap();
+        let poll_end = TelemetryEvent::PollEnd {
+            timestamp_nanos: 0,
+            worker_id: 0,
+        };
+        write_event(&mut buf, &poll_end).unwrap();
         assert_eq!(buf[0], WIRE_POLL_END);
 
         buf.clear();
-        let end_nonzero = TelemetryEvent::new(
-            EventType::PollEnd,
-            MetricsSnapshot {
-                timestamp_nanos: 0,
-                worker_id: 0,
-                global_queue_depth: 0,
-                worker_local_queue_depth: 3,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
+        let spawn_def = TelemetryEvent::SpawnLocationDef {
+            id: SpawnLocationId::from_u16(1),
+            location: "test".to_string(),
+        };
+        write_event(&mut buf, &spawn_def).unwrap();
+        assert_eq!(buf[0], WIRE_SPAWN_LOCATION_DEF);
+
+        buf.clear();
+        let task_spawn = TelemetryEvent::TaskSpawn {
+            task_id: TaskId::from_u32(1),
+            spawn_loc_id: SpawnLocationId::from_u16(1),
+        };
+        write_event(&mut buf, &task_spawn).unwrap();
+        assert_eq!(buf[0], WIRE_TASK_SPAWN);
+    }
+
+    #[test]
+    fn test_poll_start_v7_with_task_metadata() {
+        let event = TelemetryEvent::PollStart {
+            timestamp_nanos: 123_456_000,
+            worker_id: 3,
+            worker_local_queue_depth: 17,
+            task_id: TaskId::from_u32(42),
+            spawn_loc_id: SpawnLocationId::from_u16(5),
+        };
+
+        assert_eq!(wire_event_size(&event), 13);
+        let decoded = roundtrip(&event);
+        match decoded {
+            TelemetryEvent::PollStart {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                task_id,
+                spawn_loc_id,
+            } => {
+                assert_eq!(timestamp_nanos, 123_456_000);
+                assert_eq!(worker_id, 3);
+                assert_eq!(worker_local_queue_depth, 17);
+                assert_eq!(task_id.to_u32(), 42);
+                assert_eq!(spawn_loc_id.as_u16(), 5);
+            }
+            _ => panic!("expected PollStart"),
+        }
+    }
+
+    #[test]
+    fn test_spawn_location_def_roundtrip() {
+        let event = TelemetryEvent::SpawnLocationDef {
+            id: SpawnLocationId::from_u16(42),
+            location: "src/main.rs:123:45".to_string(),
+        };
+
+        let mut buf = Vec::new();
+        write_event(&mut buf, &event).unwrap();
+
+        // Check wire format: code(1) + id(2) + len(2) + string
+        assert_eq!(buf[0], WIRE_SPAWN_LOCATION_DEF);
+        assert_eq!(buf.len(), wire_event_size(&event));
+
+        let mut cursor = Cursor::new(buf);
+        let decoded = read_event(&mut cursor).unwrap().unwrap();
+        match decoded {
+            TelemetryEvent::SpawnLocationDef { id, location } => {
+                assert_eq!(id.as_u16(), 42);
+                assert_eq!(location, "src/main.rs:123:45");
+            }
+            _ => panic!("expected SpawnLocationDef"),
+        }
+    }
+
+    #[test]
+    fn test_task_spawn_roundtrip() {
+        let event = TelemetryEvent::TaskSpawn {
+            task_id: TaskId::from_u32(99),
+            spawn_loc_id: SpawnLocationId::from_u16(7),
+        };
+
+        let mut buf = Vec::new();
+        write_event(&mut buf, &event).unwrap();
+        assert_eq!(buf.len(), wire_event_size(&event));
+        assert_eq!(buf[0], WIRE_TASK_SPAWN);
+
+        let mut cursor = Cursor::new(buf);
+        let decoded = read_event(&mut cursor).unwrap().unwrap();
+        match decoded {
+            TelemetryEvent::TaskSpawn {
+                task_id,
+                spawn_loc_id,
+            } => {
+                assert_eq!(task_id.to_u32(), 99);
+                assert_eq!(spawn_loc_id.as_u16(), 7);
+            }
+            _ => panic!("expected TaskSpawn"),
+        }
+    }
+
+    #[test]
+    fn test_mixed_stream_with_metadata_records() {
+        // Write a stream that includes SpawnLocationDef and TaskSpawn interleaved with
+        // runtime events, then read it back verifying order is preserved.
+        let events: Vec<TelemetryEvent> = vec![
+            TelemetryEvent::SpawnLocationDef {
+                id: SpawnLocationId::from_u16(1),
+                location: "src/main.rs:10:1".to_string(),
             },
-        );
-        write_event(&mut buf, &end_nonzero).unwrap();
-        assert_eq!(buf[0], WIRE_POLL_END_WITH_QUEUE);
+            TelemetryEvent::TaskSpawn {
+                task_id: TaskId::from_u32(100),
+                spawn_loc_id: SpawnLocationId::from_u16(1),
+            },
+            TelemetryEvent::PollStart {
+                timestamp_nanos: 1_000_000,
+                worker_id: 0,
+                worker_local_queue_depth: 3,
+                task_id: TaskId::from_u32(100),
+                spawn_loc_id: SpawnLocationId::from_u16(1),
+            },
+            TelemetryEvent::PollEnd {
+                timestamp_nanos: 2_000_000,
+                worker_id: 0,
+            },
+        ];
+
+        let mut buf = Vec::new();
+        for e in &events {
+            write_event(&mut buf, e).unwrap();
+        }
+
+        let expected_size: usize = events.iter().map(|e| wire_event_size(e)).sum();
+        assert_eq!(buf.len(), expected_size);
+
+        // Read all events back (including metadata)
+        let mut cursor = Cursor::new(&buf);
+        let mut decoded = Vec::new();
+        while let Some(e) = read_event(&mut cursor).unwrap() {
+            decoded.push(e);
+        }
+        assert_eq!(decoded.len(), 4);
+        assert!(matches!(
+            decoded[0],
+            TelemetryEvent::SpawnLocationDef { .. }
+        ));
+        assert!(matches!(decoded[1], TelemetryEvent::TaskSpawn { .. }));
+        assert!(matches!(decoded[2], TelemetryEvent::PollStart { .. }));
+        assert!(matches!(decoded[3], TelemetryEvent::PollEnd { .. }));
+
+        // Read only runtime events using the helper
+        let mut cursor2 = Cursor::new(&buf);
+        let mut runtime_events = Vec::new();
+        while let Some(e) = read_runtime_event(&mut cursor2).unwrap() {
+            runtime_events.push(e);
+        }
+        assert_eq!(runtime_events.len(), 2);
+        assert!(matches!(
+            runtime_events[0],
+            TelemetryEvent::PollStart { .. }
+        ));
+        assert!(matches!(runtime_events[1], TelemetryEvent::PollEnd { .. }));
+    }
+
+    #[test]
+    fn test_spawn_location_def_wire_size_matches_written() {
+        // Verify wire_event_size matches actual written bytes for various string lengths
+        for len in [0, 1, 10, 100, 255] {
+            let location: String = "x".repeat(len);
+            let event = TelemetryEvent::SpawnLocationDef {
+                id: SpawnLocationId::from_u16(1),
+                location,
+            };
+            let mut buf = Vec::new();
+            write_event(&mut buf, &event).unwrap();
+            assert_eq!(
+                buf.len(),
+                wire_event_size(&event),
+                "size mismatch for string length {len}"
+            );
+        }
     }
 }
