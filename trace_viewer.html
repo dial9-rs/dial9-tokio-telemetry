@@ -1,0 +1,1407 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Tokio Trace Viewer</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            body {
+                font-family:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                    monospace;
+                background: #1a1a2e;
+                color: #e0e0e0;
+                overflow: hidden;
+                height: 100vh;
+                display: flex;
+                flex-direction: column;
+            }
+
+            #drop-zone {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: 100vh;
+                width: 100vw;
+                border: 3px dashed #444;
+                border-radius: 12px;
+                margin: 20px;
+                font-size: 1.2em;
+                color: #888;
+                cursor: pointer;
+                transition: all 0.2s;
+            }
+            #drop-zone:hover,
+            #drop-zone.dragover {
+                border-color: #6c63ff;
+                color: #6c63ff;
+                background: rgba(108, 99, 255, 0.05);
+            }
+            #drop-zone input {
+                display: none;
+            }
+
+            #viewer {
+                display: none;
+                flex-direction: column;
+                height: 100vh;
+            }
+
+            #toolbar {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 8px 16px;
+                background: #16213e;
+                border-bottom: 1px solid #333;
+                flex-shrink: 0;
+                min-height: 44px;
+            }
+            #toolbar .filename {
+                font-weight: 600;
+                color: #6c63ff;
+            }
+            #toolbar .filename::after {
+                content: " v12";
+                font-size: 0.7em;
+                color: #888;
+            }
+            #toolbar .stats {
+                color: #888;
+                font-size: 0.85em;
+            }
+            #toolbar button {
+                background: #2a2a4a;
+                border: 1px solid #444;
+                color: #ccc;
+                padding: 4px 12px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 0.85em;
+            }
+            #toolbar button:hover {
+                background: #3a3a5a;
+            }
+            #toolbar button:disabled {
+                opacity: 0.4;
+                cursor: not-allowed;
+            }
+            #toolbar select {
+                background: #2a2a4a;
+                border: 1px solid #444;
+                color: #ccc;
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-size: 0.85em;
+            }
+
+            #tooltip {
+                display: none;
+                position: fixed;
+                background: #222244;
+                border: 1px solid #555;
+                padding: 8px 12px;
+                border-radius: 6px;
+                font-size: 0.8em;
+                pointer-events: none;
+                z-index: 100;
+                max-width: 320px;
+                line-height: 1.5;
+            }
+            #tooltip .label {
+                color: #888;
+            }
+            #tooltip .value {
+                color: #fff;
+                font-weight: 600;
+            }
+
+            #main-area {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+                position: relative;
+            }
+
+            #timeline-header {
+                height: 30px;
+                background: #16213e;
+                border-bottom: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+
+            #lanes-container {
+                flex: 1;
+                overflow-y: auto;
+                overflow-x: hidden;
+                position: relative;
+            }
+
+            #queue-chart {
+                height: 120px;
+                background: #16213e;
+                border-top: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+            #queue-chart .chart-label {
+                position: absolute;
+                top: 4px;
+                left: 8px;
+                font-size: 0.75em;
+                color: #888;
+                z-index: 2;
+            }
+
+            .lane {
+                height: 60px;
+                border-bottom: 1px solid #222;
+                position: relative;
+                display: flex;
+            }
+            .lane-label {
+                width: 100px;
+                flex-shrink: 0;
+                display: flex;
+                align-items: center;
+                padding-left: 12px;
+                font-size: 0.8em;
+                color: #aaa;
+                background: #16213e;
+                border-right: 1px solid #333;
+                z-index: 1;
+            }
+            .lane-content {
+                flex: 1;
+                position: relative;
+                overflow: hidden;
+            }
+
+            canvas {
+                display: block;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="drop-zone">
+            <div>
+                <div style="font-size: 2em; margin-bottom: 12px">📊</div>
+                <div>
+                    Drop a <code>.bin</code> trace file here or click to open
+                </div>
+                <div style="font-size: 0.8em; margin-top: 8px; color: #666">
+                    Expects TOKIOTRC binary format
+                </div>
+            </div>
+            <input type="file" id="file-input" accept=".bin" />
+        </div>
+
+        <div id="viewer">
+            <div id="toolbar">
+                <span class="filename" id="tb-filename"></span>
+                <span class="stats" id="tb-stats"></span>
+                <span style="flex: 1"></span>
+                <select id="poi-filter">
+                    <option value="sched">Kernel Scheduling Delays</option>
+                    <option value="long-park">Long Parks (>10ms)</option>
+                    <option value="long-poll">Long Polls (>1ms)</option>
+                </select>
+                <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer">
+                    <input type="checkbox" id="sort-by-worst" style="cursor:pointer">
+                    Worst first
+                </label>
+                <button id="btn-prev-poi">◀ Prev</button>
+                <button id="btn-next-poi">Next ▶</button>
+                <span id="poi-counter" style="font-size:0.85em;color:#888"></span>
+                <span style="width:1px;height:20px;background:#444;margin:0 8px"></span>
+                <button id="btn-zoom-in">Zoom +</button>
+                <button id="btn-zoom-out">Zoom −</button>
+                <button id="btn-fit">Fit All</button>
+                <button id="btn-reset">New File</button>
+            </div>
+            <div id="main-area">
+                <div id="timeline-header">
+                    <canvas id="timeline-canvas"></canvas>
+                </div>
+                <div id="lanes-container" id="lanes"></div>
+                <div id="queue-chart">
+                    <span class="chart-label"
+                        >Queue Depth (global=blue, local max=orange)</span
+                    >
+                    <canvas id="queue-canvas"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div id="tooltip"></div>
+
+        <script>
+            // ── Binary Parser (v6 format) ──
+            // Wire codes:
+            //   0: PollStart   (local_queue=0)  → code(1) + ts(4) + worker(1)                                            = 6 bytes
+            //   1: PollEnd     (local_queue=0)  → code(1) + ts(4) + worker(1)                                            = 6 bytes
+            //   2: WorkerPark                   → code(1) + ts(4) + worker(1) + local_q(1) + cpu_us(4)                   = 11 bytes
+            //   3: WorkerUnpark                 → code(1) + ts(4) + worker(1) + local_q(1) + cpu_us(4) + sched_wait_us(4) = 15 bytes
+            //   4: QueueSample                  → code(1) + ts(4) + global_q(1)                                          = 6 bytes
+            //   5: PollStart   (local_queue>0)  → code(1) + ts(4) + worker(1) + local_q(1)                               = 7 bytes
+            //   6: PollEnd     (local_queue>0)  → code(1) + ts(4) + worker(1) + local_q(1)                               = 7 bytes
+            const MAX_EVENTS = 2_000_000; // cap parsed events to keep UI responsive
+
+            function parseTrace(buffer) {
+                const view = new DataView(buffer);
+                let off = 0;
+                const magic = String.fromCharCode(
+                    ...new Uint8Array(buffer, 0, 8),
+                );
+                off += 8;
+                const version = view.getUint32(off, true);
+                off += 4;
+                if (magic !== "TOKIOTRC")
+                    throw new Error("Not a TOKIOTRC file (got: " + magic + ")");
+                const hasCpuTime = version >= 5; // v5+ has cpu_us on park/unpark
+                const hasSchedWait = version >= 6; // v6+ has sched_wait_us on unpark
+
+                const events = [];
+                while (off < buffer.byteLength && events.length < MAX_EVENTS) {
+                    if (off + 1 > buffer.byteLength) break;
+                    const wireCode = view.getUint8(off);
+                    off += 1;
+                    if (wireCode > 6) break;
+
+                    // All codes have a 4-byte timestamp next
+                    if (off + 4 > buffer.byteLength) break;
+                    const timestampUs = view.getUint32(off, true);
+                    off += 4;
+                    const timestamp = timestampUs * 1000; // convert to nanoseconds for display
+
+                    let eventType,
+                        workerId = 0,
+                        globalQueue = 0,
+                        localQueue = 0,
+                        cpuTime = 0,
+                        schedWait = 0;
+                    switch (wireCode) {
+                        case 0: // PollStart, local_queue=0
+                        case 1: // PollEnd, local_queue=0
+                            if (off + 1 > buffer.byteLength) break;
+                            eventType = wireCode; // 0=PollStart, 1=PollEnd
+                            workerId = view.getUint8(off);
+                            off += 1;
+                            break;
+                        case 2: { // WorkerPark
+                            const need = hasCpuTime ? 6 : 2;
+                            if (off + need > buffer.byteLength) break;
+                            eventType = 2;
+                            workerId = view.getUint8(off);
+                            off += 1;
+                            localQueue = view.getUint8(off);
+                            off += 1;
+                            if (hasCpuTime) {
+                                cpuTime = view.getUint32(off, true) * 1000;
+                                off += 4;
+                            }
+                            break;
+                        }
+                        case 3: { // WorkerUnpark
+                            const need = hasCpuTime ? (hasSchedWait ? 10 : 6) : 2;
+                            if (off + need > buffer.byteLength) break;
+                            eventType = 3;
+                            workerId = view.getUint8(off);
+                            off += 1;
+                            localQueue = view.getUint8(off);
+                            off += 1;
+                            if (hasCpuTime) {
+                                cpuTime = view.getUint32(off, true) * 1000;
+                                off += 4;
+                            }
+                            if (hasSchedWait) {
+                                schedWait = view.getUint32(off, true); // microseconds
+                                off += 4;
+                            }
+                            break;
+                        }
+                        case 4: // QueueSample (runtime-level, no worker_id)
+                            if (off + 1 > buffer.byteLength) break;
+                            eventType = 4;
+                            globalQueue = view.getUint8(off);
+                            off += 1;
+                            break;
+                        case 5: // PollStart, local_queue>0
+                            if (off + 2 > buffer.byteLength) break;
+                            eventType = 0; // map back to PollStart
+                            workerId = view.getUint8(off);
+                            off += 1;
+                            localQueue = view.getUint8(off);
+                            off += 1;
+                            break;
+                        case 6: // PollEnd, local_queue>0
+                            if (off + 2 > buffer.byteLength) break;
+                            eventType = 1; // map back to PollEnd
+                            workerId = view.getUint8(off);
+                            off += 1;
+                            localQueue = view.getUint8(off);
+                            off += 1;
+                            break;
+                    }
+                    events.push({
+                        eventType,
+                        timestamp,
+                        workerId,
+                        globalQueue,
+                        localQueue,
+                        cpuTime,
+                        schedWait,
+                    });
+                }
+                return { magic, version, events, truncated: events.length >= MAX_EVENTS, hasCpuTime, hasSchedWait };
+            }
+
+            // ── Event type helpers ──
+            const ET = {
+                PollStart: 0,
+                PollEnd: 1,
+                WorkerPark: 2,
+                WorkerUnpark: 3,
+                QueueSample: 4,
+            };
+            const ET_NAMES = [
+                "PollStart",
+                "PollEnd",
+                "WorkerPark",
+                "WorkerUnpark",
+                "QueueSample",
+            ];
+            const ET_COLORS = { poll: "#4fc3f7", park: "#ff8a65" };
+
+            // ── State ──
+            let trace = null;
+            let workerIds = [];
+            let minTs = 0,
+                maxTs = 0,
+                durationNs = 0;
+            // View window in nanoseconds
+            let viewStart = 0,
+                viewEnd = 0;
+            // Precomputed spans per worker: { polls: [{start,end}], parks: [{start,end}] }
+            let workerSpans = {};
+            // Queue depth samples sorted by time
+            let queueSamples = [];
+            // Per-worker local queue samples
+            let workerQueueSamples = {};
+            let maxLocalQueue = 1;
+            // Points of interest for navigation
+            let pointsOfInterest = [];
+            let currentPoiIndex = -1;
+
+            const LABEL_W = 100;
+            const LANE_H = 60;
+
+            // ── DOM refs ──
+            const dropZone = document.getElementById("drop-zone");
+            const fileInput = document.getElementById("file-input");
+            const viewer = document.getElementById("viewer");
+            const tooltip = document.getElementById("tooltip");
+            const timelineCanvas = document.getElementById("timeline-canvas");
+            const queueCanvas = document.getElementById("queue-canvas");
+            const lanesContainer = document.getElementById("lanes-container");
+
+            // ── File loading ──
+            dropZone.addEventListener("click", () => fileInput.click());
+            dropZone.addEventListener("dragover", (e) => {
+                e.preventDefault();
+                dropZone.classList.add("dragover");
+            });
+            dropZone.addEventListener("dragleave", () =>
+                dropZone.classList.remove("dragover"),
+            );
+            dropZone.addEventListener("drop", (e) => {
+                e.preventDefault();
+                dropZone.classList.remove("dragover");
+                loadFile(e.dataTransfer.files[0]);
+            });
+            fileInput.addEventListener("change", (e) => {
+                if (e.target.files[0]) loadFile(e.target.files[0]);
+            });
+            document
+                .getElementById("btn-reset")
+                .addEventListener("click", () => {
+                    viewer.style.display = "none";
+                    dropZone.style.display = "flex";
+                });
+
+            function loadFile(file) {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        trace = parseTrace(e.target.result);
+                        processTrace();
+                        showViewer(file.name);
+                    } catch (err) {
+                        alert("Error: " + err.message);
+                    }
+                };
+                // Only read first 20MB — parser caps at MAX_EVENTS anyway
+                const maxBytes = 20 * 1024 * 1024;
+                const blob = file.size > maxBytes ? file.slice(0, maxBytes) : file;
+                reader.readAsArrayBuffer(blob);
+            }
+
+            function processTrace() {
+                const evts = trace.events;
+                if (!evts.length) {
+                    alert("No events in trace");
+                    return;
+                }
+
+                const wSet = new Set();
+                evts.forEach((e) => {
+                    if (e.eventType !== ET.QueueSample) wSet.add(e.workerId);
+                });
+                workerIds = [...wSet].sort((a, b) => a - b);
+
+                minTs = evts[0].timestamp;
+                maxTs = evts[evts.length - 1].timestamp;
+                // Scan for true min/max in case events aren't sorted
+                for (const e of evts) {
+                    if (e.timestamp < minTs) minTs = e.timestamp;
+                    if (e.timestamp > maxTs) maxTs = e.timestamp;
+                }
+                durationNs = maxTs - minTs || 1;
+                viewStart = minTs;
+                viewEnd = maxTs;
+
+                // Build spans
+                workerSpans = {};
+                const openPoll = {},
+                    openPark = {},
+                    openUnpark = {}; // track {timestamp, cpuTime} at unpark
+                for (const w of workerIds) {
+                    workerSpans[w] = { polls: [], parks: [], actives: [] };
+                }
+
+                // Group events by worker and sort per-worker by timestamp
+                // (events arrive in flush order, not global timestamp order)
+                const perWorker = {};
+                const globalEvts = []; // QueueSample etc
+                for (const e of evts) {
+                    if (e.eventType === ET.QueueSample) {
+                        globalEvts.push(e);
+                    } else {
+                        (perWorker[e.workerId] ??= []).push(e);
+                    }
+                }
+                for (const wEvents of Object.values(perWorker)) {
+                    wEvents.sort((a, b) => a.timestamp - b.timestamp);
+                }
+
+                for (const [w, wEvents] of Object.entries(perWorker)) {
+                    for (const e of wEvents) {
+                        if (e.eventType === ET.PollStart) {
+                            openPoll[w] = e.timestamp;
+                        } else if (e.eventType === ET.PollEnd) {
+                            if (openPoll[w] != null) {
+                                workerSpans[w].polls.push({
+                                    start: openPoll[w],
+                                    end: e.timestamp,
+                                });
+                                openPoll[w] = null;
+                            }
+                        } else if (e.eventType === ET.WorkerPark) {
+                            openPark[w] = e.timestamp;
+                            // Close active period
+                            if (openUnpark[w] != null) {
+                                const wallDelta = e.timestamp - openUnpark[w].timestamp;
+                                const cpuDelta = e.cpuTime - openUnpark[w].cpuTime;
+                                const ratio = wallDelta > 0 ? Math.min(cpuDelta / wallDelta, 1.0) : 1.0;
+                                workerSpans[w].actives.push({
+                                    start: openUnpark[w].timestamp,
+                                    end: e.timestamp,
+                                    ratio,
+                                });
+                                openUnpark[w] = null;
+                            }
+                        } else if (e.eventType === ET.WorkerUnpark) {
+                            if (openPark[w] != null) {
+                                workerSpans[w].parks.push({
+                                    start: openPark[w],
+                                    end: e.timestamp,
+                                    schedWait: e.schedWait,
+                                });
+                                openPark[w] = null;
+                            }
+                            openUnpark[w] = { timestamp: e.timestamp, cpuTime: e.cpuTime };
+                        }
+                    }
+                }
+                // Close any open spans at trace end
+                for (const w of workerIds) {
+                    if (openPoll[w] != null)
+                        workerSpans[w].polls.push({
+                            start: openPoll[w],
+                            end: maxTs,
+                        });
+                    if (openPark[w] != null)
+                        workerSpans[w].parks.push({
+                            start: openPark[w],
+                            end: maxTs,
+                        });
+                }
+
+                // Debug: log active period stats
+                for (const w of workerIds) {
+                    const a = workerSpans[w].actives;
+                    console.log(`Worker ${w}: ${a.length} active periods` +
+                        (a.length > 0 ? `, first ratio=${a[0].ratio.toFixed(3)}` : ''));
+                }
+
+                // Global queue samples (from QueueSample events only)
+                queueSamples = evts
+                    .filter((e) => e.eventType === ET.QueueSample)
+                    .map((e) => ({ t: e.timestamp, global: e.globalQueue }));
+                console.log(`Found ${queueSamples.length} global queue samples`);
+
+                // Per-worker local queue samples (from all worker events)
+                workerQueueSamples = {};
+                maxLocalQueue = 1;
+                for (const w of workerIds) {
+                    workerQueueSamples[w] = [];
+                }
+                for (const e of evts) {
+                    if (e.eventType === ET.QueueSample) continue;
+                    if (!workerQueueSamples[e.workerId])
+                        workerQueueSamples[e.workerId] = [];
+                    workerQueueSamples[e.workerId].push({
+                        t: e.timestamp,
+                        local: e.localQueue,
+                    });
+                    if (e.localQueue > maxLocalQueue)
+                        maxLocalQueue = e.localQueue;
+                }
+            }
+
+            function showViewer(filename) {
+                dropZone.style.display = "none";
+                viewer.style.display = "flex";
+                document.getElementById("tb-filename").textContent = filename;
+                const durMs = durationNs / 1e6;
+                const truncNote = trace.truncated ? " (truncated)" : "";
+                document.getElementById("tb-stats").textContent =
+                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durMs.toFixed(1)}ms${truncNote}`;
+
+                buildLanes();
+                updatePointsOfInterest();
+                requestAnimationFrame(renderAll);
+            }
+
+            function updatePointsOfInterest() {
+                const filterType = document.getElementById("poi-filter").value;
+                pointsOfInterest = [];
+                
+                for (const w of workerIds) {
+                    const spans = workerSpans[w];
+                    
+                    if (filterType === "sched") {
+                        // Find parks with scheduling delays > 100µs
+                        for (const s of spans.parks) {
+                            if (trace.hasSchedWait && s.schedWait > 100) {
+                                const schedWaitNs = s.schedWait * 1000;
+                                const wakeupShouldBe = s.end - schedWaitNs;
+                                pointsOfInterest.push({
+                                    time: wakeupShouldBe,
+                                    worker: w,
+                                    type: "sched",
+                                    value: s.schedWait,
+                                    span: s
+                                });
+                            }
+                        }
+                    } else if (filterType === "long-park") {
+                        // Parks longer than 10ms
+                        for (const s of spans.parks) {
+                            const durMs = (s.end - s.start) / 1e6;
+                            if (durMs > 10) {
+                                pointsOfInterest.push({
+                                    time: s.start,
+                                    worker: w,
+                                    type: "long-park",
+                                    value: durMs,
+                                    span: s
+                                });
+                            }
+                        }
+                    } else if (filterType === "long-poll") {
+                        // Polls longer than 1ms
+                        for (const s of spans.polls) {
+                            const durMs = (s.end - s.start) / 1e6;
+                            if (durMs > 1) {
+                                pointsOfInterest.push({
+                                    time: s.start,
+                                    worker: w,
+                                    type: "long-poll",
+                                    value: durMs,
+                                    span: s
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                // Sort by time or by worst value
+                const sortByWorst = document.getElementById("sort-by-worst").checked;
+                if (sortByWorst) {
+                    pointsOfInterest.sort((a, b) => b.value - a.value);
+                } else {
+                    pointsOfInterest.sort((a, b) => a.time - b.time);
+                }
+                currentPoiIndex = -1;
+                updatePoiCounter();
+            }
+
+            function updatePoiCounter() {
+                const counter = document.getElementById("poi-counter");
+                const prevBtn = document.getElementById("btn-prev-poi");
+                const nextBtn = document.getElementById("btn-next-poi");
+                
+                if (pointsOfInterest.length === 0) {
+                    counter.textContent = "None found";
+                    prevBtn.disabled = true;
+                    nextBtn.disabled = true;
+                } else {
+                    const idx = currentPoiIndex >= 0 ? currentPoiIndex + 1 : 0;
+                    counter.textContent = `${idx}/${pointsOfInterest.length}`;
+                    prevBtn.disabled = currentPoiIndex <= 0;
+                    nextBtn.disabled = currentPoiIndex >= pointsOfInterest.length - 1;
+                }
+            }
+
+            function jumpToPoi(index) {
+                if (index < 0 || index >= pointsOfInterest.length) return;
+                currentPoiIndex = index;
+                const poi = pointsOfInterest[index];
+                
+                // Center view on this POI with appropriate zoom
+                const spanDur = poi.span.end - poi.span.start;
+                const viewDur = Math.max(spanDur * 5, 1e6); // Show 5x the span duration, min 1ms
+                viewStart = Math.max(minTs, poi.time - viewDur * 0.3);
+                viewEnd = Math.min(maxTs, viewStart + viewDur);
+                
+                // Scroll to worker lane
+                const laneIdx = workerIds.indexOf(poi.worker);
+                if (laneIdx >= 0) {
+                    const scrollTop = laneIdx * LANE_H;
+                    lanesContainer.scrollTop = scrollTop;
+                }
+                
+                updatePoiCounter();
+                renderAll();
+            }
+
+            // ── Lane DOM ──
+            let laneCanvases = {};
+            function buildLanes() {
+                lanesContainer.innerHTML = "";
+                laneCanvases = {};
+                for (const w of workerIds) {
+                    const lane = document.createElement("div");
+                    lane.className = "lane";
+                    const label = document.createElement("div");
+                    label.className = "lane-label";
+                    label.textContent = `Worker ${w}`;
+                    const content = document.createElement("div");
+                    content.className = "lane-content";
+                    const canvas = document.createElement("canvas");
+                    content.appendChild(canvas);
+                    lane.appendChild(label);
+                    lane.appendChild(content);
+                    lanesContainer.appendChild(lane);
+                    laneCanvases[w] = canvas;
+                }
+            }
+
+            // ── Rendering ──
+            let mouseNs = null; // Track mouse position for crosshair
+            let queueChartRafId = null; // Throttle queue chart redraws
+            function renderAll() {
+                const rect = lanesContainer.getBoundingClientRect();
+                const drawW = rect.width - LABEL_W;
+                if (drawW <= 0) return;
+
+                // First pass: calculate max visible queue across all workers
+                window.visibleQueueRanges = {};
+                let maxVisibleQ = 1;
+                for (const w of workerIds) {
+                    const samples = workerQueueSamples[w];
+                    if (!samples || !samples.length) continue;
+                    for (const s of samples) {
+                        if (s.t >= viewStart && s.t <= viewEnd && s.local > maxVisibleQ) {
+                            maxVisibleQ = s.local;
+                        }
+                    }
+                }
+                window.sharedVisibleMaxQ = maxVisibleQ;
+
+                renderTimeline(drawW);
+                for (const w of workerIds) renderLane(w, drawW);
+                renderQueueChart(drawW);
+            }
+
+            function nsToX(ns, drawW) {
+                return ((ns - viewStart) / (viewEnd - viewStart)) * drawW;
+            }
+
+            function renderTimeline(drawW) {
+                const c = timelineCanvas;
+                const parent = c.parentElement;
+                const dpr = devicePixelRatio || 1;
+                c.width = parent.clientWidth * dpr;
+                c.height = 30 * dpr;
+                c.style.width = parent.clientWidth + "px";
+                c.style.height = "30px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+                const w = parent.clientWidth;
+
+                ctx.fillStyle = "#16213e";
+                ctx.fillRect(0, 0, w, 30);
+
+                const viewDur = viewEnd - viewStart;
+                // Pick nice tick interval
+                const targetTicks = Math.max(4, Math.floor(drawW / 100));
+                const rawInterval = viewDur / targetTicks;
+                const niceIntervals = [
+                    1e3, 5e3, 1e4, 5e4, 1e5, 5e5, 1e6, 5e6, 1e7, 5e7, 1e8, 5e8,
+                    1e9, 5e9, 1e10,
+                ];
+                let interval =
+                    niceIntervals.find((i) => i >= rawInterval) || rawInterval;
+
+                ctx.fillStyle = "#888";
+                ctx.font = "10px monospace";
+                ctx.textAlign = "center";
+                ctx.strokeStyle = "#333";
+
+                const firstTick = Math.ceil(viewStart / interval) * interval;
+                for (let t = firstTick; t <= viewEnd; t += interval) {
+                    const x = LABEL_W + nsToX(t, drawW);
+                    ctx.beginPath();
+                    ctx.moveTo(x, 20);
+                    ctx.lineTo(x, 30);
+                    ctx.stroke();
+                    const relMs = (t - minTs) / 1e6;
+                    let label;
+                    if (relMs >= 1000) label = (relMs / 1000).toFixed(2) + "s";
+                    else if (relMs >= 1) label = relMs.toFixed(2) + "ms";
+                    else label = (relMs * 1000).toFixed(0) + "µs";
+                    ctx.fillText(label, x, 16);
+                }
+            }
+
+            function renderLane(workerId, drawW) {
+                const c = laneCanvases[workerId];
+                const parent = c.parentElement;
+                const dpr = devicePixelRatio || 1;
+                const pw = parent.clientWidth,
+                    ph = LANE_H;
+                c.width = pw * dpr;
+                c.height = ph * dpr;
+                c.style.width = pw + "px";
+                c.style.height = ph + "px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+
+                const spans = workerSpans[workerId];
+
+                // Background: active = dark, parked = distinct reddish-brown
+                // First fill entire lane as "active" (dark)
+                ctx.fillStyle = "#1a1e2a";
+                ctx.fillRect(0, 0, pw, ph);
+
+                // Color-code active periods by scheduling ratio (v5+ only)
+                if (trace.hasCpuTime) {
+                    for (const s of spans.actives) {
+                        if (s.end < viewStart || s.start > viewEnd) continue;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        const w = Math.max(x2 - x1, 1);
+                        if (s.ratio >= 0.95) {
+                            ctx.fillStyle = "#1a2a1a"; // green tint — healthy
+                        } else if (s.ratio >= 0.5) {
+                            ctx.fillStyle = "#2a2a1a"; // yellow tint — some preemption
+                        } else {
+                            ctx.fillStyle = "#2a1a1a"; // red tint — heavily descheduled
+                        }
+                        ctx.fillRect(x1, 0, w, ph);
+                    }
+                }
+
+                // Draw park spans — split into normal park (muted) and scheduling delay (bright red)
+                for (const s of spans.parks) {
+                    if (s.end < viewStart || s.start > viewEnd) continue;
+                    const x1 = Math.max(0, nsToX(s.start, pw));
+                    const x2 = Math.min(pw, nsToX(s.end, pw));
+                    const w = Math.max(x2 - x1, 1);
+                    
+                    // If we have scheduling delay info, split the park visually
+                    if (trace.hasSchedWait && s.schedWait > 0) {
+                        const schedWaitNs = s.schedWait * 1000; // convert µs to ns
+                        const wakeupShouldBe = s.end - schedWaitNs;
+                        
+                        // Normal park portion (before wakeup should have happened)
+                        if (wakeupShouldBe > s.start) {
+                            const xSplit = Math.min(pw, nsToX(wakeupShouldBe, pw));
+                            const normalW = Math.max(xSplit - x1, 0);
+                            if (normalW > 0) {
+                                ctx.fillStyle = "#2a1520";
+                                ctx.fillRect(x1, 0, normalW, ph);
+                                ctx.fillStyle = "#cc5533";
+                                ctx.fillRect(x1, 0, normalW, 4);
+                            }
+                            
+                            // Scheduling delay portion (bright red)
+                            const delayW = Math.max(x2 - xSplit, 0);
+                            if (delayW > 0) {
+                                ctx.fillStyle = "#ff0000";
+                                ctx.fillRect(xSplit, 0, delayW, ph);
+                            }
+                        } else {
+                            // Entire park is scheduling delay
+                            ctx.fillStyle = "#ff0000";
+                            ctx.fillRect(x1, 0, w, ph);
+                        }
+                    } else {
+                        // No scheduling delay info, draw as normal park
+                        ctx.fillStyle = "#2a1520";
+                        ctx.fillRect(x1, 0, w, ph);
+                        ctx.fillStyle = "#cc5533";
+                        ctx.fillRect(x1, 0, w, 4);
+                    }
+                }
+
+                // Draw poll spans (solid blue bars, center band)
+                const bandTop = 10,
+                    bandH = 20;
+                ctx.fillStyle = "#4fc3f7";
+                for (const s of spans.polls) {
+                    if (s.end < viewStart || s.start > viewEnd) continue;
+                    const x1 = Math.max(0, nsToX(s.start, pw));
+                    const x2 = Math.min(pw, nsToX(s.end, pw));
+                    ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
+                }
+
+                // Overlay local queue depth as a step chart in the bottom portion
+                const samples = workerQueueSamples[workerId];
+                if (samples.length) {
+                    // Find visible range with one sample before and after for continuity
+                    let iStart = 0,
+                        iEnd = samples.length - 1;
+                    // Binary-ish search for first sample >= viewStart
+                    for (let i = 0; i < samples.length; i++) {
+                        if (samples[i].t >= viewStart) {
+                            iStart = Math.max(0, i - 1);
+                            break;
+                        }
+                        iStart = i;
+                    }
+                    for (let i = samples.length - 1; i >= 0; i--) {
+                        if (samples[i].t <= viewEnd) {
+                            iEnd = Math.min(samples.length - 1, i + 1);
+                            break;
+                        }
+                        iEnd = i;
+                    }
+
+                    // Store visible range for later max calculation
+                    if (!window.visibleQueueRanges) window.visibleQueueRanges = {};
+                    window.visibleQueueRanges[workerId] = { iStart, iEnd };
+
+                    const qTop = 34,
+                        qH = ph - 38;
+
+                    // Use shared max (calculated in renderAllLanes)
+                    const laneMaxQ = window.sharedVisibleMaxQ || 1;
+
+                    // Draw scale label
+                    ctx.fillStyle = "#666";
+                    ctx.font = "8px monospace";
+                    ctx.textAlign = "left";
+                    ctx.fillText("q:" + laneMaxQ, 2, qTop + 8);
+
+                    // Draw step chart
+                    ctx.beginPath();
+                    let lastX = 0,
+                        lastY = qTop + qH;
+                    for (let i = iStart; i <= iEnd; i++) {
+                        const x = nsToX(samples[i].t, pw);
+                        const y =
+                            qTop + qH - (samples[i].local / laneMaxQ) * qH;
+                        if (i === iStart) {
+                            ctx.moveTo(x, y);
+                        } else {
+                            ctx.lineTo(x, lastY);
+                            ctx.lineTo(x, y);
+                        }
+                        lastX = x;
+                        lastY = y;
+                    }
+                    // Extend to right edge at last known value
+                    ctx.lineTo(pw, lastY);
+                    ctx.strokeStyle = "rgba(255,200,50,0.8)";
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+
+                    // Fill under the step chart
+                    const firstX = nsToX(samples[iStart].t, pw);
+                    ctx.lineTo(pw, qTop + qH);
+                    ctx.lineTo(firstX, qTop + qH);
+                    ctx.closePath();
+                    ctx.fillStyle = "rgba(255,200,50,0.15)";
+                    ctx.fill();
+                }
+
+                // Separator line between poll band and queue area
+                ctx.strokeStyle = "#333";
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(0, 33);
+                ctx.lineTo(pw, 33);
+                ctx.stroke();
+            }
+
+            function renderQueueChart(drawW) {
+                const c = queueCanvas;
+                const parent = c.parentElement;
+                const dpr = devicePixelRatio || 1;
+                const pw = parent.clientWidth,
+                    ph = parent.clientHeight;
+                c.width = pw * dpr;
+                c.height = ph * dpr;
+                c.style.width = pw + "px";
+                c.style.height = ph + "px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+
+                ctx.fillStyle = "#16213e";
+                ctx.fillRect(0, 0, pw, ph);
+
+                if (!queueSamples.length) return;
+
+                const chartLeft = LABEL_W,
+                    chartW = pw - LABEL_W;
+                const chartTop = 24,
+                    chartH = ph - 30;
+                if (chartW <= 0) return;
+
+                // Bucket samples into pixels — take max global and max local per pixel bucket
+                const numBuckets = Math.ceil(chartW);
+                const buckets = new Array(numBuckets);
+                for (let i = 0; i < numBuckets; i++)
+                    buckets[i] = { maxGlobal: 0, maxLocal: 0, hasData: false };
+
+                const viewDur = viewEnd - viewStart;
+                // Global queue from QueueSample events
+                for (const s of queueSamples) {
+                    if (s.t < viewStart || s.t > viewEnd) continue;
+                    const bi = Math.floor(
+                        ((s.t - viewStart) / viewDur) * (numBuckets - 1),
+                    );
+                    if (bi < 0 || bi >= numBuckets) continue;
+                    const b = buckets[bi];
+                    b.hasData = true;
+                    if (s.global > b.maxGlobal) b.maxGlobal = s.global;
+                }
+                // Build sorted timeline of all local queue changes
+                const allLocalSamples = [];
+                for (const w of workerIds) {
+                    const wSamples = workerQueueSamples[w] || [];
+                    for (const s of wSamples) {
+                        if (s.t >= viewStart && s.t <= viewEnd) {
+                            allLocalSamples.push({ t: s.t, w, local: s.local });
+                        }
+                    }
+                }
+                allLocalSamples.sort((a, b) => a.t - b.t);
+                
+                // Single pass: maintain per-worker state and compute max for each bucket
+                const workerState = {};
+                for (const w of workerIds) workerState[w] = 0;
+                let sampleIdx = 0;
+                
+                for (let bi = 0; bi < numBuckets; bi++) {
+                    const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
+                    
+                    // Apply all samples up to this bucket's end
+                    while (sampleIdx < allLocalSamples.length && allLocalSamples[sampleIdx].t < bucketEnd) {
+                        const s = allLocalSamples[sampleIdx];
+                        workerState[s.w] = s.local;
+                        buckets[bi].hasData = true;
+                        sampleIdx++;
+                    }
+                    
+                    // Max across all workers
+                    let max = 0;
+                    for (const w of workerIds) {
+                        if (workerState[w] > max) max = workerState[w];
+                    }
+                    buckets[bi].maxLocal = max;
+                }
+
+                // Find max for scaling
+                let maxQ = 1;
+                for (const b of buckets) {
+                    if (b.maxGlobal > maxQ) maxQ = b.maxGlobal;
+                    if (b.maxLocal > maxQ) maxQ = b.maxLocal;
+                }
+
+                // Y-axis labels
+                ctx.fillStyle = "#666";
+                ctx.font = "10px monospace";
+                ctx.textAlign = "right";
+                ctx.fillText(maxQ.toString(), LABEL_W - 6, chartTop + 10);
+                ctx.fillText("0", LABEL_W - 6, chartTop + chartH);
+
+                // Draw global queue as filled step area
+                ctx.beginPath();
+                ctx.moveTo(chartLeft, chartTop + chartH);
+                let lastY = chartTop + chartH;
+                for (let i = 0; i < numBuckets; i++) {
+                    const x = chartLeft + i;
+                    if (buckets[i].hasData) {
+                        lastY =
+                            chartTop +
+                            chartH -
+                            (buckets[i].maxGlobal / maxQ) * chartH;
+                    }
+                    ctx.lineTo(x, lastY);
+                }
+                ctx.lineTo(chartLeft + numBuckets - 1, chartTop + chartH);
+                ctx.closePath();
+                ctx.fillStyle = "rgba(79,195,247,0.3)";
+                ctx.fill();
+                ctx.strokeStyle = "#4fc3f7";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Draw max local queue as step line
+                ctx.beginPath();
+                lastY = chartTop + chartH;
+                let started = false;
+                for (let i = 0; i < numBuckets; i++) {
+                    const x = chartLeft + i;
+                    if (buckets[i].hasData) {
+                        lastY =
+                            chartTop +
+                            chartH -
+                            (buckets[i].maxLocal / maxQ) * chartH;
+                    }
+                    if (!started) {
+                        ctx.moveTo(x, lastY);
+                        started = true;
+                    } else ctx.lineTo(x, lastY);
+                }
+                ctx.strokeStyle = "#ff8a65";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Draw crosshair if mouse is over worker lanes
+                if (mouseNs !== null && mouseNs >= viewStart && mouseNs <= viewEnd) {
+                    const x = chartLeft + ((mouseNs - viewStart) / viewDur) * chartW;
+                    ctx.strokeStyle = "rgba(255,255,255,0.5)";
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([4, 4]);
+                    ctx.beginPath();
+                    ctx.moveTo(x, chartTop);
+                    ctx.lineTo(x, chartTop + chartH);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+            }
+
+            // ── Zoom & Pan ──
+            document.getElementById("poi-filter").addEventListener("change", updatePointsOfInterest);
+            document.getElementById("sort-by-worst").addEventListener("change", updatePointsOfInterest);
+            document.getElementById("btn-prev-poi").addEventListener("click", () => {
+                if (currentPoiIndex > 0) jumpToPoi(currentPoiIndex - 1);
+                else if (currentPoiIndex < 0 && pointsOfInterest.length > 0) jumpToPoi(0);
+            });
+            document.getElementById("btn-next-poi").addEventListener("click", () => {
+                if (currentPoiIndex < pointsOfInterest.length - 1) jumpToPoi(currentPoiIndex + 1);
+                else if (currentPoiIndex < 0 && pointsOfInterest.length > 0) jumpToPoi(0);
+            });
+            document
+                .getElementById("btn-zoom-in")
+                .addEventListener("click", () => zoom(0.5));
+            document
+                .getElementById("btn-zoom-out")
+                .addEventListener("click", () => zoom(2));
+            document.getElementById("btn-fit").addEventListener("click", () => {
+                viewStart = minTs;
+                viewEnd = maxTs;
+                renderAll();
+            });
+
+            function zoom(factor, centerFrac = 0.5) {
+                const viewDur = viewEnd - viewStart;
+                const center = viewStart + viewDur * centerFrac;
+                const newDur = Math.max(viewDur * factor, 100); // min 100ns
+                viewStart = Math.max(minTs, center - newDur * centerFrac);
+                viewEnd = Math.min(maxTs, center + newDur * (1 - centerFrac));
+                renderAll();
+            }
+
+            // Mouse wheel zoom on main area
+            document.getElementById("main-area").addEventListener(
+                "wheel",
+                (e) => {
+                    e.preventDefault();
+                    const rect = lanesContainer.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left - LABEL_W;
+                    const drawW = rect.width - LABEL_W;
+                    const frac = Math.max(0, Math.min(1, mouseX / drawW));
+                    const factor = e.deltaY > 0 ? 1.3 : 1 / 1.3;
+                    zoom(factor, frac);
+                },
+                { passive: false },
+            );
+
+            // Pan with mouse drag
+            let dragging = false,
+                dragStartX = 0,
+                dragViewStart = 0,
+                dragViewEnd = 0;
+            document
+                .getElementById("main-area")
+                .addEventListener("mousedown", (e) => {
+                    dragging = true;
+                    dragStartX = e.clientX;
+                    dragViewStart = viewStart;
+                    dragViewEnd = viewEnd;
+                    document.body.style.cursor = "grabbing";
+                });
+            window.addEventListener("mousemove", (e) => {
+                if (!dragging) return;
+                const rect = lanesContainer.getBoundingClientRect();
+                const drawW = rect.width - LABEL_W;
+                const dx = e.clientX - dragStartX;
+                const nsPerPx = (dragViewEnd - dragViewStart) / drawW;
+                const shift = -dx * nsPerPx;
+                let newStart = dragViewStart + shift;
+                let newEnd = dragViewEnd + shift;
+                // Clamp
+                if (newStart < minTs) {
+                    newEnd += minTs - newStart;
+                    newStart = minTs;
+                }
+                if (newEnd > maxTs) {
+                    newStart -= newEnd - maxTs;
+                    newEnd = maxTs;
+                }
+                viewStart = Math.max(minTs, newStart);
+                viewEnd = Math.min(maxTs, newEnd);
+                renderAll();
+            });
+            window.addEventListener("mouseup", () => {
+                dragging = false;
+                document.body.style.cursor = "";
+            });
+
+            // ── Keyboard navigation ──
+            window.addEventListener("keydown", (e) => {
+                if (!trace) return;
+                const viewDur = viewEnd - viewStart;
+                switch (e.key) {
+                    case "ArrowUp":
+                        e.preventDefault();
+                        zoom(0.5);
+                        break;
+                    case "ArrowDown":
+                        e.preventDefault();
+                        zoom(2);
+                        break;
+                    case "ArrowLeft": {
+                        e.preventDefault();
+                        const shift = viewDur * 0.2;
+                        viewStart = Math.max(minTs, viewStart - shift);
+                        viewEnd = viewStart + viewDur;
+                        if (viewEnd > maxTs) {
+                            viewEnd = maxTs;
+                            viewStart = viewEnd - viewDur;
+                        }
+                        renderAll();
+                        break;
+                    }
+                    case "ArrowRight": {
+                        e.preventDefault();
+                        const shift = viewDur * 0.2;
+                        viewEnd = Math.min(maxTs, viewEnd + shift);
+                        viewStart = viewEnd - viewDur;
+                        if (viewStart < minTs) {
+                            viewStart = minTs;
+                            viewEnd = viewStart + viewDur;
+                        }
+                        renderAll();
+                        break;
+                    }
+                }
+            });
+
+            // ── Tooltip ──
+            document
+                .getElementById("main-area")
+                .addEventListener("mousemove", (e) => {
+                    if (dragging) {
+                        tooltip.style.display = "none";
+                        mouseNs = null;
+                        return;
+                    }
+                    const rect = lanesContainer.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left - LABEL_W;
+                    const mouseY = e.clientY - rect.top;
+                    const drawW = rect.width - LABEL_W;
+                    if (mouseX < 0 || mouseX > drawW) {
+                        tooltip.style.display = "none";
+                        mouseNs = null;
+                        return;
+                    }
+
+                    const ns =
+                        viewStart + (mouseX / drawW) * (viewEnd - viewStart);
+                    mouseNs = ns;
+                    
+                    // Throttle queue chart redraw with RAF
+                    if (!queueChartRafId) {
+                        queueChartRafId = requestAnimationFrame(() => {
+                            renderQueueChart(drawW);
+                            queueChartRafId = null;
+                        });
+                    }
+
+                    const laneIdx = Math.floor(
+                        (mouseY + lanesContainer.scrollTop) / LANE_H,
+                    );
+                    if (laneIdx < 0 || laneIdx >= workerIds.length) {
+                        tooltip.style.display = "none";
+                        return;
+                    }
+
+                    const w = workerIds[laneIdx];
+                    const spans = workerSpans[w];
+                    const relMs = (ns - minTs) / 1e6;
+
+                    // Determine worker state at this point in time
+                    let state = "🟢 Active";
+                    let stateDetail = "";
+                    let schedInfo = "";
+                    if (trace.hasCpuTime) {
+                        for (const s of spans.actives) {
+                            if (ns >= s.start && ns <= s.end) {
+                                const pct = (s.ratio * 100).toFixed(1);
+                                const icon = s.ratio >= 0.95 ? "🟢" : s.ratio >= 0.5 ? "🟡" : "🔴";
+                                schedInfo = `<span class="label">Scheduling:</span> <span class="value">${icon} ${pct}% on-CPU</span><br>`;
+                                break;
+                            }
+                        }
+                    }
+                    for (const s of spans.parks) {
+                        if (ns >= s.start && ns <= s.end) {
+                            const durMs = (s.end - s.start) / 1e6;
+                            state = "💤 Parked";
+                            stateDetail = ` for <span class="value">${durMs < 1 ? (durMs * 1000).toFixed(1) + "µs" : durMs.toFixed(2) + "ms"}</span>`;
+                            schedInfo = "";
+                            if (trace.hasSchedWait && s.schedWait != null) {
+                                const swUs = s.schedWait;
+                                const icon = swUs < 100 ? "🟢" : swUs < 1000 ? "🟡" : "🔴";
+                                stateDetail += `<br><span class="label">Kernel sched delay:</span> <span class="value">${icon} ${swUs.toFixed(0)}µs</span>`;
+                            }
+                            break;
+                        }
+                    }
+
+                    let pollInfo = "";
+                    for (const s of spans.polls) {
+                        if (ns >= s.start && ns <= s.end) {
+                            const durUs = (s.end - s.start) / 1e3;
+                            state = "⚡ Polling";
+                            pollInfo = `<span class="label">Poll duration:</span> <span class="value">${durUs.toFixed(1)}µs</span><br>`;
+                            break;
+                        }
+                    }
+
+                    // Find nearest local queue sample for this worker
+                    let nearest = null,
+                        bestDist = Infinity;
+                    const wSamples = workerQueueSamples[w] || [];
+                    for (const s of wSamples) {
+                        const d = Math.abs(s.t - ns);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            nearest = s;
+                        }
+                    }
+                    // Find nearest global queue from QueueSample timeline
+                    let nearestGlobal = null;
+                    bestDist = Infinity;
+                    for (const s of queueSamples) {
+                        const d = Math.abs(s.t - ns);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            nearestGlobal = s;
+                        }
+                    }
+
+                    let qInfo = "";
+                    const globalStr = nearestGlobal != null ? nearestGlobal.global : "-";
+                    const localStr = nearest != null ? nearest.local : "-";
+                    const totalEst = (nearestGlobal != null ? nearestGlobal.global : 0) + (nearest != null ? nearest.local : 0);
+                    qInfo = `<span class="label">Global Q:</span> <span class="value">${globalStr}</span> · <span class="label">Local Q:</span> <span class="value">${localStr}</span> · <span class="label">Est. Total:</span> <span class="value">${totalEst}</span>`;
+
+                    tooltip.innerHTML =
+                        `<span class="label">Worker</span> <span class="value">${w}</span> · <span class="label">Time</span> <span class="value">${relMs.toFixed(3)}ms</span><br>` +
+                        `<span class="label">State:</span> ${state}${stateDetail}<br>` +
+                        schedInfo +
+                        pollInfo +
+                        qInfo;
+                    tooltip.style.display = "block";
+                    tooltip.style.left =
+                        Math.min(e.clientX + 12, window.innerWidth - 340) +
+                        "px";
+                    tooltip.style.top = e.clientY - 60 + "px";
+                });
+            document
+                .getElementById("main-area")
+                .addEventListener("mouseleave", () => {
+                    tooltip.style.display = "none";
+                    mouseNs = null;
+                    renderAll();
+                });
+
+            // ── Resize ──
+            window.addEventListener("resize", () => {
+                if (trace) renderAll();
+            });
+
+            // ── Legend (inline in toolbar area) ──
+            (function addLegend() {
+                const tb = document.getElementById("toolbar");
+                const leg = document.createElement("span");
+                leg.style.cssText =
+                    "font-size:0.8em;display:flex;gap:12px;align-items:center;";
+                leg.innerHTML = `
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#4fc3f7;display:inline-block;border-radius:2px"></span>Poll</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a1520;border-top:3px solid #cc5533;display:inline-block;border-radius:2px"></span>Parked</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff0000;display:inline-block;border-radius:2px"></span>Kernel Sched Delay</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
+  `;
+                tb.insertBefore(leg, document.getElementById("btn-zoom-in"));
+            })();
+        </script>
+    </body>
+</html>
