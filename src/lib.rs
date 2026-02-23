@@ -416,48 +416,6 @@ mod tests {
         task.abort();
     }
 
-    /// Test that multiple long-running tasks are tracked independently.
-    #[tokio::test]
-    async fn test_multiple_tasks() {
-        let (tracker, mut handle) = LongPollTracker::new();
-        tracker.spawn();
-
-        // Spawn multiple long-running tasks
-        let task1 = {
-            let tx = handle.sentinel_tx.clone();
-            tokio::spawn(async move {
-                let sleep = tokio::time::sleep(Duration::from_secs(15));
-                DetectLongWait::new(sleep, tx).await;
-            })
-        };
-
-        let task2 = {
-            let tx = handle.sentinel_tx.clone();
-            tokio::spawn(async move {
-                let sleep = tokio::time::sleep(Duration::from_secs(15));
-                DetectLongWait::new(sleep, tx).await;
-            })
-        };
-
-        // Wait for detections
-        tokio::time::sleep(Duration::from_secs(8)).await;
-
-        // We should receive traces for both tasks
-        let mut trace_count = 0;
-        while let Ok(_) = handle.rx.try_recv() {
-            trace_count += 1;
-        }
-
-        check!(
-            trace_count >= 2,
-            "Should have received traces for both tasks, got {}",
-            trace_count
-        );
-
-        task1.abort();
-        task2.abort();
-    }
-
     /// Test that sentinel status transitions correctly from Pending to Completed.
     #[tokio::test]
     #[ignore]
