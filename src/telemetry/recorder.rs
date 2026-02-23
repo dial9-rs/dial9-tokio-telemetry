@@ -10,49 +10,42 @@ use std::collections::{HashMap, HashSet};
 use std::panic::Location;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 use tokio::runtime::{Handle, RuntimeMetrics};
 
+/// Sentinel value for events from non-worker threads
+const UNKNOWN_WORKER: usize = 255;
+
 thread_local! {
     /// Cached tokio worker index for this thread. `None` means not yet resolved.
+    /// Once resolved, the worker ID is stable for the lifetime of the thread—a thread
+    /// won't become a *different* worker, though it may stop being a worker entirely.
     static WORKER_ID: Cell<Option<usize>> = const { Cell::new(None) };
     /// schedstat wait_time_ns captured at park time, used to compute delta on unpark.
     static PARKED_SCHED_WAIT: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Build a ThreadId → tokio worker index map from RuntimeMetrics.
-fn build_worker_map(metrics: &RuntimeMetrics) -> HashMap<ThreadId, usize> {
-    let mut map = HashMap::new();
-    for i in 0..metrics.num_workers() {
-        if let Some(tid) = metrics.worker_thread_id(i) {
-            map.insert(tid, i);
-        }
-    }
-    map
-}
-
 /// Resolve the current thread's tokio worker index, caching in TLS.
-/// Falls back to 0 if the map isn't populated yet.
-fn resolve_worker_id(worker_map: &ArcSwap<HashMap<ThreadId, usize>>) -> usize {
-    // TODO: should return Option<usize> instead
+/// Returns None if the thread is not a tokio worker.
+///
+/// The result is cached permanently in TLS because a thread's worker identity
+/// is stable: it won't become a different worker, it can only stop being one.
+fn resolve_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> Option<usize> {
     WORKER_ID.with(|cell| {
         if let Some(id) = cell.get() {
-            return id;
+            return Some(id);
         }
         let tid = std::thread::current().id();
-        let map = worker_map.load();
-        let id = map.get(&tid).copied().unwrap_or(0);
-        if id != 0 || map.contains_key(&tid) {
-            cell.set(Some(id));
+        if let Some(ref m) = **metrics.load() {
+            for i in 0..m.num_workers() {
+                if m.worker_thread_id(i) == Some(tid) {
+                    cell.set(Some(i));
+                    return Some(i);
+                }
+            }
         }
-        id
+        None
     })
-}
-
-/// Invalidate the cached worker ID so it's re-resolved on next event.
-fn invalidate_worker_id() {
-    WORKER_ID.with(|cell| cell.set(None));
 }
 
 /// Shared state accessed lock-free by callbacks on the hot path.
@@ -62,11 +55,6 @@ struct SharedState {
     collector: CentralCollector,
     start_time: Instant,
     metrics: ArcSwap<Option<RuntimeMetrics>>,
-    /// ThreadId → tokio worker index, rebuilt every flush cycle.
-    /// Uses ArcSwap for lock-free reads on hot path (cached in TLS).
-    /// Must rebuild periodically because worker threads can restart with new ThreadIds.
-    /// Clone cost is negligible: ~100ns for typical instances, max ~1µs on very large instances (100s of workers), every 250ms.
-    worker_map: ArcSwap<HashMap<ThreadId, usize>>,
 }
 
 impl SharedState {
@@ -76,7 +64,6 @@ impl SharedState {
             collector: CentralCollector::new(),
             start_time: Instant::now(),
             metrics: ArcSwap::from_pointee(None),
-            worker_map: ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
@@ -91,22 +78,22 @@ impl SharedState {
             let should_flush = buf.should_flush() || matches!(event, RawEvent::WorkerPark { .. });
             if should_flush {
                 self.collector.accept_flush(buf.flush());
-                invalidate_worker_id();
             }
         });
     }
 
     fn make_poll_start(&self, location: &'static Location<'static>, task_id: TaskId) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.worker_map);
+        let worker_id = resolve_worker_id(&self.metrics);
         let metrics_guard = self.metrics.load();
-        let worker_local_queue_depth = if let Some(ref metrics) = **metrics_guard {
-            metrics.worker_local_queue_depth(worker_id)
-        } else {
-            0
-        };
+        let worker_local_queue_depth =
+            if let (Some(worker_id), Some(metrics)) = (worker_id, &**metrics_guard) {
+                metrics.worker_local_queue_depth(worker_id)
+            } else {
+                0
+            };
         RawEvent::PollStart {
             timestamp_nanos: self.start_time.elapsed().as_nanos() as u64,
-            worker_id,
+            worker_id: worker_id.unwrap_or(UNKNOWN_WORKER),
             worker_local_queue_depth,
             task_id,
             location,
@@ -114,41 +101,43 @@ impl SharedState {
     }
 
     fn make_poll_end(&self) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.worker_map);
+        let worker_id = resolve_worker_id(&self.metrics);
         RawEvent::PollEnd {
             timestamp_nanos: self.start_time.elapsed().as_nanos() as u64,
-            worker_id,
+            worker_id: worker_id.unwrap_or(UNKNOWN_WORKER),
         }
     }
 
     fn make_worker_park(&self) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.worker_map);
+        let worker_id = resolve_worker_id(&self.metrics);
         let metrics_guard = self.metrics.load();
-        let worker_local_queue_depth = if let Some(ref metrics) = **metrics_guard {
-            metrics.worker_local_queue_depth(worker_id)
-        } else {
-            0
-        };
+        let worker_local_queue_depth =
+            if let (Some(worker_id), Some(metrics)) = (worker_id, &**metrics_guard) {
+                metrics.worker_local_queue_depth(worker_id)
+            } else {
+                0
+            };
         let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
         if let Ok(ss) = SchedStat::read_current() {
             PARKED_SCHED_WAIT.with(|c| c.set(ss.wait_time_ns));
         }
         RawEvent::WorkerPark {
             timestamp_nanos: self.start_time.elapsed().as_nanos() as u64,
-            worker_id,
+            worker_id: worker_id.unwrap_or(UNKNOWN_WORKER),
             worker_local_queue_depth,
             cpu_time_nanos,
         }
     }
 
     fn make_worker_unpark(&self) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.worker_map);
+        let worker_id = resolve_worker_id(&self.metrics);
         let metrics_guard = self.metrics.load();
-        let worker_local_queue_depth = if let Some(ref metrics) = **metrics_guard {
-            metrics.worker_local_queue_depth(worker_id)
-        } else {
-            0
-        };
+        let worker_local_queue_depth =
+            if let (Some(worker_id), Some(metrics)) = (worker_id, &**metrics_guard) {
+                metrics.worker_local_queue_depth(worker_id)
+            } else {
+                0
+            };
         let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
         let sched_wait_delta_nanos = if let Ok(ss) = SchedStat::read_current() {
             let prev = PARKED_SCHED_WAIT.with(|c| c.get());
@@ -158,7 +147,7 @@ impl SharedState {
         };
         RawEvent::WorkerUnpark {
             timestamp_nanos: self.start_time.elapsed().as_nanos() as u64,
-            worker_id,
+            worker_id: worker_id.unwrap_or(UNKNOWN_WORKER),
             worker_local_queue_depth,
             cpu_time_nanos,
             sched_wait_delta_nanos,
@@ -320,13 +309,6 @@ impl TelemetryRecorder {
     }
 
     fn flush(&mut self) {
-        let metrics_guard = self.shared.metrics.load();
-        if let Some(ref metrics) = **metrics_guard {
-            self.shared
-                .worker_map
-                .store(Arc::new(build_worker_map(metrics)));
-        }
-
         for batch in self.shared.collector.drain() {
             for raw in batch {
                 self.write_raw_event(raw).unwrap();
@@ -371,19 +353,12 @@ impl TelemetryRecorder {
             flush_state: FlushState::new(),
         }));
 
-        let s0 = shared.clone();
         let s1 = shared.clone();
         let s2 = shared.clone();
         let s3 = shared.clone();
         let s4 = shared.clone();
 
         builder
-            .on_thread_start(move || {
-                let metrics_guard = s0.metrics.load();
-                if let Some(ref metrics) = **metrics_guard {
-                    s0.worker_map.store(Arc::new(build_worker_map(metrics)));
-                }
-            })
             .on_thread_park(move || {
                 let event = s1.make_worker_park();
                 s1.record_event(event);
