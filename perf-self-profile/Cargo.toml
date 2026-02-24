@@ -1,0 +1,27 @@
+[package]
+name = "perf-self-profile"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal self-profiling via Linux perf_event_open with frame-pointer-based stack traces"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+libc = "0.2"
+blazesym = "0.2"
+
+[dev-dependencies]
+# None needed
+
+[profile.release]
+debug = true
+# Frame pointers are essential for this crate to produce useful stack traces.
+# Callers should also enable this in their own profiles.
+# Note: Rust 1.73+ supports -C force-frame-pointers=yes
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "multithread"
+path = "examples/multithread.rs"
