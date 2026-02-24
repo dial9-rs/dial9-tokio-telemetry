@@ -21,7 +21,7 @@ thread_local! {
     /// Once resolved, the worker ID is stable for the lifetime of the thread—a thread
     /// won't become a *different* worker, though it may stop being a worker entirely.
     static WORKER_ID: Cell<Option<usize>> = const { Cell::new(None) };
-    /// Whether we've already emitted a WorkerTid for this thread.
+    /// Whether we've already registered this thread's tid→worker mapping.
     static TID_EMITTED: Cell<bool> = const { Cell::new(false) };
     /// schedstat wait_time_ns captured at park time, used to compute delta on unpark.
     static PARKED_SCHED_WAIT: Cell<u64> = const { Cell::new(0) };
@@ -33,8 +33,9 @@ thread_local! {
 /// The result is cached permanently in TLS because a thread's worker identity
 /// is stable: it won't become a different worker, it can only stop being one.
 ///
-/// On first resolution, also sends a WorkerTid event so the flush thread can
-/// map OS tids to worker IDs for CPU profiling.
+/// On first resolution, eagerly registers the OS tid → worker mapping in
+/// `SharedState.worker_tids` so the CPU profiler can attribute samples
+/// immediately (without waiting for a flush cycle).
 fn resolve_worker_id(
     metrics: &ArcSwap<Option<RuntimeMetrics>>,
     shared: Option<&SharedState>,
@@ -48,16 +49,13 @@ fn resolve_worker_id(
             for i in 0..m.num_workers() {
                 if m.worker_thread_id(i) == Some(tid) {
                     cell.set(Some(i));
-                    // Emit WorkerTid once per thread
+                    // Eagerly register tid→worker mapping for CPU profiling
                     if let Some(shared) = shared {
                         TID_EMITTED.with(|emitted| {
                             if !emitted.get() {
                                 emitted.set(true);
                                 let os_tid = crate::telemetry::events::current_tid();
-                                shared.record_event(RawEvent::WorkerTid {
-                                    worker_id: i,
-                                    tid: os_tid,
-                                });
+                                shared.worker_tids.lock().unwrap().insert(os_tid, i);
                             }
                         });
                     }
@@ -76,6 +74,10 @@ struct SharedState {
     collector: CentralCollector,
     start_time: Instant,
     metrics: ArcSwap<Option<RuntimeMetrics>>,
+    /// OS tid → worker_id mapping, populated eagerly by worker threads on first
+    /// `resolve_worker_id`. Workers only register once, so contention is negligible.
+    /// Read by the CPU profiler during flush to attribute samples to workers.
+    worker_tids: Mutex<HashMap<u32, usize>>,
 }
 
 impl SharedState {
@@ -85,6 +87,7 @@ impl SharedState {
             collector: CentralCollector::new(),
             start_time: Instant::now(),
             metrics: ArcSwap::from_pointee(None),
+            worker_tids: Mutex::new(HashMap::new()),
         }
     }
 
@@ -299,9 +302,6 @@ impl FlushState {
                     global_queue_depth,
                 });
             }
-            RawEvent::WorkerTid { .. } => {
-                // Internal-only event, not serialized. Handled by flush() for CPU profiling.
-            }
         }
         events
     }
@@ -352,15 +352,18 @@ impl TelemetryRecorder {
     }
 
     fn flush(&mut self) {
+        // Sync worker tid→id mappings into the CPU profiler before draining
+        // samples, so all samples can be attributed to the correct worker.
+        #[cfg(feature = "cpu-profiling")]
+        if let Some(ref mut profiler) = self.cpu_profiler {
+            let tids = self.shared.worker_tids.lock().unwrap();
+            for (&tid, &worker_id) in tids.iter() {
+                profiler.register_worker(worker_id, tid);
+            }
+        }
+
         for batch in self.shared.collector.drain() {
             for raw in batch {
-                // Update CPU profiler's tid→worker mapping from WorkerThreadMap events
-                #[cfg(feature = "cpu-profiling")]
-                if let RawEvent::WorkerTid { worker_id, tid } = &raw {
-                    if let Some(ref mut profiler) = self.cpu_profiler {
-                        profiler.register_worker(*worker_id, *tid);
-                    }
-                }
                 self.write_raw_event(raw).unwrap();
             }
         }

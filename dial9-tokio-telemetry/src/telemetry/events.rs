@@ -177,11 +177,6 @@ pub enum RawEvent {
         task_id: crate::telemetry::task_metadata::TaskId,
         location: &'static std::panic::Location<'static>,
     },
-    /// Reports this worker thread's OS tid to the flush thread (internal only, not serialized).
-    WorkerTid {
-        worker_id: usize,
-        tid: u32,
-    },
 }
 
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.
