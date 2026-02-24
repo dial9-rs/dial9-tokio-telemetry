@@ -1,2 +1,3 @@
 # ignore trace files in the root directory (produced by examples etc.)
 *.bin
+/target

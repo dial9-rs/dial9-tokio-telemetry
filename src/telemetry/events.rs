@@ -3,12 +3,11 @@ use serde::Serialize;
 
 /// Wire event representing a telemetry record after interning.
 ///
-/// Each variant carries exactly the fields relevant to that event type,
-/// eliminating the old "bag of fields" `MetricsSnapshot` design where most
-/// fields were unused for most event types.
-///
 /// Compare with `RawEvent` which is emitted by worker threads and carries
 /// `&'static Location` instead of interned `SpawnLocationId`.
+///
+/// Future updates will continue to diverge the in-memory format with the wire format.
+///
 /// NOTE: the `Serialize` impl here is just for convienence of writing to JSON.
 /// It does NOT reflect the wire format.
 #[derive(Debug, Clone, PartialEq, Serialize)]
