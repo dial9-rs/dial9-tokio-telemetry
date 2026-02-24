@@ -1,4 +1,4 @@
-//! Binary trace wire format (v9).
+//! Binary trace wire format (v10).
 //!
 //! ## File layout
 //! ```text
@@ -13,6 +13,7 @@
 //!   5: SpawnLocationDef             → code(u8) + spawn_loc_id(u16) + string_len(u16) + string_bytes(N)                                 = 5 + N bytes
 //!   6: TaskSpawn                    → code(u8) + task_id(u32) + spawn_loc_id(u16)                                                       = 7 bytes
 //!   7: CpuSample                    → code(u8) + timestamp_us(u32) + worker_id(u8) + num_frames(u8) + frames(N * u64)                  = 7 + 8N bytes
+//!   8: CallframeDef                 → code(u8) + address(u64) + string_len(u16) + string_bytes(N)                                      = 11 + N bytes
 //! ```
 //!
 //! Timestamps are microseconds since trace start. u32 micros supports traces up to ~71 minutes.
@@ -20,15 +21,15 @@
 //! `sched_wait_us` is the scheduling wait delta from schedstat during the park period.
 //! In-memory representation remains nanoseconds; conversion happens at the wire boundary.
 //!
-//! ### v8 → v9 changes
-//! - Added CpuSample (code 7): perf-sampled CPU stack traces attributed to workers
+//! ### v9 → v10 changes
+//! - Added CallframeDef (code 8): inline symbolication of CPU profile callframe addresses
 
 use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::io::{Read, Result, Write};
 
 pub const MAGIC: &[u8; 8] = b"TOKIOTRC";
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 pub const HEADER_SIZE: usize = 12; // 8 magic + 4 version
 
 // Wire codes
@@ -40,6 +41,7 @@ const WIRE_QUEUE_SAMPLE: u8 = 4;
 const WIRE_SPAWN_LOCATION_DEF: u8 = 5;
 const WIRE_TASK_SPAWN: u8 = 6;
 const WIRE_CPU_SAMPLE: u8 = 7;
+const WIRE_CALLFRAME_DEF: u8 = 8;
 
 /// Returns the wire size of an event.
 pub fn wire_event_size(event: &TelemetryEvent) -> usize {
@@ -52,6 +54,7 @@ pub fn wire_event_size(event: &TelemetryEvent) -> usize {
         TelemetryEvent::SpawnLocationDef { location, .. } => 1 + 2 + 2 + location.len(),
         TelemetryEvent::TaskSpawn { .. } => 7,
         TelemetryEvent::CpuSample { callchain, .. } => 7 + 8 * callchain.len(),
+        TelemetryEvent::CallframeDef { symbol, .. } => 1 + 8 + 2 + symbol.len(),
     }
 }
 
@@ -157,6 +160,13 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
                 w.write_all(&addr.to_le_bytes())?;
             }
         }
+        TelemetryEvent::CallframeDef { address, symbol } => {
+            w.write_all(&[WIRE_CALLFRAME_DEF])?;
+            w.write_all(&address.to_le_bytes())?;
+            let len = symbol.len() as u16;
+            w.write_all(&len.to_le_bytes())?;
+            w.write_all(symbol.as_bytes())?;
+        }
     }
     Ok(())
 }
@@ -209,6 +219,22 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
             task_id: TaskId::from_u32(u32::from_le_bytes(task_id_bytes)),
             spawn_loc_id: SpawnLocationId::from_u16(u16::from_le_bytes(spawn_loc_id_bytes)),
         }));
+    }
+    if tag[0] == WIRE_CALLFRAME_DEF {
+        let mut addr_bytes = [0u8; 8];
+        r.read_exact(&mut addr_bytes)?;
+        let address = u64::from_le_bytes(addr_bytes);
+
+        let mut len_bytes = [0u8; 2];
+        r.read_exact(&mut len_bytes)?;
+        let len = u16::from_le_bytes(len_bytes) as usize;
+
+        let mut string_bytes = vec![0u8; len];
+        r.read_exact(&mut string_bytes)?;
+        let symbol = String::from_utf8(string_bytes)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8"))?;
+
+        return Ok(Some(TelemetryEvent::CallframeDef { address, symbol }));
     }
     let mut ts = [0u8; 4];
     r.read_exact(&mut ts)?;

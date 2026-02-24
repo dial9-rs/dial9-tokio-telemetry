@@ -77,6 +77,15 @@ pub enum TelemetryEvent {
         /// Raw instruction pointer addresses (leaf first). Symbolized offline.
         callchain: Vec<u64>,
     },
+    /// Definition of a callframe symbol: maps an address to its resolved name.
+    /// Emitted before the first CpuSample that references this address (when inline
+    /// symbolication is enabled). Analogous to SpawnLocationDef.
+    CallframeDef {
+        /// The raw instruction pointer address.
+        address: u64,
+        /// Resolved symbol name (demangled).
+        symbol: String,
+    },
 }
 
 impl TelemetryEvent {
@@ -104,7 +113,8 @@ impl TelemetryEvent {
                 timestamp_nanos, ..
             } => Some(*timestamp_nanos),
             TelemetryEvent::SpawnLocationDef { .. }
-            | TelemetryEvent::TaskSpawn { .. } => None,
+            | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::CallframeDef { .. } => None,
         }
     }
 
@@ -118,7 +128,8 @@ impl TelemetryEvent {
             | TelemetryEvent::CpuSample { worker_id, .. } => Some(*worker_id),
             TelemetryEvent::QueueSample { .. }
             | TelemetryEvent::SpawnLocationDef { .. }
-            | TelemetryEvent::TaskSpawn { .. } => None,
+            | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::CallframeDef { .. } => None,
         }
     }
 

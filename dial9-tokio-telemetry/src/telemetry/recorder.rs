@@ -318,6 +318,15 @@ pub struct TelemetryRecorder {
     flush_state: FlushState,
     #[cfg(feature = "cpu-profiling")]
     cpu_profiler: Option<crate::telemetry::cpu_profile::CpuProfiler>,
+    /// When true, symbolicate callframe addresses and emit CallframeDef events.
+    #[cfg(feature = "cpu-profiling")]
+    inline_callframe_symbols: bool,
+    /// Addresses already symbolicated (across all files). Maps addr → symbol name.
+    #[cfg(feature = "cpu-profiling")]
+    callframe_intern: HashMap<u64, String>,
+    /// Addresses whose CallframeDef has been emitted in the current file.
+    #[cfg(feature = "cpu-profiling")]
+    callframe_emitted_this_file: HashSet<u64>,
 }
 
 impl TelemetryRecorder {
@@ -328,6 +337,12 @@ impl TelemetryRecorder {
             flush_state: FlushState::new(),
             #[cfg(feature = "cpu-profiling")]
             cpu_profiler: None,
+            #[cfg(feature = "cpu-profiling")]
+            inline_callframe_symbols: false,
+            #[cfg(feature = "cpu-profiling")]
+            callframe_intern: HashMap::new(),
+            #[cfg(feature = "cpu-profiling")]
+            callframe_emitted_this_file: HashSet::new(),
         }
     }
 
@@ -354,8 +369,35 @@ impl TelemetryRecorder {
         {
             let has_profiler = self.cpu_profiler.is_some();
             if let Some(ref mut profiler) = self.cpu_profiler {
-                let events = profiler.drain();
-                for event in &events {
+                let cpu_events = profiler.drain();
+                for event in &cpu_events {
+                    if self.inline_callframe_symbols {
+                        if let TelemetryEvent::CpuSample { callchain, .. } = event {
+                            // Check for rotation before writing defs
+                            if self.writer.take_rotated() {
+                                self.flush_state.on_rotate();
+                                self.callframe_emitted_this_file.clear();
+                            }
+                            for &addr in callchain {
+                                if !self.callframe_emitted_this_file.contains(&addr) {
+                                    // Symbolicate if not yet interned
+                                    if !self.callframe_intern.contains_key(&addr) {
+                                        let sym = perf_self_profile::resolve_symbol(addr);
+                                        let name =
+                                            sym.name.unwrap_or_else(|| format!("{:#x}", addr));
+                                        self.callframe_intern.insert(addr, name);
+                                    }
+                                    let symbol = self.callframe_intern[&addr].clone();
+                                    let def = TelemetryEvent::CallframeDef {
+                                        address: addr,
+                                        symbol,
+                                    };
+                                    let _ = self.writer.write_event(&def);
+                                    self.callframe_emitted_this_file.insert(addr);
+                                }
+                            }
+                        }
+                    }
                     let _ = self.writer.write_event(event);
                 }
             }
@@ -378,6 +420,8 @@ impl TelemetryRecorder {
     fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
         if self.writer.take_rotated() {
             self.flush_state.on_rotate();
+            #[cfg(feature = "cpu-profiling")]
+            self.callframe_emitted_this_file.clear();
         }
         let events = self.flush_state.resolve(raw);
         if self.writer.write_atomic(&events)? {
@@ -388,6 +432,8 @@ impl TelemetryRecorder {
                 "write atomic returned true, rotation occured"
             );
             self.flush_state.on_rotate();
+            #[cfg(feature = "cpu-profiling")]
+            self.callframe_emitted_this_file.clear();
             let events = self.flush_state.resolve(raw);
             if self.writer.write_atomic(&events)? {
                 // Something bad is happening...
@@ -410,6 +456,12 @@ impl TelemetryRecorder {
             flush_state: FlushState::new(),
             #[cfg(feature = "cpu-profiling")]
             cpu_profiler: None,
+            #[cfg(feature = "cpu-profiling")]
+            inline_callframe_symbols: false,
+            #[cfg(feature = "cpu-profiling")]
+            callframe_intern: HashMap::new(),
+            #[cfg(feature = "cpu-profiling")]
+            callframe_emitted_this_file: HashSet::new(),
         }));
 
         let s1 = shared.clone();
@@ -555,6 +607,8 @@ pub struct TracedRuntimeBuilder {
     task_tracking_enabled: bool,
     #[cfg(feature = "cpu-profiling")]
     cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
+    #[cfg(feature = "cpu-profiling")]
+    inline_callframe_symbols: bool,
 }
 
 impl TracedRuntimeBuilder {
@@ -579,25 +633,39 @@ impl TracedRuntimeBuilder {
         self
     }
 
+    /// When enabled, callframe addresses from CPU samples are symbolicated inline
+    /// and emitted as `CallframeDef` events in the trace. This allows reading the
+    /// trace without needing to symbolicate offline.
+    ///
+    /// Requires the `cpu-profiling` feature.
+    #[cfg(feature = "cpu-profiling")]
+    pub fn with_inline_callframe_symbols(mut self, enabled: bool) -> Self {
+        self.inline_callframe_symbols = enabled;
+        self
+    }
+
     pub fn build(
         self,
         mut builder: tokio::runtime::Builder,
         writer: Box<dyn TraceWriter>,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        let recorder = TelemetryRecorder::install(&mut builder, writer, self.task_tracking_enabled);
-
         // Start CPU profiler if configured
         #[cfg(feature = "cpu-profiling")]
-        if let Some(config) = self.cpu_profiling_config {
+        let sampler = if let Some(config) = self.cpu_profiling_config {
             let mono_ns = crate::telemetry::cpu_profile::clock_monotonic_ns();
-            match crate::telemetry::cpu_profile::CpuProfiler::start(config, mono_ns) {
-                Ok(p) => {
-                    recorder.lock().unwrap().cpu_profiler = Some(p);
-                }
-                Err(e) => {
-                    eprintln!("warning: failed to start CPU profiler: {e}");
-                }
-            }
+            Some(crate::telemetry::cpu_profile::CpuProfiler::start(
+                config, mono_ns,
+            ))
+        } else {
+            None
+        };
+
+        let recorder = TelemetryRecorder::install(&mut builder, writer, self.task_tracking_enabled);
+
+        #[cfg(feature = "cpu-profiling")]
+        if let Some(Ok(sampler)) = sampler {
+            recorder.lock().unwrap().cpu_profiler = Some(sampler);
+            recorder.lock().unwrap().inline_callframe_symbols = self.inline_callframe_symbols;
         }
 
         let runtime = builder.build()?;
@@ -693,6 +761,8 @@ impl TracedRuntime {
             task_tracking_enabled: false,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
+            #[cfg(feature = "cpu-profiling")]
+            inline_callframe_symbols: false,
         }
     }
 
@@ -712,6 +782,8 @@ impl TracedRuntime {
             task_tracking_enabled: false,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
+            #[cfg(feature = "cpu-profiling")]
+            inline_callframe_symbols: false,
         }
         .build(builder, writer)
     }
@@ -727,6 +799,8 @@ impl TracedRuntime {
             task_tracking_enabled: true,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
+            #[cfg(feature = "cpu-profiling")]
+            inline_callframe_symbols: false,
         }
         .build_and_start(builder, writer)
     }

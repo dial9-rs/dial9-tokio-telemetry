@@ -231,6 +231,7 @@
                 <select id="poi-filter">
                     <option value="sched">Kernel Scheduling Delays</option>
                     <option value="long-poll">Long Polls (>1ms)</option>
+                    <option value="cpu-sampled">Polls with CPU Samples</option>
                 </select>
                 <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer">
                     <input type="checkbox" id="sort-by-worst" style="cursor:pointer">
@@ -264,6 +265,13 @@
         </div>
 
         <div id="tooltip"></div>
+        <div id="stack-popup" style="display:none;position:fixed;background:#1a1a2e;border:1px solid #6c63ff;border-radius:8px;padding:12px 16px;z-index:200;max-width:500px;max-height:400px;overflow-y:auto;font-size:0.8em;line-height:1.6;box-shadow:0 4px 20px rgba(0,0,0,0.5)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                <span id="stack-popup-title" style="color:#6c63ff;font-weight:600"></span>
+                <span id="stack-popup-close" style="cursor:pointer;color:#888;font-size:1.2em;padding:0 4px">&times;</span>
+            </div>
+            <div id="stack-popup-body" style="font-family:monospace;font-size:0.9em"></div>
+        </div>
 
         <script>
             // ── Binary Parser (v8 format) ──
@@ -289,7 +297,7 @@
                 if (magic !== "TOKIOTRC")
                     throw new Error("Not a TOKIOTRC file (got: " + magic + ")");
                 if (version !== 8) {
-                    console.warn(`Expected version 8, got ${version}. Spawn location data may be missing.`);
+                    console.warn(`Expected version 8-10, got ${version}. Some data may be missing.`);
                 }
                 const hasCpuTime = version >= 5;
                 const hasSchedWait = version >= 6;
@@ -298,6 +306,8 @@
                 const events = [];
                 const spawnLocations = new Map(); // SpawnLocationId (number) → string
                 const taskSpawnLocs = new Map();  // taskId (number) → SpawnLocationId (number)
+                const callframeSymbols = new Map(); // address (bigint as string) → symbol name
+                const cpuSamples = []; // {timestamp, workerId, callchain: [addr strings]}
                 const decoder = new TextDecoder();
                 while (off < buffer.byteLength && events.length < MAX_EVENTS) {
                     if (off + 1 > buffer.byteLength) break;
@@ -319,6 +329,37 @@
                         const taskId = view.getUint32(off, true); off += 4;
                         const spawnLocId = view.getUint16(off, true); off += 2;
                         taskSpawnLocs.set(taskId, spawnLocId);
+                        continue;
+                    }
+                    if (wireCode === 8) {
+                        // CallframeDef: address(8) + string_len(2) + string_bytes(N)
+                        if (off + 10 > buffer.byteLength) break;
+                        const lo = view.getUint32(off, true);
+                        const hi = view.getUint32(off + 4, true);
+                        off += 8;
+                        const addrKey = "0x" + (hi * 0x100000000 + lo).toString(16);
+                        const strLen = view.getUint16(off, true); off += 2;
+                        if (off + strLen > buffer.byteLength) break;
+                        callframeSymbols.set(addrKey, decoder.decode(new Uint8Array(buffer, off, strLen)));
+                        off += strLen;
+                        continue;
+                    }
+
+                    if (wireCode === 7) {
+                        // CpuSample: timestamp_us(4) + worker_id(1) + num_frames(1) + frames(N*8)
+                        if (off + 6 > buffer.byteLength) break;
+                        const tsUs = view.getUint32(off, true); off += 4;
+                        const wid = view.getUint8(off); off += 1;
+                        const nf = view.getUint8(off); off += 1;
+                        if (off + nf * 8 > buffer.byteLength) break;
+                        const chain = [];
+                        for (let i = 0; i < nf; i++) {
+                            const lo = view.getUint32(off, true);
+                            const hi = view.getUint32(off + 4, true);
+                            off += 8;
+                            chain.push("0x" + (hi * 0x100000000 + lo).toString(16));
+                        }
+                        cpuSamples.push({ timestamp: tsUs * 1000, workerId: wid, callchain: chain });
                         continue;
                     }
 
@@ -397,7 +438,7 @@
                         spawnLoc: spawnLocations.get(spawnLocId) ?? null,
                     });
                 }
-                return { magic, version, events, truncated: events.length >= MAX_EVENTS, hasCpuTime, hasSchedWait, hasTaskTracking, spawnLocations, taskSpawnLocs };
+                return { magic, version, events, truncated: events.length >= MAX_EVENTS, hasCpuTime, hasSchedWait, hasTaskTracking, spawnLocations, taskSpawnLocs, cpuSamples, callframeSymbols };
             }
 
             // ── Event type helpers ──
@@ -612,6 +653,27 @@
                     .map((e) => ({ t: e.timestamp, global: e.globalQueue }));
                 console.log(`Found ${queueSamples.length} global queue samples`);
 
+                // Attach CPU samples to poll spans they fall within
+                if (trace.cpuSamples.length > 0) {
+                    for (const sample of trace.cpuSamples) {
+                        const spans = workerSpans[sample.workerId];
+                        if (!spans) continue;
+                        for (const poll of spans.polls) {
+                            if (sample.timestamp >= poll.start && sample.timestamp <= poll.end) {
+                                (poll.cpuSamples ??= []).push(sample);
+                                break;
+                            }
+                        }
+                    }
+                    let pollsWithSamples = 0;
+                    for (const w of workerIds) {
+                        for (const p of workerSpans[w].polls) {
+                            if (p.cpuSamples) pollsWithSamples++;
+                        }
+                    }
+                    console.log(`CPU samples: ${trace.cpuSamples.length}, polls with samples: ${pollsWithSamples}`);
+                }
+
                 // Per-worker local queue samples (from events that have local_queue)
                 workerQueueSamples = {};
                 maxLocalQueue = 1;
@@ -679,6 +741,18 @@
                                     worker: w,
                                     type: "long-poll",
                                     value: durMs,
+                                    span: s
+                                });
+                            }
+                        }
+                    } else if (filterType === "cpu-sampled") {
+                        for (const s of spans.polls) {
+                            if (s.cpuSamples && s.cpuSamples.length > 0) {
+                                pointsOfInterest.push({
+                                    time: s.start,
+                                    worker: w,
+                                    type: "cpu-sampled",
+                                    value: s.cpuSamples.length,
                                     span: s
                                 });
                             }
@@ -965,6 +1039,16 @@
                         ctx.lineWidth = 2;
                         ctx.strokeRect(x1, bandTop, w, bandH);
                     }
+                }
+
+                // Mark polls that have CPU samples with an orange top stripe
+                ctx.fillStyle = "#ff8c00";
+                for (const s of spans.polls) {
+                    if (!s.cpuSamples || s.end < viewStart || s.start > viewEnd) continue;
+                    const x1 = Math.max(0, nsToX(s.start, pw));
+                    const x2 = Math.min(pw, nsToX(s.end, pw));
+                    const w = Math.max(x2 - x1, 3);
+                    ctx.fillRect(x1, bandTop, w, 3);
                 }
 
                 // Overlay local queue depth as a step chart in the bottom portion
@@ -1397,11 +1481,78 @@
                 const w = workerIds[laneIdx];
                 const spans = workerSpans[w];
                 let found = null;
+                let foundSpan = null;
                 for (const s of spans.polls) {
-                    if (ns >= s.start && ns <= s.end && s.taskId) { found = s.taskId; break; }
+                    if (ns >= s.start && ns <= s.end) {
+                        if (s.taskId) found = s.taskId;
+                        foundSpan = s;
+                        break;
+                    }
                 }
+
+                // Show stack popup if poll has CPU samples
+                if (foundSpan && foundSpan.cpuSamples && foundSpan.cpuSamples.length > 0) {
+                    showStackPopup(foundSpan, e.clientX, e.clientY);
+                } else {
+                    hideStackPopup();
+                }
+
                 selectedTaskId = (found && found !== selectedTaskId) ? found : null;
                 renderAll();
+            });
+
+            function showStackPopup(poll, x, y) {
+                const popup = document.getElementById("stack-popup");
+                const title = document.getElementById("stack-popup-title");
+                const body = document.getElementById("stack-popup-body");
+                const durUs = ((poll.end - poll.start) / 1e3).toFixed(1);
+                title.textContent = `${poll.cpuSamples.length} CPU sample${poll.cpuSamples.length > 1 ? "s" : ""} · poll ${durUs}µs`;
+
+                // Merge all samples: count occurrences of each unique stack (top 5 frames)
+                const MAX_FRAMES = 5;
+                const stackCounts = new Map();
+                for (const sample of poll.cpuSamples) {
+                    const frames = sample.callchain.slice(0, MAX_FRAMES);
+                    const key = frames.join("\n");
+                    stackCounts.set(key, (stackCounts.get(key) || 0) + 1);
+                }
+                // Sort by count descending
+                const sorted = [...stackCounts.entries()].sort((a, b) => b[1] - a[1]);
+
+                let html = "";
+                for (const [stack, count] of sorted) {
+                    const addrs = stack.split("\n");
+                    const countLabel = poll.cpuSamples.length > 1 ? `<span style="color:#ff8c00">${count}×</span> ` : "";
+                    html += `<div style="margin-bottom:8px;border-left:2px solid #333;padding-left:8px">${countLabel}`;
+                    for (let i = 0; i < addrs.length; i++) {
+                        const addr = addrs[i];
+                        const sym = trace.callframeSymbols.get(addr) || addr;
+                        const color = i === 0 ? "#fff" : "#aaa";
+                        html += `<div style="color:${color}">${sym}</div>`;
+                    }
+                    if (poll.cpuSamples[0].callchain.length > MAX_FRAMES) {
+                        html += `<div style="color:#666">… ${poll.cpuSamples[0].callchain.length - MAX_FRAMES} more frames</div>`;
+                    }
+                    html += "</div>";
+                }
+                body.innerHTML = html;
+                popup.style.display = "block";
+                popup.style.left = Math.min(x + 12, window.innerWidth - 520) + "px";
+                popup.style.top = Math.min(y - 20, window.innerHeight - 420) + "px";
+            }
+
+            function hideStackPopup() {
+                document.getElementById("stack-popup").style.display = "none";
+            }
+
+            document.getElementById("stack-popup-close").addEventListener("click", hideStackPopup);
+            // Close popup when clicking outside it
+            document.addEventListener("click", (e) => {
+                const popup = document.getElementById("stack-popup");
+                if (popup.style.display !== "none" && !popup.contains(e.target) &&
+                    !e.target.closest("#main-area")) {
+                    hideStackPopup();
+                }
             });
 
             // ── Keyboard navigation ──
@@ -1411,6 +1562,7 @@
                 switch (e.key) {
                     case "Escape":
                         e.preventDefault();
+                        hideStackPopup();
                         selectedTaskId = null;
                         renderAll();
                         break;
@@ -1533,6 +1685,9 @@
                                     pollInfo += `<span class="label">Spawned at:</span> <span class="value">${s.spawnLoc}</span><br>`;
                                 }
                             }
+                            if (s.cpuSamples && s.cpuSamples.length > 0) {
+                                pollInfo += `<span class="label">CPU samples:</span> <span class="value">🔥 ${s.cpuSamples.length}</span> <span style="color:#666">(click to view)</span><br>`;
+                            }
                             break;
                         }
                     }
@@ -1600,6 +1755,7 @@
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#4fc3f7;display:inline-block;border-radius:2px"></span>Poll</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a1520;border-top:3px solid #cc5533;display:inline-block;border-radius:2px"></span>Parked</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff0000;display:inline-block;border-radius:2px"></span>Kernel Sched Delay</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:3px;background:#ff8c00;display:inline-block"></span>CPU Sampled</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
     <span style="color:#666;margin-left:8px">│ ↑↓ zoom · ←→ pan · click poll for task timeline · esc close</span>
   `;
