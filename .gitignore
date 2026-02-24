@@ -1,21 +1,3 @@
-# Committing Cargo.lock is not recommended with CargoBrazil because it will cause double locking with your version set.
-# https://docs.hub.amazon.dev/whats-new/lockfiles-and-first-party-dependencies-in-rust-in-brazil/
-Cargo.lock
-
-# This is the directory where your brazil-build artifacts go.
-/build
-
-# In case you accidentally run cargo without brazil-build.
-target/
-
-# Don't check in the local rustup toolchain override.
-/rust-toolchain.toml
-
-# .attach_pid{n} pop up frequently
-# if you have older (<17) JDK versions in your dependency closure
-# and generally should not be commited to git
-# ref: https://bugs.openjdk.java.net/browse/JDK-8214300
-.attach_*
-
 # ignore trace files in the root directory (produced by examples etc.)
 *.bin
+/target

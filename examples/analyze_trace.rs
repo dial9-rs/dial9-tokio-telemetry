@@ -20,9 +20,12 @@ fn main() {
 
     let events = reader.read_all().expect("Failed to read events");
     println!("Read {} events", events.len());
+    if !reader.spawn_locations.is_empty() {
+        println!("Spawn locations: {}", reader.spawn_locations.len());
+    }
 
     let analysis = analyze_trace(&events);
-    print_analysis(&analysis);
+    print_analysis(&analysis, &reader.spawn_locations);
 
     println!("\n=== Idle Worker Detection ===");
     let idle_periods = detect_idle_workers(&events);

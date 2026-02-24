@@ -84,7 +84,9 @@ fn main() {
         .unwrap_or(30u64);
 
     let writer = Box::new(SimpleBinaryWriter::new("long_trace.bin").unwrap());
-    let (runtime, _guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
+    let (runtime, _guard) = TracedRuntime::builder()
+        .build_and_start(builder, writer)
+        .unwrap();
 
     println!("Running workload for {}s...", duration_secs);
 
