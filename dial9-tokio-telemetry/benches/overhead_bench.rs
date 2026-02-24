@@ -14,7 +14,7 @@
 //! Duration defaults to 30 seconds. A 3-second warmup precedes measurement.
 
 use dial9_tokio_telemetry::telemetry::{
-    NullWriter, SimpleBinaryWriter, TelemetryGuard, TracedRuntime,
+    CpuProfilingConfig, NullWriter, SimpleBinaryWriter, TelemetryGuard, TracedRuntime,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -169,6 +169,8 @@ fn main() {
                 Box::new(SimpleBinaryWriter::new("/tmp/overhead_bench_trace.bin").unwrap());
             let (rt, g) = TracedRuntime::builder()
                 .with_task_tracking(true)
+                .with_cpu_profiling(CpuProfilingConfig::default())
+                .with_inline_callframe_symbols(true)
                 .build_and_start(builder, writer)
                 .unwrap();
             (rt, Some(g))
