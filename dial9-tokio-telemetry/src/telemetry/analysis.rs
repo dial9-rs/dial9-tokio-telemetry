@@ -191,7 +191,9 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
                 stats.total_sched_wait_ns += sched_wait_delta_nanos;
                 stats.max_sched_wait_ns = stats.max_sched_wait_ns.max(*sched_wait_delta_nanos);
             }
-            TelemetryEvent::SpawnLocationDef { .. } | TelemetryEvent::TaskSpawn { .. } => {}
+            TelemetryEvent::SpawnLocationDef { .. }
+            | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::CpuSample { .. } => {}
         }
     }
 

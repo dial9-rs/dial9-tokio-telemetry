@@ -308,6 +308,7 @@ dependencies = [
  "criterion",
  "hdrhistogram",
  "libc",
+ "perf-self-profile",
  "pin-project-lite",
  "serde",
  "serde_json",

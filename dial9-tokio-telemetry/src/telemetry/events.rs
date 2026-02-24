@@ -68,6 +68,15 @@ pub enum TelemetryEvent {
         task_id: TaskId,
         spawn_loc_id: SpawnLocationId,
     },
+    /// A CPU stack trace sample from perf_event, attributed to a worker thread.
+    CpuSample {
+        #[serde(rename = "timestamp_ns")]
+        timestamp_nanos: u64,
+        #[serde(rename = "worker")]
+        worker_id: usize,
+        /// Raw instruction pointer addresses (leaf first). Symbolized offline.
+        callchain: Vec<u64>,
+    },
 }
 
 impl TelemetryEvent {
@@ -90,8 +99,12 @@ impl TelemetryEvent {
             }
             | TelemetryEvent::QueueSample {
                 timestamp_nanos, ..
+            }
+            | TelemetryEvent::CpuSample {
+                timestamp_nanos, ..
             } => Some(*timestamp_nanos),
-            TelemetryEvent::SpawnLocationDef { .. } | TelemetryEvent::TaskSpawn { .. } => None,
+            TelemetryEvent::SpawnLocationDef { .. }
+            | TelemetryEvent::TaskSpawn { .. } => None,
         }
     }
 
@@ -101,7 +114,8 @@ impl TelemetryEvent {
             TelemetryEvent::PollStart { worker_id, .. }
             | TelemetryEvent::PollEnd { worker_id, .. }
             | TelemetryEvent::WorkerPark { worker_id, .. }
-            | TelemetryEvent::WorkerUnpark { worker_id, .. } => Some(*worker_id),
+            | TelemetryEvent::WorkerUnpark { worker_id, .. }
+            | TelemetryEvent::CpuSample { worker_id, .. } => Some(*worker_id),
             TelemetryEvent::QueueSample { .. }
             | TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. } => None,
@@ -152,6 +166,16 @@ pub enum RawEvent {
         task_id: crate::telemetry::task_metadata::TaskId,
         location: &'static std::panic::Location<'static>,
     },
+    /// Reports this worker thread's OS tid to the flush thread (internal only, not serialized).
+    WorkerTid {
+        worker_id: usize,
+        tid: u32,
+    },
+}
+
+/// Get the OS thread ID (tid) of the calling thread via `gettid()`.
+pub fn current_tid() -> u32 {
+    unsafe { libc::syscall(libc::SYS_gettid) as u32 }
 }
 
 /// Read the calling thread's CPU time via `CLOCK_THREAD_CPUTIME_ID`.

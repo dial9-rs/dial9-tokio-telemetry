@@ -21,6 +21,8 @@ thread_local! {
     /// Once resolved, the worker ID is stable for the lifetime of the thread—a thread
     /// won't become a *different* worker, though it may stop being a worker entirely.
     static WORKER_ID: Cell<Option<usize>> = const { Cell::new(None) };
+    /// Whether we've already emitted a WorkerTid for this thread.
+    static TID_EMITTED: Cell<bool> = const { Cell::new(false) };
     /// schedstat wait_time_ns captured at park time, used to compute delta on unpark.
     static PARKED_SCHED_WAIT: Cell<u64> = const { Cell::new(0) };
 }
@@ -30,7 +32,13 @@ thread_local! {
 ///
 /// The result is cached permanently in TLS because a thread's worker identity
 /// is stable: it won't become a different worker, it can only stop being one.
-fn resolve_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> Option<usize> {
+///
+/// On first resolution, also sends a WorkerTid event so the flush thread can
+/// map OS tids to worker IDs for CPU profiling.
+fn resolve_worker_id(
+    metrics: &ArcSwap<Option<RuntimeMetrics>>,
+    shared: Option<&SharedState>,
+) -> Option<usize> {
     WORKER_ID.with(|cell| {
         if let Some(id) = cell.get() {
             return Some(id);
@@ -40,6 +48,19 @@ fn resolve_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> Option<usize>
             for i in 0..m.num_workers() {
                 if m.worker_thread_id(i) == Some(tid) {
                     cell.set(Some(i));
+                    // Emit WorkerTid once per thread
+                    if let Some(shared) = shared {
+                        TID_EMITTED.with(|emitted| {
+                            if !emitted.get() {
+                                emitted.set(true);
+                                let os_tid = crate::telemetry::events::current_tid();
+                                shared.record_event(RawEvent::WorkerTid {
+                                    worker_id: i,
+                                    tid: os_tid,
+                                });
+                            }
+                        });
+                    }
                     return Some(i);
                 }
             }
@@ -83,7 +104,7 @@ impl SharedState {
     }
 
     fn make_poll_start(&self, location: &'static Location<'static>, task_id: TaskId) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.metrics);
+        let worker_id = resolve_worker_id(&self.metrics, Some(self));
         let metrics_guard = self.metrics.load();
         let worker_local_queue_depth =
             if let (Some(worker_id), Some(metrics)) = (worker_id, &**metrics_guard) {
@@ -101,7 +122,7 @@ impl SharedState {
     }
 
     fn make_poll_end(&self) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.metrics);
+        let worker_id = resolve_worker_id(&self.metrics, Some(self));
         RawEvent::PollEnd {
             timestamp_nanos: self.start_time.elapsed().as_nanos() as u64,
             worker_id: worker_id.unwrap_or(UNKNOWN_WORKER),
@@ -109,7 +130,7 @@ impl SharedState {
     }
 
     fn make_worker_park(&self) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.metrics);
+        let worker_id = resolve_worker_id(&self.metrics, Some(self));
         let metrics_guard = self.metrics.load();
         let worker_local_queue_depth =
             if let (Some(worker_id), Some(metrics)) = (worker_id, &**metrics_guard) {
@@ -130,7 +151,7 @@ impl SharedState {
     }
 
     fn make_worker_unpark(&self) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.metrics);
+        let worker_id = resolve_worker_id(&self.metrics, Some(self));
         let metrics_guard = self.metrics.load();
         let worker_local_queue_depth =
             if let (Some(worker_id), Some(metrics)) = (worker_id, &**metrics_guard) {
@@ -278,6 +299,9 @@ impl FlushState {
                     global_queue_depth,
                 });
             }
+            RawEvent::WorkerTid { .. } => {
+                // Internal-only event, not serialized. Handled by flush() for CPU profiling.
+            }
         }
         events
     }
@@ -292,6 +316,8 @@ pub struct TelemetryRecorder {
     shared: Arc<SharedState>,
     writer: Box<dyn TraceWriter>,
     flush_state: FlushState,
+    #[cfg(feature = "cpu-profiling")]
+    cpu_profiler: Option<crate::telemetry::cpu_profile::CpuProfiler>,
 }
 
 impl TelemetryRecorder {
@@ -300,6 +326,8 @@ impl TelemetryRecorder {
             shared: Arc::new(SharedState::new()),
             writer,
             flush_state: FlushState::new(),
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiler: None,
         }
     }
 
@@ -311,7 +339,36 @@ impl TelemetryRecorder {
     fn flush(&mut self) {
         for batch in self.shared.collector.drain() {
             for raw in batch {
+                // Update CPU profiler's tid→worker mapping from WorkerThreadMap events
+                #[cfg(feature = "cpu-profiling")]
+                if let RawEvent::WorkerTid { worker_id, tid } = &raw {
+                    if let Some(ref mut profiler) = self.cpu_profiler {
+                        profiler.register_worker(*worker_id, *tid);
+                    }
+                }
                 self.write_raw_event(raw).unwrap();
+            }
+        }
+        // Drain CPU profiler samples and write them
+        #[cfg(feature = "cpu-profiling")]
+        {
+            let has_profiler = self.cpu_profiler.is_some();
+            if let Some(ref mut profiler) = self.cpu_profiler {
+                let events = profiler.drain();
+                for event in &events {
+                    let _ = self.writer.write_event(event);
+                }
+            }
+            if has_profiler {
+                // only log once to confirm profiler is wired up
+                static LOGGED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[cpu-profiler] profiler active in flush path, has_pending={}",
+                        self.cpu_profiler.as_ref().unwrap().has_pending()
+                    );
+                }
             }
         }
         self.writer.flush().unwrap();
@@ -351,6 +408,8 @@ impl TelemetryRecorder {
             shared: shared.clone(),
             writer,
             flush_state: FlushState::new(),
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiler: None,
         }));
 
         let s1 = shared.clone();
@@ -494,6 +553,8 @@ impl Drop for TelemetryGuard {
 
 pub struct TracedRuntimeBuilder {
     task_tracking_enabled: bool,
+    #[cfg(feature = "cpu-profiling")]
+    cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
 }
 
 impl TracedRuntimeBuilder {
@@ -505,12 +566,40 @@ impl TracedRuntimeBuilder {
         self
     }
 
+    /// Enable CPU profiling via perf_event_open. Captures stack traces at the configured
+    /// frequency and merges them into the trace timeline.
+    ///
+    /// Requires the `cpu-profiling` feature and Linux with `perf_event_paranoid <= 2`.
+    #[cfg(feature = "cpu-profiling")]
+    pub fn with_cpu_profiling(
+        mut self,
+        config: crate::telemetry::cpu_profile::CpuProfilingConfig,
+    ) -> Self {
+        self.cpu_profiling_config = Some(config);
+        self
+    }
+
     pub fn build(
         self,
         mut builder: tokio::runtime::Builder,
         writer: Box<dyn TraceWriter>,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         let recorder = TelemetryRecorder::install(&mut builder, writer, self.task_tracking_enabled);
+
+        // Start CPU profiler if configured
+        #[cfg(feature = "cpu-profiling")]
+        if let Some(config) = self.cpu_profiling_config {
+            let mono_ns = crate::telemetry::cpu_profile::clock_monotonic_ns();
+            match crate::telemetry::cpu_profile::CpuProfiler::start(config, mono_ns) {
+                Ok(p) => {
+                    recorder.lock().unwrap().cpu_profiler = Some(p);
+                }
+                Err(e) => {
+                    eprintln!("warning: failed to start CPU profiler: {e}");
+                }
+            }
+        }
+
         let runtime = builder.build()?;
 
         recorder
@@ -602,6 +691,8 @@ impl TracedRuntime {
     pub fn builder() -> TracedRuntimeBuilder {
         TracedRuntimeBuilder {
             task_tracking_enabled: false,
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiling_config: None,
         }
     }
 
@@ -619,6 +710,8 @@ impl TracedRuntime {
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
             task_tracking_enabled: false,
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiling_config: None,
         }
         .build(builder, writer)
     }
@@ -632,6 +725,8 @@ impl TracedRuntime {
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
             task_tracking_enabled: true,
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiling_config: None,
         }
         .build_and_start(builder, writer)
     }

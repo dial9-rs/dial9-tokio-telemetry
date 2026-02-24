@@ -1,4 +1,4 @@
-//! Binary trace wire format (v8).
+//! Binary trace wire format (v9).
 //!
 //! ## File layout
 //! ```text
@@ -12,6 +12,7 @@
 //!   4: QueueSample                  → code(u8) + timestamp_us(u32) + global_queue(u8)                                                   = 6 bytes
 //!   5: SpawnLocationDef             → code(u8) + spawn_loc_id(u16) + string_len(u16) + string_bytes(N)                                 = 5 + N bytes
 //!   6: TaskSpawn                    → code(u8) + task_id(u32) + spawn_loc_id(u16)                                                       = 7 bytes
+//!   7: CpuSample                    → code(u8) + timestamp_us(u32) + worker_id(u8) + num_frames(u8) + frames(N * u64)                  = 7 + 8N bytes
 //! ```
 //!
 //! Timestamps are microseconds since trace start. u32 micros supports traces up to ~71 minutes.
@@ -19,19 +20,15 @@
 //! `sched_wait_us` is the scheduling wait delta from schedstat during the park period.
 //! In-memory representation remains nanoseconds; conversion happens at the wire boundary.
 //!
-//! ### v7 → v8 changes
-//! - Added TaskSpawn (code 6): emitted once per task, maps task_id → spawn_loc_id
-//! - SpawnLocationDef moved to code 5 (was 7)
-//! - Interning now happens in the flush thread, not in SharedState
-//! - Workers carry &'static Location in RawEvents; flush thread interns to SpawnLocationId
-//! - PollStart spawn_loc_id is resolved by flush thread from the TaskSpawn mapping
+//! ### v8 → v9 changes
+//! - Added CpuSample (code 7): perf-sampled CPU stack traces attributed to workers
 
 use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::io::{Read, Result, Write};
 
 pub const MAGIC: &[u8; 8] = b"TOKIOTRC";
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 pub const HEADER_SIZE: usize = 12; // 8 magic + 4 version
 
 // Wire codes
@@ -42,6 +39,7 @@ const WIRE_WORKER_UNPARK: u8 = 3;
 const WIRE_QUEUE_SAMPLE: u8 = 4;
 const WIRE_SPAWN_LOCATION_DEF: u8 = 5;
 const WIRE_TASK_SPAWN: u8 = 6;
+const WIRE_CPU_SAMPLE: u8 = 7;
 
 /// Returns the wire size of an event.
 pub fn wire_event_size(event: &TelemetryEvent) -> usize {
@@ -53,6 +51,7 @@ pub fn wire_event_size(event: &TelemetryEvent) -> usize {
         TelemetryEvent::WorkerUnpark { .. } => 15,
         TelemetryEvent::SpawnLocationDef { location, .. } => 1 + 2 + 2 + location.len(),
         TelemetryEvent::TaskSpawn { .. } => 7,
+        TelemetryEvent::CpuSample { callchain, .. } => 7 + 8 * callchain.len(),
     }
 }
 
@@ -143,6 +142,21 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
             w.write_all(&task_id.to_u32().to_le_bytes())?;
             w.write_all(&spawn_loc_id.as_u16().to_le_bytes())?;
         }
+        TelemetryEvent::CpuSample {
+            timestamp_nanos,
+            worker_id,
+            callchain,
+        } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
+            w.write_all(&[WIRE_CPU_SAMPLE])?;
+            w.write_all(&timestamp_us.to_le_bytes())?;
+            w.write_all(&[*worker_id as u8])?;
+            let num_frames = callchain.len().min(255) as u8;
+            w.write_all(&[num_frames])?;
+            for &addr in callchain.iter().take(num_frames as usize) {
+                w.write_all(&addr.to_le_bytes())?;
+            }
+        }
     }
     Ok(())
 }
@@ -196,7 +210,6 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
             spawn_loc_id: SpawnLocationId::from_u16(u16::from_le_bytes(spawn_loc_id_bytes)),
         }));
     }
-
     let mut ts = [0u8; 4];
     r.read_exact(&mut ts)?;
     let timestamp_nanos = u32::from_le_bytes(ts) as u64 * 1000;
@@ -268,6 +281,24 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
             TelemetryEvent::QueueSample {
                 timestamp_nanos,
                 global_queue_depth: gq[0] as usize,
+            }
+        }
+        WIRE_CPU_SAMPLE => {
+            let mut wid = [0u8; 1];
+            let mut nf = [0u8; 1];
+            r.read_exact(&mut wid)?;
+            r.read_exact(&mut nf)?;
+            let num_frames = nf[0] as usize;
+            let mut callchain = Vec::with_capacity(num_frames);
+            for _ in 0..num_frames {
+                let mut addr = [0u8; 8];
+                r.read_exact(&mut addr)?;
+                callchain.push(u64::from_le_bytes(addr));
+            }
+            TelemetryEvent::CpuSample {
+                timestamp_nanos,
+                worker_id: wid[0] as usize,
+                callchain,
             }
         }
         _ => return Ok(None),
