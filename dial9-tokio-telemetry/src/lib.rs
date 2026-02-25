@@ -1,4 +1,5 @@
 pub mod telemetry;
+pub mod traced;
 
 use arc_swap::ArcSwap;
 use pin_project_lite::pin_project;

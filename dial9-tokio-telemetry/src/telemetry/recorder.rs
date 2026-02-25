@@ -67,17 +67,25 @@ fn resolve_worker_id(
     })
 }
 
+/// Get the current worker ID as u8 (255 if unknown). Used by Traced waker.
+pub(crate) fn current_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> u8 {
+    match resolve_worker_id(metrics, None) {
+        Some(id) if id <= 254 => id as u8,
+        _ => 255,
+    }
+}
+
 /// Shared state accessed lock-free by callbacks on the hot path.
 /// No spawn location tracking here — all interning happens in the flush thread.
-struct SharedState {
-    enabled: AtomicBool,
-    collector: CentralCollector,
-    start_time: Instant,
-    metrics: ArcSwap<Option<RuntimeMetrics>>,
+pub(crate) struct SharedState {
+    pub(crate) enabled: AtomicBool,
+    pub(crate) collector: CentralCollector,
+    pub(crate) start_time: Instant,
+    pub(crate) metrics: ArcSwap<Option<RuntimeMetrics>>,
     /// OS tid → worker_id mapping, populated eagerly by worker threads on first
     /// `resolve_worker_id`. Workers only register once, so contention is negligible.
     /// Read by the CPU profiler during flush to attribute samples to workers.
-    worker_tids: Mutex<HashMap<u32, usize>>,
+    pub(crate) worker_tids: Mutex<HashMap<u32, usize>>,
 }
 
 impl SharedState {
@@ -91,7 +99,42 @@ impl SharedState {
         }
     }
 
-    fn record_event(&self, event: RawEvent) {
+    pub(crate) fn timestamp_nanos(&self) -> u64 {
+        self.start_time.elapsed().as_nanos() as u64
+    }
+
+    /// Build a [`RawEvent::WakeEvent`] for the task identified by `woken_task_id`.
+    ///
+    /// The waker task id (the task currently running `wake_by_ref`) and the
+    /// target worker are resolved automatically from thread-local state so
+    /// callers don't need to reach into `SharedState` fields directly.
+    pub(crate) fn create_wake_event(&self, woken_task_id: TaskId) -> RawEvent {
+        let waker_task_id = tokio::task::try_id()
+            .map(TaskId::from)
+            .unwrap_or(TaskId::from_u32(0));
+        let target_worker = current_worker_id(&self.metrics);
+        RawEvent::WakeEvent {
+            timestamp_nanos: self.timestamp_nanos(),
+            waker_task_id,
+            woken_task_id,
+            target_worker,
+        }
+    }
+
+    /// Record a queue-depth sample directly into the collector, bypassing the
+    /// thread-local buffer.  The enabled flag is checked; if telemetry is off
+    /// the sample is silently dropped.
+    pub(crate) fn record_queue_sample(&self, global_queue_depth: usize) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        self.collector.accept_flush(vec![RawEvent::QueueSample {
+            timestamp_nanos: self.timestamp_nanos(),
+            global_queue_depth,
+        }]);
+    }
+
+    pub(crate) fn record_event(&self, event: RawEvent) {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
@@ -300,6 +343,19 @@ impl FlushState {
                 events.push(TelemetryEvent::QueueSample {
                     timestamp_nanos,
                     global_queue_depth,
+                });
+            }
+            RawEvent::WakeEvent {
+                timestamp_nanos,
+                waker_task_id,
+                woken_task_id,
+                target_worker,
+            } => {
+                events.push(TelemetryEvent::WakeEvent {
+                    timestamp_nanos,
+                    waker_task_id,
+                    woken_task_id,
+                    target_worker,
                 });
             }
         }
@@ -530,11 +586,7 @@ impl TelemetryRecorder {
                 let Some(ref metrics) = **metrics_guard else {
                     continue;
                 };
-                let ts = shared.start_time.elapsed().as_nanos() as u64;
-                shared.collector.accept_flush(vec![RawEvent::QueueSample {
-                    timestamp_nanos: ts,
-                    global_queue_depth: metrics.global_queue_depth(),
-                }]);
+                shared.record_queue_sample(metrics.global_queue_depth());
             }
         })
     }
@@ -564,6 +616,29 @@ impl TelemetryHandle {
     pub fn disable(&self) {
         self.shared.enabled.store(false, Ordering::Relaxed);
         self.recorder.lock().unwrap().flush();
+    }
+
+    /// Get a handle for creating `Traced<F>` future wrappers.
+    pub fn traced_handle(&self) -> crate::traced::TracedHandle {
+        crate::traced::TracedHandle {
+            shared: self.shared.clone(),
+        }
+    }
+
+    /// Spawn a future wrapped in [`Traced`](crate::traced::Traced) for wake-event capture.
+    #[track_caller]
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let traced_handle = self.traced_handle();
+        tokio::spawn(async move {
+            let task_id = tokio::task::try_id()
+                .map(TaskId::from)
+                .unwrap_or(TaskId::from_u32(0));
+            crate::traced::Traced::new(future, traced_handle, task_id).await
+        })
     }
 }
 
@@ -698,16 +773,9 @@ impl TracedRuntimeBuilder {
                         let now = Instant::now();
                         if now.duration_since(last_sample) >= sample_interval {
                             last_sample = now;
-                            if !shared.enabled.load(Ordering::Relaxed) {
-                                continue;
-                            }
                             let metrics_guard = shared.metrics.load();
                             if let Some(ref metrics) = **metrics_guard {
-                                let ts = shared.start_time.elapsed().as_nanos() as u64;
-                                shared.collector.accept_flush(vec![RawEvent::QueueSample {
-                                    timestamp_nanos: ts,
-                                    global_queue_depth: metrics.global_queue_depth(),
-                                }]);
+                                shared.record_queue_sample(metrics.global_queue_depth());
                             }
                         }
 

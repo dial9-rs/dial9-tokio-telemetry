@@ -14,7 +14,7 @@
 //! Duration defaults to 30 seconds. A 3-second warmup precedes measurement.
 
 use dial9_tokio_telemetry::telemetry::{
-    CpuProfilingConfig, NullWriter, SimpleBinaryWriter, TelemetryGuard, TracedRuntime,
+    CpuProfilingConfig, NullWriter, SimpleBinaryWriter, TelemetryGuard, TelemetryHandle, TracedRuntime,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -29,13 +29,13 @@ const WARMUP_SECS: u64 = 3;
 
 // ── Echo server (runs on the traced runtime) ─────────────────────────────────
 
-async fn echo_server(listener: TcpListener) {
+async fn echo_server(listener: TcpListener, handle: Option<TelemetryHandle>) {
     loop {
         let (mut sock, _) = match listener.accept().await {
             Ok(c) => c,
             Err(_) => break,
         };
-        tokio::spawn(async move {
+        let conn = async move {
             let mut buf = [0u8; 256];
             loop {
                 let n = match sock.read(&mut buf).await {
@@ -46,7 +46,12 @@ async fn echo_server(listener: TcpListener) {
                     break;
                 }
             }
-        });
+        };
+        if let Some(h) = &handle {
+            h.spawn(conn);
+        } else {
+            tokio::spawn(conn);
+        }
     }
 }
 
@@ -192,7 +197,8 @@ fn main() {
     let port = server_rt.block_on(async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(echo_server(listener));
+        let handle = _guard.as_ref().map(|g| g.handle());
+        tokio::spawn(echo_server(listener, handle));
         port
     });
 

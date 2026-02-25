@@ -1,4 +1,4 @@
-//! Binary trace wire format (v10).
+//! Binary trace wire format (v11).
 //!
 //! ## File layout
 //! ```text
@@ -14,6 +14,7 @@
 //!   6: TaskSpawn                    → code(u8) + task_id(u32) + spawn_loc_id(u16)                                                       = 7 bytes
 //!   7: CpuSample                    → code(u8) + timestamp_us(u32) + worker_id(u8) + num_frames(u8) + frames(N * u64)                  = 7 + 8N bytes
 //!   8: CallframeDef                 → code(u8) + address(u64) + string_len(u16) + string_bytes(N)                                      = 11 + N bytes
+//!   9: WakeEvent                    → code(u8) + timestamp_us(u32) + waker_task_id(u32) + woken_task_id(u32) + target_worker(u8)        = 14 bytes
 //! ```
 //!
 //! Timestamps are microseconds since trace start. u32 micros supports traces up to ~71 minutes.
@@ -21,15 +22,15 @@
 //! `sched_wait_us` is the scheduling wait delta from schedstat during the park period.
 //! In-memory representation remains nanoseconds; conversion happens at the wire boundary.
 //!
-//! ### v9 → v10 changes
-//! - Added CallframeDef (code 8): inline symbolication of CPU profile callframe addresses
+//! ### v10 → v11 changes
+//! - Added WakeEvent (code 9): emitted by Traced<F> waker wrapper, records who woke a task
 
 use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::io::{Read, Result, Write};
 
 pub const MAGIC: &[u8; 8] = b"TOKIOTRC";
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 pub const HEADER_SIZE: usize = 12; // 8 magic + 4 version
 
 // Wire codes
@@ -42,6 +43,7 @@ const WIRE_SPAWN_LOCATION_DEF: u8 = 5;
 const WIRE_TASK_SPAWN: u8 = 6;
 const WIRE_CPU_SAMPLE: u8 = 7;
 const WIRE_CALLFRAME_DEF: u8 = 8;
+const WIRE_WAKE_EVENT: u8 = 9;
 
 /// Returns the wire size of an event.
 pub fn wire_event_size(event: &TelemetryEvent) -> usize {
@@ -55,6 +57,7 @@ pub fn wire_event_size(event: &TelemetryEvent) -> usize {
         TelemetryEvent::TaskSpawn { .. } => 7,
         TelemetryEvent::CpuSample { callchain, .. } => 7 + 8 * callchain.len(),
         TelemetryEvent::CallframeDef { symbol, .. } => 1 + 8 + 2 + symbol.len(),
+        TelemetryEvent::WakeEvent { .. } => 14,
     }
 }
 
@@ -166,6 +169,19 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
             let len = symbol.len() as u16;
             w.write_all(&len.to_le_bytes())?;
             w.write_all(symbol.as_bytes())?;
+        }
+        TelemetryEvent::WakeEvent {
+            timestamp_nanos,
+            waker_task_id,
+            woken_task_id,
+            target_worker,
+        } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
+            w.write_all(&[WIRE_WAKE_EVENT])?;
+            w.write_all(&timestamp_us.to_le_bytes())?;
+            w.write_all(&waker_task_id.to_u32().to_le_bytes())?;
+            w.write_all(&woken_task_id.to_u32().to_le_bytes())?;
+            w.write_all(&[*target_worker])?;
         }
     }
     Ok(())
@@ -325,6 +341,20 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
                 timestamp_nanos,
                 worker_id: wid[0] as usize,
                 callchain,
+            }
+        }
+        WIRE_WAKE_EVENT => {
+            let mut waker_task_id_bytes = [0u8; 4];
+            let mut woken_task_id_bytes = [0u8; 4];
+            let mut tw = [0u8; 1];
+            r.read_exact(&mut waker_task_id_bytes)?;
+            r.read_exact(&mut woken_task_id_bytes)?;
+            r.read_exact(&mut tw)?;
+            TelemetryEvent::WakeEvent {
+                timestamp_nanos,
+                waker_task_id: TaskId::from_u32(u32::from_le_bytes(waker_task_id_bytes)),
+                woken_task_id: TaskId::from_u32(u32::from_le_bytes(woken_task_id_bytes)),
+                target_worker: tw[0],
             }
         }
         _ => return Ok(None),
@@ -949,6 +979,32 @@ mod tests {
                 wire_event_size(&event),
                 "size mismatch for string length {len}"
             );
+        }
+    }
+
+    #[test]
+    fn test_wake_event_roundtrip() {
+        let event = TelemetryEvent::WakeEvent {
+            timestamp_nanos: 5_000_000,
+            waker_task_id: TaskId::from_u32(10),
+            woken_task_id: TaskId::from_u32(20),
+            target_worker: 3,
+        };
+        assert_eq!(wire_event_size(&event), 14);
+        let decoded = roundtrip(&event);
+        match decoded {
+            TelemetryEvent::WakeEvent {
+                timestamp_nanos,
+                waker_task_id,
+                woken_task_id,
+                target_worker,
+            } => {
+                assert_eq!(timestamp_nanos, 5_000_000);
+                assert_eq!(waker_task_id.to_u32(), 10);
+                assert_eq!(woken_task_id.to_u32(), 20);
+                assert_eq!(target_worker, 3);
+            }
+            _ => panic!("expected WakeEvent"),
         }
     }
 }

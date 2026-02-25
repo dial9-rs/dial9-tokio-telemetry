@@ -11,7 +11,7 @@ pub mod writer;
 
 pub use analysis::{
     ActivePeriod, SpawnLocationStats, TraceAnalysis, TraceReader, WorkerStats, analyze_trace,
-    compute_active_periods, detect_idle_workers, print_analysis,
+    compute_active_periods, compute_wake_to_poll_delays, detect_idle_workers, print_analysis,
 };
 pub use events::{SchedStat, TelemetryEvent};
 #[cfg(feature = "cpu-profiling")]

@@ -86,6 +86,13 @@ pub enum TelemetryEvent {
         /// Resolved symbol name (demangled).
         symbol: String,
     },
+    WakeEvent {
+        #[serde(rename = "timestamp_ns")]
+        timestamp_nanos: u64,
+        waker_task_id: TaskId,
+        woken_task_id: TaskId,
+        target_worker: u8,
+    },
 }
 
 impl TelemetryEvent {
@@ -111,6 +118,9 @@ impl TelemetryEvent {
             }
             | TelemetryEvent::CpuSample {
                 timestamp_nanos, ..
+            }
+            | TelemetryEvent::WakeEvent {
+                timestamp_nanos, ..
             } => Some(*timestamp_nanos),
             TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
@@ -129,7 +139,8 @@ impl TelemetryEvent {
             TelemetryEvent::QueueSample { .. }
             | TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
-            | TelemetryEvent::CallframeDef { .. } => None,
+            | TelemetryEvent::CallframeDef { .. }
+            | TelemetryEvent::WakeEvent { .. } => None,
         }
     }
 
@@ -176,6 +187,12 @@ pub enum RawEvent {
     TaskSpawn {
         task_id: crate::telemetry::task_metadata::TaskId,
         location: &'static std::panic::Location<'static>,
+    },
+    WakeEvent {
+        timestamp_nanos: u64,
+        waker_task_id: crate::telemetry::task_metadata::TaskId,
+        woken_task_id: crate::telemetry::task_metadata::TaskId,
+        target_worker: u8,
     },
 }
 

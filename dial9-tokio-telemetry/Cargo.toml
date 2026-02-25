@@ -7,7 +7,8 @@ publish = true
 [dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "taskdump", "rt-multi-thread", "sync", "net", "io-util"] }
 arc-swap = "1"
-libc = "0.2"
+libc.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 pin-project-lite = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
