@@ -75,7 +75,42 @@ impl SharedState {
         }
     }
 
-    fn record_event(&self, event: RawEvent) {
+    pub(crate) fn timestamp_nanos(&self) -> u64 {
+        self.start_time.elapsed().as_nanos() as u64
+    }
+
+    /// Build a [`RawEvent::WakeEvent`] for the task identified by `woken_task_id`.
+    ///
+    /// The waker task id (the task currently running `wake_by_ref`) and the
+    /// target worker are resolved automatically from thread-local state so
+    /// callers don't need to reach into `SharedState` fields directly.
+    pub(crate) fn create_wake_event(&self, woken_task_id: TaskId) -> RawEvent {
+        let waker_task_id = tokio::task::try_id()
+            .map(TaskId::from)
+            .unwrap_or(TaskId::from_u32(0));
+        let target_worker = current_worker_id(&self.metrics);
+        RawEvent::WakeEvent {
+            timestamp_nanos: self.timestamp_nanos(),
+            waker_task_id,
+            woken_task_id,
+            target_worker,
+        }
+    }
+
+    /// Record a queue-depth sample directly into the collector, bypassing the
+    /// thread-local buffer.  The enabled flag is checked; if telemetry is off
+    /// the sample is silently dropped.
+    pub(crate) fn record_queue_sample(&self, global_queue_depth: usize) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        self.collector.accept_flush(vec![RawEvent::QueueSample {
+            timestamp_nanos: self.timestamp_nanos(),
+            global_queue_depth,
+        }]);
+    }
+
+    pub(crate) fn record_event(&self, event: RawEvent) {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
@@ -437,11 +472,7 @@ impl TelemetryRecorder {
                 let Some(ref metrics) = **metrics_guard else {
                     continue;
                 };
-                let ts = shared.start_time.elapsed().as_nanos() as u64;
-                shared.collector.accept_flush(vec![RawEvent::QueueSample {
-                    timestamp_nanos: ts,
-                    global_queue_depth: metrics.global_queue_depth(),
-                }]);
+                shared.record_queue_sample(metrics.global_queue_depth());
             }
         })
     }
@@ -582,16 +613,9 @@ impl TracedRuntimeBuilder {
                         let now = Instant::now();
                         if now.duration_since(last_sample) >= sample_interval {
                             last_sample = now;
-                            if !shared.enabled.load(Ordering::Relaxed) {
-                                continue;
-                            }
                             let metrics_guard = shared.metrics.load();
                             if let Some(ref metrics) = **metrics_guard {
-                                let ts = shared.start_time.elapsed().as_nanos() as u64;
-                                shared.collector.accept_flush(vec![RawEvent::QueueSample {
-                                    timestamp_nanos: ts,
-                                    global_queue_depth: metrics.global_queue_depth(),
-                                }]);
+                                shared.record_queue_sample(metrics.global_queue_depth());
                             }
                         }
 

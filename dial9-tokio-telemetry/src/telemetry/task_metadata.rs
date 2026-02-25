@@ -23,12 +23,20 @@ impl From<tokio::task::Id> for TaskId {
 }
 
 /// A Hasher that captures the first u64 written to it.
+///
+/// This captures the task id from Tokio as a u64 (sorry)
 struct U64Extractor(u64);
 
 impl Hasher for U64Extractor {
-    fn write(&mut self, _bytes: &[u8]) {}
-    fn write_u64(&mut self, val: u64) { self.0 = val; }
-    fn finish(&self) -> u64 { self.0 }
+    fn write(&mut self, _bytes: &[u8]) {
+        debug_assert!(false, "called on bytes!")
+    }
+    fn write_u64(&mut self, val: u64) {
+        self.0 = val;
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 impl TaskId {

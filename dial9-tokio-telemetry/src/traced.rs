@@ -1,8 +1,6 @@
 //! `Traced<F>` future wrapper for wake event capture and task dump collection.
 
-use crate::telemetry::buffer::BUFFER;
-use crate::telemetry::events::RawEvent;
-use crate::telemetry::recorder::{SharedState, current_worker_id};
+use crate::telemetry::recorder::SharedState;
 use crate::telemetry::task_metadata::TaskId;
 use futures_util::task::{ArcWake, AtomicWaker, waker as arc_waker};
 use pin_project_lite::pin_project;
@@ -67,28 +65,8 @@ impl ArcWake for TracedWakerData {
 }
 
 fn record_wake_event(data: &TracedWakerData) {
-    if !data.shared.enabled.load(Ordering::Relaxed) {
-        return;
-    }
-    let waker_task_id = tokio::task::try_id()
-        .map(TaskId::from)
-        .unwrap_or(TaskId::from_u32(0));
-    let target_worker = current_worker_id(&data.shared.metrics);
-    let timestamp_nanos = data.shared.start_time.elapsed().as_nanos() as u64;
-
-    let event = RawEvent::WakeEvent {
-        timestamp_nanos,
-        waker_task_id,
-        woken_task_id: data.woken_task_id,
-        target_worker,
-    };
-    BUFFER.with(|buf| {
-        let mut buf = buf.borrow_mut();
-        buf.record_event(event);
-        if buf.should_flush() {
-            data.shared.collector.accept_flush(buf.flush());
-        }
-    });
+    let event = data.shared.create_wake_event(data.woken_task_id);
+    data.shared.record_event(event);
 }
 
 fn make_traced_waker(data: Arc<TracedWakerData>) -> Waker {
@@ -120,6 +98,7 @@ impl<F: Future> Future for Traced<F> {
 mod tests {
     use super::*;
     use crate::telemetry::analysis::TraceReader;
+    use crate::telemetry::buffer::BUFFER;
     use crate::telemetry::events::TelemetryEvent;
     use crate::telemetry::recorder::TracedRuntime;
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
