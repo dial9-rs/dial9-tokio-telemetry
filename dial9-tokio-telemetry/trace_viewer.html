@@ -247,12 +247,14 @@
                 <button id="btn-reset">New File</button>
             </div>
             <div id="main-area">
+                <canvas id="crosshair-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10"></canvas>
                 <div id="timeline-header">
                     <canvas id="timeline-canvas"></canvas>
                 </div>
                 <div id="lanes-container" id="lanes"></div>
                 <div id="task-detail">
                     <span class="chart-label" id="task-detail-label">Task Detail</span>
+                    <span id="task-detail-status" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2"></span>
                     <canvas id="task-detail-canvas"></canvas>
                 </div>
                 <div id="queue-chart">
@@ -411,6 +413,10 @@
                             eventType = 4;
                             globalQueue = view.getUint8(off); off += 1;
                             break;
+                    }
+                    // Also build taskSpawnLocs from PollStart (covers tasks without TaskSpawn events)
+                    if (eventType === 0 && taskId && spawnLocId && !taskSpawnLocs.has(taskId)) {
+                        taskSpawnLocs.set(taskId, spawnLocId);
                     }
                     events.push({
                         eventType, timestamp, workerId,
@@ -713,6 +719,17 @@
                 }
 
                 // Compute scheduling delays: for each poll, find the most recent wake before it
+                // Build task → sorted polls index for mid-poll wake adjustment
+                const pollsByTask = {};
+                for (const w of workerIds) {
+                    for (const s of workerSpans[w].polls) {
+                        if (s.taskId) (pollsByTask[s.taskId] ??= []).push(s);
+                    }
+                }
+                for (const arr of Object.values(pollsByTask)) {
+                    arr.sort((a, b) => a.start - b.start);
+                }
+
                 schedDelays = [];
                 for (const w of workerIds) {
                     for (const s of workerSpans[w].polls) {
@@ -728,10 +745,22 @@
                         }
                         if (best >= 0) {
                             const wake = wakes[best];
-                            const delay = s.start - wake.timestamp;
+                            // If wake arrived during an earlier poll of this task, effective wait starts at that poll's end
+                            let effectiveWake = wake.timestamp;
+                            const taskPolls = pollsByTask[s.taskId];
+                            if (taskPolls) {
+                                for (const p of taskPolls) {
+                                    if (p.start >= s.start) break; // only earlier polls
+                                    if (wake.timestamp >= p.start && wake.timestamp <= p.end) {
+                                        effectiveWake = p.end;
+                                        break;
+                                    }
+                                }
+                            }
+                            const delay = s.start - effectiveWake;
                             if (delay > 0 && delay < 1e9) { // sanity: < 1s
                                 schedDelays.push({
-                                    wakeTime: wake.timestamp,
+                                    wakeTime: effectiveWake,
                                     pollTime: s.start,
                                     delay,
                                     taskId: s.taskId,
@@ -1270,8 +1299,9 @@
                 ctx.textAlign = "center";
 
                 // For each poll, find the most recent wake before it to show wake→poll delay
-                const pollWakes = []; // parallel to polls: the wake that triggered each poll (or null)
-                for (const s of polls) {
+                const pollWakes = []; // parallel to polls: {wake, effectiveWake} or null
+                for (let pi = 0; pi < polls.length; pi++) {
+                    const s = polls[pi];
                     let best = null;
                     if (wakes.length) {
                         let lo = 0, hi = wakes.length - 1, bi = -1;
@@ -1282,8 +1312,16 @@
                         }
                         if (bi >= 0) {
                             const w = wakes[bi];
-                            const delay = s.start - w.timestamp;
-                            if (delay >= 0 && delay < 1e9) best = w;
+                            // If wake arrived during an earlier poll, effective wait starts at that poll's end
+                            let effectiveWake = w.timestamp;
+                            for (let j = 0; j < pi; j++) {
+                                if (w.timestamp >= polls[j].start && w.timestamp <= polls[j].end) {
+                                    effectiveWake = polls[j].end;
+                                    break;
+                                }
+                            }
+                            const delay = s.start - effectiveWake;
+                            if (delay >= 0 && delay < 1e9) best = { wake: w, effectiveWake };
                         }
                     }
                     pollWakes.push(best);
@@ -1293,12 +1331,13 @@
                 taskDetailWakeRegions = [];
                 taskDetailHitRegions = [];
                 for (let i = 0; i < polls.length; i++) {
-                    const wake = pollWakes[i];
-                    if (!wake) continue;
+                    const pollWake = pollWakes[i];
+                    if (!pollWake) continue;
+                    const { wake, effectiveWake } = pollWake;
                     const s = polls[i];
-                    if (s.start < viewStart || wake.timestamp > viewEnd) continue;
-                    const delay = s.start - wake.timestamp;
-                    const x1 = LABEL_W + Math.max(0, nsToX(wake.timestamp, drawW));
+                    if (s.start < viewStart || effectiveWake > viewEnd) continue;
+                    const delay = s.start - effectiveWake;
+                    const x1 = LABEL_W + Math.max(0, nsToX(effectiveWake, drawW));
                     const x2 = LABEL_W + Math.min(drawW, nsToX(s.start, drawW));
                     const w = x2 - x1;
                     if (w < 1) continue;
@@ -1340,14 +1379,18 @@
                         detail: `Scheduled — waiting ${fmtDur(delay)} for worker to poll after wake`,
                     });
 
-                    // If woken by another task, show waker info
-                    if (wake.wakerTaskId && wake.wakerTaskId !== 0) {
-                        const wakerLoc = trace.taskSpawnLocs.get(wake.wakerTaskId);
-                        const wakerLocStr = wakerLoc ? trace.spawnLocations.get(wakerLoc) : null;
-                        const label = wakerLocStr
-                            ? wakerLocStr.replace(/.*\//, '')
-                            : null;
-                        if (label && w > 40) {
+                    // Show waker info: spawn location for tracked tasks, "io" for runtime/worker wakes
+                    {
+                        let label;
+                        const wid = wake.wakerTaskId;
+                        if (!wid || wid === 0 || (wid >= 1 && wid <= workerIds.length)) {
+                            label = "io";
+                        } else {
+                            const wakerLoc = trace.taskSpawnLocs.get(wid);
+                            const wakerLocStr = wakerLoc ? trace.spawnLocations.get(wakerLoc) : null;
+                            label = wakerLocStr ? wakerLocStr.replace(/.*\//, '') : `task 0x${wid.toString(16)}`;
+                        }
+                        if (w > 40) {
                             const isHovered = hoveredWakerTaskId === wake.wakerTaskId;
                             ctx.fillStyle = isHovered ? "#fff" : "#66bb6a";
                             ctx.font = isHovered ? "bold 8px monospace" : "8px monospace";
@@ -1390,10 +1433,11 @@
                     const gapEnd = polls[i + 1].start;
                     if (gapEnd < viewStart || gapStart > viewEnd) continue;
                     // Skip if the next poll's wake covers this gap
-                    const nextWake = pollWakes[i + 1];
-                    if (nextWake && nextWake.timestamp <= gapStart) continue;
+                    const nextPw = pollWakes[i + 1];
+                    const nextWakeTs = nextPw ? nextPw.effectiveWake : null;
+                    if (nextWakeTs !== null && nextWakeTs <= gapStart) continue;
                     const x1 = LABEL_W + Math.max(0, nsToX(gapStart, drawW));
-                    const wakeX = nextWake ? LABEL_W + Math.max(0, nsToX(nextWake.timestamp, drawW)) : LABEL_W + Math.min(drawW, nsToX(gapEnd, drawW));
+                    const wakeX = nextWakeTs !== null ? LABEL_W + Math.max(0, nsToX(nextWakeTs, drawW)) : LABEL_W + Math.min(drawW, nsToX(gapEnd, drawW));
                     const x2 = Math.min(wakeX, LABEL_W + Math.min(drawW, nsToX(gapEnd, drawW)));
                     const w = Math.max(x2 - x1, 0);
                     if (w < 1) continue;
@@ -1404,7 +1448,7 @@
                     ctx.setLineDash([3, 3]);
                     ctx.strokeRect(x1, bandTop, w, bandH);
                     ctx.setLineDash([]);
-                    const dur = (nextWake ? nextWake.timestamp : gapEnd) - gapStart;
+                    const dur = (nextWakeTs !== null ? nextWakeTs : gapEnd) - gapStart;
                     ctx.fillStyle = dur > 1e6 ? "#ff8a65" : "#888";
                     if (w > 35) {
                         ctx.fillText(fmtDur(dur), x1 + w / 2, bandTop - 6);
@@ -1560,19 +1604,37 @@
                 ctx.strokeStyle = "#ff8a65";
                 ctx.lineWidth = 1;
                 ctx.stroke();
+            }
 
-                // Draw crosshair if mouse is over worker lanes
-                if (mouseNs !== null && mouseNs >= viewStart && mouseNs <= viewEnd) {
-                    const x = chartLeft + ((mouseNs - viewStart) / viewDur) * chartW;
-                    ctx.strokeStyle = "rgba(255,255,255,0.5)";
-                    ctx.lineWidth = 1;
-                    ctx.setLineDash([4, 4]);
-                    ctx.beginPath();
-                    ctx.moveTo(x, chartTop);
-                    ctx.lineTo(x, chartTop + chartH);
-                    ctx.stroke();
-                    ctx.setLineDash([]);
-                }
+            function renderCrosshair() {
+                const overlay = document.getElementById("crosshair-overlay");
+                const mainArea = document.getElementById("main-area");
+                const dpr = devicePixelRatio || 1;
+                const w = mainArea.clientWidth, h = mainArea.clientHeight;
+                overlay.width = w * dpr;
+                overlay.height = h * dpr;
+                overlay.style.width = w + "px";
+                overlay.style.height = h + "px";
+                const ctx = overlay.getContext("2d");
+                ctx.scale(dpr, dpr);
+                ctx.clearRect(0, 0, w, h);
+                if (mouseNs === null || mouseNs < viewStart || mouseNs > viewEnd) return;
+
+                // Compute x position aligned with the lanes (lanes start after LABEL_W within lanes-container)
+                const lanesRect = lanesContainer.getBoundingClientRect();
+                const mainRect = mainArea.getBoundingClientRect();
+                const laneDrawW = lanesRect.width - LABEL_W;
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const x = (lanesRect.left - mainRect.left) + LABEL_W + nsToX(mouseNs, laneDrawW - scrollbarW);
+
+                ctx.strokeStyle = "rgba(255,255,255,0.3)";
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, h);
+                ctx.stroke();
+                ctx.setLineDash([]);
             }
 
             // ── Zoom & Pan ──
@@ -1760,11 +1822,10 @@
                         viewStart + (mouseX / drawW) * (viewEnd - viewStart);
                     mouseNs = ns;
                     
-                    // Throttle queue chart redraw with RAF
+                    // Throttle crosshair redraw with RAF
                     if (!queueChartRafId) {
-                        const sbW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
                         queueChartRafId = requestAnimationFrame(() => {
-                            renderQueueChart(drawW, sbW);
+                            renderCrosshair();
                             queueChartRafId = null;
                         });
                     }
@@ -1871,7 +1932,7 @@
                 .addEventListener("mouseleave", () => {
                     tooltip.style.display = "none";
                     mouseNs = null;
-                    renderAll();
+                    renderCrosshair();
                 });
 
             // ── Resize ──
@@ -1894,7 +1955,8 @@
                     renderAll();
                 }
 
-                // Show tooltip for polling/scheduled/idle sections
+                // Show status for polling/scheduled/idle sections
+                const statusEl = document.getElementById("task-detail-status");
                 let hit = null;
                 for (const r of taskDetailHitRegions) {
                     if (mx >= r.x1 && mx <= r.x2 && my >= r.y1 && my <= r.y2) {
@@ -1902,18 +1964,11 @@
                         break;
                     }
                 }
-                if (hit) {
-                    const icon = hit.type === "polling" ? "⚡" : hit.type === "scheduled" ? "⏳" : "💤";
-                    tooltip.innerHTML = `<span class="value">${icon} ${hit.detail}</span>`;
-                    tooltip.style.display = "block";
-                    tooltip.style.left = Math.min(e.clientX + 12, window.innerWidth - 340) + "px";
-                    tooltip.style.top = (e.clientY - 40) + "px";
-                } else {
-                    tooltip.style.display = "none";
-                }
+                const icon = hit ? (hit.type === "polling" ? "⚡" : hit.type === "scheduled" ? "⏳" : "💤") : "";
+                statusEl.textContent = hit ? `${icon} ${hit.detail}` : "";
             });
             document.getElementById("task-detail").addEventListener("mouseleave", () => {
-                tooltip.style.display = "none";
+                document.getElementById("task-detail-status").textContent = "";
                 if (hoveredWakerTaskId) {
                     hoveredWakerTaskId = null;
                     renderAll();
