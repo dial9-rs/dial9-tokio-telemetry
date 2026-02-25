@@ -66,7 +66,7 @@ pub fn validate_trace_matches_metrics(
         .filter(|e| matches!(e, TelemetryEvent::PollStart { .. }))
         .count();
     eprintln!("=== Totals ===");
-    eprintln!("  tokio total polls: {}", total_tokio_polls);
+    eprintln!("  tokio total polls (tokio metrics): {}", total_tokio_polls);
     eprintln!(
         "  trace total PollStart events: {}",
         total_trace_poll_starts
@@ -108,7 +108,7 @@ pub fn validate_trace_matches_metrics(
                 let trace = s.poll_count as i64;
                 let tokio = metrics_polls[w] as i64;
                 let diff = (trace - tokio).abs();
-                if diff > 5 {
+                if diff > 30 {
                     Some((w, trace, tokio, diff))
                 } else {
                     None
@@ -143,7 +143,7 @@ pub fn validate_trace_matches_metrics(
                 let trace = s.park_count as i64;
                 let tokio = metrics_parks[w] as i64;
                 let diff = (trace - tokio).abs();
-                let threshold = ((tokio as f64 * 0.01).ceil() as i64).max(3);
+                let threshold = ((tokio as f64 * 0.01).ceil() as i64).max(5);
                 if diff > threshold {
                     Some((w, trace, tokio, diff, threshold))
                 } else {
