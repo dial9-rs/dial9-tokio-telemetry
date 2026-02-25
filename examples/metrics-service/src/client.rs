@@ -12,25 +12,12 @@ const MAX_WORKERS: usize = 40;
 const THUNDERING_HERD: usize = 200;
 const BASELINE: usize = 4;
 
-/// Load profile (elapsed_secs, target_concurrency):
-/// 0-10:  ramp 4 -> 40
-/// 10-20: hold at 40
-/// 20-30: ramp 40 -> 4
-/// 30-40: hold at 4 (baseline)
-/// 40-45: thundering herd (200)
-/// 45+:   back to baseline (4)
+// ramp up for 3 seconds -> crushing load -> baseline
 fn target_concurrency(elapsed: f64) -> usize {
-    if elapsed < 10.0 {
+    if elapsed < 3.0 {
         let t = elapsed / 10.0;
         (BASELINE as f64 + t * (MAX_WORKERS - BASELINE) as f64) as usize
-    } else if elapsed < 20.0 {
-        MAX_WORKERS
-    } else if elapsed < 30.0 {
-        let t = (elapsed - 20.0) / 10.0;
-        (MAX_WORKERS as f64 - t * (MAX_WORKERS - BASELINE) as f64) as usize
-    } else if elapsed < 40.0 {
-        BASELINE
-    } else if elapsed < 45.0 {
+    } else if elapsed < 10.0 {
         THUNDERING_HERD
     } else {
         BASELINE

@@ -37,12 +37,16 @@ struct Args {
     )]
     trace_path: String,
 
-    #[arg(long, default_value = "1048576", help = "Max trace file size in bytes")]
+    #[arg(
+        long,
+        default_value = "100000000",
+        help = "Max trace file size in bytes"
+    )]
     trace_max_file_size: u64,
 
     #[arg(
         long,
-        default_value = "31457280",
+        default_value = "314572800",
         help = "Max total trace size in bytes"
     )]
     trace_max_total_size: u64,

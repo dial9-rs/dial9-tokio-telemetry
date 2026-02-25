@@ -440,6 +440,23 @@
             ];
             const ET_COLORS = { poll: "#4fc3f7", park: "#ff8a65" };
 
+            // Duration-based poll coloring: short=dim, long=hot
+            function pollColor(startNs, endNs) {
+                const durUs = (endNs - startNs) / 1e3;
+                if (durUs > 1000) return "#ff4444"; // >1ms: red
+                if (durUs > 100)  return "#ff8a65"; // >100µs: orange
+                if (durUs > 10)   return "#4fc3f7"; // >10µs: bright blue
+                return "#2a5a7a";                    // ≤10µs: dim blue
+            }
+
+            function pollColorDim(startNs, endNs) {
+                const durUs = (endNs - startNs) / 1e3;
+                if (durUs > 1000) return "#803030"; // >1ms: muted red
+                if (durUs > 100)  return "#805540"; // >100µs: muted orange
+                if (durUs > 10)   return "#2a5a7a"; // >10µs: dim blue
+                return "#1e3040";                    // ≤10µs: very dim
+            }
+
             // ── State ──
             let trace = null;
             let workerIds = [];
@@ -1056,11 +1073,11 @@
                     bandH = 20;
                 const poiSpan = (currentPoiIndex >= 0) ? pointsOfInterest[currentPoiIndex].span : null;
                 if (selectedTaskId) {
-                    ctx.fillStyle = "#2a3a4a";
                     for (const s of spans.polls) {
                         if (s.end < viewStart || s.start > viewEnd || s.taskId === selectedTaskId) continue;
                         const x1 = Math.max(0, nsToX(s.start, pw));
                         const x2 = Math.min(pw, nsToX(s.end, pw));
+                        ctx.fillStyle = pollColorDim(s.start, s.end);
                         ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
                     }
                     ctx.fillStyle = "#ffeb3b";
@@ -1071,11 +1088,11 @@
                         ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
                     }
                 } else {
-                    ctx.fillStyle = "#4fc3f7";
                     for (const s of spans.polls) {
                         if (s.end < viewStart || s.start > viewEnd) continue;
                         const x1 = Math.max(0, nsToX(s.start, pw));
                         const x2 = Math.min(pw, nsToX(s.end, pw));
+                        ctx.fillStyle = pollColor(s.start, s.end);
                         ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
                     }
                 }
@@ -1914,7 +1931,10 @@
                 leg.style.cssText =
                     "font-size:0.8em;display:flex;gap:12px;align-items:center;";
                 leg.innerHTML = `
-    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#4fc3f7;display:inline-block;border-radius:2px"></span>Poll</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a5a7a;display:inline-block;border-radius:2px"></span>Poll ≤10µs</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#4fc3f7;display:inline-block;border-radius:2px"></span>&gt;10µs</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff8a65;display:inline-block;border-radius:2px"></span>&gt;100µs</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff4444;display:inline-block;border-radius:2px"></span>&gt;1ms</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a1520;border-top:3px solid #cc5533;display:inline-block;border-radius:2px"></span>Parked</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff0000;display:inline-block;border-radius:2px"></span>Kernel Sched Delay</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#66bb6a;font-size:10px">▼</span>Wake</span>
