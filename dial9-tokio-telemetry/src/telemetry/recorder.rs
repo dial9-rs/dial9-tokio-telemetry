@@ -4,6 +4,7 @@ use crate::telemetry::events::{RawEvent, SchedStat, TelemetryEvent};
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use crate::telemetry::writer::TraceWriter;
 use arc_swap::ArcSwap;
+use smallvec::SmallVec;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::panic::Location;
@@ -11,9 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::runtime::{Handle, RuntimeMetrics};
-
-/// Sentinel location for tokio-internal tasks (spawned before our callbacks).
-static TOKIO_INTERNAL_LOCATION: &std::panic::Location<'static> = std::panic::Location::caller();
 
 /// Sentinel value for events from non-worker threads
 const UNKNOWN_WORKER: usize = 255;
@@ -50,21 +48,13 @@ fn resolve_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> Option<usize>
     })
 }
 
-/// Get the current worker ID as u8 (255 if unknown). Used by Traced waker.
-pub(crate) fn current_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> u8 {
-    match resolve_worker_id(metrics) {
-        Some(id) if id <= 254 => id as u8,
-        _ => 255,
-    }
-}
-
 /// Shared state accessed lock-free by callbacks on the hot path.
 /// No spawn location tracking here — all interning happens in the flush thread.
-pub(crate) struct SharedState {
-    pub(crate) enabled: AtomicBool,
-    pub(crate) collector: CentralCollector,
-    pub(crate) start_time: Instant,
-    pub(crate) metrics: ArcSwap<Option<RuntimeMetrics>>,
+struct SharedState {
+    enabled: AtomicBool,
+    collector: CentralCollector,
+    start_time: Instant,
+    metrics: ArcSwap<Option<RuntimeMetrics>>,
 }
 
 impl SharedState {
@@ -85,11 +75,7 @@ impl SharedState {
             let mut buf = buf.borrow_mut();
             buf.record_event(event);
             // Determine event type for flush decision
-            let should_flush = buf.should_flush()
-                || matches!(
-                    event,
-                    RawEvent::WorkerPark { .. } | RawEvent::TaskSpawn { .. }
-                );
+            let should_flush = buf.should_flush() || matches!(event, RawEvent::WorkerPark { .. });
             if should_flush {
                 self.collector.accept_flush(buf.flush());
             }
@@ -200,31 +186,100 @@ impl FlushState {
         let id = SpawnLocationId(self.next_id);
         self.next_id += 1;
         self.intern_map.insert(ptr, id);
-        if location == TOKIO_INTERNAL_LOCATION {
-            self.intern_strings
-                .push("<tokio internal (io driver, etc.>".to_string());
-        } else {
-            self.intern_strings.push(format!(
-                "{}:{}:{}",
-                location.file(),
-                location.line(),
-                location.column()
-            ));
-        }
+        self.intern_strings.push(format!(
+            "{}:{}:{}",
+            location.file(),
+            location.line(),
+            location.column()
+        ));
         id
     }
 
-    /// Ensure a SpawnLocationDef has been written for this id in the current file.
-    fn ensure_def(
-        &mut self,
-        id: SpawnLocationId,
-        writer: &mut dyn TraceWriter,
-    ) -> std::io::Result<()> {
+    /// If this id hasn't been emitted in the current file, push its def into `defs`.
+    fn collect_def(&mut self, id: SpawnLocationId, defs: &mut SmallVec<[TelemetryEvent; 3]>) {
         if self.emitted_this_file.insert(id) {
             let loc = self.intern_strings[id.as_u16() as usize].clone();
-            writer.write_event(&TelemetryEvent::SpawnLocationDef { id, location: loc })?;
+            defs.push(TelemetryEvent::SpawnLocationDef { id, location: loc });
         }
-        Ok(())
+    }
+
+    /// Resolve a RawEvent into a SmallVec of wire events: defs first, then the event itself.
+    fn resolve(&mut self, raw: RawEvent) -> SmallVec<[TelemetryEvent; 3]> {
+        let mut events = SmallVec::new();
+        match raw {
+            RawEvent::TaskSpawn { task_id, location } => {
+                let spawn_loc_id = self.intern(location);
+                self.collect_def(spawn_loc_id, &mut events);
+                events.push(TelemetryEvent::TaskSpawn {
+                    task_id,
+                    spawn_loc_id,
+                });
+            }
+            RawEvent::PollStart {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                task_id,
+                location,
+            } => {
+                let spawn_loc_id = self.intern(location);
+                self.collect_def(spawn_loc_id, &mut events);
+                events.push(TelemetryEvent::PollStart {
+                    timestamp_nanos,
+                    worker_id,
+                    worker_local_queue_depth,
+                    task_id,
+                    spawn_loc_id,
+                });
+            }
+            RawEvent::PollEnd {
+                timestamp_nanos,
+                worker_id,
+            } => {
+                events.push(TelemetryEvent::PollEnd {
+                    timestamp_nanos,
+                    worker_id,
+                });
+            }
+            RawEvent::WorkerPark {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                cpu_time_nanos,
+            } => {
+                events.push(TelemetryEvent::WorkerPark {
+                    timestamp_nanos,
+                    worker_id,
+                    worker_local_queue_depth,
+                    cpu_time_nanos,
+                });
+            }
+            RawEvent::WorkerUnpark {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                cpu_time_nanos,
+                sched_wait_delta_nanos,
+            } => {
+                events.push(TelemetryEvent::WorkerUnpark {
+                    timestamp_nanos,
+                    worker_id,
+                    worker_local_queue_depth,
+                    cpu_time_nanos,
+                    sched_wait_delta_nanos,
+                });
+            }
+            RawEvent::QueueSample {
+                timestamp_nanos,
+                global_queue_depth,
+            } => {
+                events.push(TelemetryEvent::QueueSample {
+                    timestamp_nanos,
+                    global_queue_depth,
+                });
+            }
+        }
+        events
     }
 
     /// Called on file rotation — next reference to any id will re-emit its def.
@@ -248,23 +303,9 @@ impl TelemetryRecorder {
         }
     }
 
-    pub fn initialize(&mut self, handle: Handle, task_tracking_enabled: bool) {
+    pub fn initialize(&mut self, handle: Handle) {
         let metrics = handle.metrics();
-        let num_workers = metrics.num_workers();
         self.shared.metrics.store(Arc::new(Some(metrics)));
-
-        // Tokio spawns internal tasks (IDs 1..=num_workers) during runtime build,
-        // before our on_task_spawn callback fires. Register them synthetically.
-        if task_tracking_enabled {
-            for id in 1..=num_workers as u32 {
-                self.shared
-                    .collector
-                    .accept_flush(vec![RawEvent::TaskSpawn {
-                        task_id: TaskId::from_u32(id),
-                        location: TOKIO_INTERNAL_LOCATION,
-                    }]);
-            }
-        }
     }
 
     fn flush(&mut self) {
@@ -278,120 +319,24 @@ impl TelemetryRecorder {
 
     /// Convert a RawEvent to wire format, interning locations as needed.
     fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
-        match raw {
-            RawEvent::TaskSpawn { task_id, location } => {
-                let spawn_loc_id = self.flush_state.intern(location);
-                self.flush_state
-                    .ensure_def(spawn_loc_id, &mut *self.writer)?;
-                if self.writer.take_rotated() {
-                    self.flush_state.on_rotate();
-                }
-                self.writer.write_event(&TelemetryEvent::TaskSpawn {
-                    task_id,
-                    spawn_loc_id,
-                })?;
-                if self.writer.take_rotated() {
-                    self.flush_state.on_rotate();
-                }
-            }
-            RawEvent::PollStart {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                task_id,
-                location,
-            } => {
-                let spawn_loc_id = self.flush_state.intern(location);
-                self.flush_state
-                    .ensure_def(spawn_loc_id, &mut *self.writer)?;
-                if self.writer.take_rotated() {
-                    self.flush_state.on_rotate();
-                }
-                self.writer.write_event(&TelemetryEvent::PollStart {
-                    timestamp_nanos,
-                    worker_id,
-                    worker_local_queue_depth,
-                    task_id,
-                    spawn_loc_id,
-                })?;
-                if self.writer.take_rotated() {
-                    self.flush_state.on_rotate();
-                }
-            }
-            RawEvent::PollEnd {
-                timestamp_nanos,
-                worker_id,
-            } => {
-                self.writer.write_event(&TelemetryEvent::PollEnd {
-                    timestamp_nanos,
-                    worker_id,
-                })?;
-                if self.writer.take_rotated() {
-                    self.flush_state.on_rotate();
-                }
-            }
-            RawEvent::WorkerPark {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                cpu_time_nanos,
-            } => {
-                self.writer.write_event(&TelemetryEvent::WorkerPark {
-                    timestamp_nanos,
-                    worker_id,
-                    worker_local_queue_depth,
-                    cpu_time_nanos,
-                })?;
-                if self.writer.take_rotated() {
-                    self.flush_state.on_rotate();
-                }
-            }
-            RawEvent::WorkerUnpark {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                cpu_time_nanos,
-                sched_wait_delta_nanos,
-            } => {
-                self.writer.write_event(&TelemetryEvent::WorkerUnpark {
-                    timestamp_nanos,
-                    worker_id,
-                    worker_local_queue_depth,
-                    cpu_time_nanos,
-                    sched_wait_delta_nanos,
-                })?;
-                if self.writer.take_rotated() {
-                    self.flush_state.on_rotate();
-                }
-            }
-            RawEvent::QueueSample {
-                timestamp_nanos,
-                global_queue_depth,
-            } => {
-                self.writer.write_event(&TelemetryEvent::QueueSample {
-                    timestamp_nanos,
-                    global_queue_depth,
-                })?;
-                if self.writer.take_rotated() {
-                    self.flush_state.on_rotate();
-                }
-            }
-            RawEvent::WakeEvent {
-                timestamp_nanos,
-                waker_task_id,
-                woken_task_id,
-                target_worker,
-            } => {
-                self.writer.write_event(&TelemetryEvent::WakeEvent {
-                    timestamp_nanos,
-                    waker_task_id,
-                    woken_task_id,
-                    target_worker,
-                })?;
-                if self.writer.take_rotated() {
-                    self.flush_state.on_rotate();
-                }
-            }
+        if self.writer.take_rotated() {
+            self.flush_state.on_rotate();
+        }
+        let events = self.flush_state.resolve(raw);
+        if self.writer.write_atomic(&events)? {
+            // write_atomic rotated to a new file — defs referenced by these
+            // events were only in the old file. Emit them into the new file.
+            debug_assert!(
+                self.writer.take_rotated(),
+                "write atomic returned true, rotation occured"
+            );
+            self.flush_state.on_rotate();
+            let events = self.flush_state.resolve(raw);
+            if self.writer.write_atomic(&events)? {
+                // Something bad is happening...
+                eprintln!("double failed to write events. this is a bug. disabling");
+                self.shared.enabled.store(false, Ordering::Relaxed);
+            };
         }
         Ok(())
     }
@@ -436,7 +381,6 @@ impl TelemetryRecorder {
         if task_tracking_enabled {
             let s5 = shared.clone();
             builder.on_task_spawn(move |meta| {
-                println!("meta: {:?}", meta.id());
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
                 s5.record_event(RawEvent::TaskSpawn { task_id, location });
@@ -507,29 +451,6 @@ impl TelemetryHandle {
         self.shared.enabled.store(false, Ordering::Relaxed);
         self.recorder.lock().unwrap().flush();
     }
-
-    /// Get a handle for creating `Traced<F>` future wrappers.
-    pub fn traced_handle(&self) -> crate::traced::TracedHandle {
-        crate::traced::TracedHandle {
-            shared: self.shared.clone(),
-        }
-    }
-
-    /// Spawn a future wrapped in [`Traced`](crate::traced::Traced) for wake-event capture.
-    #[track_caller]
-    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
-    where
-        F: std::future::Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        let traced_handle = self.traced_handle();
-        tokio::spawn(async move {
-            let task_id = tokio::task::try_id()
-                .map(TaskId::from)
-                .unwrap_or(TaskId::from_u32(0));
-            crate::traced::Traced::new(future, traced_handle, task_id).await
-        })
-    }
 }
 
 /// RAII guard returned by [`TracedRuntimeBuilder::build`].
@@ -559,16 +480,6 @@ impl TelemetryGuard {
     pub fn disable(&self) {
         self.handle.disable();
     }
-
-    /// Spawn a future wrapped in [`Traced`](crate::traced::Traced) for wake-event capture.
-    #[track_caller]
-    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
-    where
-        F: std::future::Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        self.handle.spawn(future)
-    }
 }
 
 impl Drop for TelemetryGuard {
@@ -586,6 +497,9 @@ pub struct TracedRuntimeBuilder {
 }
 
 impl TracedRuntimeBuilder {
+    /// Enables task tracking on the runtime
+    ///
+    /// This will cause the emitted events to include task tracking information (namely a TaskId and spawn location)
     pub fn with_task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking_enabled = enabled;
         self
@@ -602,7 +516,7 @@ impl TracedRuntimeBuilder {
         recorder
             .lock()
             .unwrap()
-            .initialize(runtime.handle().clone(), self.task_tracking_enabled);
+            .initialize(runtime.handle().clone());
 
         let stop = Arc::new(AtomicBool::new(false));
 
@@ -709,10 +623,9 @@ impl TracedRuntime {
         .build(builder, writer)
     }
 
-    /// Build a traced runtime with telemetry **enabled** immediately, with task metadata tracking on.
+    /// Build and start runtime with all settings enabled.
     ///
-    /// This is the backwards-compatible one-liner. Equivalent to:
-    /// `TracedRuntime::builder().with_task_tracking(true).build_and_start(builder, writer)`
+    /// Future versions of this library MAY enable more features via this API as they are added.
     pub fn build_and_start(
         builder: tokio::runtime::Builder,
         writer: Box<dyn TraceWriter>,
@@ -754,16 +667,118 @@ mod tests {
     #[test]
     fn test_flush_state_on_rotate_clears_emitted() {
         let mut fs = FlushState::new();
-        let mut writer = NullWriter;
         #[track_caller]
         fn get_loc() -> &'static Location<'static> {
             Location::caller()
         }
         let loc = get_loc();
         let id = fs.intern(loc);
-        fs.ensure_def(id, &mut writer).unwrap();
+        let mut defs = SmallVec::new();
+        fs.collect_def(id, &mut defs);
+        assert_eq!(defs.len(), 1);
         assert!(fs.emitted_this_file.contains(&id));
         fs.on_rotate();
         assert!(!fs.emitted_this_file.contains(&id));
+    }
+
+    /// Integration test: write events through the recorder with a rotating writer,
+    /// then read back each file with TraceReader and verify every spawn location resolves.
+    /// This is the key invariant: each rotated file is self-contained and readable.
+    #[test]
+    fn test_spawn_locations_resolve_after_rotation() {
+        use crate::telemetry::analysis::TraceReader;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+
+        // Two distinct call-sites → two different interned locations.
+        #[track_caller]
+        fn loc_a() -> &'static Location<'static> {
+            Location::caller()
+        }
+        #[track_caller]
+        fn loc_b() -> &'static Location<'static> {
+            Location::caller()
+        }
+        let location_a = loc_a();
+        let location_b = loc_b();
+
+        let writer = crate::telemetry::writer::RotatingWriter::new(&base, 100, 100_000).unwrap();
+        let mut recorder = TelemetryRecorder::new(Box::new(writer));
+
+        // Interleave PollStart and TaskSpawn so both code paths hit rotation.
+        let locations = [
+            location_a, location_b, location_a, location_b, location_a, location_b,
+        ];
+        for (i, loc) in locations.iter().enumerate() {
+            let task_id = crate::telemetry::task_metadata::TaskId::from_u32(i as u32);
+            recorder
+                .write_raw_event(RawEvent::TaskSpawn {
+                    task_id,
+                    location: loc,
+                })
+                .unwrap();
+            recorder
+                .write_raw_event(RawEvent::PollStart {
+                    timestamp_nanos: (i as u64 + 1) * 1000,
+                    worker_id: 0,
+                    worker_local_queue_depth: 0,
+                    task_id,
+                    location: loc,
+                })
+                .unwrap();
+        }
+        recorder.writer.flush().unwrap();
+
+        // Collect all rotated files.
+        let mut files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map_or(false, |ext| ext == "bin"))
+            .collect();
+        files.sort();
+        assert!(
+            files.len() > 1,
+            "expected multiple files from rotation, got {}",
+            files.len()
+        );
+
+        let mut total_events = 0;
+        for file in &files {
+            let path = file.to_str().unwrap();
+            let mut reader = TraceReader::new(path).unwrap();
+            reader.read_header().unwrap();
+            let events = reader.read_all().unwrap();
+
+            // Every PollStart's spawn location must resolve to a real location string.
+            for ev in &events {
+                if let TelemetryEvent::PollStart { spawn_loc_id, .. } = ev {
+                    let loc = reader.spawn_locations.get(spawn_loc_id).unwrap_or_else(|| {
+                        panic!(
+                            "file {path:?}: spawn_loc_id {spawn_loc_id:?} has no definition {:#?}",
+                            reader.spawn_locations
+                        )
+                    });
+                    assert!(
+                        loc.contains(':'),
+                        "location should be file:line:col, got {loc:?}"
+                    );
+                }
+            }
+
+            // Every TaskSpawn's spawn location must also resolve.
+            for (task_id, spawn_loc_id) in &reader.task_spawn_locs {
+                reader.spawn_locations.get(spawn_loc_id).unwrap_or_else(|| {
+                    panic!("file {path:?}: task {task_id:?} spawn_loc_id {spawn_loc_id:?} has no definition")
+                });
+            }
+
+            total_events += events.len();
+        }
+        assert_eq!(
+            total_events, 6,
+            "all PollStart events should be readable across files"
+        );
     }
 }

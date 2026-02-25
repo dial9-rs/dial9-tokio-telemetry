@@ -14,6 +14,15 @@ pub trait TraceWriter: Send {
     fn take_rotated(&mut self) -> bool {
         false
     }
+    /// Write a group of events atomically — all events land in the same file.
+    /// Rotating writers pre-check total size and rotate before writing if needed.
+    /// Returns true if a file rotation occurred during this write.
+    fn write_atomic(&mut self, events: &[TelemetryEvent]) -> std::io::Result<bool> {
+        for event in events {
+            self.write_event(event)?;
+        }
+        Ok(false)
+    }
 }
 
 pub struct SimpleBinaryWriter {
@@ -161,6 +170,17 @@ impl RotatingWriter {
         Ok(())
     }
 
+    /// Pre-rotate if `bytes` won't fit in the current file.
+    fn ensure_space(&mut self, bytes: u64) -> std::io::Result<()> {
+        if self.stopped {
+            return Ok(());
+        }
+        if self.current_size + bytes > self.max_file_size {
+            self.rotate()?;
+        }
+        Ok(())
+    }
+
     fn write_event_inner(&mut self, event: &TelemetryEvent) -> std::io::Result<()> {
         if self.stopped {
             return Ok(());
@@ -209,6 +229,22 @@ impl TraceWriter for RotatingWriter {
 
     fn take_rotated(&mut self) -> bool {
         std::mem::replace(&mut self.rotated, false)
+    }
+
+    fn write_atomic(&mut self, events: &[TelemetryEvent]) -> std::io::Result<bool> {
+        let total: u64 = events
+            .iter()
+            .map(|e| format::wire_event_size(e) as u64)
+            .sum();
+        self.ensure_space(total)?;
+        if self.rotated {
+            return Ok(true);
+        }
+
+        for event in events {
+            self.write_event_inner(event)?;
+        }
+        Ok(false)
     }
 }
 
