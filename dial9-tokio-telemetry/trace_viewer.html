@@ -1979,6 +1979,21 @@
                 if (trace) renderAll();
             });
 
+            // ── Auto-load trace from ?trace=URL parameter ──
+            (function autoLoadFromUrl() {
+                const traceUrl = new URLSearchParams(location.search).get("trace");
+                if (!traceUrl) return;
+                dropZone.innerHTML = "Loading trace…";
+                fetch(traceUrl)
+                    .then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+                    .then(buf => {
+                        trace = parseTrace(buf);
+                        processTrace();
+                        showViewer(traceUrl.split("/").pop());
+                    })
+                    .catch(err => { dropZone.innerHTML = "Failed to load trace: " + err.message; });
+            })();
+
             // ── Legend (inline in toolbar area) ──
             (function addLegend() {
                 const tb = document.getElementById("toolbar");
