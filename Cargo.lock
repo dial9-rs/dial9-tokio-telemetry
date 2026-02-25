@@ -905,6 +905,7 @@ dependencies = [
  "arc-swap",
  "assert2",
  "criterion",
+ "futures-util",
  "hdrhistogram",
  "libc",
  "pin-project-lite",
@@ -1676,13 +1677,20 @@ dependencies = [
  "aws-config",
  "aws-sdk-dynamodb",
  "axum",
+ "axum-core",
  "clap",
  "dial9-tokio-telemetry",
+ "futures-util",
+ "hyper 1.8.1",
+ "hyper-util",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
+ "tower",
+ "tower-service",
+ "tracing",
 ]
 
 [[package]]

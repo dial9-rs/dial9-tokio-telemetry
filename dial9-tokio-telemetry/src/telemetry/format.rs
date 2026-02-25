@@ -1,4 +1,4 @@
-//! Binary trace wire format (v8).
+//! Binary trace wire format (v9).
 //!
 //! ## File layout
 //! ```text
@@ -12,6 +12,7 @@
 //!   4: QueueSample                  → code(u8) + timestamp_us(u32) + global_queue(u8)                                                   = 6 bytes
 //!   5: SpawnLocationDef             → code(u8) + spawn_loc_id(u16) + string_len(u16) + string_bytes(N)                                 = 5 + N bytes
 //!   6: TaskSpawn                    → code(u8) + task_id(u32) + spawn_loc_id(u16)                                                       = 7 bytes
+//!   7: WakeEvent                    → code(u8) + timestamp_us(u32) + waker_task_id(u32) + woken_task_id(u32) + target_worker(u8)        = 14 bytes
 //! ```
 //!
 //! Timestamps are microseconds since trace start. u32 micros supports traces up to ~71 minutes.
@@ -19,19 +20,15 @@
 //! `sched_wait_us` is the scheduling wait delta from schedstat during the park period.
 //! In-memory representation remains nanoseconds; conversion happens at the wire boundary.
 //!
-//! ### v7 → v8 changes
-//! - Added TaskSpawn (code 6): emitted once per task, maps task_id → spawn_loc_id
-//! - SpawnLocationDef moved to code 5 (was 7)
-//! - Interning now happens in the flush thread, not in SharedState
-//! - Workers carry &'static Location in RawEvents; flush thread interns to SpawnLocationId
-//! - PollStart spawn_loc_id is resolved by flush thread from the TaskSpawn mapping
+//! ### v8 → v9 changes
+//! - Added WakeEvent (code 7): emitted by Traced<F> waker wrapper, records who woke a task
 
 use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::io::{Read, Result, Write};
 
 pub const MAGIC: &[u8; 8] = b"TOKIOTRC";
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 pub const HEADER_SIZE: usize = 12; // 8 magic + 4 version
 
 // Wire codes
@@ -42,6 +39,7 @@ const WIRE_WORKER_UNPARK: u8 = 3;
 const WIRE_QUEUE_SAMPLE: u8 = 4;
 const WIRE_SPAWN_LOCATION_DEF: u8 = 5;
 const WIRE_TASK_SPAWN: u8 = 6;
+const WIRE_WAKE_EVENT: u8 = 7;
 
 /// Returns the wire size of an event.
 pub fn wire_event_size(event: &TelemetryEvent) -> usize {
@@ -53,6 +51,7 @@ pub fn wire_event_size(event: &TelemetryEvent) -> usize {
         TelemetryEvent::WorkerUnpark { .. } => 15,
         TelemetryEvent::SpawnLocationDef { location, .. } => 1 + 2 + 2 + location.len(),
         TelemetryEvent::TaskSpawn { .. } => 7,
+        TelemetryEvent::WakeEvent { .. } => 14,
     }
 }
 
@@ -142,6 +141,19 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
             w.write_all(&[WIRE_TASK_SPAWN])?;
             w.write_all(&task_id.to_u32().to_le_bytes())?;
             w.write_all(&spawn_loc_id.as_u16().to_le_bytes())?;
+        }
+        TelemetryEvent::WakeEvent {
+            timestamp_nanos,
+            waker_task_id,
+            woken_task_id,
+            target_worker,
+        } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
+            w.write_all(&[WIRE_WAKE_EVENT])?;
+            w.write_all(&timestamp_us.to_le_bytes())?;
+            w.write_all(&waker_task_id.to_u32().to_le_bytes())?;
+            w.write_all(&woken_task_id.to_u32().to_le_bytes())?;
+            w.write_all(&[*target_worker])?;
         }
     }
     Ok(())
@@ -268,6 +280,20 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
             TelemetryEvent::QueueSample {
                 timestamp_nanos,
                 global_queue_depth: gq[0] as usize,
+            }
+        }
+        WIRE_WAKE_EVENT => {
+            let mut waker_task_id_bytes = [0u8; 4];
+            let mut woken_task_id_bytes = [0u8; 4];
+            let mut tw = [0u8; 1];
+            r.read_exact(&mut waker_task_id_bytes)?;
+            r.read_exact(&mut woken_task_id_bytes)?;
+            r.read_exact(&mut tw)?;
+            TelemetryEvent::WakeEvent {
+                timestamp_nanos,
+                waker_task_id: TaskId::from_u32(u32::from_le_bytes(waker_task_id_bytes)),
+                woken_task_id: TaskId::from_u32(u32::from_le_bytes(woken_task_id_bytes)),
+                target_worker: tw[0],
             }
         }
         _ => return Ok(None),
@@ -892,6 +918,32 @@ mod tests {
                 wire_event_size(&event),
                 "size mismatch for string length {len}"
             );
+        }
+    }
+
+    #[test]
+    fn test_wake_event_roundtrip() {
+        let event = TelemetryEvent::WakeEvent {
+            timestamp_nanos: 5_000_000,
+            waker_task_id: TaskId::from_u32(10),
+            woken_task_id: TaskId::from_u32(20),
+            target_worker: 3,
+        };
+        assert_eq!(wire_event_size(&event), 14);
+        let decoded = roundtrip(&event);
+        match decoded {
+            TelemetryEvent::WakeEvent {
+                timestamp_nanos,
+                waker_task_id,
+                woken_task_id,
+                target_worker,
+            } => {
+                assert_eq!(timestamp_nanos, 5_000_000);
+                assert_eq!(waker_task_id.to_u32(), 10);
+                assert_eq!(woken_task_id.to_u32(), 20);
+                assert_eq!(target_worker, 3);
+            }
+            _ => panic!("expected WakeEvent"),
         }
     }
 }
