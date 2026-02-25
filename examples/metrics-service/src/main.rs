@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use clap::Parser;
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RotatingWriter, TracedRuntime};
 use tokio::runtime::Builder;
 
 use buffer::MetricsBuffer;
@@ -72,7 +72,11 @@ fn main() -> std::io::Result<()> {
 
     let mut builder = Builder::new_multi_thread();
     builder.worker_threads(args.worker_threads).enable_all();
-    let (runtime, _guard) = TracedRuntime::build_and_start(builder, Box::new(writer))?;
+    let (runtime, _guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .with_cpu_profiling(CpuProfilingConfig::default())
+        .with_inline_callframe_symbols(true)
+        .build_and_start(builder, Box::new(writer))?;
     let handle = _guard.handle();
 
     runtime.block_on(async {

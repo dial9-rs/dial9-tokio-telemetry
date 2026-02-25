@@ -277,7 +277,7 @@
         </div>
 
         <script>
-            // ── Binary Parser (v9 format) ──
+            // ── Binary Parser (v11 format) ──
             // Wire codes:
             //   0: PollStart        → code(1) + ts(4) + worker(1) + local_q(1) + task_id(4) + spawn_loc_id(2) = 13 bytes
             //   1: PollEnd          → code(1) + ts(4) + worker(1)                                              = 6 bytes
@@ -286,7 +286,9 @@
             //   4: QueueSample      → code(1) + ts(4) + global_q(1)                                           = 6 bytes
             //   5: SpawnLocationDef → code(1) + spawn_loc_id(2) + string_len(2) + string_bytes(N)
             //   6: TaskSpawn        → code(1) + task_id(4) + spawn_loc_id(2)                                  = 7 bytes
-            //   7: WakeEvent        → code(1) + ts(4) + waker_task_id(4) + woken_task_id(4) + target_worker(1) = 14 bytes
+            //   7: CpuSample        → code(1) + ts(4) + worker(1) + num_frames(1) + frames(N*8)
+            //   8: CallframeDef     → code(1) + address(8) + string_len(2) + string_bytes(N)
+            //   9: WakeEvent        → code(1) + ts(4) + waker_task_id(4) + woken_task_id(4) + target_worker(1) = 14 bytes
             const MAX_EVENTS = 2_000_000; // cap parsed events to keep UI responsive
 
             function parseTrace(buffer) {
@@ -367,7 +369,7 @@
                         continue;
                     }
 
-                    if (wireCode === 7) {
+                    if (wireCode === 9) {
                         // WakeEvent: ts(4) + waker_task_id(4) + woken_task_id(4) + target_worker(1) = 13 after code
                         if (off + 13 > buffer.byteLength) break;
                         const timestampUs = view.getUint32(off, true); off += 4;
@@ -375,7 +377,7 @@
                         const wokenTaskId = view.getUint32(off, true); off += 4;
                         const targetWorker = view.getUint8(off); off += 1;
                         events.push({
-                            eventType: 7, // WakeEvent
+                            eventType: 9, // WakeEvent
                             timestamp: timestampUs * 1000,
                             workerId: targetWorker,
                             wakerTaskId,
@@ -387,7 +389,7 @@
                         continue;
                     }
 
-                    if (wireCode > 7) break; // unknown code
+                    if (wireCode > 9) break; // unknown code
 
                     // All regular codes have a 4-byte timestamp next
                     if (off + 4 > buffer.byteLength) break;
@@ -476,7 +478,7 @@
                 WorkerPark: 2,
                 WorkerUnpark: 3,
                 QueueSample: 4,
-                WakeEvent: 7,
+                WakeEvent: 9,
             };
             const ET_NAMES = [
                 "PollStart",
@@ -1253,7 +1255,6 @@
                             ctx.fill();
                         }
                     }
-                }
                 }
 
                 // Overlay local queue depth as a step chart in the bottom portion
