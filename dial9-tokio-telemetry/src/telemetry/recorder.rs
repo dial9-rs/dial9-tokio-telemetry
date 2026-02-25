@@ -48,13 +48,21 @@ fn resolve_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> Option<usize>
     })
 }
 
+/// Get the current worker ID as u8 (255 if unknown). Used by Traced waker.
+pub(crate) fn current_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> u8 {
+    match resolve_worker_id(metrics) {
+        Some(id) if id <= 254 => id as u8,
+        _ => 255,
+    }
+}
+
 /// Shared state accessed lock-free by callbacks on the hot path.
 /// No spawn location tracking here — all interning happens in the flush thread.
-struct SharedState {
-    enabled: AtomicBool,
-    collector: CentralCollector,
-    start_time: Instant,
-    metrics: ArcSwap<Option<RuntimeMetrics>>,
+pub(crate) struct SharedState {
+    pub(crate) enabled: AtomicBool,
+    pub(crate) collector: CentralCollector,
+    pub(crate) start_time: Instant,
+    pub(crate) metrics: ArcSwap<Option<RuntimeMetrics>>,
 }
 
 impl SharedState {
@@ -276,6 +284,19 @@ impl FlushState {
                 events.push(TelemetryEvent::QueueSample {
                     timestamp_nanos,
                     global_queue_depth,
+                });
+            }
+            RawEvent::WakeEvent {
+                timestamp_nanos,
+                waker_task_id,
+                woken_task_id,
+                target_worker,
+            } => {
+                events.push(TelemetryEvent::WakeEvent {
+                    timestamp_nanos,
+                    waker_task_id,
+                    woken_task_id,
+                    target_worker,
                 });
             }
         }
