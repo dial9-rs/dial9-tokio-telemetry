@@ -1,3 +1,4 @@
+mod axum_traced;
 mod buffer;
 mod client;
 mod ddb;
@@ -123,7 +124,7 @@ fn main() -> std::io::Result<()> {
             timer_shutdown.cancel();
         });
 
-        axum::serve(listener, app)
+        axum_traced::serve(listener, app.into_make_service(), handle.clone())
             .with_graceful_shutdown(async move { shutdown.cancelled().await })
             .await
             .unwrap();

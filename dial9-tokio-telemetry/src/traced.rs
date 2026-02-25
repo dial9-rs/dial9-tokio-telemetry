@@ -115,3 +115,109 @@ impl<F: Future> Future for Traced<F> {
         this.inner.poll(&mut traced_cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::telemetry::analysis::TraceReader;
+    use crate::telemetry::events::TelemetryEvent;
+    use crate::telemetry::recorder::TracedRuntime;
+    use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
+    use crate::telemetry::writer::SimpleBinaryWriter;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    /// Verify that `Traced<F>` records a `WakeEvent` whose `woken_task_id`
+    /// matches the spawned task when a `Notify` wakes it.
+    ///
+    /// This is an integration test: events are written to a real file via
+    /// `SimpleBinaryWriter` and then read back with `TraceReader`.
+    #[test]
+    fn traced_emits_wake_events() {
+        let dir = TempDir::new().unwrap();
+        let trace_path = dir.path().join("trace.bin");
+
+        // Build a current-thread runtime so that all tasks — and all thread-local
+        // BUFFER accesses — share a single thread with the test itself.
+        let (runtime, guard) = TracedRuntime::build_and_start(
+            tokio::runtime::Builder::new_current_thread(),
+            Box::new(SimpleBinaryWriter::new(&trace_path).unwrap()),
+        )
+        .unwrap();
+
+        let handle = guard.handle();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let notify_clone = notify.clone();
+
+        // We'll capture the spawned task's ID from inside the task so we can
+        // assert the correct `woken_task_id` appears in the recorded events.
+        let spawned_id: Arc<Mutex<TaskId>> = Arc::new(Mutex::new(UNKNOWN_TASK_ID));
+        let spawned_id_write = spawned_id.clone();
+
+        runtime.block_on(async {
+            // Spawn a task wrapped in Traced that blocks on a Notify.
+            let join = handle.spawn(async move {
+                *spawned_id_write.lock().unwrap() = tokio::task::try_id()
+                    .map(TaskId::from)
+                    .unwrap_or(UNKNOWN_TASK_ID);
+                notify_clone.notified().await;
+            });
+
+            // Yield so the spawned task runs its first poll and registers its
+            // waker with the Notify before we send the notification.
+            tokio::task::yield_now().await;
+
+            // This calls wake_by_ref on our TracedWakerData, recording the WakeEvent.
+            notify.notify_one();
+
+            join.await.unwrap();
+        });
+
+        // Wake events land in the thread-local BUFFER (capacity 1_024), so a
+        // single event will not auto-flush.  Manually drain the buffer into the
+        // collector so that the guard flush below picks it up.
+        let th = handle.traced_handle();
+        BUFFER.with(|buf| {
+            let batch = buf.borrow_mut().flush();
+            if !batch.is_empty() {
+                th.shared.collector.accept_flush(batch);
+            }
+        });
+
+        // Dropping the guard stops the background flush thread, joins it, then
+        // performs a final flush: collector → SimpleBinaryWriter → trace file.
+        drop(guard);
+
+        // Parse the trace file and collect all WakeEvents.
+        let trace_path_str = trace_path.to_str().unwrap();
+        let mut reader = TraceReader::new(trace_path_str).unwrap();
+        reader.read_header().unwrap();
+        let events = reader.read_all().unwrap();
+
+        let wake_task_ids: Vec<TaskId> = events
+            .iter()
+            .filter_map(|e| {
+                if let TelemetryEvent::WakeEvent { woken_task_id, .. } = e {
+                    Some(*woken_task_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            !wake_task_ids.is_empty(),
+            "expected at least one WakeEvent but got none; all events: {events:#?}"
+        );
+
+        let expected = *spawned_id.lock().unwrap();
+        assert_ne!(
+            expected, UNKNOWN_TASK_ID,
+            "spawned task should have a real tokio task ID"
+        );
+        assert!(
+            wake_task_ids.contains(&expected),
+            "no WakeEvent with woken_task_id={expected:?}; recorded wake_task_ids={wake_task_ids:?}"
+        );
+    }
+}
