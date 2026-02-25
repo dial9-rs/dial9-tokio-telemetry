@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "dial9-tokio-telemetry",
+    "examples/metrics-service",
 ]
 
 [workspace.dependencies]
