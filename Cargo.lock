@@ -905,6 +905,7 @@ dependencies = [
  "arc-swap",
  "assert2",
  "criterion",
+ "futures-util",
  "hdrhistogram",
  "libc",
  "pin-project-lite",

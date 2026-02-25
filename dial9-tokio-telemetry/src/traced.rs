@@ -4,12 +4,13 @@ use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::recorder::{SharedState, current_worker_id};
 use crate::telemetry::task_metadata::TaskId;
+use futures_util::task::{ArcWake, AtomicWaker, waker as arc_waker};
 use pin_project_lite::pin_project;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::sync::atomic::Ordering;
+use std::task::{Context, Poll, Waker};
 
 /// Handle used by `Traced<F>` to emit events into the telemetry system.
 /// Obtained via `TelemetryHandle::traced_handle()`.
@@ -25,52 +26,44 @@ pin_project! {
         inner: F,
         handle: TracedHandle,
         task_id: TaskId,
+        waker_data: Arc<TracedWakerData>, // reused across polls to avoid a per-poll Arc allocation
     }
 }
 
 impl<F> Traced<F> {
     pub fn new(inner: F, handle: TracedHandle, task_id: TaskId) -> Self {
-        Self { inner, handle, task_id }
+        let waker_data = Arc::new(TracedWakerData {
+            inner: AtomicWaker::new(),
+            woken_task_id: task_id,
+            shared: handle.shared.clone(),
+        });
+        Self {
+            inner,
+            handle,
+            task_id,
+            waker_data,
+        }
     }
 }
 
 // --- Waker wrapping ---
 
+/// Shared state threaded through our custom `Waker`.
+///
+/// `inner` is an `AtomicWaker` so that the waker registered by the executor
+/// can be stored and replaced in a thread-safe way without allocating a new
+/// `Arc` on every `poll`.
 struct TracedWakerData {
-    inner: Waker,
+    inner: AtomicWaker,
     woken_task_id: TaskId,
     shared: Arc<SharedState>,
 }
 
-const VTABLE: RawWakerVTable = RawWakerVTable::new(
-    traced_waker_clone,
-    traced_waker_wake,
-    traced_waker_wake_by_ref,
-    traced_waker_drop,
-);
-
-unsafe fn traced_waker_clone(data: *const ()) -> RawWaker {
-    let arc = unsafe { Arc::from_raw(data as *const TracedWakerData) };
-    let cloned = arc.clone();
-    std::mem::forget(arc);
-    RawWaker::new(Arc::into_raw(cloned) as *const (), &VTABLE)
-}
-
-unsafe fn traced_waker_wake(data: *const ()) {
-    let arc = unsafe { Arc::from_raw(data as *const TracedWakerData) };
-    record_wake_event(&arc);
-    arc.inner.wake_by_ref();
-}
-
-unsafe fn traced_waker_wake_by_ref(data: *const ()) {
-    let arc = unsafe { Arc::from_raw(data as *const TracedWakerData) };
-    record_wake_event(&arc);
-    arc.inner.wake_by_ref();
-    std::mem::forget(arc);
-}
-
-unsafe fn traced_waker_drop(data: *const ()) {
-    let _arc = unsafe { Arc::from_raw(data as *const TracedWakerData) };
+impl ArcWake for TracedWakerData {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        record_wake_event(arc_self);
+        arc_self.inner.wake();
+    }
 }
 
 fn record_wake_event(data: &TracedWakerData) {
@@ -98,19 +91,8 @@ fn record_wake_event(data: &TracedWakerData) {
     });
 }
 
-fn make_traced_waker(
-    inner: &Waker,
-    woken_task_id: TaskId,
-    shared: &Arc<SharedState>,
-) -> Waker {
-    let data = Arc::new(TracedWakerData {
-        inner: inner.clone(),
-        woken_task_id,
-        shared: shared.clone(),
-    });
-    let raw = RawWaker::new(Arc::into_raw(data) as *const (), &VTABLE);
-    // SAFETY: Our vtable correctly implements clone/wake/drop for Arc<TracedWakerData>
-    unsafe { Waker::from_raw(raw) }
+fn make_traced_waker(data: Arc<TracedWakerData>) -> Waker {
+    arc_waker(data)
 }
 
 impl<F: Future> Future for Traced<F> {
@@ -122,7 +104,13 @@ impl<F: Future> Future for Traced<F> {
             return this.inner.poll(cx);
         }
 
-        let traced_waker = make_traced_waker(cx.waker(), *this.task_id, &this.handle.shared);
+        // Store (or replace) the executor's waker so that when our custom
+        // waker fires it can forward the notification to the correct waker,
+        // even if the task has been moved to a different executor thread
+        // between polls.
+        this.waker_data.inner.register(cx.waker());
+
+        let traced_waker = make_traced_waker(this.waker_data.clone());
         let mut traced_cx = Context::from_waker(&traced_waker);
         this.inner.poll(&mut traced_cx)
     }
