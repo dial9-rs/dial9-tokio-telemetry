@@ -472,6 +472,29 @@ impl TelemetryHandle {
         self.shared.enabled.store(false, Ordering::Relaxed);
         self.recorder.lock().unwrap().flush();
     }
+
+    /// Get a handle for creating `Traced<F>` future wrappers.
+    pub fn traced_handle(&self) -> crate::traced::TracedHandle {
+        crate::traced::TracedHandle {
+            shared: self.shared.clone(),
+        }
+    }
+
+    /// Spawn a future wrapped in [`Traced`](crate::traced::Traced) for wake-event capture.
+    #[track_caller]
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let traced_handle = self.traced_handle();
+        tokio::spawn(async move {
+            let task_id = tokio::task::try_id()
+                .map(TaskId::from)
+                .unwrap_or(TaskId::from_u32(0));
+            crate::traced::Traced::new(future, traced_handle, task_id).await
+        })
+    }
 }
 
 /// RAII guard returned by [`TracedRuntimeBuilder::build`].

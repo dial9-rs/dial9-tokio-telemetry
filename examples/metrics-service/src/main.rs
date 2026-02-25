@@ -68,6 +68,7 @@ fn main() -> std::io::Result<()> {
     let mut builder = Builder::new_multi_thread();
     builder.worker_threads(args.worker_threads).enable_all();
     let (runtime, _guard) = TracedRuntime::build_and_start(builder, Box::new(writer))?;
+    let handle = _guard.handle();
 
     runtime.block_on(async {
         let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
@@ -85,7 +86,7 @@ fn main() -> std::io::Result<()> {
         // background flush worker
         let flush_state = state.clone();
         let flush_interval = Duration::from_secs(args.flush_interval);
-        tokio::spawn(async move {
+        handle.spawn(async move {
             let mut interval = tokio::time::interval(flush_interval);
             loop {
                 interval.tick().await;
@@ -107,7 +108,7 @@ fn main() -> std::io::Result<()> {
             "http://127.0.0.1:{}",
             args.server_addr.split(':').nth(1).unwrap_or("3001")
         );
-        tokio::spawn(async move {
+        handle.spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             println!("Client starting load profile...");
             client::run(&server_url, client_shutdown.clone()).await;
@@ -116,7 +117,7 @@ fn main() -> std::io::Result<()> {
         // timer to stop everything
         let timer_shutdown = shutdown.clone();
         let run_duration = Duration::from_secs(args.run_duration);
-        tokio::spawn(async move {
+        handle.spawn(async move {
             tokio::time::sleep(run_duration).await;
             println!("Run complete, shutting down.");
             timer_shutdown.cancel();
