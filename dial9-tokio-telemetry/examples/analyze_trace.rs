@@ -1,5 +1,5 @@
 use dial9_tokio_telemetry::telemetry::{
-    TraceReader, TelemetryEvent, analyze_trace, compute_wake_to_poll_delays, detect_idle_workers,
+    TelemetryEvent, TraceReader, analyze_trace, compute_wake_to_poll_delays, detect_idle_workers,
     print_analysis,
 };
 use std::collections::HashMap;
@@ -51,13 +51,22 @@ fn main() {
     // Build task_id → spawn_loc_id from PollStart events (more complete than TaskSpawn alone)
     let mut task_locs: HashMap<u32, u16> = HashMap::new();
     for e in &events {
-        if let TelemetryEvent::PollStart { task_id, spawn_loc_id, .. } = e {
-            task_locs.entry(task_id.to_u32()).or_insert(spawn_loc_id.as_u16());
+        if let TelemetryEvent::PollStart {
+            task_id,
+            spawn_loc_id,
+            ..
+        } = e
+        {
+            task_locs
+                .entry(task_id.to_u32())
+                .or_insert(spawn_loc_id.as_u16());
         }
     }
     // Also include TaskSpawn mappings from the reader
     for (task_id, spawn_loc_id) in &reader.task_spawn_locs {
-        task_locs.entry(task_id.to_u32()).or_insert(spawn_loc_id.as_u16());
+        task_locs
+            .entry(task_id.to_u32())
+            .or_insert(spawn_loc_id.as_u16());
     }
 
     // Count wakes by waker spawn location
@@ -71,7 +80,9 @@ fn main() {
                 *wakes_by_loc.entry(Some("<non-task context>")).or_default() += 1;
                 resolved += 1;
             } else if let Some(loc_id) = task_locs.get(&id) {
-                let loc = reader.spawn_locations.get(&dial9_tokio_telemetry::telemetry::SpawnLocationId::from_u16(*loc_id));
+                let loc = reader
+                    .spawn_locations
+                    .get(&dial9_tokio_telemetry::telemetry::SpawnLocationId::from_u16(*loc_id));
                 *wakes_by_loc.entry(loc.map(|s| s.as_str())).or_default() += 1;
                 resolved += 1;
             } else {
@@ -80,8 +91,12 @@ fn main() {
         }
     }
     if resolved + unresolved > 0 {
-        println!("\n=== Waker Identity ({} resolved, {} unresolved of {} total tasks in trace) ===",
-            resolved, unresolved, task_locs.len());
+        println!(
+            "\n=== Waker Identity ({} resolved, {} unresolved of {} total tasks in trace) ===",
+            resolved,
+            unresolved,
+            task_locs.len()
+        );
 
         // Debug: show some unresolved waker task IDs vs known task IDs
         let mut unresolved_ids: HashMap<u32, usize> = HashMap::new();
@@ -101,16 +116,33 @@ fn main() {
         }
         println!("  Known task IDs (sample):");
         for (id, loc_id) in task_locs.iter().take(5) {
-            let loc = reader.spawn_locations.get(&dial9_tokio_telemetry::telemetry::SpawnLocationId::from_u16(*loc_id));
-            println!("    0x{:08x} ({}) — {}", id, id, loc.map(|s| s.as_str()).unwrap_or("?"));
+            let loc = reader
+                .spawn_locations
+                .get(&dial9_tokio_telemetry::telemetry::SpawnLocationId::from_u16(*loc_id));
+            println!(
+                "    0x{:08x} ({}) — {}",
+                id,
+                id,
+                loc.map(|s| s.as_str()).unwrap_or("?")
+            );
         }
-        println!("  task_spawn_locs from reader: {} entries", reader.task_spawn_locs.len());
+        println!(
+            "  task_spawn_locs from reader: {} entries",
+            reader.task_spawn_locs.len()
+        );
         println!("  task_locs from PollStart: {} entries", task_locs.len());
         // Check: are the unresolved IDs in task_spawn_locs?
         for (id, count) in top_unresolved.iter().take(5) {
-            let in_spawn = reader.task_spawn_locs.contains_key(&dial9_tokio_telemetry::telemetry::TaskId::from_u32(*id));
-            println!("    0x{:08x}: in task_spawn_locs={}, in task_locs={}, wakes={}",
-                id, in_spawn, task_locs.contains_key(id), count);
+            let in_spawn = reader
+                .task_spawn_locs
+                .contains_key(&dial9_tokio_telemetry::telemetry::TaskId::from_u32(*id));
+            println!(
+                "    0x{:08x}: in task_spawn_locs={}, in task_locs={}, wakes={}",
+                id,
+                in_spawn,
+                task_locs.contains_key(id),
+                count
+            );
         }
         let mut by_count: Vec<_> = wakes_by_loc.into_iter().collect();
         by_count.sort_by(|a, b| b.1.cmp(&a.1));

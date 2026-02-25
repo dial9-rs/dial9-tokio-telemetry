@@ -239,15 +239,14 @@ pub fn compute_wake_to_poll_delays(events: &[TelemetryEvent]) -> Vec<u64> {
             task_id,
             ..
         } = e
+            && let Some(wakes) = wakes_by_task.get(task_id)
         {
-            if let Some(wakes) = wakes_by_task.get(task_id) {
-                // Binary search for last wake <= poll start
-                let idx = wakes.partition_point(|&t| t <= *timestamp_nanos);
-                if idx > 0 {
-                    let delay = timestamp_nanos - wakes[idx - 1];
-                    if delay > 0 && delay < 1_000_000_000 {
-                        delays.push(delay);
-                    }
+            // Binary search for last wake <= poll start
+            let idx = wakes.partition_point(|&t| t <= *timestamp_nanos);
+            if idx > 0 {
+                let delay = timestamp_nanos - wakes[idx - 1];
+                if delay > 0 && delay < 1_000_000_000 {
+                    delays.push(delay);
                 }
             }
         }
