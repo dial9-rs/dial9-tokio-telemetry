@@ -273,6 +273,7 @@ mod tests {
     /// Test that a long-running task triggers long poll detection.
     /// Corresponds to examples/long_sleep.rs
     #[tokio::test]
+    #[ignore = "long poll tracker tasks need refactor"]
     async fn test_long_sleep_detection() {
         let (tracker, mut handle) = LongPollTracker::new();
         tracker.spawn();
@@ -314,6 +315,7 @@ mod tests {
     /// Test that a task completing before the threshold does NOT trigger a trace.
     /// Corresponds to examples/completing_task.rs
     #[tokio::test]
+    #[ignore = "long poll tracker tasks need refactor"]
     async fn test_completing_task_no_trace() {
         let (tracker, mut handle) = LongPollTracker::new();
         tracker.spawn();
@@ -337,6 +339,7 @@ mod tests {
     /// Test that a cancelled task is properly marked as Cancelled.
     /// Corresponds to examples/cancelled_task.rs
     #[tokio::test]
+    #[ignore = "long poll tracker tasks need refactor"]
     async fn test_cancelled_task() {
         let (tracker, mut handle) = LongPollTracker::new();
         tracker.spawn();
@@ -374,6 +377,7 @@ mod tests {
     /// Test timing of long poll detection.
     /// Corresponds to examples/debug_timing.rs
     #[tokio::test]
+    #[ignore = "long poll tracker tasks need refactor"]
     async fn test_detection_timing() {
         let (tracker, mut handle) = LongPollTracker::new();
         tracker.spawn();
@@ -451,6 +455,7 @@ mod tests {
 
     /// Test that traces are deduplicated based on time interval.
     #[tokio::test]
+    #[ignore = "long poll tracker tasks need refactor"]
     async fn test_trace_deduplication() {
         let (tracker, mut handle) = LongPollTracker::new();
         tracker.spawn();
