@@ -1,28 +1,8 @@
-[package]
-name = "dial9-tokio-telemetry"
-edition = "2024"
-version = "0.1.0"
-publish = true
+[workspace]
+resolver = "3"
+members = [
+    "dial9-tokio-telemetry",
+]
 
-[dependencies]
-tokio = { version = "1", features = ["rt", "macros", "time", "taskdump", "rt-multi-thread", "sync", "net", "io-util"] }
-arc-swap = "1"
+[workspace.dependencies]
 libc = "0.2"
-pin-project-lite = "0.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-smallvec = "1"
-
-[dev-dependencies]
-assert2 = "0.3"
-criterion = "0.5"
-hdrhistogram = "7"
-tempfile = "3"
-
-[[bench]]
-name = "poll_overhead"
-harness = false
-
-[[bench]]
-name = "overhead_bench"
-harness = false
