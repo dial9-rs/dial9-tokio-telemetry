@@ -299,6 +299,7 @@
                 <button id="btn-next-poi">Next ▶</button>
                 <span id="poi-counter" style="font-size:0.85em;color:#888"></span>
                 <span style="width:1px;height:20px;background:#444;margin:0 8px"></span>
+                <button id="btn-sched-panel" style="background:#3a1a1a;border-color:#ff4444;color:#ff8a65">⚠ Blocking Calls</button>
                 <button id="btn-zoom-in">Zoom +</button>
                 <button id="btn-zoom-out">Zoom −</button>
                 <button id="btn-fit">Fit All</button>
@@ -336,12 +337,25 @@
                         <canvas id="fg-canvas-offworker"></canvas>
                     </div>
                 </div>
+                <div id="sched-panel" style="display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:#1a1a2e;z-index:50;flex-direction:column">
+                    <div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16213e;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0">
+                        <span style="color:#ff4444;font-weight:600" id="sched-panel-title">⚠ Scheduling Events</span>
+                        <span style="color:#888" id="sched-panel-stats"></span>
+                        <select id="sched-group-by" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em">
+                            <option value="leaf">Group by blocking call</option>
+                            <option value="full">Group by full stack</option>
+                        </select>
+                        <span style="flex:1"></span>
+                        <span id="sched-panel-close" style="cursor:pointer;color:#888;padding:0 4px">✕ Close (Esc)</span>
+                    </div>
+                    <div id="sched-panel-body" style="flex:1;overflow-y:auto;padding:8px 12px;font-family:monospace;font-size:0.82em;line-height:1.5"></div>
+                </div>
             </div>
         </div>
 
         <div id="tooltip"></div>
         <div id="fg-tooltip"></div>
-        <div id="stack-popup" style="display:none;position:fixed;background:#1a1a2e;border:1px solid #6c63ff;border-radius:8px;padding:12px 16px;z-index:200;max-width:500px;max-height:400px;overflow-y:auto;font-size:0.8em;line-height:1.6;box-shadow:0 4px 20px rgba(0,0,0,0.5)">
+        <div id="stack-popup" style="display:none;position:fixed;background:#1a1a2e;border:1px solid #6c63ff;border-radius:8px;padding:12px 16px;z-index:200;max-width:800px;max-height:600px;overflow-y:auto;font-size:0.8em;line-height:1.6;box-shadow:0 4px 20px rgba(0,0,0,0.5)">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
                 <span id="stack-popup-title" style="color:#6c63ff;font-weight:600"></span>
                 <span id="stack-popup-close" style="cursor:pointer;color:#888;font-size:1.2em;padding:0 4px">&times;</span>
@@ -425,10 +439,11 @@
                     }
 
                     if (wireCode === 7) {
-                        // CpuSample: timestamp_us(4) + worker_id(1) + num_frames(1) + frames(N*8)
-                        if (off + 6 > buffer.byteLength) break;
+                        // CpuSample: timestamp_us(4) + worker_id(1) + source(1) + num_frames(1) + frames(N*8)
+                        if (off + 7 > buffer.byteLength) break;
                         const tsUs = view.getUint32(off, true); off += 4;
                         const wid = view.getUint8(off); off += 1;
+                        const src = view.getUint8(off); off += 1; // 0=CpuProfile, 1=SchedEvent
                         const nf = view.getUint8(off); off += 1;
                         if (off + nf * 8 > buffer.byteLength) break;
                         const chain = [];
@@ -438,7 +453,7 @@
                             off += 8;
                             chain.push("0x" + (hi * 0x100000000 + lo).toString(16));
                         }
-                        cpuSamples.push({ timestamp: tsUs * 1000, workerId: wid, callchain: chain });
+                        cpuSamples.push({ timestamp: tsUs * 1000, workerId: wid, source: src, callchain: chain });
                         continue;
                     }
 
@@ -792,7 +807,12 @@
                         let found = false;
                         for (const poll of spans.polls) {
                             if (sample.timestamp >= poll.start && sample.timestamp <= poll.end) {
-                                (poll.cpuSamples ??= []).push(sample);
+                                if (sample.source === 1) {
+                                    // SchedEvent — kernel descheduled this worker during a poll (blocking!)
+                                    (poll.schedSamples ??= []).push(sample);
+                                } else {
+                                    (poll.cpuSamples ??= []).push(sample);
+                                }
                                 sample.spawnLoc = poll.spawnLoc;
                                 found = true;
                                 break;
@@ -801,12 +821,14 @@
                         if (!found) sample.spawnLoc = null;
                     }
                     let pollsWithSamples = 0;
+                    let pollsWithSched = 0;
                     for (const w of workerIds) {
                         for (const p of workerSpans[w].polls) {
                             if (p.cpuSamples) pollsWithSamples++;
+                            if (p.schedSamples) pollsWithSched++;
                         }
                     }
-                    console.log(`CPU samples: ${trace.cpuSamples.length}, polls with samples: ${pollsWithSamples}`);
+                    console.log(`CPU samples: ${trace.cpuSamples.length}, polls with cpu samples: ${pollsWithSamples}, polls with sched events: ${pollsWithSched}`);
                 }
 
                 // Per-worker local queue samples (from events that have local_queue)
@@ -928,6 +950,15 @@
 
                 buildLanes();
                 updatePointsOfInterest();
+                // Show/hide sched panel button based on whether sched events exist
+                let hasSchedEvents = false;
+                for (const w of workerIds) {
+                    for (const p of workerSpans[w].polls) {
+                        if (p.schedSamples && p.schedSamples.length > 0) { hasSchedEvents = true; break; }
+                    }
+                    if (hasSchedEvents) break;
+                }
+                document.getElementById("btn-sched-panel").style.display = hasSchedEvents ? "" : "none";
                 requestAnimationFrame(renderAll);
             }
 
@@ -969,12 +1000,14 @@
                         }
                     } else if (filterType === "cpu-sampled") {
                         for (const s of spans.polls) {
-                            if (s.cpuSamples && s.cpuSamples.length > 0) {
+                            const cpuCount = s.cpuSamples ? s.cpuSamples.length : 0;
+                            const schedCount = s.schedSamples ? s.schedSamples.length : 0;
+                            if (cpuCount + schedCount > 0) {
                                 pointsOfInterest.push({
                                     time: s.start,
                                     worker: w,
                                     type: "cpu-sampled",
-                                    value: s.cpuSamples.length,
+                                    value: cpuCount + schedCount,
                                     span: s
                                 });
                             }
@@ -1301,6 +1334,22 @@
                     const x2 = Math.min(pw, nsToX(s.end, pw));
                     const w = Math.max(x2 - x1, 3);
                     ctx.fillRect(x1, bandTop, w, 3);
+                }
+
+                // Mark polls that have sched events with red triangles below the poll band
+                for (const s of spans.polls) {
+                    if (!s.schedSamples || s.end < viewStart || s.start > viewEnd) continue;
+                    for (const sample of s.schedSamples) {
+                        if (sample.timestamp < viewStart || sample.timestamp > viewEnd) continue;
+                        const x = nsToX(sample.timestamp, pw);
+                        ctx.fillStyle = "#ff2222";
+                        ctx.beginPath();
+                        ctx.moveTo(x, bandTop + bandH + 1);
+                        ctx.lineTo(x - 3, bandTop + bandH + 7);
+                        ctx.lineTo(x + 3, bandTop + bandH + 7);
+                        ctx.closePath();
+                        ctx.fill();
+                    }
                 }
 
                 // Highlight hovered waker task's polls (orange)
@@ -1803,6 +1852,7 @@
             // ── Zoom & Pan ──
             document.getElementById("poi-filter").addEventListener("change", updatePointsOfInterest);
             document.getElementById("sort-by-worst").addEventListener("change", updatePointsOfInterest);
+            document.getElementById("btn-sched-panel").addEventListener("click", showSchedPanel);
             document.getElementById("btn-prev-poi").addEventListener("click", () => {
                 if (currentPoiIndex > 0) jumpToPoi(currentPoiIndex - 1);
                 else if (currentPoiIndex < 0 && pointsOfInterest.length > 0) jumpToPoi(0);
@@ -1940,7 +1990,13 @@
                     if (dragMoved) {
                         const selStart = Math.min(regionStartNs, regionEndNs);
                         const selEnd = Math.max(regionStartNs, regionEndNs);
-                        showFlamegraph(selStart, selEnd);
+                        // Check if there are sched events in range
+                        const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
+                        if (hasSched) {
+                            showSelectionPicker(selStart, selEnd);
+                        } else {
+                            showFlamegraph(selStart, selEnd);
+                        }
                     }
                     return;
                 }
@@ -1976,8 +2032,9 @@
                     }
                 }
 
-                // Show stack popup if poll has CPU samples
-                if (foundSpan && foundSpan.cpuSamples && foundSpan.cpuSamples.length > 0) {
+                // Show stack popup if poll has CPU samples or sched events
+                if (foundSpan && ((foundSpan.cpuSamples && foundSpan.cpuSamples.length > 0) ||
+                                  (foundSpan.schedSamples && foundSpan.schedSamples.length > 0))) {
                     showStackPopup(foundSpan, e.clientX, e.clientY);
                 } else {
                     hideStackPopup();
@@ -1987,44 +2044,108 @@
                 renderAll();
             });
 
+            function symbolizeChain(chain) {
+                return chain.map(addr => trace.callframeSymbols.get(addr) || addr);
+            }
+
+            // Shorten a symbol for display: strip generic params, keep last path segment
+            function shortSym(sym) {
+                // Strip everything inside < > for readability
+                return sym.replace(/<[^>]*>/g, '<…>');
+            }
+
             function showStackPopup(poll, x, y) {
                 const popup = document.getElementById("stack-popup");
                 const title = document.getElementById("stack-popup-title");
                 const body = document.getElementById("stack-popup-body");
                 const durUs = ((poll.end - poll.start) / 1e3).toFixed(1);
-                title.textContent = `${poll.cpuSamples.length} CPU sample${poll.cpuSamples.length > 1 ? "s" : ""} · poll ${durUs}µs`;
-
-                // Merge all samples: count occurrences of each unique stack (top 5 frames)
-                const MAX_FRAMES = 5;
-                const stackCounts = new Map();
-                for (const sample of poll.cpuSamples) {
-                    const frames = sample.callchain.slice(0, MAX_FRAMES);
-                    const key = frames.join("\n");
-                    stackCounts.set(key, (stackCounts.get(key) || 0) + 1);
-                }
-                // Sort by count descending
-                const sorted = [...stackCounts.entries()].sort((a, b) => b[1] - a[1]);
+                const cpuCount = poll.cpuSamples ? poll.cpuSamples.length : 0;
+                const schedCount = poll.schedSamples ? poll.schedSamples.length : 0;
+                title.textContent = `Poll ${durUs}µs` +
+                    (cpuCount ? ` · ${cpuCount} CPU sample${cpuCount > 1 ? "s" : ""}` : "") +
+                    (schedCount ? ` · ${schedCount} sched event${schedCount > 1 ? "s" : ""}` : "");
 
                 let html = "";
-                for (const [stack, count] of sorted) {
-                    const addrs = stack.split("\n");
-                    const countLabel = poll.cpuSamples.length > 1 ? `<span style="color:#ff8c00">${count}×</span> ` : "";
-                    html += `<div style="margin-bottom:8px;border-left:2px solid #333;padding-left:8px">${countLabel}`;
-                    for (let i = 0; i < addrs.length; i++) {
-                        const addr = addrs[i];
-                        const sym = trace.callframeSymbols.get(addr) || addr;
-                        const color = i === 0 ? "#fff" : "#aaa";
-                        html += `<div style="color:${color}">${sym}</div>`;
+
+                // Sched events: deduplicate by symbolized stack, show counts
+                if (poll.schedSamples && poll.schedSamples.length > 0) {
+                    html += `<div style="color:#ff4444;font-weight:600;margin-bottom:6px">⚠ Blocking during poll (${schedCount} sched event${schedCount > 1 ? "s" : ""})</div>`;
+                    const groups = deduplicateSamples(poll.schedSamples);
+                    for (const g of groups) {
+                        const pct = ((g.count / schedCount) * 100).toFixed(0);
+                        const barW = Math.max(2, (g.count / schedCount) * 200);
+                        html += `<div style="margin-bottom:10px;border-left:3px solid #ff4444;padding-left:8px">`;
+                        html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">`;
+                        html += `<span style="color:#ff4444;font-weight:600;font-size:1.1em">${g.count}×</span>`;
+                        html += `<span style="color:#fff;font-weight:600">${shortSym(g.leaf)}</span>`;
+                        html += `<span style="color:#888">(${pct}%)</span>`;
+                        html += `<span style="display:inline-block;height:8px;width:${barW}px;background:#ff4444;border-radius:2px;opacity:0.6"></span>`;
+                        html += `</div>`;
+                        // Show abbreviated context: leaf + first interesting caller
+                        const ctx = g.syms.slice(0, 3);
+                        for (let i = 0; i < ctx.length; i++) {
+                            html += `<div style="color:${i === 0 ? '#ff8a65' : '#777'};padding-left:${i * 8}px;font-size:0.9em">${shortSym(ctx[i])}</div>`;
+                        }
+                        if (g.syms.length > 3) {
+                            const id = 'sched-expand-' + Math.random().toString(36).slice(2);
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:16px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.syms.length - 3} more frames'">▶ ${g.syms.length - 3} more frames</div>`;
+                            html += `<div id="${id}" style="display:none">`;
+                            for (let i = 3; i < g.syms.length; i++) {
+                                html += `<div style="color:#666;padding-left:24px;font-size:0.85em">${shortSym(g.syms[i])}</div>`;
+                            }
+                            html += `</div>`;
+                        }
+                        html += `</div>`;
                     }
-                    if (poll.cpuSamples[0].callchain.length > MAX_FRAMES) {
-                        html += `<div style="color:#666">… ${poll.cpuSamples[0].callchain.length - MAX_FRAMES} more frames</div>`;
-                    }
-                    html += "</div>";
                 }
+
+                // CPU profile samples: same dedup treatment
+                if (poll.cpuSamples && poll.cpuSamples.length > 0) {
+                    if (schedCount > 0) {
+                        html += `<div style="color:#ff8c00;font-weight:600;margin:8px 0 6px">CPU Profile (${cpuCount} sample${cpuCount > 1 ? "s" : ""})</div>`;
+                    }
+                    const groups = deduplicateSamples(poll.cpuSamples);
+                    for (const g of groups) {
+                        const pct = ((g.count / cpuCount) * 100).toFixed(0);
+                        html += `<div style="margin-bottom:8px;border-left:2px solid #333;padding-left:8px">`;
+                        html += `<span style="color:#ff8c00">${g.count}×</span> `;
+                        html += `<span style="color:#fff">${shortSym(g.leaf)}</span> `;
+                        html += `<span style="color:#888">(${pct}%)</span>`;
+                        const ctx = g.syms.slice(1, 3);
+                        for (const s of ctx) {
+                            html += `<div style="color:#777;padding-left:8px;font-size:0.9em">${shortSym(s)}</div>`;
+                        }
+                        if (g.syms.length > 3) {
+                            const id = 'cpu-expand-' + Math.random().toString(36).slice(2);
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:8px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.syms.length - 3} more frames'">▶ ${g.syms.length - 3} more frames</div>`;
+                            html += `<div id="${id}" style="display:none">`;
+                            for (let i = 3; i < g.syms.length; i++) {
+                                html += `<div style="color:#666;padding-left:16px;font-size:0.85em">${shortSym(g.syms[i])}</div>`;
+                            }
+                            html += `</div>`;
+                        }
+                        html += `</div>`;
+                    }
+                }
+
                 body.innerHTML = html;
                 popup.style.display = "block";
-                popup.style.left = Math.min(x + 12, window.innerWidth - 520) + "px";
-                popup.style.top = Math.min(y - 20, window.innerHeight - 420) + "px";
+                popup.style.left = Math.min(x + 12, window.innerWidth - 820) + "px";
+                popup.style.top = Math.min(y - 20, window.innerHeight - 620) + "px";
+            }
+
+            // Deduplicate samples by symbolized stack, return sorted groups
+            function deduplicateSamples(samples) {
+                const groups = new Map(); // key → {count, syms, leaf}
+                for (const sample of samples) {
+                    const syms = symbolizeChain(sample.callchain);
+                    const key = syms.join('\0');
+                    if (!groups.has(key)) {
+                        groups.set(key, { count: 0, syms, leaf: syms[0] || '(unknown)' });
+                    }
+                    groups.get(key).count++;
+                }
+                return [...groups.values()].sort((a, b) => b.count - a.count);
             }
 
             function hideStackPopup() {
@@ -2041,6 +2162,169 @@
                 }
             });
 
+            // ── Sched Events Panel (global view of all blocking operations) ──
+            let schedPanelTimeRange = null; // {start, end} or null for full trace
+
+            function showSchedPanel(startNs, endNs) {
+                schedPanelTimeRange = (startNs != null && endNs != null) ? { start: startNs, end: endNs } : null;
+                const allSched = collectSchedSamples(schedPanelTimeRange);
+                if (!allSched.length) {
+                    alert("No scheduling events found" + (schedPanelTimeRange ? " in selected range." : " in this trace."));
+                    return;
+                }
+                renderSchedPanel(allSched);
+                document.getElementById("sched-panel").style.display = "flex";
+            }
+
+            function collectSchedSamples(range) {
+                const allSched = [];
+                for (const w of workerIds) {
+                    for (const poll of workerSpans[w].polls) {
+                        if (!poll.schedSamples) continue;
+                        if (range && (poll.end < range.start || poll.start > range.end)) continue;
+                        for (const s of poll.schedSamples) {
+                            if (range && (s.timestamp < range.start || s.timestamp > range.end)) continue;
+                            allSched.push({ sample: s, poll, worker: w });
+                        }
+                    }
+                }
+                return allSched;
+            }
+
+            function renderSchedPanel(allSched) {
+                const groupBy = document.getElementById("sched-group-by").value;
+                const body = document.getElementById("sched-panel-body");
+                const total = allSched.length;
+                const rangeLabel = schedPanelTimeRange
+                    ? ` in ${((schedPanelTimeRange.end - schedPanelTimeRange.start) / 1e6).toFixed(2)}ms selection`
+                    : " (full trace)";
+                document.getElementById("sched-panel-stats").textContent =
+                    `${total} events across ${workerIds.length} workers${rangeLabel}`;
+
+                // Group by leaf frame or full stack
+                const groups = new Map();
+                for (const { sample, poll, worker } of allSched) {
+                    const syms = symbolizeChain(sample.callchain);
+                    const key = groupBy === "leaf" ? (syms[0] || "(unknown)") : syms.join('\0');
+                    if (!groups.has(key)) {
+                        groups.set(key, { leaf: syms[0] || "(unknown)", count: 0, stacks: new Map(), polls: [] });
+                    }
+                    const g = groups.get(key);
+                    g.count++;
+                    g.polls.push({ poll, worker, timestamp: sample.timestamp });
+                    // Sub-group by full stack within each leaf group
+                    const fullKey = syms.join('\0');
+                    if (!g.stacks.has(fullKey)) {
+                        g.stacks.set(fullKey, { count: 0, syms });
+                    }
+                    g.stacks.get(fullKey).count++;
+                }
+
+                const sorted = [...groups.values()].sort((a, b) => b.count - a.count);
+
+                let html = `<div style="margin-bottom:12px;color:#aaa;font-size:0.9em">
+                    Blocking calls that caused the kernel to deschedule a tokio worker thread during a poll.
+                    These indicate synchronous/blocking operations on the async runtime.
+                </div>`;
+
+                // Summary bar chart
+                html += `<div style="margin-bottom:16px">`;
+                for (const g of sorted) {
+                    const pct = ((g.count / total) * 100).toFixed(1);
+                    const barW = Math.max(4, (g.count / total) * 100);
+                    const color = g.leaf.includes("lock") || g.leaf.includes("mutex") ? "#ff4444"
+                        : g.leaf.includes("epoll") || g.leaf.includes("poll") ? "#4fc3f7"
+                        : g.leaf.includes("write") || g.leaf.includes("read") || g.leaf.includes("recv") || g.leaf.includes("send") ? "#ff8a65"
+                        : g.leaf.includes("syscall") ? "#888"
+                        : "#cc66ff";
+                    html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;cursor:pointer" class="sched-row" data-leaf="${encodeURIComponent(g.leaf)}">`;
+                    html += `<span style="width:50px;text-align:right;color:${color};font-weight:600">${g.count}</span>`;
+                    html += `<span style="display:inline-block;height:14px;width:${barW}%;background:${color};border-radius:2px;opacity:0.7"></span>`;
+                    html += `<span style="color:#fff">${g.leaf}</span>`;
+                    html += `<span style="color:#666">${pct}%</span>`;
+                    html += `</div>`;
+                }
+                html += `</div>`;
+
+                // Detailed stacks per group
+                for (const g of sorted) {
+                    const pct = ((g.count / total) * 100).toFixed(1);
+                    const color = g.leaf.includes("lock") || g.leaf.includes("mutex") ? "#ff4444" : "#ff8a65";
+                    const gid = 'sg-' + Math.random().toString(36).slice(2);
+
+                    html += `<div style="border:1px solid #333;border-radius:6px;margin-bottom:8px;overflow:hidden">`;
+                    html += `<div style="padding:8px 12px;background:#16213e;display:flex;align-items:center;gap:8px;cursor:pointer" onclick="document.getElementById('${gid}').style.display=document.getElementById('${gid}').style.display==='none'?'block':'none'">`;
+                    html += `<span style="color:${color};font-weight:700;font-size:1.1em">${g.count}×</span>`;
+                    html += `<span style="color:#fff;font-weight:600">${g.leaf}</span>`;
+                    html += `<span style="color:#888">(${pct}% of all sched events)</span>`;
+                    html += `<span style="color:#6c63ff;margin-left:auto;font-size:0.9em">▼ details</span>`;
+                    html += `</div>`;
+
+                    html += `<div id="${gid}" style="display:none;padding:8px 12px">`;
+
+                    // Show unique stacks within this group
+                    const subStacks = [...g.stacks.values()].sort((a, b) => b.count - a.count);
+                    for (const sub of subStacks) {
+                        const subPct = ((sub.count / g.count) * 100).toFixed(0);
+                        html += `<div style="margin-bottom:10px;border-left:3px solid ${color};padding-left:10px">`;
+                        html += `<div style="color:${color};margin-bottom:2px"><strong>${sub.count}×</strong> <span style="color:#888">(${subPct}% of group)</span></div>`;
+                        // Show full symbolized stack
+                        for (let i = 0; i < sub.syms.length; i++) {
+                            const isLeaf = i === 0;
+                            const isTokio = sub.syms[i].includes("tokio::runtime");
+                            const c = isLeaf ? "#fff" : isTokio ? "#555" : "#aaa";
+                            const weight = isLeaf ? "font-weight:600" : "";
+                            html += `<div style="color:${c};${weight};padding-left:${Math.min(i, 1) * 12}px">${shortSym(sub.syms[i])}</div>`;
+                        }
+                        html += `</div>`;
+                    }
+
+                    // Jump-to links: show a few example polls
+                    const examples = g.polls.slice(0, 5);
+                    html += `<div style="margin-top:6px;color:#6c63ff;font-size:0.9em">`;
+                    html += `Example polls: `;
+                    for (let i = 0; i < examples.length; i++) {
+                        const ex = examples[i];
+                        const tMs = ((ex.poll.start - minTs) / 1e6).toFixed(2);
+                        const durUs = ((ex.poll.end - ex.poll.start) / 1e3).toFixed(0);
+                        html += `<span class="sched-jump" style="cursor:pointer;text-decoration:underline;margin-right:8px" data-time="${ex.poll.start}" data-end="${ex.poll.end}" data-worker="${ex.worker}">W${ex.worker} @${tMs}ms (${durUs}µs)</span>`;
+                    }
+                    if (g.polls.length > 5) html += `<span style="color:#888">… ${g.polls.length - 5} more</span>`;
+                    html += `</div>`;
+
+                    html += `</div></div>`;
+                }
+
+                body.innerHTML = html;
+
+                // Wire up jump-to-poll links
+                body.querySelectorAll('.sched-jump').forEach(el => {
+                    el.addEventListener('click', (e) => {
+                        const t = parseFloat(el.dataset.time);
+                        const end = parseFloat(el.dataset.end);
+                        const w = parseInt(el.dataset.worker);
+                        const dur = end - t;
+                        const pad = Math.max(dur * 5, 1e6);
+                        viewStart = Math.max(minTs, t - pad * 0.3);
+                        viewEnd = Math.min(maxTs, viewStart + pad);
+                        document.getElementById("sched-panel").style.display = "none";
+                        // Scroll to worker lane
+                        const laneIdx = workerIds.indexOf(w);
+                        if (laneIdx >= 0) lanesContainer.scrollTop = laneIdx * LANE_H;
+                        renderAll();
+                    });
+                });
+            }
+
+            document.getElementById("sched-group-by").addEventListener("change", () => {
+                const allSched = collectSchedSamples(schedPanelTimeRange);
+                renderSchedPanel(allSched);
+            });
+
+            document.getElementById("sched-panel-close").addEventListener("click", () => {
+                document.getElementById("sched-panel").style.display = "none";
+            });
+
             // ── Keyboard navigation ──
             window.addEventListener("keydown", (e) => {
                 if (!trace) return;
@@ -2049,7 +2333,9 @@
                     case "Escape":
                         e.preventDefault();
                         hideStackPopup();
-                        if (document.getElementById("flamegraph-panel").style.display === "flex") {
+                        if (document.getElementById("sched-panel").style.display === "flex") {
+                            document.getElementById("sched-panel").style.display = "none";
+                        } else if (document.getElementById("flamegraph-panel").style.display === "flex") {
                             document.getElementById("flamegraph-panel").style.display = "none";
                             document.getElementById("fg-tooltip").style.display = "none";
                         }
@@ -2183,6 +2469,9 @@
                             if (s.cpuSamples && s.cpuSamples.length > 0) {
                                 pollInfo += `<span class="label">CPU samples:</span> <span class="value">🔥 ${s.cpuSamples.length}</span> <span style="color:#666">(click to view)</span><br>`;
                             }
+                            if (s.schedSamples && s.schedSamples.length > 0) {
+                                pollInfo += `<span class="label">Sched events:</span> <span class="value">⚠️ ${s.schedSamples.length} blocking</span> <span style="color:#666">(click to view)</span><br>`;
+                            }
                             break;
                         }
                     }
@@ -2293,6 +2582,7 @@
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a1520;border-top:3px solid #cc5533;display:inline-block;border-radius:2px"></span>Parked</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff0000;display:inline-block;border-radius:2px"></span>Kernel Sched Delay</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:3px;background:#ff8c00;display:inline-block"></span>CPU Sampled</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="color:#ff2222;font-size:10px">▲</span>Sched (blocking)</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#66bb6a;font-size:10px">▼</span>Wake</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
     <span style="color:#666;margin-left:8px">│ ↑↓ zoom · ←→ pan · click poll for task + wake timeline · shift+drag for flamegraph · esc close</span>
@@ -2359,9 +2649,40 @@
                 return { nodes: result.nodes, maxDepth: result.maxDepth, totalSamples: samples.length };
             }
 
+            // Selection picker: shown after shift+drag when both flamegraph and sched data exist
+            function showSelectionPicker(selStart, selEnd) {
+                const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
+                const schedCount = collectSchedSamples({ start: selStart, end: selEnd }).length;
+                const popup = document.getElementById("stack-popup");
+                const title = document.getElementById("stack-popup-title");
+                const body = document.getElementById("stack-popup-body");
+                title.textContent = `${durMs}ms selected`;
+                body.innerHTML = `
+                    <div style="display:flex;flex-direction:column;gap:8px;min-width:250px">
+                        <div style="padding:8px 12px;background:#2a2a4a;border:1px solid #444;border-radius:6px;cursor:pointer;transition:background 0.15s"
+                             onmouseover="this.style.background='#3a3a5a'" onmouseout="this.style.background='#2a2a4a'"
+                             id="pick-flamegraph">
+                            <div style="color:#ff8c00;font-weight:600">🔥 CPU Flamegraph</div>
+                            <div style="color:#888;font-size:0.9em">Profile where CPU time is spent</div>
+                        </div>
+                        <div style="padding:8px 12px;background:#2a2a4a;border:1px solid #444;border-radius:6px;cursor:pointer;transition:background 0.15s"
+                             onmouseover="this.style.background='#3a3a5a'" onmouseout="this.style.background='#2a2a4a'"
+                             id="pick-sched">
+                            <div style="color:#ff4444;font-weight:600">⚠ Blocking Calls <span style="color:#888;font-weight:400">(${schedCount})</span></div>
+                            <div style="color:#888;font-size:0.9em">Analyze what's blocking the runtime</div>
+                        </div>
+                    </div>`;
+                popup.style.display = "block";
+                // Center it roughly
+                popup.style.left = (window.innerWidth / 2 - 150) + "px";
+                popup.style.top = (window.innerHeight / 2 - 80) + "px";
+                document.getElementById("pick-flamegraph").onclick = () => { hideStackPopup(); showFlamegraph(selStart, selEnd); };
+                document.getElementById("pick-sched").onclick = () => { hideStackPopup(); showSchedPanel(selStart, selEnd); };
+            }
+
             function showFlamegraph(selStart, selEnd) {
                 const allSamples = trace.cpuSamples.filter(s =>
-                    s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0
+                    s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
                 );
                 if (!allSamples.length) {
                     alert("No CPU samples in selected region. CPU sampling must be active during this time range.");

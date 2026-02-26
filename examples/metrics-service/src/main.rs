@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use clap::Parser;
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{
+    CpuProfilingConfig, RotatingWriter, SchedEventConfig, TracedRuntime,
+};
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
@@ -18,7 +20,7 @@ use ddb::DdbClient;
 #[derive(Parser)]
 #[command(about = "Metrics service with DynamoDB persistence and telemetry")]
 struct Args {
-    #[arg(long, default_value = "10", help = "Flush interval in seconds")]
+    #[arg(long, default_value = "1", help = "Flush interval in seconds")]
     flush_interval: u64,
 
     #[arg(long, default_value = "metrics-service", help = "DynamoDB table name")]
@@ -79,12 +81,16 @@ fn main() -> std::io::Result<()> {
 
     let mut builder = Builder::new_multi_thread();
     builder.worker_threads(args.worker_threads).enable_all();
-    let (runtime, _guard) = TracedRuntime::builder()
+    let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig::default())
         .with_inline_callframe_symbols(true)
-        .build_and_start(builder, Box::new(writer))?;
-    let handle = _guard.handle();
+        .with_sched_events(SchedEventConfig {
+            include_kernel: true,
+        })
+        .build(builder, Box::new(writer))?;
+    guard.enable();
+    let handle = guard.handle();
 
     runtime.block_on(async {
         let config = aws_config::defaults(BehaviorVersion::latest()).load().await;

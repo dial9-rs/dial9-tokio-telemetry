@@ -21,3 +21,6 @@ serde_json = "1"
 dial9-tokio-telemetry = { path = "../../dial9-tokio-telemetry" }
 reqwest = { version = "0.12", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+debug = 1
