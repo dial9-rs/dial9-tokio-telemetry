@@ -2,26 +2,44 @@
 
 use blazesym::symbolize::{source, Input, Symbolizer};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
 
-thread_local! {
-    static SYMBOLIZER: RefCell<Option<(Symbolizer, u64)>> = RefCell::new(None);
+struct SymbolizerState {
+    symbolizer: Symbolizer,
+    /// Map from address range to (path, base_addr)
+    mappings: Vec<(u64, u64, String, u64)>,
 }
 
-fn get_base_addr() -> Option<u64> {
-    let maps = fs::read_to_string("/proc/self/maps").ok()?;
-    let exe = fs::read_link("/proc/self/exe").ok()?;
-    let exe_str = exe.to_str()?;
+thread_local! {
+    static SYMBOLIZER: RefCell<Option<SymbolizerState>> = RefCell::new(None);
+}
 
+fn parse_maps() -> Vec<(u64, u64, String, u64)> {
+    let maps = fs::read_to_string("/proc/self/maps").unwrap_or_default();
+    let mut result = Vec::new();
+    
     for line in maps.lines() {
-        if line.contains("r-xp") && line.contains(exe_str) {
-            let addr_range = line.split_whitespace().next()?;
-            let start = addr_range.split('-').next()?;
-            return u64::from_str_radix(start, 16).ok();
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 6 || !parts[1].contains('x') {
+            continue; // Skip non-executable mappings
         }
+        
+        let addr_range = parts[0];
+        let mut range_parts = addr_range.split('-');
+        let start = u64::from_str_radix(range_parts.next().unwrap(), 16).unwrap();
+        let end = u64::from_str_radix(range_parts.next().unwrap(), 16).unwrap();
+        let offset = u64::from_str_radix(parts[2], 16).unwrap();
+        let path = parts[5].to_string();
+        
+        if !path.starts_with('/') {
+            continue; // Skip vdso, stack, etc.
+        }
+        
+        result.push((start, end, path, offset));
     }
-    None
+    
+    result
 }
 
 /// A resolved symbol name and its base address.
@@ -37,44 +55,48 @@ pub struct SymbolInfo {
     pub offset: u64,
 }
 
+const EMPTY: SymbolInfo = SymbolInfo {
+    name: None,
+    base_addr: 0,
+    object: None,
+    offset: 0,
+};
+
 /// Resolve an instruction pointer to a symbol name.
 pub fn resolve_symbol(addr: u64) -> SymbolInfo {
     SYMBOLIZER.with(|cell| {
         let mut opt = cell.borrow_mut();
         if opt.is_none() {
-            let base = get_base_addr().unwrap_or(0);
-            *opt = Some((Symbolizer::new(), base));
+            *opt = Some(SymbolizerState {
+                symbolizer: Symbolizer::new(),
+                mappings: parse_maps(),
+            });
         }
-
-        let (symbolizer, base) = opt.as_ref().unwrap();
-        let offset = addr.saturating_sub(*base);
-        let src = source::Source::Elf(source::Elf::new(PathBuf::from("/proc/self/exe")));
-        let syms = symbolizer.symbolize(&src, Input::VirtOffset(&[offset]));
-
-        match syms {
-            Ok(results) if !results.is_empty() => {
-                if let Some(sym) = results[0].as_sym() {
-                    SymbolInfo {
-                        name: Some(sym.name.to_string()),
-                        base_addr: sym.addr,
-                        object: None,
-                        offset: offset.saturating_sub(sym.addr),
-                    }
-                } else {
-                    SymbolInfo {
-                        name: None,
-                        base_addr: 0,
-                        object: None,
-                        offset: 0,
+        let state = opt.as_ref().unwrap();
+        
+        // Find which mapping contains this address
+        for (start, end, path, file_offset) in &state.mappings {
+            if addr >= *start && addr < *end {
+                let offset = addr - start + file_offset;
+                let src = source::Source::Elf(source::Elf::new(path));
+                if let Ok(results) = state.symbolizer.symbolize(&src, Input::FileOffset(&[offset])) {
+                    if !results.is_empty() {
+                        if let Some(sym) = results[0].as_sym() {
+                            return SymbolInfo {
+                                name: Some(sym.name.to_string()),
+                                base_addr: sym.addr,
+                                object: sym.code_info.as_ref().map(|c| 
+                                    format!("{}:{}", c.to_path().display(), c.line.unwrap_or(0))
+                                ),
+                                offset: addr.saturating_sub(sym.addr),
+                            };
+                        }
                     }
                 }
+                break;
             }
-            _ => SymbolInfo {
-                name: None,
-                base_addr: 0,
-                object: None,
-                offset: 0,
-            },
         }
+        
+        EMPTY
     })
 }

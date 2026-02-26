@@ -30,6 +30,29 @@ impl TraceReader {
         format::read_header(&mut self.reader)
     }
 
+    /// Read the next event without filtering — returns all events including
+    /// metadata records (SpawnLocationDef, TaskSpawn, CallframeDef).
+    /// Still accumulates metadata into lookup tables as a side effect.
+    pub fn read_raw_event(&mut self) -> Result<Option<TelemetryEvent>> {
+        let event = format::read_event(&mut self.reader)?;
+        match &event {
+            Some(TelemetryEvent::SpawnLocationDef { id, location }) => {
+                self.spawn_locations.insert(*id, location.clone());
+            }
+            Some(TelemetryEvent::TaskSpawn {
+                task_id,
+                spawn_loc_id,
+            }) => {
+                self.task_spawn_locs.insert(*task_id, *spawn_loc_id);
+            }
+            Some(TelemetryEvent::CallframeDef { address, symbol }) => {
+                self.callframe_symbols.insert(*address, symbol.clone());
+            }
+            _ => {}
+        }
+        Ok(event)
+    }
+
     /// Read the next runtime telemetry event, automatically accumulating
     /// SpawnLocationDef and TaskSpawn metadata records.
     pub fn read_event(&mut self) -> Result<Option<TelemetryEvent>> {

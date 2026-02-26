@@ -18,6 +18,7 @@ pub const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
 
 pub const PERF_COUNT_SW_CPU_CLOCK: u64 = 0;
 pub const PERF_COUNT_SW_TASK_CLOCK: u64 = 1;
+pub const PERF_COUNT_SW_CONTEXT_SWITCHES: u64 = 3;
 
 // --- sample_type bitmask ---
 
@@ -27,6 +28,8 @@ pub const PERF_SAMPLE_TIME: u64 = 1 << 2;
 pub const PERF_SAMPLE_CALLCHAIN: u64 = 1 << 5;
 pub const PERF_SAMPLE_CPU: u64 = 1 << 7;
 pub const PERF_SAMPLE_PERIOD: u64 = 1 << 8;
+pub const PERF_SAMPLE_REGS_USER: u64 = 1 << 12;
+pub const PERF_SAMPLE_STACK_USER: u64 = 1 << 13;
 
 // --- attr.flags (bitfield) ---
 // On little-endian, bit N is simply (1 << N).
@@ -37,6 +40,7 @@ pub const PERF_ATTR_FLAG_EXCLUDE_KERNEL: u64 = 1 << 5;
 pub const PERF_ATTR_FLAG_EXCLUDE_HV: u64 = 1 << 6;
 pub const PERF_ATTR_FLAG_FREQ: u64 = 1 << 10;
 pub const PERF_ATTR_FLAG_SAMPLE_ID_ALL: u64 = 1 << 18;
+pub const PERF_ATTR_FLAG_EXCLUDE_CALLCHAIN_USER: u64 = 1 << 23;
 
 // --- perf_event_open flags ---
 
@@ -54,6 +58,11 @@ pub const PERF_EVENT_IOC_DISABLE: c_ulong = 0x2401;
 
 pub const PERF_RECORD_SAMPLE: u32 = 9;
 pub const PERF_RECORD_LOST: u32 = 2;
+
+// --- Kernel address threshold ---
+// On x86_64, userspace virtual addresses are below 0x0000_8000_0000_0000.
+// Anything at or above this is kernel space, a context marker, or invalid.
+pub const USER_ADDR_LIMIT: u64 = 0x0000_8000_0000_0000;
 
 // --- Context markers in callchain ---
 // These sentinel values separate kernel/user/hypervisor frames in the callchain.

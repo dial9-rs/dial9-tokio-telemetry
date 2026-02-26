@@ -17,6 +17,10 @@ pub enum EventSource {
     SwCpuClock,
     /// `PERF_COUNT_SW_TASK_CLOCK` — software task clock (per-thread CPU time).
     SwTaskClock,
+    /// `PERF_COUNT_SW_CONTEXT_SWITCHES` — fires on every context switch.
+    /// Captures the stack at the moment the thread is descheduled, revealing
+    /// what code path led to the thread going off-CPU (e.g. mutex, I/O, preemption).
+    SwContextSwitches,
 }
 
 /// Configuration for the sampler.
@@ -62,19 +66,70 @@ pub struct Sample {
     pub callchain: Vec<u64>,
 }
 
-struct PerCpuEvent {
+struct PerfEvent {
     fd: i32,
     ring: RingBuffer,
+    /// Thread ID this event is tracking, or 0 for process-wide events.
+    tid: i32,
+}
+
+const PAGE_SIZE: usize = 4096;
+const PAGE_COUNT: usize = 16; // power of 2
+const MMAP_SIZE: usize = (PAGE_COUNT + 1) * PAGE_SIZE;
+const DATA_SIZE: usize = PAGE_COUNT * PAGE_SIZE;
+
+/// Open a perf event fd, mmap the ring buffer, and enable it.
+fn open_perf_event(attr: &PerfEventAttr, pid: i32, cpu: i32) -> io::Result<PerfEvent> {
+    let fd = perf_event_open(attr, pid, cpu, -1, PERF_FLAG_FD_CLOEXEC);
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let base = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            MMAP_SIZE,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+
+    if base == libc::MAP_FAILED {
+        let err = io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(err);
+    }
+
+    let ring = unsafe { RingBuffer::new(base as *mut u8, DATA_SIZE as u64, MMAP_SIZE) };
+
+    if perf_event_ioctl(fd, PERF_EVENT_IOC_ENABLE) < 0 {
+        let err = io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(err);
+    }
+
+    Ok(PerfEvent { fd, ring, tid: pid })
 }
 
 /// A live perf event sampler that profiles the current process.
 ///
-/// When `inherit` is enabled (the default for `start()`), the kernel requires
-/// that each perf event fd is pinned to a specific CPU. We open one event per
-/// online CPU so that samples from all threads on all CPUs are captured.
+/// Two modes of operation:
+///
+/// 1. **Process-wide** (`start` / `start_for_pid`): For frequency-based sources,
+///    opens one event per CPU with `inherit` to capture all threads automatically.
+///    For event-based sources (context switches), opens a single fd with `cpu=-1`.
+///
+/// 2. **Per-thread** (`new_per_thread` + `add_thread`): Opens one event per thread
+///    with `cpu=-1`. Call `add_thread` from an `on_thread_start` callback and
+///    `remove_thread` when the thread exits. This works for all event sources
+///    including context switches.
 pub struct PerfSampler {
-    events: Vec<PerCpuEvent>,
+    events: Vec<PerfEvent>,
     sample_type: u64,
+    /// Stored attr for per-thread tracking.
+    attr: PerfEventAttr,
 }
 
 impl PerfSampler {
@@ -90,6 +145,79 @@ impl PerfSampler {
     ///
     /// `pid=0` means the current process. `pid=-1` means all processes (requires root).
     pub fn start_for_pid(pid: i32, config: SamplerConfig) -> io::Result<Self> {
+        let attr = Self::build_attr(&config)?;
+
+        let is_event_based = matches!(config.event_source, EventSource::SwContextSwitches);
+        let mut events = Vec::new();
+
+        if is_event_based {
+            // Single fd, cpu=-1, pid=target process
+            events.push(open_perf_event(&attr, pid, -1)?);
+        } else {
+            // With inherit + sampling, the kernel forbids cpu=-1 for mmap. We open
+            // one event per online CPU, each with its own mmap ring buffer.
+            let online_cpus = get_online_cpus()?;
+            events.reserve(online_cpus.len());
+            for &cpu in &online_cpus {
+                match open_perf_event(&attr, pid, cpu) {
+                    Ok(ev) => events.push(ev),
+                    Err(e) => {
+                        drop(events);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        Ok(PerfSampler {
+            events,
+            sample_type: attr.sample_type,
+            attr,
+        })
+    }
+
+    /// Create a per-thread sampler with no initial threads.
+    ///
+    /// Use `track_current_thread` from each thread you want to monitor
+    /// (e.g. from an `on_thread_start` callback), and `stop_tracking_current_thread`
+    /// when the thread exits.
+    ///
+    /// This mode works for all event sources including `SwContextSwitches`.
+    pub fn new_per_thread(config: SamplerConfig) -> io::Result<Self> {
+        let attr = Self::build_attr(&config)?;
+        Ok(PerfSampler {
+            events: Vec::new(),
+            sample_type: attr.sample_type,
+            attr,
+        })
+    }
+
+    /// Start tracking the calling thread.
+    ///
+    /// Must be called from the thread you want to monitor. Opens a perf event
+    /// fd scoped to this thread's tid with `cpu=-1`.
+    pub fn track_current_thread(&mut self) -> io::Result<()> {
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as i32;
+        let ev = open_perf_event(&self.attr, tid, -1)?;
+        self.events.push(ev);
+        Ok(())
+    }
+
+    /// Stop tracking the calling thread.
+    ///
+    /// Must be called from the same thread that called `track_current_thread`.
+    /// Closes the perf event fd and unmaps the ring buffer. Any unread samples
+    /// from this thread are lost.
+    pub fn stop_tracking_current_thread(&mut self) {
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as i32;
+        if let Some(idx) = self.events.iter().position(|ev| ev.tid == tid) {
+            let ev = self.events.swap_remove(idx);
+            perf_event_ioctl(ev.fd, PERF_EVENT_IOC_DISABLE);
+            unsafe { libc::close(ev.fd) };
+        }
+    }
+
+    fn build_attr(config: &SamplerConfig) -> io::Result<PerfEventAttr> {
         // Check max sample rate
         if let Ok(contents) = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
         {
@@ -123,94 +251,30 @@ impl PerfSampler {
                 attr.type_ = PERF_TYPE_SOFTWARE;
                 attr.config = PERF_COUNT_SW_TASK_CLOCK;
             }
+            EventSource::SwContextSwitches => {
+                attr.type_ = PERF_TYPE_SOFTWARE;
+                attr.config = PERF_COUNT_SW_CONTEXT_SWITCHES;
+            }
         }
 
-        let sample_type = PERF_SAMPLE_IP
-            | PERF_SAMPLE_TID
-            | PERF_SAMPLE_TIME
-            | PERF_SAMPLE_CALLCHAIN
-            | PERF_SAMPLE_CPU
-            | PERF_SAMPLE_PERIOD;
-        attr.sample_type = sample_type;
-        attr.sample_period_or_freq = config.frequency_hz;
-        attr.flags = PERF_ATTR_FLAG_FREQ | PERF_ATTR_FLAG_SAMPLE_ID_ALL | PERF_ATTR_FLAG_INHERIT;
+        attr.sample_type = PERF_SAMPLE_CALLCHAIN | PERF_SAMPLE_TID | PERF_SAMPLE_TIME | PERF_SAMPLE_CPU | PERF_SAMPLE_PERIOD;
 
-        if !config.include_kernel {
-            attr.flags |= PERF_ATTR_FLAG_EXCLUDE_KERNEL | PERF_ATTR_FLAG_EXCLUDE_HV;
+        let is_event_based = matches!(config.event_source, EventSource::SwContextSwitches);
+        if is_event_based {
+            // Event-based: sample every event (period=1), no inherit.
+            // Context switches are kernel events — exclude_kernel would suppress them.
+            attr.sample_period_or_freq = 1;
+            attr.flags = PERF_ATTR_FLAG_SAMPLE_ID_ALL;
+        } else {
+            attr.sample_period_or_freq = config.frequency_hz;
+            attr.flags =
+                PERF_ATTR_FLAG_FREQ | PERF_ATTR_FLAG_SAMPLE_ID_ALL | PERF_ATTR_FLAG_INHERIT;
+            if !config.include_kernel {
+                attr.flags |= PERF_ATTR_FLAG_EXCLUDE_KERNEL | PERF_ATTR_FLAG_EXCLUDE_HV;
+            }
         }
 
-        // With inherit + sampling, the kernel forbids cpu=-1 for mmap. We open
-        // one event per online CPU, each with its own mmap ring buffer.
-        let online_cpus = get_online_cpus()?;
-        let mut events = Vec::with_capacity(online_cpus.len());
-
-        for &cpu in &online_cpus {
-            let fd = perf_event_open(&attr, pid, cpu, -1, PERF_FLAG_FD_CLOEXEC);
-            if fd < 0 {
-                // Clean up already-opened fds
-                for ev in &events {
-                    let ev: &PerCpuEvent = ev;
-                    unsafe { libc::close(ev.fd) };
-                }
-                return Err(io::Error::last_os_error());
-            }
-
-            let page_count: usize = 16; // power of 2
-            let page_size: usize = 4096;
-            let mmap_size = (page_count + 1) * page_size;
-            let data_size = page_count * page_size;
-
-            // inherit + per-cpu is fine with PROT_READ|PROT_WRITE
-            let base = unsafe {
-                libc::mmap(
-                    ptr::null_mut(),
-                    mmap_size,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_SHARED,
-                    fd,
-                    0,
-                )
-            };
-
-            if base == libc::MAP_FAILED {
-                let err = io::Error::last_os_error();
-                unsafe { libc::close(fd) };
-                for ev in &events {
-                    let ev: &PerCpuEvent = ev;
-                    unsafe { libc::close(ev.fd) };
-                }
-                return Err(io::Error::new(
-                    err.kind(),
-                    format!(
-                        "mmap failed for perf ring buffer on cpu {cpu}: {err}. \
-                         You may need to increase perf_event_mlock_kb: \
-                         sudo sysctl kernel.perf_event_mlock_kb=2048",
-                    ),
-                ));
-            }
-
-            let ring = unsafe { RingBuffer::new(base as *mut u8, data_size as u64, mmap_size) };
-
-            if perf_event_ioctl(fd, PERF_EVENT_IOC_ENABLE) < 0 {
-                let err = io::Error::last_os_error();
-                unsafe { libc::close(fd) };
-                for ev in &events {
-                    let ev: &PerCpuEvent = ev;
-                    unsafe { libc::close(ev.fd) };
-                }
-                return Err(io::Error::new(
-                    err.kind(),
-                    format!("ioctl PERF_EVENT_IOC_ENABLE failed on cpu {cpu}: {err}"),
-                ));
-            }
-
-            events.push(PerCpuEvent { fd, ring });
-        }
-
-        Ok(PerfSampler {
-            events,
-            sample_type,
-        })
+        Ok(attr)
     }
 
     /// Returns true if there are pending samples to read on any CPU.
@@ -410,7 +474,7 @@ fn parse_sample(sample_type: u64, body: &crate::ring_buffer::RecordBody<'_>) -> 
         let mut chain = Vec::with_capacity(nr);
         for _ in 0..nr {
             let addr = read_u64!();
-            if addr >= PERF_CONTEXT_MAX {
+            if addr >= USER_ADDR_LIMIT || addr == 0 {
                 continue;
             }
             chain.push(addr);
