@@ -60,8 +60,7 @@ impl RingBuffer {
             let data = self.data_slice();
             let pos = (self.position % self.data_size) as usize;
 
-            let header: PerfEventHeader = if pos + mem::size_of::<PerfEventHeader>() <= data.len()
-            {
+            let header: PerfEventHeader = if pos + mem::size_of::<PerfEventHeader>() <= data.len() {
                 unsafe { ptr::read_unaligned(data.as_ptr().add(pos) as *const PerfEventHeader) }
             } else {
                 let mut buf = [0u8; mem::size_of::<PerfEventHeader>()];

@@ -14,7 +14,8 @@
 //! Duration defaults to 30 seconds. A 3-second warmup precedes measurement.
 
 use dial9_tokio_telemetry::telemetry::{
-    CpuProfilingConfig, NullWriter, SimpleBinaryWriter, TelemetryGuard, TelemetryHandle, TracedRuntime,
+    CpuProfilingConfig, NullWriter, SimpleBinaryWriter, TelemetryGuard, TelemetryHandle,
+    TracedRuntime,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;

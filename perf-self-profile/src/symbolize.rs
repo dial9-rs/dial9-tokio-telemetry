@@ -13,7 +13,7 @@ fn get_base_addr() -> Option<u64> {
     let maps = fs::read_to_string("/proc/self/maps").ok()?;
     let exe = fs::read_link("/proc/self/exe").ok()?;
     let exe_str = exe.to_str()?;
-    
+
     for line in maps.lines() {
         if line.contains("r-xp") && line.contains(exe_str) {
             let addr_range = line.split_whitespace().next()?;
@@ -45,12 +45,12 @@ pub fn resolve_symbol(addr: u64) -> SymbolInfo {
             let base = get_base_addr().unwrap_or(0);
             *opt = Some((Symbolizer::new(), base));
         }
-        
+
         let (symbolizer, base) = opt.as_ref().unwrap();
         let offset = addr.saturating_sub(*base);
         let src = source::Source::Elf(source::Elf::new(PathBuf::from("/proc/self/exe")));
         let syms = symbolizer.symbolize(&src, Input::VirtOffset(&[offset]));
-        
+
         match syms {
             Ok(results) if !results.is_empty() => {
                 if let Some(sym) = results[0].as_sym() {
@@ -61,10 +61,20 @@ pub fn resolve_symbol(addr: u64) -> SymbolInfo {
                         offset: offset.saturating_sub(sym.addr),
                     }
                 } else {
-                    SymbolInfo { name: None, base_addr: 0, object: None, offset: 0 }
+                    SymbolInfo {
+                        name: None,
+                        base_addr: 0,
+                        object: None,
+                        offset: 0,
+                    }
                 }
             }
-            _ => SymbolInfo { name: None, base_addr: 0, object: None, offset: 0 },
+            _ => SymbolInfo {
+                name: None,
+                base_addr: 0,
+                object: None,
+                offset: 0,
+            },
         }
     })
 }

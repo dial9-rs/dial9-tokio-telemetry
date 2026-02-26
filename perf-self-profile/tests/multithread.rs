@@ -45,10 +45,7 @@ fn profiles_spawned_threads() {
     let samples = sampler.drain_samples();
 
     let tids: HashSet<u32> = samples.iter().map(|s| s.tid).collect();
-    assert!(
-        samples.len() > 0,
-        "expected at least some samples, got 0"
-    );
+    assert!(samples.len() > 0, "expected at least some samples, got 0");
     assert!(
         tids.len() > 1,
         "expected samples from multiple threads, but only saw tids: {:?} ({} samples)",

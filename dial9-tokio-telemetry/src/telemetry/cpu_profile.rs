@@ -73,12 +73,7 @@ impl CpuProfiler {
 
     /// Drain all pending perf samples and convert to CpuSample events.
     pub fn drain(&mut self) -> Vec<TelemetryEvent> {
-        let has_data = self.sampler.has_pending();
         let mut events = Vec::new();
-        eprintln!(
-            "drainling sampler... {has_data} {}",
-            self.tid_to_worker.len()
-        );
         self.sampler.for_each_sample(|sample| {
             let timestamp_nanos = sample.time.saturating_sub(self.clock_offset);
             let worker_id = self
@@ -92,13 +87,6 @@ impl CpuProfiler {
                 callchain: sample.callchain.clone(),
             });
         });
-        if has_data || !events.is_empty() {
-            eprintln!(
-                "[cpu-profiler] has_pending={has_data} drained={} workers_mapped={}",
-                events.len(),
-                self.tid_to_worker.len()
-            );
-        }
         events
     }
 }

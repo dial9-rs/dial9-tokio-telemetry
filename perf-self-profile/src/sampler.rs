@@ -91,8 +91,7 @@ impl PerfSampler {
     /// `pid=0` means the current process. `pid=-1` means all processes (requires root).
     pub fn start_for_pid(pid: i32, config: SamplerConfig) -> io::Result<Self> {
         // Check max sample rate
-        if let Ok(contents) =
-            std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
+        if let Ok(contents) = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
         {
             if let Ok(max_rate) = contents.trim().parse::<u64>() {
                 if config.frequency_hz > max_rate {
@@ -134,9 +133,7 @@ impl PerfSampler {
             | PERF_SAMPLE_PERIOD;
         attr.sample_type = sample_type;
         attr.sample_period_or_freq = config.frequency_hz;
-        attr.flags = PERF_ATTR_FLAG_FREQ
-            | PERF_ATTR_FLAG_SAMPLE_ID_ALL
-            | PERF_ATTR_FLAG_INHERIT;
+        attr.flags = PERF_ATTR_FLAG_FREQ | PERF_ATTR_FLAG_SAMPLE_ID_ALL | PERF_ATTR_FLAG_INHERIT;
 
         if !config.include_kernel {
             attr.flags |= PERF_ATTR_FLAG_EXCLUDE_KERNEL | PERF_ATTR_FLAG_EXCLUDE_HV;
@@ -192,8 +189,7 @@ impl PerfSampler {
                 ));
             }
 
-            let ring =
-                unsafe { RingBuffer::new(base as *mut u8, data_size as u64, mmap_size) };
+            let ring = unsafe { RingBuffer::new(base as *mut u8, data_size as u64, mmap_size) };
 
             if perf_event_ioctl(fd, PERF_EVENT_IOC_ENABLE) < 0 {
                 let err = io::Error::last_os_error();
@@ -326,10 +322,7 @@ fn get_online_cpus() -> io::Result<Vec<i32>> {
 ///   u64 nr;                          // PERF_SAMPLE_CALLCHAIN
 ///   u64 ips[nr];                     //   (callchain data)
 /// ```
-fn parse_sample(
-    sample_type: u64,
-    body: &crate::ring_buffer::RecordBody<'_>,
-) -> Option<Sample> {
+fn parse_sample(sample_type: u64, body: &crate::ring_buffer::RecordBody<'_>) -> Option<Sample> {
     let mut offset: usize = 0;
     let body_len = body.len();
 

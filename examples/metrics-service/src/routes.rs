@@ -13,6 +13,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/metrics", post(record_metric))
         .route("/metrics/{name}", get(query_metric))
+        .route("/terminate", post(terminate))
         .with_state(state)
 }
 
@@ -64,4 +65,10 @@ async fn query_metric(
             eprintln!("query error: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
+}
+
+async fn terminate(State(state): State<AppState>) -> StatusCode {
+    println!("Received /terminate – initiating graceful shutdown.");
+    state.shutdown.cancel();
+    StatusCode::OK
 }

@@ -37,14 +37,19 @@ fn main() {
 
     if samples.is_empty() {
         eprintln!("No samples collected. Make sure you're running with frame pointers.");
-        eprintln!("  RUSTFLAGS=\"-C force-frame-pointers=yes\" cargo run --release --example basic");
+        eprintln!(
+            "  RUSTFLAGS=\"-C force-frame-pointers=yes\" cargo run --release --example basic"
+        );
         return;
     }
 
     // --- Print a few raw samples ---
     eprintln!("=== First 3 samples ===");
     for (i, sample) in samples.iter().take(3).enumerate() {
-        eprintln!("Sample {i}: ip={:#x}, tid={}, cpu={}, frames:", sample.ip, sample.tid, sample.cpu);
+        eprintln!(
+            "Sample {i}: ip={:#x}, tid={}, cpu={}, frames:",
+            sample.ip, sample.tid, sample.cpu
+        );
         for (j, &addr) in sample.callchain.iter().enumerate() {
             let sym = resolve_symbol(addr);
             let name = sym.name.as_deref().unwrap_or("???");

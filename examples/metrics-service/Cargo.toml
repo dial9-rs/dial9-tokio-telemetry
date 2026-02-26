@@ -4,7 +4,7 @@ edition = "2024"
 version = "0.1.0"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 axum = "0.8"
 axum-core = "0.5"
