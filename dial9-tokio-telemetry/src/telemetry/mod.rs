@@ -15,7 +15,9 @@ pub use analysis::{
 };
 #[cfg(feature = "cpu-profiling")]
 pub use cpu_profile::CpuProfilingConfig;
-pub use events::{SchedStat, TelemetryEvent};
+#[cfg(feature = "cpu-profiling")]
+pub use cpu_profile::SchedEventConfig;
+pub use events::{CpuSampleSource, SchedStat, TelemetryEvent};
 pub use recorder::{TelemetryGuard, TelemetryHandle, TracedRuntime, TracedRuntimeBuilder};
 pub use task_metadata::{SpawnLocationId, TaskId, UNKNOWN_SPAWN_LOCATION_ID, UNKNOWN_TASK_ID};
 pub use writer::{NullWriter, RotatingWriter, SimpleBinaryWriter, TraceWriter};

@@ -12,7 +12,7 @@
 //!   4: QueueSample                  → code(u8) + timestamp_us(u32) + global_queue(u8)                                                   = 6 bytes
 //!   5: SpawnLocationDef             → code(u8) + spawn_loc_id(u16) + string_len(u16) + string_bytes(N)                                 = 5 + N bytes
 //!   6: TaskSpawn                    → code(u8) + task_id(u32) + spawn_loc_id(u16)                                                       = 7 bytes
-//!   7: CpuSample                    → code(u8) + timestamp_us(u32) + worker_id(u8) + num_frames(u8) + frames(N * u64)                  = 7 + 8N bytes
+//!   7: CpuSample                    → code(u8) + timestamp_us(u32) + worker_id(u8) + source(u8) + num_frames(u8) + frames(N * u64)          = 8 + 8N bytes
 //!   8: CallframeDef                 → code(u8) + address(u64) + string_len(u16) + string_bytes(N)                                      = 11 + N bytes
 //!   9: WakeEvent                    → code(u8) + timestamp_us(u32) + waker_task_id(u32) + woken_task_id(u32) + target_worker(u8)        = 14 bytes
 //! ```
@@ -30,7 +30,7 @@ use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::io::{Read, Result, Write};
 
 pub const MAGIC: &[u8; 8] = b"TOKIOTRC";
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 pub const HEADER_SIZE: usize = 12; // 8 magic + 4 version
 
 // Wire codes
@@ -55,7 +55,7 @@ pub fn wire_event_size(event: &TelemetryEvent) -> usize {
         TelemetryEvent::WorkerUnpark { .. } => 15,
         TelemetryEvent::SpawnLocationDef { location, .. } => 1 + 2 + 2 + location.len(),
         TelemetryEvent::TaskSpawn { .. } => 7,
-        TelemetryEvent::CpuSample { callchain, .. } => 7 + 8 * callchain.len(),
+        TelemetryEvent::CpuSample { callchain, .. } => 8 + 8 * callchain.len(),
         TelemetryEvent::CallframeDef { symbol, .. } => 1 + 8 + 2 + symbol.len(),
         TelemetryEvent::WakeEvent { .. } => 14,
     }
@@ -151,12 +151,14 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
         TelemetryEvent::CpuSample {
             timestamp_nanos,
             worker_id,
+            source,
             callchain,
         } => {
             let timestamp_us = (*timestamp_nanos / 1000) as u32;
             w.write_all(&[WIRE_CPU_SAMPLE])?;
             w.write_all(&timestamp_us.to_le_bytes())?;
             w.write_all(&[*worker_id as u8])?;
+            w.write_all(&[*source as u8])?;
             let num_frames = callchain.len().min(255) as u8;
             w.write_all(&[num_frames])?;
             for &addr in callchain.iter().take(num_frames as usize) {
@@ -327,8 +329,10 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
         }
         WIRE_CPU_SAMPLE => {
             let mut wid = [0u8; 1];
+            let mut src = [0u8; 1];
             let mut nf = [0u8; 1];
             r.read_exact(&mut wid)?;
+            r.read_exact(&mut src)?;
             r.read_exact(&mut nf)?;
             let num_frames = nf[0] as usize;
             let mut callchain = Vec::with_capacity(num_frames);
@@ -340,6 +344,7 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
             TelemetryEvent::CpuSample {
                 timestamp_nanos,
                 worker_id: wid[0] as usize,
+                source: crate::telemetry::events::CpuSampleSource::from_u8(src[0]),
                 callchain,
             }
         }

@@ -30,6 +30,24 @@ impl Default for CpuProfilingConfig {
     }
 }
 
+/// Configuration for per-worker sched event capture (context switches).
+///
+/// Uses `perf_event_open` with `SwContextSwitches` in per-thread mode,
+/// so each worker thread gets its own perf fd via `on_thread_start`.
+#[derive(Debug, Clone)]
+pub struct SchedEventConfig {
+    /// Whether to include kernel stack frames.
+    pub include_kernel: bool,
+}
+
+impl Default for SchedEventConfig {
+    fn default() -> Self {
+        Self {
+            include_kernel: false,
+        }
+    }
+}
+
 /// Manages the perf sampler and converts samples to telemetry events.
 pub(crate) struct CpuProfiler {
     sampler: PerfSampler,
@@ -84,6 +102,7 @@ impl CpuProfiler {
             events.push(TelemetryEvent::CpuSample {
                 timestamp_nanos,
                 worker_id,
+                source: crate::telemetry::events::CpuSampleSource::CpuProfile,
                 callchain: sample.callchain.clone(),
             });
         });
@@ -101,4 +120,58 @@ pub(crate) fn clock_monotonic_ns() -> u64 {
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
     }
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
+/// Per-thread sched event profiler. Each worker thread calls `track_current_thread`
+/// from `on_thread_start`; the flush thread drains samples via `drain`.
+pub(crate) struct SchedProfiler {
+    sampler: PerfSampler,
+    clock_offset: u64,
+    tid_to_worker: HashMap<u32, usize>,
+}
+
+impl SchedProfiler {
+    pub fn new(config: SchedEventConfig, trace_start_mono_ns: u64) -> io::Result<Self> {
+        let sampler = PerfSampler::new_per_thread(SamplerConfig {
+            frequency_hz: 1, // ignored for event-based; period=1
+            event_source: EventSource::SwContextSwitches,
+            include_kernel: config.include_kernel,
+        })?;
+        Ok(Self {
+            sampler,
+            clock_offset: trace_start_mono_ns,
+            tid_to_worker: HashMap::new(),
+        })
+    }
+
+    pub fn track_current_thread(&mut self) -> io::Result<()> {
+        self.sampler.track_current_thread()
+    }
+
+    pub fn stop_tracking_current_thread(&mut self) {
+        self.sampler.stop_tracking_current_thread()
+    }
+
+    pub fn register_worker(&mut self, worker_id: usize, tid: u32) {
+        self.tid_to_worker.insert(tid, worker_id);
+    }
+
+    pub fn drain(&mut self) -> Vec<TelemetryEvent> {
+        let mut events = Vec::new();
+        self.sampler.for_each_sample(|sample| {
+            let timestamp_nanos = sample.time.saturating_sub(self.clock_offset);
+            let worker_id = self
+                .tid_to_worker
+                .get(&sample.tid)
+                .copied()
+                .unwrap_or(UNKNOWN_WORKER);
+            events.push(TelemetryEvent::CpuSample {
+                timestamp_nanos,
+                worker_id,
+                source: crate::telemetry::events::CpuSampleSource::SchedEvent,
+                callchain: sample.callchain.clone(),
+            });
+        });
+        events
+    }
 }

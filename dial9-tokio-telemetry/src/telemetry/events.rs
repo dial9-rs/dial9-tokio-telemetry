@@ -1,6 +1,24 @@
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use serde::Serialize;
 
+/// What triggered a [`TelemetryEvent::CpuSample`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum CpuSampleSource {
+    /// Periodic CPU profiling sample (frequency-based).
+    CpuProfile = 0,
+    /// Context switch captured by per-thread sched event tracking.
+    SchedEvent = 1,
+}
+
+impl CpuSampleSource {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::SchedEvent,
+            _ => Self::CpuProfile,
+        }
+    }
+}
+
 /// Wire event representing a telemetry record after interning.
 ///
 /// Compare with `RawEvent` which is emitted by worker threads and carries
@@ -74,6 +92,8 @@ pub enum TelemetryEvent {
         timestamp_nanos: u64,
         #[serde(rename = "worker")]
         worker_id: usize,
+        /// What triggered this sample.
+        source: CpuSampleSource,
         /// Raw instruction pointer addresses (leaf first). Symbolized offline.
         callchain: Vec<u64>,
     },

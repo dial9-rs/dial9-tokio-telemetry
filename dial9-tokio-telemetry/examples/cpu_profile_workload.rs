@@ -77,12 +77,13 @@ fn main() {
                 worker_id,
                 callchain,
                 timestamp_nanos,
+                source,
             } => {
                 cpu_samples += 1;
                 *samples_by_worker.entry(*worker_id).or_default() += 1;
                 if cpu_samples <= 10 {
                     eprintln!(
-                        "  CpuSample: worker={worker_id} t={timestamp_nanos}ns frames={}",
+                        "  CpuSample: worker={worker_id} t={timestamp_nanos}ns source={source:?} frames={}",
                         callchain.len()
                     );
                     for (i, addr) in callchain.iter().take(8).enumerate() {
