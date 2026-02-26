@@ -207,6 +207,63 @@
             canvas {
                 display: block;
             }
+
+            #selection-overlay {
+                position: absolute;
+                background: rgba(108, 99, 255, 0.15);
+                border: 1px solid rgba(108, 99, 255, 0.6);
+                pointer-events: none;
+                z-index: 9;
+                display: none;
+            }
+
+            #flamegraph-panel {
+                display: none;
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: #1a1a2e;
+                z-index: 50;
+                flex-direction: column;
+            }
+            #flamegraph-panel .fg-header {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 6px 12px;
+                background: #16213e;
+                border-bottom: 1px solid #333;
+                font-size: 0.8em;
+                flex-shrink: 0;
+            }
+            #flamegraph-panel .fg-header .fg-title { color: #6c63ff; font-weight: 600; }
+            #flamegraph-panel .fg-header .fg-stats { color: #888; }
+            #flamegraph-panel .fg-header .fg-close { cursor: pointer; color: #888; margin-left: auto; padding: 0 4px; }
+            #flamegraph-panel .fg-header .fg-close:hover { color: #fff; }
+            .fg-section-label {
+                padding: 4px 12px;
+                font-size: 0.78em;
+                color: #aaa;
+                background: #16213e;
+                border-bottom: 1px solid #222;
+                flex-shrink: 0;
+            }
+            #fg-tooltip {
+                display: none;
+                position: fixed;
+                background: #222244;
+                border: 1px solid #555;
+                padding: 6px 10px;
+                border-radius: 4px;
+                font-size: 0.78em;
+                pointer-events: none;
+                z-index: 200;
+                max-width: 600px;
+                white-space: nowrap;
+                color: #e0e0e0;
+            }
         </style>
     </head>
     <body>
@@ -248,6 +305,7 @@
                 <button id="btn-reset">New File</button>
             </div>
             <div id="main-area">
+                <div id="selection-overlay"></div>
                 <canvas id="crosshair-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10"></canvas>
                 <div id="timeline-header">
                     <canvas id="timeline-canvas"></canvas>
@@ -264,10 +322,25 @@
                     >
                     <canvas id="queue-canvas"></canvas>
                 </div>
+                <div id="flamegraph-panel">
+                    <div class="fg-header">
+                        <span class="fg-title" id="fg-title">Flamegraph</span>
+                        <span class="fg-stats" id="fg-stats"></span>
+                        <select id="fg-spawn-filter" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em;max-width:350px"></select>
+                        <span class="fg-close" id="fg-close">✕ Close (Esc)</span>
+                    </div>
+                    <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column">
+                        <div class="fg-section-label" id="fg-worker-label">Worker threads</div>
+                        <canvas id="fg-canvas-worker"></canvas>
+                        <div class="fg-section-label" id="fg-offworker-label">Off-worker (sampler thread)</div>
+                        <canvas id="fg-canvas-offworker"></canvas>
+                    </div>
+                </div>
             </div>
         </div>
 
         <div id="tooltip"></div>
+        <div id="fg-tooltip"></div>
         <div id="stack-popup" style="display:none;position:fixed;background:#1a1a2e;border:1px solid #6c63ff;border-radius:8px;padding:12px 16px;z-index:200;max-width:500px;max-height:400px;overflow-y:auto;font-size:0.8em;line-height:1.6;box-shadow:0 4px 20px rgba(0,0,0,0.5)">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
                 <span id="stack-popup-title" style="color:#6c63ff;font-weight:600"></span>
@@ -715,13 +788,17 @@
                 if (trace.cpuSamples.length > 0) {
                     for (const sample of trace.cpuSamples) {
                         const spans = workerSpans[sample.workerId];
-                        if (!spans) continue;
+                        if (!spans) { sample.spawnLoc = null; continue; }
+                        let found = false;
                         for (const poll of spans.polls) {
                             if (sample.timestamp >= poll.start && sample.timestamp <= poll.end) {
                                 (poll.cpuSamples ??= []).push(sample);
+                                sample.spawnLoc = poll.spawnLoc;
+                                found = true;
                                 break;
                             }
                         }
+                        if (!found) sample.spawnLoc = null;
                     }
                     let pollsWithSamples = 0;
                     for (const w of workerIds) {
@@ -1759,6 +1836,7 @@
             document.getElementById("main-area").addEventListener(
                 "wheel",
                 (e) => {
+                    if (document.getElementById("flamegraph-panel").style.display === "flex") return;
                     e.preventDefault();
                     const rect = lanesContainer.getBoundingClientRect();
                     const mouseX = e.clientX - rect.left - LABEL_W;
@@ -1770,15 +1848,39 @@
                 { passive: false },
             );
 
-            // Pan with mouse drag
+            // Pan with mouse drag (normal) or region select (shift+drag)
             let dragging = false,
                 dragStartX = 0,
                 dragViewStart = 0,
                 dragViewEnd = 0,
                 dragMoved = false;
+            let regionSelecting = false,
+                regionStartNs = 0,
+                regionEndNs = 0;
+            const selOverlay = document.getElementById("selection-overlay");
+
             document
                 .getElementById("main-area")
                 .addEventListener("mousedown", (e) => {
+                    if (e.shiftKey && trace && trace.cpuSamples.length > 0) {
+                        // Shift+drag: region select
+                        regionSelecting = true;
+                        dragMoved = false;
+                        dragStartX = e.clientX;
+                        const rect = lanesContainer.getBoundingClientRect();
+                        const mouseX = e.clientX - rect.left - LABEL_W;
+                        const drawW = rect.width - LABEL_W;
+                        regionStartNs = viewStart + (Math.max(0, mouseX) / drawW) * (viewEnd - viewStart);
+                        regionEndNs = regionStartNs;
+                        // Position overlay
+                        const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                        selOverlay.style.top = "0px";
+                        selOverlay.style.height = mainRect.height + "px";
+                        selOverlay.style.display = "block";
+                        updateSelOverlay(e.clientX);
+                        document.body.style.cursor = "crosshair";
+                        return;
+                    }
                     dragging = true;
                     dragMoved = false;
                     dragStartX = e.clientX;
@@ -1786,7 +1888,28 @@
                     dragViewEnd = viewEnd;
                     document.body.style.cursor = "grabbing";
                 });
+
+            function updateSelOverlay(clientX) {
+                const rect = lanesContainer.getBoundingClientRect();
+                const drawW = rect.width - LABEL_W;
+                const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                const lanesLeft = rect.left - mainRect.left + LABEL_W;
+                const x1 = lanesLeft + nsToX(Math.min(regionStartNs, regionEndNs), drawW);
+                const x2 = lanesLeft + nsToX(Math.max(regionStartNs, regionEndNs), drawW);
+                selOverlay.style.left = x1 + "px";
+                selOverlay.style.width = Math.max(1, x2 - x1) + "px";
+            }
+
             window.addEventListener("mousemove", (e) => {
+                if (regionSelecting) {
+                    if (Math.abs(e.clientX - dragStartX) > 3) dragMoved = true;
+                    const rect = lanesContainer.getBoundingClientRect();
+                    const drawW = rect.width - LABEL_W;
+                    const mouseX = e.clientX - rect.left - LABEL_W;
+                    regionEndNs = viewStart + (Math.max(0, Math.min(drawW, mouseX)) / drawW) * (viewEnd - viewStart);
+                    updateSelOverlay(e.clientX);
+                    return;
+                }
                 if (!dragging) return;
                 if (Math.abs(e.clientX - dragStartX) > 3) dragMoved = true;
                 const rect = lanesContainer.getBoundingClientRect();
@@ -1810,6 +1933,17 @@
                 renderAll();
             });
             window.addEventListener("mouseup", () => {
+                if (regionSelecting) {
+                    regionSelecting = false;
+                    selOverlay.style.display = "none";
+                    document.body.style.cursor = "";
+                    if (dragMoved) {
+                        const selStart = Math.min(regionStartNs, regionEndNs);
+                        const selEnd = Math.max(regionStartNs, regionEndNs);
+                        showFlamegraph(selStart, selEnd);
+                    }
+                    return;
+                }
                 dragging = false;
                 document.body.style.cursor = "";
             });
@@ -1915,6 +2049,10 @@
                     case "Escape":
                         e.preventDefault();
                         hideStackPopup();
+                        if (document.getElementById("flamegraph-panel").style.display === "flex") {
+                            document.getElementById("flamegraph-panel").style.display = "none";
+                            document.getElementById("fg-tooltip").style.display = "none";
+                        }
                         selectedTaskId = null;
                         renderAll();
                         break;
@@ -1958,6 +2096,11 @@
                 .getElementById("main-area")
                 .addEventListener("mousemove", (e) => {
                     if (dragging) {
+                        tooltip.style.display = "none";
+                        mouseNs = null;
+                        return;
+                    }
+                    if (document.getElementById("flamegraph-panel").style.display === "flex") {
                         tooltip.style.display = "none";
                         mouseNs = null;
                         return;
@@ -2152,10 +2295,245 @@
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:3px;background:#ff8c00;display:inline-block"></span>CPU Sampled</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#66bb6a;font-size:10px">▼</span>Wake</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
-    <span style="color:#666;margin-left:8px">│ ↑↓ zoom · ←→ pan · click poll for task + wake timeline · esc close</span>
+    <span style="color:#666;margin-left:8px">│ ↑↓ zoom · ←→ pan · click poll for task + wake timeline · shift+drag for flamegraph · esc close</span>
   `;
                 tb.insertBefore(leg, document.getElementById("btn-zoom-in"));
             })();
+
+            // ── Flamegraph ──
+            let fgWorkerData = null;    // {nodes, maxDepth, totalSamples}
+            let fgOffworkerData = null; // same shape, for worker 255
+            const FG_ROW_H = 18;
+            // Per-canvas hit regions
+            let fgHitRegions = { worker: [], offworker: [] };
+            // Raw samples for current flamegraph (for re-filtering)
+            let fgAllSamples = [];
+
+            function buildFlamegraphTree(samples) {
+                const root = { name: "(all)", children: new Map(), count: 0, self: 0 };
+                for (const s of samples) {
+                    const chain = s.callchain.slice().reverse();
+                    let node = root;
+                    node.count++;
+                    for (const addr of chain) {
+                        const name = trace.callframeSymbols.get(addr) || addr;
+                        if (!node.children.has(name)) {
+                            node.children.set(name, { name, children: new Map(), count: 0, self: 0 });
+                        }
+                        node = node.children.get(name);
+                        node.count++;
+                    }
+                    node.self++;
+                }
+                return root;
+            }
+
+            function flattenFlamegraph(root, total) {
+                const nodes = [];
+                let maxD = 0;
+                function walk(node, depth, xStart) {
+                    const w = node.count / total;
+                    if (w < 0.001) return;
+                    nodes.push({ name: node.name, depth, x: xStart, w, count: node.count, self: node.self });
+                    if (depth > maxD) maxD = depth;
+                    const kids = [...node.children.values()].sort((a, b) => b.count - a.count);
+                    let cx = xStart;
+                    for (const child of kids) {
+                        walk(child, depth + 1, cx);
+                        cx += child.count / total;
+                    }
+                }
+                const kids = [...root.children.values()].sort((a, b) => b.count - a.count);
+                let cx = 0;
+                for (const child of kids) {
+                    walk(child, 0, cx);
+                    cx += child.count / total;
+                }
+                return { nodes, maxDepth: maxD };
+            }
+
+            function buildFgData(samples) {
+                if (!samples.length) return null;
+                const tree = buildFlamegraphTree(samples);
+                const result = flattenFlamegraph(tree, samples.length);
+                return { nodes: result.nodes, maxDepth: result.maxDepth, totalSamples: samples.length };
+            }
+
+            function showFlamegraph(selStart, selEnd) {
+                const allSamples = trace.cpuSamples.filter(s =>
+                    s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0
+                );
+                if (!allSamples.length) {
+                    alert("No CPU samples in selected region. CPU sampling must be active during this time range.");
+                    return;
+                }
+
+                fgAllSamples = allSamples;
+                const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
+                document.getElementById("fg-title").textContent = "Flamegraph";
+                document.getElementById("fg-stats").textContent =
+                    `${allSamples.length} samples · ${durMs}ms selected`;
+
+                // Build spawn location dropdown
+                const locCounts = new Map(); // spawnLoc → count
+                for (const s of allSamples) {
+                    const loc = s.spawnLoc || "(unknown)";
+                    locCounts.set(loc, (locCounts.get(loc) || 0) + 1);
+                }
+                const sel = document.getElementById("fg-spawn-filter");
+                sel.innerHTML = `<option value="">All tasks (${allSamples.length} samples)</option>`;
+                // Sort by count descending
+                const sorted = [...locCounts.entries()].sort((a, b) => b[1] - a[1]);
+                for (const [loc, count] of sorted) {
+                    const short = loc.replace(/.*\//, '');
+                    const opt = document.createElement("option");
+                    opt.value = loc;
+                    opt.textContent = `${short} (${count})`;
+                    opt.title = loc;
+                    sel.appendChild(opt);
+                }
+
+                document.getElementById("flamegraph-panel").style.display = "flex";
+                applyFgFilter();
+            }
+
+            function applyFgFilter() {
+                const filterVal = document.getElementById("fg-spawn-filter").value;
+                const samples = filterVal
+                    ? fgAllSamples.filter(s => (s.spawnLoc || "(unknown)") === filterVal)
+                    : fgAllSamples;
+
+                const workerSamples = samples.filter(s => s.workerId !== 255);
+                const offworkerSamples = samples.filter(s => s.workerId === 255);
+
+                fgWorkerData = buildFgData(workerSamples);
+                fgOffworkerData = buildFgData(offworkerSamples);
+
+                document.getElementById("fg-worker-label").textContent =
+                    `Worker threads — ${workerSamples.length} samples`;
+                document.getElementById("fg-worker-label").style.display = fgWorkerData ? "" : "none";
+                document.getElementById("fg-canvas-worker").style.display = fgWorkerData ? "" : "none";
+
+                const offLabel = document.getElementById("fg-offworker-label");
+                offLabel.textContent =
+                    `Off-worker (sampler thread) — ${offworkerSamples.length} samples`;
+                offLabel.style.display = fgOffworkerData ? "" : "none";
+                document.getElementById("fg-canvas-offworker").style.display = fgOffworkerData ? "" : "none";
+
+                renderFlamegraph();
+            }
+
+            document.getElementById("fg-spawn-filter").addEventListener("change", applyFgFilter);
+
+            function flamegraphColor(name) {
+                let h = 0;
+                for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+                const hue = 10 + (Math.abs(h) % 40);
+                const sat = 60 + (Math.abs(h >> 8) % 30);
+                const lit = 40 + (Math.abs(h >> 16) % 15);
+                return `hsl(${hue},${sat}%,${lit}%)`;
+            }
+
+            function renderFgCanvas(canvasId, data, hitKey) {
+                const c = document.getElementById(canvasId);
+                if (!data) { c.width = 0; c.height = 0; fgHitRegions[hitKey] = []; return; }
+                const dpr = devicePixelRatio || 1;
+                const pw = c.parentElement.clientWidth;
+                const ph = (data.maxDepth + 2) * FG_ROW_H + 8;
+                c.width = pw * dpr;
+                c.height = ph * dpr;
+                c.style.width = pw + "px";
+                c.style.height = ph + "px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+                ctx.fillStyle = "#1a1a2e";
+                ctx.fillRect(0, 0, pw, ph);
+
+                const regions = [];
+                const padL = 4, padR = 4, drawW = pw - padL - padR;
+                const baseY = ph - 4;
+                ctx.font = "11px monospace";
+                ctx.textBaseline = "middle";
+                for (const node of data.nodes) {
+                    const x = padL + node.x * drawW;
+                    const w = node.w * drawW;
+                    const y = baseY - (node.depth + 1) * FG_ROW_H;
+                    if (w < 0.5) continue;
+                    ctx.fillStyle = flamegraphColor(node.name);
+                    ctx.fillRect(x, y, Math.max(w - 0.5, 0.5), FG_ROW_H - 1);
+                    regions.push({ x1: x, x2: x + w, y, node, totalSamples: data.totalSamples });
+                    if (w > 30) {
+                        ctx.fillStyle = "#fff";
+                        const label = node.name.length * 7 > w - 4
+                            ? node.name.slice(0, Math.floor((w - 10) / 7)) + "…"
+                            : node.name;
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.rect(x + 2, y, w - 4, FG_ROW_H);
+                        ctx.clip();
+                        ctx.fillText(label, x + 3, y + FG_ROW_H / 2);
+                        ctx.restore();
+                    }
+                }
+                fgHitRegions[hitKey] = regions;
+            }
+
+            function renderFlamegraph() {
+                renderFgCanvas("fg-canvas-worker", fgWorkerData, "worker");
+                renderFgCanvas("fg-canvas-offworker", fgOffworkerData, "offworker");
+            }
+
+            // Flamegraph tooltip — shared handler for both canvases
+            function fgCanvasMouseMove(e, hitKey) {
+                const c = e.target;
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+                const tip = document.getElementById("fg-tooltip");
+                const regions = fgHitRegions[hitKey] || [];
+                let hit = null;
+                for (let i = regions.length - 1; i >= 0; i--) {
+                    const r = regions[i];
+                    if (mx >= r.x1 && mx <= r.x2 && my >= r.y && my < r.y + FG_ROW_H) {
+                        hit = r;
+                        break;
+                    }
+                }
+                if (hit) {
+                    const total = hit.totalSamples;
+                    const pct = ((hit.node.count / total) * 100).toFixed(1);
+                    const selfPct = ((hit.node.self / total) * 100).toFixed(1);
+                    tip.innerHTML = `<b>${hit.node.name}</b><br>${hit.node.count} samples (${pct}%) · ${hit.node.self} self (${selfPct}%)`;
+                    tip.style.display = "block";
+                    tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 620) + "px";
+                    tip.style.top = (e.clientY - 50) + "px";
+                    c.style.cursor = "pointer";
+                } else {
+                    tip.style.display = "none";
+                    c.style.cursor = "";
+                }
+            }
+
+            document.getElementById("fg-canvas-worker").addEventListener("mousemove", (e) => fgCanvasMouseMove(e, "worker"));
+            document.getElementById("fg-canvas-offworker").addEventListener("mousemove", (e) => fgCanvasMouseMove(e, "offworker"));
+            document.getElementById("fg-canvas-worker").addEventListener("mouseleave", () => {
+                document.getElementById("fg-tooltip").style.display = "none";
+            });
+            document.getElementById("fg-canvas-offworker").addEventListener("mouseleave", () => {
+                document.getElementById("fg-tooltip").style.display = "none";
+            });
+
+            document.getElementById("fg-close").addEventListener("click", () => {
+                document.getElementById("flamegraph-panel").style.display = "none";
+                document.getElementById("fg-tooltip").style.display = "none";
+            });
+
+            // Re-render flamegraph on resize
+            window.addEventListener("resize", () => {
+                if (document.getElementById("flamegraph-panel").style.display === "flex") {
+                    renderFlamegraph();
+                }
+            });
         </script>
     </body>
 </html>
