@@ -32,7 +32,7 @@ fn main() -> std::io::Result<()> {
     let mut w = BufWriter::new(out);
 
     let mut count = 0u64;
-    while let Some(e) = reader.read_event()? {
+    while let Some(e) = reader.read_raw_event()? {
         serde_json::to_writer(&mut w, &e)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         w.write_all(b"\n")?;
