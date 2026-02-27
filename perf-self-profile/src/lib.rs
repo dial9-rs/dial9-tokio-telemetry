@@ -36,7 +36,6 @@
 mod ring_buffer;
 mod sampler;
 mod symbolize;
-mod sys;
 
 pub use sampler::{EventSource, PerfSampler, Sample, SamplerConfig};
 pub use symbolize::resolve_symbol;

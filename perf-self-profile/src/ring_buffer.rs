@@ -7,7 +7,7 @@ use std::mem;
 use std::ptr;
 use std::sync::atomic::{Ordering, fence};
 
-use crate::sys::{PerfEventHeader, PerfEventMmapPage};
+use perf_event_open_sys::bindings::{perf_event_header, perf_event_mmap_page};
 
 /// A mapped perf ring buffer.
 pub struct RingBuffer {
@@ -21,8 +21,9 @@ pub struct RingBuffer {
     position: u64,
 }
 
-// Safety: The ring buffer pointer is only accessed by the owner thread,
-// and the kernel side is synchronized via data_head/data_tail with fences.
+// Safety: The mmap'd memory is valid for the lifetime of the RingBuffer
+// regardless of which thread owns it. The kernel's data_head/data_tail
+// synchronization protocol with memory fences is thread-safe.
 unsafe impl Send for RingBuffer {}
 
 impl RingBuffer {
@@ -60,18 +61,20 @@ impl RingBuffer {
             let data = self.data_slice();
             let pos = (self.position % self.data_size) as usize;
 
-            let header: PerfEventHeader = if pos + mem::size_of::<PerfEventHeader>() <= data.len() {
-                unsafe { ptr::read_unaligned(data.as_ptr().add(pos) as *const PerfEventHeader) }
+            let header: perf_event_header = if pos + mem::size_of::<perf_event_header>()
+                <= data.len()
+            {
+                unsafe { ptr::read_unaligned(data.as_ptr().add(pos) as *const perf_event_header) }
             } else {
-                let mut buf = [0u8; mem::size_of::<PerfEventHeader>()];
+                let mut buf = [0u8; mem::size_of::<perf_event_header>()];
                 for (i, b) in buf.iter_mut().enumerate() {
                     *b = data[(pos + i) % data.len()];
                 }
-                unsafe { ptr::read_unaligned(buf.as_ptr() as *const PerfEventHeader) }
+                unsafe { ptr::read_unaligned(buf.as_ptr() as *const perf_event_header) }
             };
 
             let record_size = header.size as usize;
-            let body_offset = mem::size_of::<PerfEventHeader>();
+            let body_offset = mem::size_of::<perf_event_header>();
             let body_size = record_size - body_offset;
             let body_start = (pos + body_offset) % data.len();
 
@@ -99,7 +102,7 @@ impl RingBuffer {
 
     fn read_head(&self) -> u64 {
         unsafe {
-            let page = &*(self.base as *const PerfEventMmapPage);
+            let page = &*(self.base as *const perf_event_mmap_page);
             let head = ptr::read_volatile(&page.data_head);
             fence(Ordering::Acquire);
             head
@@ -108,7 +111,7 @@ impl RingBuffer {
 
     fn write_tail(&self, value: u64) {
         unsafe {
-            let page = &mut *(self.base as *mut PerfEventMmapPage);
+            let page = &mut *(self.base as *mut perf_event_mmap_page);
             fence(Ordering::Release);
             ptr::write_volatile(&mut page.data_tail, value);
         }
@@ -132,7 +135,7 @@ impl Drop for RingBuffer {
 
 /// A raw record read from the ring buffer, before parsing.
 pub struct RawRecord<'a> {
-    pub header: PerfEventHeader,
+    pub header: perf_event_header,
     pub body: RecordBody<'a>,
 }
 

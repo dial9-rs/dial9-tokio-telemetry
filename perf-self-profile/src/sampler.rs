@@ -3,8 +3,18 @@
 use std::io;
 use std::ptr;
 
+use libc;
+use perf_event_open_sys::bindings::{
+    PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_SW_CONTEXT_SWITCHES, PERF_COUNT_SW_CPU_CLOCK,
+    PERF_COUNT_SW_TASK_CLOCK, PERF_FLAG_FD_CLOEXEC, PERF_RECORD_SAMPLE, PERF_SAMPLE_CALLCHAIN,
+    PERF_SAMPLE_CPU, PERF_SAMPLE_IP, PERF_SAMPLE_PERIOD, PERF_SAMPLE_TID, PERF_SAMPLE_TIME,
+    PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE, perf_event_attr,
+};
+
 use crate::ring_buffer::RingBuffer;
-use crate::sys::*;
+
+// On x86_64, userspace virtual addresses are below 0x0000_8000_0000_0000.
+const USER_ADDR_LIMIT: u64 = 0x0000_8000_0000_0000;
 
 /// Which event source to sample on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +85,7 @@ struct PerfEvent {
 
 impl Drop for PerfEvent {
     fn drop(&mut self) {
-        perf_event_ioctl(self.fd, PERF_EVENT_IOC_DISABLE);
+        unsafe { perf_event_open_sys::ioctls::DISABLE(self.fd, 0) };
         // RingBuffer::drop handles munmap; closing the fd after munmap is fine on Linux.
         unsafe { libc::close(self.fd) };
     }
@@ -87,8 +97,16 @@ const MMAP_SIZE: usize = (PAGE_COUNT + 1) * PAGE_SIZE;
 const DATA_SIZE: usize = PAGE_COUNT * PAGE_SIZE;
 
 /// Open a perf event fd, mmap the ring buffer, and enable it.
-fn open_perf_event(attr: &PerfEventAttr, pid: i32, cpu: i32) -> io::Result<PerfEvent> {
-    let fd = perf_event_open(attr, pid, cpu, -1, PERF_FLAG_FD_CLOEXEC);
+fn open_perf_event(attr: &mut perf_event_attr, pid: i32, cpu: i32) -> io::Result<PerfEvent> {
+    let fd = unsafe {
+        perf_event_open_sys::perf_event_open(
+            attr,
+            pid,
+            cpu,
+            -1,
+            PERF_FLAG_FD_CLOEXEC as libc::c_ulong,
+        )
+    };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -112,7 +130,7 @@ fn open_perf_event(attr: &PerfEventAttr, pid: i32, cpu: i32) -> io::Result<PerfE
 
     let ring = unsafe { RingBuffer::new(base as *mut u8, DATA_SIZE as u64, MMAP_SIZE) };
 
-    if perf_event_ioctl(fd, PERF_EVENT_IOC_ENABLE) < 0 {
+    if unsafe { perf_event_open_sys::ioctls::ENABLE(fd, 0) } < 0 {
         let err = io::Error::last_os_error();
         unsafe { libc::close(fd) };
         return Err(err);
@@ -136,8 +154,7 @@ fn open_perf_event(attr: &PerfEventAttr, pid: i32, cpu: i32) -> io::Result<PerfE
 pub struct PerfSampler {
     events: Vec<PerfEvent>,
     sample_type: u64,
-    /// Stored attr for per-thread tracking.
-    attr: PerfEventAttr,
+    attr: perf_event_attr,
 }
 
 impl PerfSampler {
@@ -153,21 +170,21 @@ impl PerfSampler {
     ///
     /// `pid=0` means the current process. `pid=-1` means all processes (requires root).
     pub fn start_for_pid(pid: i32, config: SamplerConfig) -> io::Result<Self> {
-        let attr = Self::build_attr(&config)?;
+        let mut attr = Self::build_attr(&config)?;
 
         let is_event_based = matches!(config.event_source, EventSource::SwContextSwitches);
         let mut events = Vec::new();
 
         if is_event_based {
             // Single fd, cpu=-1, pid=target process
-            events.push(open_perf_event(&attr, pid, -1)?);
+            events.push(open_perf_event(&mut attr, pid, -1)?);
         } else {
             // With inherit + sampling, the kernel forbids cpu=-1 for mmap. We open
             // one event per online CPU, each with its own mmap ring buffer.
             let online_cpus = get_online_cpus()?;
             events.reserve(online_cpus.len());
             for &cpu in &online_cpus {
-                match open_perf_event(&attr, pid, cpu) {
+                match open_perf_event(&mut attr, pid, cpu) {
                     Ok(ev) => events.push(ev),
                     Err(e) => {
                         drop(events);
@@ -206,7 +223,7 @@ impl PerfSampler {
     /// fd scoped to this thread's tid with `cpu=-1`.
     pub fn track_current_thread(&mut self) -> io::Result<()> {
         let tid = unsafe { libc::syscall(libc::SYS_gettid) } as i32;
-        let ev = open_perf_event(&self.attr, tid, -1)?;
+        let ev = open_perf_event(&mut self.attr, tid, -1)?;
         self.events.push(ev);
         Ok(())
     }
@@ -224,7 +241,7 @@ impl PerfSampler {
         }
     }
 
-    fn build_attr(config: &SamplerConfig) -> io::Result<PerfEventAttr> {
+    fn build_attr(config: &SamplerConfig) -> io::Result<perf_event_attr> {
         // Check max sample rate
         if let Ok(contents) = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
             && let Ok(max_rate) = contents.trim().parse::<u64>()
@@ -240,34 +257,34 @@ impl PerfSampler {
             ));
         }
 
-        let mut attr = PerfEventAttr::zeroed();
-        attr.size = std::mem::size_of::<PerfEventAttr>() as u32;
+        let mut attr = perf_event_attr::default();
+        attr.size = std::mem::size_of::<perf_event_attr>() as u32;
 
         match config.event_source {
             EventSource::HwCpuCycles => {
                 attr.type_ = PERF_TYPE_HARDWARE;
-                attr.config = PERF_COUNT_HW_CPU_CYCLES;
+                attr.config = PERF_COUNT_HW_CPU_CYCLES as u64;
             }
             EventSource::SwCpuClock => {
                 attr.type_ = PERF_TYPE_SOFTWARE;
-                attr.config = PERF_COUNT_SW_CPU_CLOCK;
+                attr.config = PERF_COUNT_SW_CPU_CLOCK as u64;
             }
             EventSource::SwTaskClock => {
                 attr.type_ = PERF_TYPE_SOFTWARE;
-                attr.config = PERF_COUNT_SW_TASK_CLOCK;
+                attr.config = PERF_COUNT_SW_TASK_CLOCK as u64;
             }
             EventSource::SwContextSwitches => {
                 attr.type_ = PERF_TYPE_SOFTWARE;
-                attr.config = PERF_COUNT_SW_CONTEXT_SWITCHES;
+                attr.config = PERF_COUNT_SW_CONTEXT_SWITCHES as u64;
             }
         }
 
-        attr.sample_type = PERF_SAMPLE_IP
-            | PERF_SAMPLE_CALLCHAIN
-            | PERF_SAMPLE_TID
-            | PERF_SAMPLE_TIME
-            | PERF_SAMPLE_CPU
-            | PERF_SAMPLE_PERIOD;
+        attr.sample_type = PERF_SAMPLE_IP as u64
+            | PERF_SAMPLE_CALLCHAIN as u64
+            | PERF_SAMPLE_TID as u64
+            | PERF_SAMPLE_TIME as u64
+            | PERF_SAMPLE_CPU as u64
+            | PERF_SAMPLE_PERIOD as u64;
 
         let is_event_based = matches!(config.event_source, EventSource::SwContextSwitches);
         if is_event_based {
@@ -275,14 +292,16 @@ impl PerfSampler {
             // Context switches fire in kernel context, so we can't set exclude_kernel
             // on the event itself. Kernel frames in the callchain are filtered at parse
             // time via USER_ADDR_LIMIT (see parse_sample).
-            attr.sample_period_or_freq = 1;
-            attr.flags = PERF_ATTR_FLAG_SAMPLE_ID_ALL;
+            attr.__bindgen_anon_1.sample_period = 1;
+            attr.set_sample_id_all(1);
         } else {
-            attr.sample_period_or_freq = config.frequency_hz;
-            attr.flags =
-                PERF_ATTR_FLAG_FREQ | PERF_ATTR_FLAG_SAMPLE_ID_ALL | PERF_ATTR_FLAG_INHERIT;
+            attr.__bindgen_anon_1.sample_freq = config.frequency_hz;
+            attr.set_freq(1);
+            attr.set_sample_id_all(1);
+            attr.set_inherit(1);
             if !config.include_kernel {
-                attr.flags |= PERF_ATTR_FLAG_EXCLUDE_KERNEL | PERF_ATTR_FLAG_EXCLUDE_HV;
+                attr.set_exclude_kernel(1);
+                attr.set_exclude_hv(1);
             }
         }
 
@@ -305,7 +324,7 @@ impl PerfSampler {
 
         for ev in &mut self.events {
             ev.ring.for_each_record(|record| {
-                if record.header.type_ != PERF_RECORD_SAMPLE {
+                if record.header.type_ != PERF_RECORD_SAMPLE as u32 {
                     return;
                 }
                 if let Some(sample) = parse_sample(sample_type, &record.body) {
@@ -335,14 +354,14 @@ impl PerfSampler {
     /// Disable sampling on all CPUs (but keep ring buffers readable).
     pub fn disable(&self) {
         for ev in &self.events {
-            perf_event_ioctl(ev.fd, PERF_EVENT_IOC_DISABLE);
+            unsafe { perf_event_open_sys::ioctls::DISABLE(ev.fd, 0) };
         }
     }
 
     /// Re-enable sampling after a `disable()`.
     pub fn enable(&self) {
         for ev in &self.events {
-            perf_event_ioctl(ev.fd, PERF_EVENT_IOC_ENABLE);
+            unsafe { perf_event_open_sys::ioctls::ENABLE(ev.fd, 0) };
         }
     }
 }
@@ -414,13 +433,13 @@ fn parse_sample(sample_type: u64, body: &crate::ring_buffer::RecordBody<'_>) -> 
     // Fields appear in PERF_RECORD_SAMPLE order (see man page):
     // IDENTIFIER, IP, TID, TIME, ADDR, ID, STREAM_ID, CPU, PERIOD, READ, CALLCHAIN, ...
 
-    let ip = if sample_type & PERF_SAMPLE_IP != 0 {
+    let ip = if sample_type & PERF_SAMPLE_IP as u64 != 0 {
         read_u64!()
     } else {
         0
     };
 
-    let (pid, tid) = if sample_type & PERF_SAMPLE_TID != 0 {
+    let (pid, tid) = if sample_type & PERF_SAMPLE_TID as u64 != 0 {
         let pid = read_u32!();
         let tid = read_u32!();
         (pid, tid)
@@ -428,7 +447,7 @@ fn parse_sample(sample_type: u64, body: &crate::ring_buffer::RecordBody<'_>) -> 
         (0, 0)
     };
 
-    let time = if sample_type & PERF_SAMPLE_TIME != 0 {
+    let time = if sample_type & PERF_SAMPLE_TIME as u64 != 0 {
         read_u64!()
     } else {
         0
@@ -448,7 +467,7 @@ fn parse_sample(sample_type: u64, body: &crate::ring_buffer::RecordBody<'_>) -> 
     }
 
     // PERF_SAMPLE_CPU (bit 7) — comes before PERIOD and CALLCHAIN in record layout
-    let cpu = if sample_type & PERF_SAMPLE_CPU != 0 {
+    let cpu = if sample_type & PERF_SAMPLE_CPU as u64 != 0 {
         let cpu = read_u32!();
         let _res = read_u32!();
         cpu
@@ -457,7 +476,7 @@ fn parse_sample(sample_type: u64, body: &crate::ring_buffer::RecordBody<'_>) -> 
     };
 
     // PERF_SAMPLE_PERIOD (bit 8) — comes before CALLCHAIN in record layout
-    let period = if sample_type & PERF_SAMPLE_PERIOD != 0 {
+    let period = if sample_type & PERF_SAMPLE_PERIOD as u64 != 0 {
         read_u64!()
     } else {
         0
@@ -466,7 +485,7 @@ fn parse_sample(sample_type: u64, body: &crate::ring_buffer::RecordBody<'_>) -> 
     // PERF_SAMPLE_READ (bit 4) — variable length, we never set this
 
     // PERF_SAMPLE_CALLCHAIN (bit 5) — comes after CPU and PERIOD
-    let callchain = if sample_type & PERF_SAMPLE_CALLCHAIN != 0 {
+    let callchain = if sample_type & PERF_SAMPLE_CALLCHAIN as u64 != 0 {
         let nr = read_u64!() as usize;
         if nr > 1024 {
             return None;
@@ -499,14 +518,15 @@ fn parse_sample(sample_type: u64, body: &crate::ring_buffer::RecordBody<'_>) -> 
 mod tests {
     use super::*;
     use crate::ring_buffer::RecordBody;
+    use perf_event_open_sys::bindings::{PERF_CONTEXT_KERNEL, PERF_CONTEXT_USER};
 
     /// Our standard sample_type: IP | TID | TIME | CPU | PERIOD | CALLCHAIN
-    const STD_SAMPLE_TYPE: u64 = PERF_SAMPLE_IP
-        | PERF_SAMPLE_TID
-        | PERF_SAMPLE_TIME
-        | PERF_SAMPLE_CPU
-        | PERF_SAMPLE_PERIOD
-        | PERF_SAMPLE_CALLCHAIN;
+    const STD_SAMPLE_TYPE: u64 = PERF_SAMPLE_IP as u64
+        | PERF_SAMPLE_TID as u64
+        | PERF_SAMPLE_TIME as u64
+        | PERF_SAMPLE_CPU as u64
+        | PERF_SAMPLE_PERIOD as u64
+        | PERF_SAMPLE_CALLCHAIN as u64;
 
     /// Build a fake sample body matching STD_SAMPLE_TYPE layout.
     fn build_body(
@@ -564,7 +584,12 @@ mod tests {
             1,
             0,
             1,
-            &[PERF_CONTEXT_KERNEL, 0x4000, PERF_CONTEXT_USER, 0x4100],
+            &[
+                PERF_CONTEXT_KERNEL as u64,
+                0x4000,
+                PERF_CONTEXT_USER as u64,
+                0x4100,
+            ],
         );
         let s = parse_sample(STD_SAMPLE_TYPE, &RecordBody::Contiguous(&body)).unwrap();
         // Context markers are >= USER_ADDR_LIMIT, so filtered
