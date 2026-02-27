@@ -84,6 +84,11 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
 
     let cpu_ts: Vec<u64> = cpu_samples.iter().map(|&(t, _)| t).collect();
 
+    if common::is_ci() {
+        eprintln!("we don't actually capture sample events in CI");
+        return;
+    }
+
     assert!(!cpu_ts.is_empty(), "expected CPU profile samples");
 
     // ── Build poll intervals: (poll_start_ns, poll_end_ns, worker_id) ─────
@@ -297,6 +302,11 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
 
     drop(runtime);
     drop(guard);
+
+    if common::is_ci() {
+        eprintln!("on CI, this test can run, but we don't get these events");
+        return;
+    }
 
     let events = events.lock().unwrap();
 
