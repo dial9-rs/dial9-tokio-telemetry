@@ -1,8 +1,6 @@
 //! Integration test: verify JS trace parser matches Rust parser
 
-use dial9_tokio_telemetry::telemetry::{
-    CpuProfilingConfig, SimpleBinaryWriter, TracedRuntime,
-};
+use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SimpleBinaryWriter, TracedRuntime};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -80,7 +78,7 @@ fn test_js_parser_matches_rust() {
     let test_script = std::path::Path::new(&manifest_dir)
         .join("trace_viewer")
         .join("test_parser.js");
-    
+
     let test_output = Command::new("node")
         .args([
             test_script.to_str().unwrap(),

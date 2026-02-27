@@ -1,10 +1,12 @@
 //! Integration test: sched event capture via per-thread perf profiling.
 
+mod common;
+
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn sched_events_capture_context_switches() {
-    use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
     use dial9_tokio_telemetry::telemetry::events::CpuSampleSource;
+    use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
     use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
     use dial9_tokio_telemetry::telemetry::{SchedEventConfig, TracedRuntime};
     use std::sync::{Arc, Mutex};
@@ -54,13 +56,20 @@ fn sched_events_capture_context_switches() {
     drop(runtime);
     drop(guard);
 
+    if common::is_ci() {
+        eprintln!("sched events not actually captured in ci");
+        return;
+    }
+
     let events = events.lock().unwrap();
 
     // 1. CpuSample events exist with SchedEvent source and some are attributed to workers
     let worker_samples: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::CpuSample { worker_id, source, .. }
-            if *worker_id < num_workers && *source == CpuSampleSource::SchedEvent))
+        .filter(|e| {
+            matches!(e, TelemetryEvent::CpuSample { worker_id, source, .. }
+            if *worker_id < num_workers && *source == CpuSampleSource::SchedEvent)
+        })
         .collect();
     assert!(
         !worker_samples.is_empty(),
@@ -70,8 +79,10 @@ fn sched_events_capture_context_switches() {
     // No samples should have CpuProfile source (we didn't enable cpu profiling)
     let cpu_profile_samples = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::CpuSample { source, .. }
-            if *source == CpuSampleSource::CpuProfile))
+        .filter(|e| {
+            matches!(e, TelemetryEvent::CpuSample { source, .. }
+            if *source == CpuSampleSource::CpuProfile)
+        })
         .count();
     assert_eq!(cpu_profile_samples, 0, "should have no CpuProfile samples");
 
@@ -79,7 +90,9 @@ fn sched_events_capture_context_switches() {
     let callframes: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            TelemetryEvent::CallframeDef { symbol, location, .. } => Some((symbol.as_str(), location.as_deref())),
+            TelemetryEvent::CallframeDef {
+                symbol, location, ..
+            } => Some((symbol.as_str(), location.as_deref())),
             _ => None,
         })
         .collect();
@@ -88,7 +101,9 @@ fn sched_events_capture_context_switches() {
 
     let symbols: Vec<&str> = callframes.iter().map(|(s, _)| *s).collect();
     assert!(
-        symbols.iter().any(|s| s.contains("sleep") || s.contains("nanosleep")),
+        symbols
+            .iter()
+            .any(|s| s.contains("sleep") || s.contains("nanosleep")),
         "expected a symbol containing 'sleep', got:\n{}",
         symbols.join("\n")
     );
@@ -97,7 +112,9 @@ fn sched_events_capture_context_switches() {
     assert!(
         callframes.iter().any(|(_, loc)| {
             loc.is_some_and(|l| {
-                l.rsplit(':').next().is_some_and(|n| n.parse::<u32>().is_ok())
+                l.rsplit(':')
+                    .next()
+                    .is_some_and(|n| n.parse::<u32>().is_ok())
             })
         }),
         "expected at least one symbol with a line number in location field, got:\n{}",

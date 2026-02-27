@@ -13,6 +13,8 @@ pub struct TraceReader {
     pub task_spawn_locs: HashMap<TaskId, SpawnLocationId>,
     /// Callframe address → symbol name mapping built from CallframeDef events.
     pub callframe_symbols: HashMap<u64, String>,
+    /// OS tid → thread name mapping built from ThreadNameDef events.
+    pub thread_names: HashMap<u32, String>,
 }
 
 impl TraceReader {
@@ -23,6 +25,7 @@ impl TraceReader {
             spawn_locations: HashMap::new(),
             task_spawn_locs: HashMap::new(),
             callframe_symbols: HashMap::new(),
+            thread_names: HashMap::new(),
         })
     }
 
@@ -45,8 +48,13 @@ impl TraceReader {
             }) => {
                 self.task_spawn_locs.insert(*task_id, *spawn_loc_id);
             }
-            Some(TelemetryEvent::CallframeDef { address, symbol, .. }) => {
+            Some(TelemetryEvent::CallframeDef {
+                address, symbol, ..
+            }) => {
                 self.callframe_symbols.insert(*address, symbol.clone());
+            }
+            Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
+                self.thread_names.insert(*tid, name.clone());
             }
             _ => {}
         }
@@ -68,8 +76,13 @@ impl TraceReader {
                 }) => {
                     self.task_spawn_locs.insert(task_id, spawn_loc_id);
                 }
-                Some(TelemetryEvent::CallframeDef { address, symbol, .. }) => {
+                Some(TelemetryEvent::CallframeDef {
+                    address, symbol, ..
+                }) => {
                     self.callframe_symbols.insert(address, symbol);
+                }
+                Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
+                    self.thread_names.insert(tid, name);
                 }
                 Some(e) => return Ok(Some(e)),
             }
@@ -224,6 +237,7 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
             | TelemetryEvent::TaskSpawn { .. }
             | TelemetryEvent::CpuSample { .. }
             | TelemetryEvent::CallframeDef { .. }
+            | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. } => {}
         }
     }

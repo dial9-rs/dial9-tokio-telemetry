@@ -78,6 +78,7 @@ fn main() {
                 callchain,
                 timestamp_nanos,
                 source,
+                ..
             } => {
                 cpu_samples += 1;
                 *samples_by_worker.entry(*worker_id).or_default() += 1;

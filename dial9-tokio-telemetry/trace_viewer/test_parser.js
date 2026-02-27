@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 // Simple test to verify JS parser matches Rust parser output
 
-const fs = require('fs');
-const { parseTrace } = require('./trace_parser.js');
+const fs = require("fs");
+const { parseTrace } = require("./trace_parser.js");
 
 function main() {
     const args = process.argv.slice(2);
     if (args.length < 2) {
-        console.error('Usage: node test_parser.js <trace.bin> <expected.jsonl>');
-        console.error('');
-        console.error('Compares JS parser output against Rust trace_to_jsonl output');
+        console.error(
+            "Usage: node test_parser.js <trace.bin> <expected.jsonl>",
+        );
+        console.error("");
+        console.error(
+            "Compares JS parser output against Rust trace_to_jsonl output",
+        );
         process.exit(1);
     }
 
@@ -17,10 +21,16 @@ function main() {
 
     // Parse binary trace with JS parser
     console.log(`Parsing ${tracePath}...`);
-    const buffer = fs.readFileSync(tracePath).buffer;
+    const rawBuf = fs.readFileSync(tracePath);
+    const buffer = rawBuf.buffer.slice(
+        rawBuf.byteOffset,
+        rawBuf.byteOffset + rawBuf.byteLength,
+    );
     const trace = parseTrace(buffer);
-    
-    console.log(`Parsed ${trace.events.length} events (version ${trace.version})`);
+
+    console.log(
+        `Parsed ${trace.events.length} events (version ${trace.version})`,
+    );
     console.log(`  - ${trace.spawnLocations.size} spawn locations`);
     console.log(`  - ${trace.taskSpawnLocs.size} task spawns`);
     console.log(`  - ${trace.cpuSamples.length} CPU samples`);
@@ -28,44 +38,54 @@ function main() {
 
     // Read expected JSONL from Rust parser
     console.log(`\nReading expected output from ${jsonlPath}...`);
-    const jsonl = fs.readFileSync(jsonlPath, 'utf8');
-    const expectedEvents = jsonl.trim().split('\n')
-        .filter(line => line.trim())
-        .map(line => JSON.parse(line));
+    const jsonl = fs.readFileSync(jsonlPath, "utf8");
+    const expectedEvents = jsonl
+        .trim()
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => JSON.parse(line));
 
     console.log(`Expected ${expectedEvents.length} events`);
 
     // Count event types in both
     const jsEventCounts = {};
     const rustEventCounts = {};
-    
-    trace.events.forEach(e => {
+
+    trace.events.forEach((e) => {
         const type = e.eventType;
         jsEventCounts[type] = (jsEventCounts[type] || 0) + 1;
     });
-    
-    expectedEvents.forEach(e => {
+
+    expectedEvents.forEach((e) => {
         const type = e.event;
         rustEventCounts[type] = (rustEventCounts[type] || 0) + 1;
     });
 
-    console.log('\nEvent counts (JS parser):');
-    Object.entries(jsEventCounts).sort().forEach(([type, count]) => {
-        console.log(`  ${type}: ${count}`);
-    });
+    console.log("\nEvent counts (JS parser):");
+    Object.entries(jsEventCounts)
+        .sort()
+        .forEach(([type, count]) => {
+            console.log(`  ${type}: ${count}`);
+        });
 
-    console.log('\nEvent counts (Rust parser):');
-    Object.entries(rustEventCounts).sort().forEach(([type, count]) => {
-        console.log(`  ${type}: ${count}`);
-    });
+    console.log("\nEvent counts (Rust parser):");
+    Object.entries(rustEventCounts)
+        .sort()
+        .forEach(([type, count]) => {
+            console.log(`  ${type}: ${count}`);
+        });
 
     // Check CallframeDef symbols match
     const rustCallframes = new Map();
-    expectedEvents.filter(e => e.event === 'CallframeDef').forEach(e => {
-        const addr = `0x${e.address.toString(16)}`;
-        const combined = e.location ? `${e.symbol} @ ${e.location}` : e.symbol;
-        rustCallframes.set(addr, combined);
-    });
+    expectedEvents
+        .filter((e) => e.event === "CallframeDef")
+        .forEach((e) => {
+            const addr = `0x${e.address.toString(16)}`;
+            const combined = e.location
+                ? `${e.symbol} @ ${e.location}`
+                : e.symbol;
+            rustCallframes.set(addr, combined);
+        });
 
     console.log(`\nCallframe symbol comparison:`);
     console.log(`  JS: ${trace.callframeSymbols.size} symbols`);
@@ -86,14 +106,16 @@ function main() {
     }
 
     if (mismatchCount === 0) {
-        console.log('  ✓ All callframe symbols match!');
+        console.log("  ✓ All callframe symbols match!");
     } else {
         console.log(`  ✗ ${mismatchCount} mismatches found`);
         process.exit(1);
     }
 
     // Check CPU sample count matches
-    const rustCpuSamples = expectedEvents.filter(e => e.event === 'CpuSample').length;
+    const rustCpuSamples = expectedEvents.filter(
+        (e) => e.event === "CpuSample",
+    ).length;
     if (trace.cpuSamples.length === rustCpuSamples) {
         console.log(`\n✓ CPU sample count matches: ${rustCpuSamples}`);
     } else {
@@ -103,7 +125,7 @@ function main() {
         process.exit(1);
     }
 
-    console.log('\n✓ All checks passed!');
+    console.log("\n✓ All checks passed!");
 }
 
 main();

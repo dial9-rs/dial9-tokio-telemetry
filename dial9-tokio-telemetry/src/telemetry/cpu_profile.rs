@@ -9,6 +9,15 @@ use perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
 use std::collections::HashMap;
 use std::io;
 
+/// Read the thread name from `/proc/self/task/<tid>/comm`.
+/// Returns `None` if the file can't be read.
+pub(crate) fn read_thread_name(tid: u32) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/self/task/{tid}/comm"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Configuration for CPU profiling integration.
 #[derive(Debug, Clone)]
 pub struct CpuProfilingConfig {
@@ -51,7 +60,7 @@ impl Default for SchedEventConfig {
 /// Manages the perf sampler and converts samples to telemetry events.
 pub(crate) struct CpuProfiler {
     sampler: PerfSampler,
-    /// Offset to convert perf timestamps (CLOCK_MONOTONIC nanos) to trace-relative nanos.
+    /// Offset to convert perf timestamps (CLOCK_MONOTONIC nanos, via use_clockid) to trace-relative nanos.
     /// trace_ns = perf_time - clock_offset
     clock_offset: u64,
     /// OS tid → worker_id mapping, populated from SharedState.worker_tids.
@@ -97,6 +106,7 @@ impl CpuProfiler {
             events.push(TelemetryEvent::CpuSample {
                 timestamp_nanos,
                 worker_id,
+                tid: sample.tid,
                 source: crate::telemetry::events::CpuSampleSource::CpuProfile,
                 callchain: sample.callchain.clone(),
             });
@@ -163,6 +173,7 @@ impl SchedProfiler {
             events.push(TelemetryEvent::CpuSample {
                 timestamp_nanos,
                 worker_id,
+                tid: sample.tid,
                 source: crate::telemetry::events::CpuSampleSource::SchedEvent,
                 callchain: sample.callchain.clone(),
             });

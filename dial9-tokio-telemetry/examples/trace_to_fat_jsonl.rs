@@ -3,7 +3,7 @@
 //! Usage:
 //!   cargo run --example trace_to_fat_jsonl -- <input.bin> [output.jsonl]
 
-use dial9_tokio_telemetry::telemetry::{events::TelemetryEvent, TraceReader};
+use dial9_tokio_telemetry::telemetry::{TraceReader, events::TelemetryEvent};
 use serde::Serialize;
 use std::io::{BufWriter, Write};
 
@@ -146,6 +146,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             worker_id,
             source,
             callchain,
+            ..
         } => Some(FatEvent::CpuSample {
             timestamp_ns: *timestamp_nanos,
             worker: *worker_id,
@@ -174,6 +175,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
         }),
         TelemetryEvent::SpawnLocationDef { .. }
         | TelemetryEvent::TaskSpawn { .. }
-        | TelemetryEvent::CallframeDef { .. } => None,
+        | TelemetryEvent::CallframeDef { .. }
+        | TelemetryEvent::ThreadNameDef { .. } => None,
     }
 }

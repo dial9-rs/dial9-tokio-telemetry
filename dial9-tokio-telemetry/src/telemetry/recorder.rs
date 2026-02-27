@@ -93,11 +93,11 @@ pub(crate) struct SharedState {
 }
 
 impl SharedState {
-    fn new() -> Self {
+    fn new(start_time: Instant) -> Self {
         Self {
             enabled: AtomicBool::new(false),
             collector: CentralCollector::new(),
-            start_time: Instant::now(),
+            start_time,
             metrics: ArcSwap::from_pointee(None),
             worker_tids: Mutex::new(HashMap::new()),
             #[cfg(feature = "cpu-profiling")]
@@ -389,12 +389,18 @@ pub struct TelemetryRecorder {
     /// Addresses whose CallframeDef has been emitted in the current file.
     #[cfg(feature = "cpu-profiling")]
     callframe_emitted_this_file: HashSet<u64>,
+    /// tid → thread name, cached across files. Only populated for non-worker tids.
+    #[cfg(feature = "cpu-profiling")]
+    thread_name_intern: HashMap<u32, String>,
+    /// tids whose ThreadNameDef has been emitted in the current file.
+    #[cfg(feature = "cpu-profiling")]
+    thread_name_emitted_this_file: HashSet<u32>,
 }
 
 impl TelemetryRecorder {
     pub fn new(writer: Box<dyn TraceWriter>) -> Self {
         Self {
-            shared: Arc::new(SharedState::new()),
+            shared: Arc::new(SharedState::new(Instant::now())),
             writer,
             flush_state: FlushState::new(),
             #[cfg(feature = "cpu-profiling")]
@@ -405,6 +411,10 @@ impl TelemetryRecorder {
             callframe_intern: HashMap::new(),
             #[cfg(feature = "cpu-profiling")]
             callframe_emitted_this_file: HashSet::new(),
+            #[cfg(feature = "cpu-profiling")]
+            thread_name_intern: HashMap::new(),
+            #[cfg(feature = "cpu-profiling")]
+            thread_name_emitted_this_file: HashSet::new(),
         }
     }
 
@@ -448,12 +458,40 @@ impl TelemetryRecorder {
                 }
             }
             for event in &cpu_events {
+                // Emit ThreadNameDef for non-worker tids before their first sample in this file
+                if let TelemetryEvent::CpuSample { worker_id, tid, .. } = event {
+                    if *worker_id == UNKNOWN_WORKER
+                        && !self.thread_name_emitted_this_file.contains(tid)
+                    {
+                        if self.writer.take_rotated() {
+                            self.flush_state.on_rotate();
+                            self.callframe_emitted_this_file.clear();
+                            self.thread_name_emitted_this_file.clear();
+                        }
+                        if !self.thread_name_intern.contains_key(tid) {
+                            if let Some(name) =
+                                crate::telemetry::cpu_profile::read_thread_name(*tid)
+                            {
+                                self.thread_name_intern.insert(*tid, name);
+                            }
+                        }
+                        if let Some(name) = self.thread_name_intern.get(tid) {
+                            let def = TelemetryEvent::ThreadNameDef {
+                                tid: *tid,
+                                name: name.clone(),
+                            };
+                            let _ = self.writer.write_event(&def);
+                        }
+                        self.thread_name_emitted_this_file.insert(*tid);
+                    }
+                }
                 if self.inline_callframe_symbols {
                     if let TelemetryEvent::CpuSample { callchain, .. } = event {
                         // Check for rotation before writing defs
                         if self.writer.take_rotated() {
                             self.flush_state.on_rotate();
                             self.callframe_emitted_this_file.clear();
+                            self.thread_name_emitted_this_file.clear();
                         }
                         for &addr in callchain {
                             if !self.callframe_emitted_this_file.contains(&addr) {
@@ -501,6 +539,8 @@ impl TelemetryRecorder {
             self.flush_state.on_rotate();
             #[cfg(feature = "cpu-profiling")]
             self.callframe_emitted_this_file.clear();
+            #[cfg(feature = "cpu-profiling")]
+            self.thread_name_emitted_this_file.clear();
         }
         let events = self.flush_state.resolve(raw);
         if self.writer.write_atomic(&events)? {
@@ -513,6 +553,8 @@ impl TelemetryRecorder {
             self.flush_state.on_rotate();
             #[cfg(feature = "cpu-profiling")]
             self.callframe_emitted_this_file.clear();
+            #[cfg(feature = "cpu-profiling")]
+            self.thread_name_emitted_this_file.clear();
             let events = self.flush_state.resolve(raw);
             if self.writer.write_atomic(&events)? {
                 // Something bad is happening...
@@ -527,8 +569,9 @@ impl TelemetryRecorder {
         builder: &mut tokio::runtime::Builder,
         writer: Box<dyn TraceWriter>,
         task_tracking_enabled: bool,
+        start_time: Instant,
     ) -> Arc<Mutex<Self>> {
-        let shared = Arc::new(SharedState::new());
+        let shared = Arc::new(SharedState::new(start_time));
         let recorder = Arc::new(Mutex::new(Self {
             shared: shared.clone(),
             writer,
@@ -541,6 +584,10 @@ impl TelemetryRecorder {
             callframe_intern: HashMap::new(),
             #[cfg(feature = "cpu-profiling")]
             callframe_emitted_this_file: HashSet::new(),
+            #[cfg(feature = "cpu-profiling")]
+            thread_name_intern: HashMap::new(),
+            #[cfg(feature = "cpu-profiling")]
+            thread_name_emitted_this_file: HashSet::new(),
         }));
 
         let s1 = shared.clone();
@@ -702,6 +749,16 @@ impl TelemetryGuard {
         self.handle.clone()
     }
 
+    /// The [`Instant`] at which trace recording began.
+    ///
+    /// All `timestamp_nanos` fields in [`TelemetryEvent`] are relative to this
+    /// instant. Use `start_time.elapsed()` to produce timestamps in the same
+    /// clock domain, or convert trace timestamps to wall-clock time via
+    /// `start_time + Duration::from_nanos(event.timestamp_nanos)`.
+    pub fn start_time(&self) -> Instant {
+        self.handle.shared.start_time
+    }
+
     /// Start recording telemetry events. Enabled by default when using [`TracedRuntime::build_and_start`].
     pub fn enable(&self) {
         self.handle.enable();
@@ -786,12 +843,19 @@ impl TracedRuntimeBuilder {
         mut builder: tokio::runtime::Builder,
         writer: Box<dyn TraceWriter>,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        // Capture both clock references at the same instant so that
+        // perf timestamps (CLOCK_MONOTONIC) and trace-relative timestamps
+        // (Instant::now()) share the same epoch.
+        let start_instant = Instant::now();
+        #[cfg(feature = "cpu-profiling")]
+        let start_mono_ns = crate::telemetry::cpu_profile::clock_monotonic_ns();
+
         // Start CPU profiler if configured
         #[cfg(feature = "cpu-profiling")]
         let sampler = if let Some(config) = self.cpu_profiling_config {
-            let mono_ns = crate::telemetry::cpu_profile::clock_monotonic_ns();
             Some(crate::telemetry::cpu_profile::CpuProfiler::start(
-                config, mono_ns,
+                config,
+                start_mono_ns,
             ))
         } else {
             None
@@ -800,15 +864,20 @@ impl TracedRuntimeBuilder {
         // Start sched event profiler if configured
         #[cfg(feature = "cpu-profiling")]
         let sched = if let Some(config) = self.sched_event_config {
-            let mono_ns = crate::telemetry::cpu_profile::clock_monotonic_ns();
             Some(crate::telemetry::cpu_profile::SchedProfiler::new(
-                config, mono_ns,
+                config,
+                start_mono_ns,
             ))
         } else {
             None
         };
 
-        let recorder = TelemetryRecorder::install(&mut builder, writer, self.task_tracking_enabled);
+        let recorder = TelemetryRecorder::install(
+            &mut builder,
+            writer,
+            self.task_tracking_enabled,
+            start_instant,
+        );
 
         #[cfg(feature = "cpu-profiling")]
         {

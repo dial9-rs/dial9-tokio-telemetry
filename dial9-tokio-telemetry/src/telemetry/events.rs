@@ -92,6 +92,8 @@ pub enum TelemetryEvent {
         timestamp_nanos: u64,
         #[serde(rename = "worker")]
         worker_id: usize,
+        /// OS thread ID that was sampled.
+        tid: u32,
         /// What triggered this sample.
         source: CpuSampleSource,
         /// Raw instruction pointer addresses (leaf first). Symbolized offline.
@@ -108,6 +110,10 @@ pub enum TelemetryEvent {
         /// Source location, e.g. "my_file.rs:123". None if unavailable.
         location: Option<String>,
     },
+    /// Maps an OS thread ID to its name (from `/proc/self/task/<tid>/comm`).
+    /// Emitted before the first CpuSample referencing this tid in each file.
+    /// Allows grouping non-worker CPU samples by thread name.
+    ThreadNameDef { tid: u32, name: String },
     WakeEvent {
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
@@ -146,7 +152,8 @@ impl TelemetryEvent {
             } => Some(*timestamp_nanos),
             TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
-            | TelemetryEvent::CallframeDef { .. } => None,
+            | TelemetryEvent::CallframeDef { .. }
+            | TelemetryEvent::ThreadNameDef { .. } => None,
         }
     }
 
@@ -162,6 +169,7 @@ impl TelemetryEvent {
             | TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
             | TelemetryEvent::CallframeDef { .. }
+            | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. } => None,
         }
     }

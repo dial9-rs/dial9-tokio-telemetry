@@ -66,7 +66,7 @@ pub struct Sample {
     pub pid: u32,
     /// Thread ID.
     pub tid: u32,
-    /// Timestamp (from `CLOCK_MONOTONIC`-ish, in nanoseconds — kernel perf clock).
+    /// Timestamp in nanoseconds from `CLOCK_MONOTONIC` (set via `use_clockid`).
     pub time: u64,
     /// CPU the sample was taken on.
     pub cpu: u32,
@@ -301,6 +301,12 @@ impl PerfSampler {
             | PERF_SAMPLE_TIME as u64
             | PERF_SAMPLE_CPU as u64
             | PERF_SAMPLE_PERIOD as u64;
+
+        // Use CLOCK_MONOTONIC so perf timestamps are in the same clock domain
+        // as Rust's `Instant::now()`. Without this, perf defaults to
+        // CLOCK_MONOTONIC_RAW which drifts relative to CLOCK_MONOTONIC.
+        attr.set_use_clockid(1);
+        attr.clockid = libc::CLOCK_MONOTONIC;
 
         attr.set_disabled(1);
         if is_event_based {

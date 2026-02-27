@@ -22,8 +22,8 @@
         off += 4;
         if (magic !== "TOKIOTRC")
             throw new Error("Not a TOKIOTRC file (got: " + magic + ")");
-        if (version < 8 || version > 12) {
-            console.warn(`Expected version 8-12, got ${version}. Some data may be missing.`);
+        if (version < 8 || version > 13) {
+            console.warn(`Expected version 8-13, got ${version}. Some data may be missing.`);
         }
         const hasCpuTime = version >= 5;
         const hasSchedWait = version >= 6;
@@ -33,7 +33,8 @@
         const spawnLocations = new Map(); // SpawnLocationId (number) → string
         const taskSpawnLocs = new Map();  // taskId (number) → SpawnLocationId (number)
         const callframeSymbols = new Map(); // address (bigint as string) → symbol name
-        const cpuSamples = []; // {timestamp, workerId, source, callchain: [addr strings]}
+        const cpuSamples = []; // {timestamp, workerId, tid, source, callchain: [addr strings]}
+        const threadNames = new Map(); // tid (number) → thread name (string)
         const decoder = new TextDecoder();
         
         while (off < buffer.byteLength && events.length < MAX_EVENTS) {
@@ -79,10 +80,11 @@
                 continue;
             }
             if (wireCode === 8) {
-                // CpuSample: timestamp_us(4) + worker_id(1) + source(1) + num_frames(1) + frames(N*8)
-                if (off + 7 > buffer.byteLength) break;
+                // CpuSample: timestamp_us(4) + worker_id(1) + tid(4) + source(1) + num_frames(1) + frames(N*8)
+                if (off + 11 > buffer.byteLength) break;
                 const tsUs = view.getUint32(off, true); off += 4;
                 const wid = view.getUint8(off); off += 1;
+                const tid = view.getUint32(off, true); off += 4;
                 const src = view.getUint8(off); off += 1; // 0=CpuProfile, 1=SchedEvent
                 const nf = view.getUint8(off); off += 1;
                 if (off + nf * 8 > buffer.byteLength) break;
@@ -93,7 +95,7 @@
                     off += 8;
                     chain.push("0x" + (hi * 0x100000000 + lo).toString(16));
                 }
-                cpuSamples.push({ timestamp: tsUs * 1000, workerId: wid, source: src, callchain: chain });
+                cpuSamples.push({ timestamp: tsUs * 1000, workerId: wid, tid, source: src, callchain: chain });
                 continue;
             }
 
@@ -126,7 +128,18 @@
                 continue;
             }
 
-            if (wireCode > 9) break; // unknown code
+            if (wireCode === 10) {
+                // ThreadNameDef: tid(4) + string_len(2) + string_bytes(N)
+                if (off + 6 > buffer.byteLength) break;
+                const tid = view.getUint32(off, true); off += 4;
+                const strLen = view.getUint16(off, true); off += 2;
+                if (off + strLen > buffer.byteLength) break;
+                threadNames.set(tid, decoder.decode(new Uint8Array(buffer, off, strLen)));
+                off += strLen;
+                continue;
+            }
+
+            if (wireCode > 10) break; // unknown code
 
             // All regular codes have a 4-byte timestamp next
             if (off + 4 > buffer.byteLength) break;
@@ -216,7 +229,8 @@
             spawnLocations, 
             taskSpawnLocs, 
             cpuSamples, 
-            callframeSymbols 
+            callframeSymbols,
+            threadNames
         };
     }
 
