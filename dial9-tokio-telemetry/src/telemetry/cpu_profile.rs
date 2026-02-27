@@ -4,7 +4,7 @@
 //! configurable frequency. The flush thread drains samples, maps OS thread IDs
 //! to tokio worker IDs, and writes `CpuSample` events into the trace.
 
-use crate::telemetry::events::TelemetryEvent;
+use crate::telemetry::events::{TelemetryEvent, UNKNOWN_WORKER};
 use perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
 use std::collections::HashMap;
 use std::io;
@@ -66,9 +66,6 @@ pub(crate) struct CpuProfiler {
     /// OS tid → worker_id mapping, populated from SharedState.worker_tids.
     tid_to_worker: HashMap<u32, usize>,
 }
-
-/// Sentinel for samples from non-worker threads.
-const UNKNOWN_WORKER: usize = 255;
 
 impl CpuProfiler {
     /// Start the profiler. Captures the clock offset for timestamp correlation.

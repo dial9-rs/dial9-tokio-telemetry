@@ -1,6 +1,9 @@
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use serde::Serialize;
 
+/// Sentinel worker_id for events from non-worker threads (encoded as u8 on the wire).
+pub const UNKNOWN_WORKER: usize = 255;
+
 /// What triggered a [`TelemetryEvent::CpuSample`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum CpuSampleSource {

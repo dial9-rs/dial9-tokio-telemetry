@@ -7,28 +7,10 @@ mod common;
 fn sched_events_capture_context_switches() {
     use dial9_tokio_telemetry::telemetry::events::CpuSampleSource;
     use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
-    use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
     use dial9_tokio_telemetry::telemetry::{SchedEventConfig, TracedRuntime};
-    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    struct CapturingWriter(Arc<Mutex<Vec<TelemetryEvent>>>);
-    impl TraceWriter for CapturingWriter {
-        fn write_event(&mut self, event: &TelemetryEvent) -> std::io::Result<()> {
-            self.0.lock().unwrap().push(event.clone());
-            Ok(())
-        }
-        fn write_batch(&mut self, events: &[TelemetryEvent]) -> std::io::Result<()> {
-            self.0.lock().unwrap().extend_from_slice(events);
-            Ok(())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let writer = CapturingWriter(events.clone());
+    let (writer, events) = common::CapturingWriter::new();
 
     let num_workers = 2;
     let mut builder = tokio::runtime::Builder::new_multi_thread();

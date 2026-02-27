@@ -1,6 +1,6 @@
 use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::collector::CentralCollector;
-use crate::telemetry::events::{RawEvent, SchedStat, TelemetryEvent};
+use crate::telemetry::events::{RawEvent, SchedStat, TelemetryEvent, UNKNOWN_WORKER};
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use crate::telemetry::writer::TraceWriter;
 use arc_swap::ArcSwap;
@@ -13,14 +13,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::runtime::{Handle, RuntimeMetrics};
 
-/// Sentinel value for events from non-worker threads
-const UNKNOWN_WORKER: usize = 255;
-
 thread_local! {
     /// Cached tokio worker index for this thread. `None` means not yet resolved.
     /// Once resolved, the worker ID is stable for the lifetime of the thread—a thread
     /// won't become a *different* worker, though it may stop being a worker entirely.
     static WORKER_ID: Cell<Option<usize>> = const { Cell::new(None) };
+    /// Negative cache: true once we've confirmed this thread is NOT a worker.
+    /// Only set after a full scan with metrics available.
+    static NOT_A_WORKER: Cell<bool> = const { Cell::new(false) };
     /// Whether we've already registered this thread's tid→worker mapping.
     static TID_EMITTED: Cell<bool> = const { Cell::new(false) };
     /// schedstat wait_time_ns captured at park time, used to compute delta on unpark.
@@ -40,9 +40,14 @@ fn resolve_worker_id(
     metrics: &ArcSwap<Option<RuntimeMetrics>>,
     shared: Option<&SharedState>,
 ) -> Option<usize> {
+    #[cfg(not(feature = "cpu-profiling"))]
+    let _ = shared;
     WORKER_ID.with(|cell| {
         if let Some(id) = cell.get() {
             return Some(id);
+        }
+        if NOT_A_WORKER.with(|c| c.get()) {
+            return None;
         }
         let tid = std::thread::current().id();
         if let Some(ref m) = **metrics.load() {
@@ -50,6 +55,7 @@ fn resolve_worker_id(
                 if m.worker_thread_id(i) == Some(tid) {
                     cell.set(Some(i));
                     // Eagerly register tid→worker mapping for CPU profiling
+                    #[cfg(feature = "cpu-profiling")]
                     if let Some(shared) = shared {
                         TID_EMITTED.with(|emitted| {
                             if !emitted.get() {
@@ -62,6 +68,8 @@ fn resolve_worker_id(
                     return Some(i);
                 }
             }
+            // Metrics available but no match — this thread is definitely not a worker.
+            NOT_A_WORKER.with(|c| c.set(true));
         }
         None
     })
@@ -85,6 +93,7 @@ pub(crate) struct SharedState {
     /// OS tid → worker_id mapping, populated eagerly by worker threads on first
     /// `resolve_worker_id`. Workers only register once, so contention is negligible.
     /// Read by the CPU profiler during flush to attribute samples to workers.
+    #[cfg(feature = "cpu-profiling")]
     pub(crate) worker_tids: Mutex<HashMap<u32, usize>>,
     /// Per-thread sched event profiler, shared with worker callbacks for track/stop.
     /// Only populated when sched event capture is enabled.
@@ -99,6 +108,7 @@ impl SharedState {
             collector: CentralCollector::new(),
             start_time,
             metrics: ArcSwap::from_pointee(None),
+            #[cfg(feature = "cpu-profiling")]
             worker_tids: Mutex::new(HashMap::new()),
             #[cfg(feature = "cpu-profiling")]
             sched_profiler: Mutex::new(None),
@@ -424,13 +434,21 @@ impl TelemetryRecorder {
     }
 
     fn flush(&mut self) {
-        // Sync worker tid→id mappings into the CPU profiler before draining
-        // samples, so all samples can be attributed to the correct worker.
+        // Sync worker tid→id mappings into both profilers with a single lock
+        // acquisition, then drain samples from each.
         #[cfg(feature = "cpu-profiling")]
-        if let Some(ref mut profiler) = self.cpu_profiler {
+        {
             let tids = self.shared.worker_tids.lock().unwrap();
-            for (&tid, &worker_id) in tids.iter() {
-                profiler.register_worker(worker_id, tid);
+            if let Some(ref mut profiler) = self.cpu_profiler {
+                for (&tid, &worker_id) in tids.iter() {
+                    profiler.register_worker(worker_id, tid);
+                }
+            }
+            let mut shared_profiler = self.shared.sched_profiler.lock().unwrap();
+            if let Some(ref mut profiler) = *shared_profiler {
+                for (&tid, &worker_id) in tids.iter() {
+                    profiler.register_worker(worker_id, tid);
+                }
             }
         }
 
@@ -442,7 +460,6 @@ impl TelemetryRecorder {
         // Drain CPU profiler samples and write them
         #[cfg(feature = "cpu-profiling")]
         {
-            // Collect samples from both process-wide and per-thread profilers
             let mut cpu_events = Vec::new();
             if let Some(ref mut profiler) = self.cpu_profiler {
                 cpu_events = profiler.drain();
@@ -450,10 +467,6 @@ impl TelemetryRecorder {
             {
                 let mut shared_profiler = self.shared.sched_profiler.lock().unwrap();
                 if let Some(ref mut profiler) = *shared_profiler {
-                    let tids = self.shared.worker_tids.lock().unwrap();
-                    for (&tid, &worker_id) in tids.iter() {
-                        profiler.register_worker(worker_id, tid);
-                    }
                     cpu_events.extend(profiler.drain());
                 }
             }
@@ -518,16 +531,6 @@ impl TelemetryRecorder {
                     }
                 }
                 let _ = self.writer.write_event(event);
-            }
-            let has_profiler =
-                self.cpu_profiler.is_some() || self.shared.sched_profiler.lock().unwrap().is_some();
-            if has_profiler {
-                // only log once to confirm profiler is wired up
-                static LOGGED: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
-                if !LOGGED.swap(true, Ordering::Relaxed) {
-                    eprintln!("[cpu-profiler] profiler active in flush path",);
-                }
             }
         }
         self.writer.flush().unwrap();
