@@ -29,6 +29,12 @@ pub struct MetricsBuffer {
     inner: Mutex<HashMap<String, Aggregate>>,
 }
 
+impl Default for MetricsBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricsBuffer {
     pub fn new() -> Self {
         Self {
