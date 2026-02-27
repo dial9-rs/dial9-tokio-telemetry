@@ -21,6 +21,8 @@ thread_local! {
     /// Once resolved, the worker ID is stable for the lifetime of the thread—a thread
     /// won't become a *different* worker, though it may stop being a worker entirely.
     static WORKER_ID: Cell<Option<usize>> = const { Cell::new(None) };
+    /// Whether we've already registered this thread's tid→worker mapping.
+    static TID_EMITTED: Cell<bool> = const { Cell::new(false) };
     /// schedstat wait_time_ns captured at park time, used to compute delta on unpark.
     static PARKED_SCHED_WAIT: Cell<u64> = const { Cell::new(0) };
 }
@@ -30,7 +32,14 @@ thread_local! {
 ///
 /// The result is cached permanently in TLS because a thread's worker identity
 /// is stable: it won't become a different worker, it can only stop being one.
-fn resolve_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> Option<usize> {
+///
+/// On first resolution, eagerly registers the OS tid → worker mapping in
+/// `SharedState.worker_tids` so the CPU profiler can attribute samples
+/// immediately (without waiting for a flush cycle).
+fn resolve_worker_id(
+    metrics: &ArcSwap<Option<RuntimeMetrics>>,
+    shared: Option<&SharedState>,
+) -> Option<usize> {
     WORKER_ID.with(|cell| {
         if let Some(id) = cell.get() {
             return Some(id);
@@ -40,6 +49,16 @@ fn resolve_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> Option<usize>
             for i in 0..m.num_workers() {
                 if m.worker_thread_id(i) == Some(tid) {
                     cell.set(Some(i));
+                    // Eagerly register tid→worker mapping for CPU profiling
+                    if let Some(shared) = shared {
+                        TID_EMITTED.with(|emitted| {
+                            if !emitted.get() {
+                                emitted.set(true);
+                                let os_tid = crate::telemetry::events::current_tid();
+                                shared.worker_tids.lock().unwrap().insert(os_tid, i);
+                            }
+                        });
+                    }
                     return Some(i);
                 }
             }
@@ -50,7 +69,7 @@ fn resolve_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> Option<usize>
 
 /// Get the current worker ID as u8 (255 if unknown). Used by Traced waker.
 pub(crate) fn current_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> u8 {
-    match resolve_worker_id(metrics) {
+    match resolve_worker_id(metrics, None) {
         Some(id) if id <= 254 => id as u8,
         _ => 255,
     }
@@ -63,6 +82,14 @@ pub(crate) struct SharedState {
     pub(crate) collector: CentralCollector,
     pub(crate) start_time: Instant,
     pub(crate) metrics: ArcSwap<Option<RuntimeMetrics>>,
+    /// OS tid → worker_id mapping, populated eagerly by worker threads on first
+    /// `resolve_worker_id`. Workers only register once, so contention is negligible.
+    /// Read by the CPU profiler during flush to attribute samples to workers.
+    pub(crate) worker_tids: Mutex<HashMap<u32, usize>>,
+    /// Per-thread sched event profiler, shared with worker callbacks for track/stop.
+    /// Only populated when sched event capture is enabled.
+    #[cfg(feature = "cpu-profiling")]
+    pub(crate) sched_profiler: Mutex<Option<crate::telemetry::cpu_profile::SchedProfiler>>,
 }
 
 impl SharedState {
@@ -72,6 +99,9 @@ impl SharedState {
             collector: CentralCollector::new(),
             start_time: Instant::now(),
             metrics: ArcSwap::from_pointee(None),
+            worker_tids: Mutex::new(HashMap::new()),
+            #[cfg(feature = "cpu-profiling")]
+            sched_profiler: Mutex::new(None),
         }
     }
 
@@ -126,7 +156,7 @@ impl SharedState {
     }
 
     fn make_poll_start(&self, location: &'static Location<'static>, task_id: TaskId) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.metrics);
+        let worker_id = resolve_worker_id(&self.metrics, Some(self));
         let metrics_guard = self.metrics.load();
         let worker_local_queue_depth =
             if let (Some(worker_id), Some(metrics)) = (worker_id, &**metrics_guard) {
@@ -144,7 +174,7 @@ impl SharedState {
     }
 
     fn make_poll_end(&self) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.metrics);
+        let worker_id = resolve_worker_id(&self.metrics, Some(self));
         RawEvent::PollEnd {
             timestamp_nanos: self.start_time.elapsed().as_nanos() as u64,
             worker_id: worker_id.unwrap_or(UNKNOWN_WORKER),
@@ -152,7 +182,7 @@ impl SharedState {
     }
 
     fn make_worker_park(&self) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.metrics);
+        let worker_id = resolve_worker_id(&self.metrics, Some(self));
         let metrics_guard = self.metrics.load();
         let worker_local_queue_depth =
             if let (Some(worker_id), Some(metrics)) = (worker_id, &**metrics_guard) {
@@ -173,7 +203,7 @@ impl SharedState {
     }
 
     fn make_worker_unpark(&self) -> RawEvent {
-        let worker_id = resolve_worker_id(&self.metrics);
+        let worker_id = resolve_worker_id(&self.metrics, Some(self));
         let metrics_guard = self.metrics.load();
         let worker_local_queue_depth =
             if let (Some(worker_id), Some(metrics)) = (worker_id, &**metrics_guard) {
@@ -348,6 +378,17 @@ pub struct TelemetryRecorder {
     shared: Arc<SharedState>,
     writer: Box<dyn TraceWriter>,
     flush_state: FlushState,
+    #[cfg(feature = "cpu-profiling")]
+    cpu_profiler: Option<crate::telemetry::cpu_profile::CpuProfiler>,
+    /// When true, symbolicate callframe addresses and emit CallframeDef events.
+    #[cfg(feature = "cpu-profiling")]
+    inline_callframe_symbols: bool,
+    /// Addresses already symbolicated (across all files). Maps addr → (symbol, location).
+    #[cfg(feature = "cpu-profiling")]
+    callframe_intern: HashMap<u64, (String, Option<String>)>,
+    /// Addresses whose CallframeDef has been emitted in the current file.
+    #[cfg(feature = "cpu-profiling")]
+    callframe_emitted_this_file: HashSet<u64>,
 }
 
 impl TelemetryRecorder {
@@ -356,6 +397,14 @@ impl TelemetryRecorder {
             shared: Arc::new(SharedState::new()),
             writer,
             flush_state: FlushState::new(),
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiler: None,
+            #[cfg(feature = "cpu-profiling")]
+            inline_callframe_symbols: false,
+            #[cfg(feature = "cpu-profiling")]
+            callframe_intern: HashMap::new(),
+            #[cfg(feature = "cpu-profiling")]
+            callframe_emitted_this_file: HashSet::new(),
         }
     }
 
@@ -365,9 +414,86 @@ impl TelemetryRecorder {
     }
 
     fn flush(&mut self) {
+        // Sync worker tid→id mappings into the CPU profiler before draining
+        // samples, so all samples can be attributed to the correct worker.
+        #[cfg(feature = "cpu-profiling")]
+        if let Some(ref mut profiler) = self.cpu_profiler {
+            let tids = self.shared.worker_tids.lock().unwrap();
+            for (&tid, &worker_id) in tids.iter() {
+                profiler.register_worker(worker_id, tid);
+            }
+        }
+
         for batch in self.shared.collector.drain() {
             for raw in batch {
                 self.write_raw_event(raw).unwrap();
+            }
+        }
+        // Drain CPU profiler samples and write them
+        #[cfg(feature = "cpu-profiling")]
+        {
+            // Collect samples from both process-wide and per-thread profilers
+            let mut cpu_events = Vec::new();
+            if let Some(ref mut profiler) = self.cpu_profiler {
+                cpu_events = profiler.drain();
+            }
+            {
+                let mut shared_profiler = self.shared.sched_profiler.lock().unwrap();
+                if let Some(ref mut profiler) = *shared_profiler {
+                    let tids = self.shared.worker_tids.lock().unwrap();
+                    for (&tid, &worker_id) in tids.iter() {
+                        profiler.register_worker(worker_id, tid);
+                    }
+                    cpu_events.extend(profiler.drain());
+                }
+            }
+            for event in &cpu_events {
+                if self.inline_callframe_symbols {
+                    if let TelemetryEvent::CpuSample { callchain, .. } = event {
+                        // Check for rotation before writing defs
+                        if self.writer.take_rotated() {
+                            self.flush_state.on_rotate();
+                            self.callframe_emitted_this_file.clear();
+                        }
+                        for &addr in callchain {
+                            if !self.callframe_emitted_this_file.contains(&addr) {
+                                // Symbolicate if not yet interned
+                                if !self.callframe_intern.contains_key(&addr) {
+                                    let sym = perf_self_profile::resolve_symbol(addr);
+                                    let symbol = sym.name.unwrap_or_else(|| format!("{:#x}", addr));
+                                    let location = sym.code_info.map(|info| {
+                                        match info.line {
+                                            Some(line) => format!("{}:{}", info.file, line),
+                                            None => info.file,
+                                        }
+                                    });
+                                    self.callframe_intern.insert(addr, (symbol, location));
+                                }
+                                let (symbol, location) = self.callframe_intern[&addr].clone();
+                                let def = TelemetryEvent::CallframeDef {
+                                    address: addr,
+                                    symbol,
+                                    location,
+                                };
+                                let _ = self.writer.write_event(&def);
+                                self.callframe_emitted_this_file.insert(addr);
+                            }
+                        }
+                    }
+                }
+                let _ = self.writer.write_event(event);
+            }
+            let has_profiler = self.cpu_profiler.is_some()
+                || self.shared.sched_profiler.lock().unwrap().is_some();
+            if has_profiler {
+                // only log once to confirm profiler is wired up
+                static LOGGED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[cpu-profiler] profiler active in flush path",
+                    );
+                }
             }
         }
         self.writer.flush().unwrap();
@@ -377,6 +503,8 @@ impl TelemetryRecorder {
     fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
         if self.writer.take_rotated() {
             self.flush_state.on_rotate();
+            #[cfg(feature = "cpu-profiling")]
+            self.callframe_emitted_this_file.clear();
         }
         let events = self.flush_state.resolve(raw);
         if self.writer.write_atomic(&events)? {
@@ -387,6 +515,8 @@ impl TelemetryRecorder {
                 "write atomic returned true, rotation occured"
             );
             self.flush_state.on_rotate();
+            #[cfg(feature = "cpu-profiling")]
+            self.callframe_emitted_this_file.clear();
             let events = self.flush_state.resolve(raw);
             if self.writer.write_atomic(&events)? {
                 // Something bad is happening...
@@ -407,6 +537,14 @@ impl TelemetryRecorder {
             shared: shared.clone(),
             writer,
             flush_state: FlushState::new(),
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiler: None,
+            #[cfg(feature = "cpu-profiling")]
+            inline_callframe_symbols: false,
+            #[cfg(feature = "cpu-profiling")]
+            callframe_intern: HashMap::new(),
+            #[cfg(feature = "cpu-profiling")]
+            callframe_emitted_this_file: HashSet::new(),
         }));
 
         let s1 = shared.clone();
@@ -441,6 +579,28 @@ impl TelemetryRecorder {
                 let location = meta.spawned_at();
                 s5.record_event(RawEvent::TaskSpawn { task_id, location });
             });
+        }
+
+        // Wire per-thread sched event tracking into worker lifecycle.
+        #[cfg(feature = "cpu-profiling")]
+        {
+            let s_start = shared.clone();
+            let s_stop = shared.clone();
+            builder
+                .on_thread_start(move || {
+                    if let Ok(mut prof) = s_start.sched_profiler.lock() {
+                        if let Some(ref mut p) = *prof {
+                            let _ = p.track_current_thread();
+                        }
+                    }
+                })
+                .on_thread_stop(move || {
+                    if let Ok(mut prof) = s_stop.sched_profiler.lock() {
+                        if let Some(ref mut p) = *prof {
+                            p.stop_tracking_current_thread();
+                        }
+                    }
+                });
         }
 
         recorder
@@ -569,6 +729,12 @@ impl Drop for TelemetryGuard {
 
 pub struct TracedRuntimeBuilder {
     task_tracking_enabled: bool,
+    #[cfg(feature = "cpu-profiling")]
+    cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
+    #[cfg(feature = "cpu-profiling")]
+    sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
+    #[cfg(feature = "cpu-profiling")]
+    inline_callframe_symbols: bool,
 }
 
 impl TracedRuntimeBuilder {
@@ -580,12 +746,83 @@ impl TracedRuntimeBuilder {
         self
     }
 
+    /// Enable CPU profiling via perf_event_open. Captures stack traces at the configured
+    /// frequency and merges them into the trace timeline.
+    ///
+    /// Requires the `cpu-profiling` feature and Linux with `perf_event_paranoid <= 2`.
+    #[cfg(feature = "cpu-profiling")]
+    pub fn with_cpu_profiling(
+        mut self,
+        config: crate::telemetry::cpu_profile::CpuProfilingConfig,
+    ) -> Self {
+        self.cpu_profiling_config = Some(config);
+        self
+    }
+
+    /// Enable per-worker sched event capture (context switches).
+    ///
+    /// Opens a per-thread perf event fd on each worker thread via `on_thread_start`,
+    /// capturing the stack at every context switch. Can be used alongside CPU profiling.
+    #[cfg(feature = "cpu-profiling")]
+    pub fn with_sched_events(
+        mut self,
+        config: crate::telemetry::cpu_profile::SchedEventConfig,
+    ) -> Self {
+        self.sched_event_config = Some(config);
+        self
+    }
+
+    /// When enabled, callframe addresses from CPU samples are symbolicated inline
+    /// and emitted as `CallframeDef` events in the trace. This allows reading the
+    /// trace without needing to symbolicate offline.
+    ///
+    /// Requires the `cpu-profiling` feature.
+    #[cfg(feature = "cpu-profiling")]
+    pub fn with_inline_callframe_symbols(mut self, enabled: bool) -> Self {
+        self.inline_callframe_symbols = enabled;
+        self
+    }
+
     pub fn build(
         self,
         mut builder: tokio::runtime::Builder,
         writer: Box<dyn TraceWriter>,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        // Start CPU profiler if configured
+        #[cfg(feature = "cpu-profiling")]
+        let sampler = if let Some(config) = self.cpu_profiling_config {
+            let mono_ns = crate::telemetry::cpu_profile::clock_monotonic_ns();
+            Some(crate::telemetry::cpu_profile::CpuProfiler::start(
+                config, mono_ns,
+            ))
+        } else {
+            None
+        };
+
+        // Start sched event profiler if configured
+        #[cfg(feature = "cpu-profiling")]
+        let sched = if let Some(config) = self.sched_event_config {
+            let mono_ns = crate::telemetry::cpu_profile::clock_monotonic_ns();
+            Some(crate::telemetry::cpu_profile::SchedProfiler::new(
+                config, mono_ns,
+            ))
+        } else {
+            None
+        };
+
         let recorder = TelemetryRecorder::install(&mut builder, writer, self.task_tracking_enabled);
+
+        #[cfg(feature = "cpu-profiling")]
+        {
+            if let Some(Ok(sampler)) = sampler {
+                recorder.lock().unwrap().cpu_profiler = Some(sampler);
+            }
+            if let Some(Ok(sched)) = sched {
+                *recorder.lock().unwrap().shared.sched_profiler.lock().unwrap() = Some(sched);
+            }
+            recorder.lock().unwrap().inline_callframe_symbols = self.inline_callframe_symbols;
+        }
+
         let runtime = builder.build()?;
 
         recorder
@@ -670,6 +907,12 @@ impl TracedRuntime {
     pub fn builder() -> TracedRuntimeBuilder {
         TracedRuntimeBuilder {
             task_tracking_enabled: false,
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiling_config: None,
+            #[cfg(feature = "cpu-profiling")]
+            sched_event_config: None,
+            #[cfg(feature = "cpu-profiling")]
+            inline_callframe_symbols: false,
         }
     }
 
@@ -687,6 +930,12 @@ impl TracedRuntime {
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
             task_tracking_enabled: false,
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiling_config: None,
+            #[cfg(feature = "cpu-profiling")]
+            sched_event_config: None,
+            #[cfg(feature = "cpu-profiling")]
+            inline_callframe_symbols: false,
         }
         .build(builder, writer)
     }
@@ -700,6 +949,12 @@ impl TracedRuntime {
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
             task_tracking_enabled: true,
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiling_config: None,
+            #[cfg(feature = "cpu-profiling")]
+            sched_event_config: None,
+            #[cfg(feature = "cpu-profiling")]
+            inline_callframe_symbols: false,
         }
         .build_and_start(builder, writer)
     }

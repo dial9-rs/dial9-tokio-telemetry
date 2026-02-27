@@ -1,6 +1,24 @@
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use serde::Serialize;
 
+/// What triggered a [`TelemetryEvent::CpuSample`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum CpuSampleSource {
+    /// Periodic CPU profiling sample (frequency-based).
+    CpuProfile = 0,
+    /// Context switch captured by per-thread sched event tracking.
+    SchedEvent = 1,
+}
+
+impl CpuSampleSource {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::SchedEvent,
+            _ => Self::CpuProfile,
+        }
+    }
+}
+
 /// Wire event representing a telemetry record after interning.
 ///
 /// Compare with `RawEvent` which is emitted by worker threads and carries
@@ -68,6 +86,28 @@ pub enum TelemetryEvent {
         task_id: TaskId,
         spawn_loc_id: SpawnLocationId,
     },
+    /// A CPU stack trace sample from perf_event, attributed to a worker thread.
+    CpuSample {
+        #[serde(rename = "timestamp_ns")]
+        timestamp_nanos: u64,
+        #[serde(rename = "worker")]
+        worker_id: usize,
+        /// What triggered this sample.
+        source: CpuSampleSource,
+        /// Raw instruction pointer addresses (leaf first). Symbolized offline.
+        callchain: Vec<u64>,
+    },
+    /// Definition of a callframe symbol: maps an address to its resolved name.
+    /// Emitted before the first CpuSample that references this address (when inline
+    /// symbolication is enabled). Analogous to SpawnLocationDef.
+    CallframeDef {
+        /// The raw instruction pointer address.
+        address: u64,
+        /// Resolved symbol name (demangled), e.g. "my_crate::my_function".
+        symbol: String,
+        /// Source location, e.g. "my_file.rs:123". None if unavailable.
+        location: Option<String>,
+    },
     WakeEvent {
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
@@ -98,10 +138,15 @@ impl TelemetryEvent {
             | TelemetryEvent::QueueSample {
                 timestamp_nanos, ..
             }
+            | TelemetryEvent::CpuSample {
+                timestamp_nanos, ..
+            }
             | TelemetryEvent::WakeEvent {
                 timestamp_nanos, ..
             } => Some(*timestamp_nanos),
-            TelemetryEvent::SpawnLocationDef { .. } | TelemetryEvent::TaskSpawn { .. } => None,
+            TelemetryEvent::SpawnLocationDef { .. }
+            | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::CallframeDef { .. } => None,
         }
     }
 
@@ -111,10 +156,12 @@ impl TelemetryEvent {
             TelemetryEvent::PollStart { worker_id, .. }
             | TelemetryEvent::PollEnd { worker_id, .. }
             | TelemetryEvent::WorkerPark { worker_id, .. }
-            | TelemetryEvent::WorkerUnpark { worker_id, .. } => Some(*worker_id),
+            | TelemetryEvent::WorkerUnpark { worker_id, .. }
+            | TelemetryEvent::CpuSample { worker_id, .. } => Some(*worker_id),
             TelemetryEvent::QueueSample { .. }
             | TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::WakeEvent { .. } => None,
         }
     }
@@ -169,6 +216,11 @@ pub enum RawEvent {
         woken_task_id: crate::telemetry::task_metadata::TaskId,
         target_worker: u8,
     },
+}
+
+/// Get the OS thread ID (tid) of the calling thread via `gettid()`.
+pub fn current_tid() -> u32 {
+    unsafe { libc::syscall(libc::SYS_gettid) as u32 }
 }
 
 /// Read the calling thread's CPU time via `CLOCK_THREAD_CPUTIME_ID`.

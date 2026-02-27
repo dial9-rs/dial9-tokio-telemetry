@@ -11,6 +11,8 @@ pub struct TraceReader {
     pub spawn_locations: HashMap<SpawnLocationId, String>,
     /// Task ID → spawn location ID mapping built from TaskSpawn events.
     pub task_spawn_locs: HashMap<TaskId, SpawnLocationId>,
+    /// Callframe address → symbol name mapping built from CallframeDef events.
+    pub callframe_symbols: HashMap<u64, String>,
 }
 
 impl TraceReader {
@@ -20,11 +22,35 @@ impl TraceReader {
             reader: BufReader::new(file),
             spawn_locations: HashMap::new(),
             task_spawn_locs: HashMap::new(),
+            callframe_symbols: HashMap::new(),
         })
     }
 
     pub fn read_header(&mut self) -> Result<(String, u32)> {
         format::read_header(&mut self.reader)
+    }
+
+    /// Read the next event without filtering — returns all events including
+    /// metadata records (SpawnLocationDef, TaskSpawn, CallframeDef).
+    /// Still accumulates metadata into lookup tables as a side effect.
+    pub fn read_raw_event(&mut self) -> Result<Option<TelemetryEvent>> {
+        let event = format::read_event(&mut self.reader)?;
+        match &event {
+            Some(TelemetryEvent::SpawnLocationDef { id, location }) => {
+                self.spawn_locations.insert(*id, location.clone());
+            }
+            Some(TelemetryEvent::TaskSpawn {
+                task_id,
+                spawn_loc_id,
+            }) => {
+                self.task_spawn_locs.insert(*task_id, *spawn_loc_id);
+            }
+            Some(TelemetryEvent::CallframeDef { address, symbol, .. }) => {
+                self.callframe_symbols.insert(*address, symbol.clone());
+            }
+            _ => {}
+        }
+        Ok(event)
     }
 
     /// Read the next runtime telemetry event, automatically accumulating
@@ -41,6 +67,9 @@ impl TraceReader {
                     spawn_loc_id,
                 }) => {
                     self.task_spawn_locs.insert(task_id, spawn_loc_id);
+                }
+                Some(TelemetryEvent::CallframeDef { address, symbol, .. }) => {
+                    self.callframe_symbols.insert(address, symbol);
                 }
                 Some(e) => return Ok(Some(e)),
             }
@@ -191,8 +220,11 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
                 stats.total_sched_wait_ns += sched_wait_delta_nanos;
                 stats.max_sched_wait_ns = stats.max_sched_wait_ns.max(*sched_wait_delta_nanos);
             }
-            TelemetryEvent::SpawnLocationDef { .. } | TelemetryEvent::TaskSpawn { .. } => {}
-            TelemetryEvent::WakeEvent { .. } => {}
+            TelemetryEvent::SpawnLocationDef { .. }
+            | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::CpuSample { .. }
+            | TelemetryEvent::CallframeDef { .. }
+            | TelemetryEvent::WakeEvent { .. } => {}
         }
     }
 
