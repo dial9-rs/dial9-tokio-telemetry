@@ -8,9 +8,14 @@ pub fn is_ci() -> bool {
 /// `perf_event_open` is unavailable (e.g. CI without perf permissions).
 /// Panics with a useful message in non-CI environments.
 ///
+/// NOTE: only useful with constructors that actually call `perf_event_open`,
+/// i.e. `PerfSampler::start`. `PerfSampler::new_per_thread` only builds an
+/// attr struct and never fails with PermissionDenied — use `is_ci()` at the
+/// top of those tests and `require_perf_ok!` for the `track_current_thread`
+/// calls instead.
+///
 /// Usage:
 ///   let mut sampler = require_sampler!(PerfSampler::start(config));
-///   let sampler = require_sampler!(PerfSampler::new_per_thread(config));
 #[macro_export]
 macro_rules! require_sampler {
     ($e:expr) => {
