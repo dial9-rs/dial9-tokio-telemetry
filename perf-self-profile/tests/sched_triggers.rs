@@ -1,3 +1,4 @@
+mod common;
 use perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -15,17 +16,13 @@ fn do_sleep() {
 #[test]
 fn captures_lock_acquisition_stack() {
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
-    let sampler = Arc::new(Mutex::new(
-        match PerfSampler::new_per_thread(SamplerConfig {
+    let sampler = Arc::new(Mutex::new(require_sampler!(PerfSampler::new_per_thread(
+        SamplerConfig {
             frequency_hz: 1,
             event_source: EventSource::SwContextSwitches,
             include_kernel: false,
-        }) {
-            Ok(s) => s,
-            Err(_) if std::env::var("CI").is_ok() => return,
-            Err(e) => panic!("failed to create sampler: {}", e),
-        },
-    ));
+        }
+    ))));
 
     // Track the main thread
     sampler.lock().unwrap().track_current_thread().unwrap();
@@ -82,17 +79,13 @@ fn captures_lock_acquisition_stack() {
 #[test]
 fn captures_sleep_stack() {
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
-    let sampler = Arc::new(Mutex::new(
-        match PerfSampler::new_per_thread(SamplerConfig {
+    let sampler = Arc::new(Mutex::new(require_sampler!(PerfSampler::new_per_thread(
+        SamplerConfig {
             frequency_hz: 1,
             event_source: EventSource::SwContextSwitches,
             include_kernel: false,
-        }) {
-            Ok(s) => s,
-            Err(_) if std::env::var("CI").is_ok() => return,
-            Err(e) => panic!("failed to create sampler: {}", e),
-        },
-    ));
+        }
+    ))));
 
     sampler.lock().unwrap().track_current_thread().unwrap();
     do_sleep();

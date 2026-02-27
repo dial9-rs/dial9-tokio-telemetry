@@ -1,3 +1,4 @@
+mod common;
 use perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -17,15 +18,11 @@ fn burn_cpu(stop: &AtomicBool) {
 
 #[test]
 fn profiles_spawned_threads() {
-    let mut sampler = match PerfSampler::start(SamplerConfig {
+    let mut sampler = require_sampler!(PerfSampler::start(SamplerConfig {
         frequency_hz: 999,
         event_source: EventSource::SwCpuClock,
         include_kernel: false,
-    }) {
-        Ok(s) => s,
-        Err(_) if std::env::var("CI").is_ok() => return,
-        Err(e) => panic!("failed to start sampler: {}", e),
-    };
+    }));
 
     let stop = Arc::new(AtomicBool::new(false));
 
