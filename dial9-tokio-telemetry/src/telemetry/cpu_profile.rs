@@ -65,6 +65,9 @@ pub(crate) struct CpuProfiler {
     clock_offset: u64,
     /// OS tid → worker_id mapping, populated from SharedState.worker_tids.
     tid_to_worker: HashMap<u32, usize>,
+    /// OS tid → thread name, eagerly cached at drain time so short-lived threads
+    /// are captured before they exit and `/proc/self/task/<tid>/comm` disappears.
+    tid_to_name: HashMap<u32, String>,
 }
 
 impl CpuProfiler {
@@ -82,6 +85,7 @@ impl CpuProfiler {
             sampler,
             clock_offset: trace_start_mono_ns,
             tid_to_worker: HashMap::new(),
+            tid_to_name: HashMap::new(),
         })
     }
 
@@ -91,6 +95,9 @@ impl CpuProfiler {
     }
 
     /// Drain all pending perf samples and convert to CpuSample events.
+    ///
+    /// Eagerly reads `/proc/self/task/<tid>/comm` for non-worker tids so that
+    /// thread names are captured before short-lived threads exit.
     pub fn drain(&mut self) -> Vec<TelemetryEvent> {
         let mut events = Vec::new();
         self.sampler.for_each_sample(|sample| {
@@ -100,6 +107,13 @@ impl CpuProfiler {
                 .get(&sample.tid)
                 .copied()
                 .unwrap_or(UNKNOWN_WORKER);
+            // Eagerly cache thread name for non-worker tids while the thread
+            // is still alive and /proc/self/task/<tid>/comm is readable.
+            if worker_id == UNKNOWN_WORKER && !self.tid_to_name.contains_key(&sample.tid) {
+                if let Some(name) = read_thread_name(sample.tid) {
+                    self.tid_to_name.insert(sample.tid, name);
+                }
+            }
             events.push(TelemetryEvent::CpuSample {
                 timestamp_nanos,
                 worker_id,
@@ -109,6 +123,11 @@ impl CpuProfiler {
             });
         });
         events
+    }
+
+    /// Return the cached thread name for a non-worker tid, if known.
+    pub fn thread_name(&self, tid: u32) -> Option<&str> {
+        self.tid_to_name.get(&tid).map(|s| s.as_str())
     }
 }
 

@@ -461,8 +461,22 @@ impl TelemetryRecorder {
         #[cfg(feature = "cpu-profiling")]
         {
             let mut cpu_events = Vec::new();
+            // Drain samples — this eagerly caches thread names in the profiler
+            // while threads are still alive.
             if let Some(ref mut profiler) = self.cpu_profiler {
                 cpu_events = profiler.drain();
+                // Pull eagerly-cached thread names into our intern table
+                for event in &cpu_events {
+                    if let TelemetryEvent::CpuSample { tid, worker_id, .. } = event {
+                        if *worker_id == UNKNOWN_WORKER
+                            && !self.thread_name_intern.contains_key(tid)
+                        {
+                            if let Some(name) = profiler.thread_name(*tid) {
+                                self.thread_name_intern.insert(*tid, name.to_string());
+                            }
+                        }
+                    }
+                }
             }
             {
                 let mut shared_profiler = self.shared.sched_profiler.lock().unwrap();
@@ -480,13 +494,6 @@ impl TelemetryRecorder {
                             self.flush_state.on_rotate();
                             self.callframe_emitted_this_file.clear();
                             self.thread_name_emitted_this_file.clear();
-                        }
-                        if !self.thread_name_intern.contains_key(tid) {
-                            if let Some(name) =
-                                crate::telemetry::cpu_profile::read_thread_name(*tid)
-                            {
-                                self.thread_name_intern.insert(*tid, name);
-                            }
                         }
                         if let Some(name) = self.thread_name_intern.get(tid) {
                             let def = TelemetryEvent::ThreadNameDef {

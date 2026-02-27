@@ -241,3 +241,121 @@ fn burn_cpu(duration: std::time::Duration) {
         std::hint::black_box(x);
     }
 }
+
+/// Verify that `ThreadNameDef` events are emitted for non-worker threads:
+/// - A plain `std::thread` spawned outside the runtime
+/// - A `spawn_blocking` task running on tokio's blocking pool
+///
+/// Both threads burn CPU for longer than the 250ms flush interval, then exit.
+/// The flush cycle's `drain()` eagerly caches thread names from
+/// `/proc/self/task/<tid>/comm` while the threads are still alive. The final
+/// `ThreadNameDef` emission happens later at write time, after the threads
+/// have exited — proving the eager cache is necessary.
+#[cfg(feature = "cpu-profiling")]
+#[test]
+fn thread_name_attribution_for_external_and_blocking_threads() {
+    use dial9_tokio_telemetry::telemetry::events::{TelemetryEvent, UNKNOWN_WORKER};
+    use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
+    use std::time::Duration;
+
+    let (writer, events) = common::CapturingWriter::new();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_cpu_profiling(CpuProfilingConfig {
+            frequency_hz: 999,
+            ..Default::default()
+        })
+        .build_and_start(builder, Box::new(writer))
+        .unwrap();
+
+    // ── std::thread with a known name — exits before flush ───────────────
+    let ext_handle = std::thread::Builder::new()
+        .name("my-ext-thread".into())
+        .spawn(|| burn_cpu(Duration::from_millis(400)))
+        .unwrap();
+
+    // ── spawn_blocking — also exits before flush ─────────────────────────
+    let blocking_handle = runtime.spawn(async {
+        tokio::task::spawn_blocking(|| burn_cpu(Duration::from_millis(400)));
+        tokio::task::spawn_blocking(|| burn_cpu(Duration::from_millis(400)))
+            .await
+            .unwrap();
+    });
+
+    // Wait for both to finish — threads are gone after this point
+    ext_handle.join().unwrap();
+    runtime.block_on(async {
+        blocking_handle.await.unwrap();
+        // Now let the flush cycle run. The threads have already exited,
+        // so /proc/self/task/<tid>/comm is no longer readable. Thread names
+        // must come from the eager cache populated during drain().
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    let events = events.lock().unwrap();
+
+    // ── Collect ThreadNameDef events ─────────────────────────────────────
+    let thread_defs: Vec<(u32, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            TelemetryEvent::ThreadNameDef { tid, name } => Some((*tid, name.as_str())),
+            _ => None,
+        })
+        .collect();
+
+    eprintln!("ThreadNameDef events: {thread_defs:?}");
+
+    // ── Verify the external thread name appears ──────────────────────────
+    let ext_def = thread_defs
+        .iter()
+        .find(|(_, name)| *name == "my-ext-thread");
+    assert!(
+        ext_def.is_some(),
+        "expected ThreadNameDef for 'my-ext-thread', got: {thread_defs:?}"
+    );
+    let ext_tid = ext_def.unwrap().0;
+
+    // ── Verify a tokio blocking-thread name appears ──────────────────────
+    // spawn_blocking threads are named "tokio-runtime-w" by tokio
+    let blocking_def = thread_defs
+        .iter()
+        .find(|(_, name)| name.starts_with("tokio-runtime-w"));
+    assert!(
+        blocking_def.is_some(),
+        "expected ThreadNameDef for a tokio blocking thread (tokio-runtime-w*), got: {thread_defs:?}"
+    );
+    let blocking_tid = blocking_def.unwrap().0;
+
+    // ── Verify CpuSamples exist for both tids with UNKNOWN_WORKER ────────
+    let ext_samples: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, TelemetryEvent::CpuSample { tid, worker_id, .. } if *tid == ext_tid && *worker_id == UNKNOWN_WORKER))
+        .collect();
+    eprintln!(
+        "CPU samples for ext thread (tid={ext_tid}): {}",
+        ext_samples.len()
+    );
+    assert!(
+        !ext_samples.is_empty(),
+        "expected CPU samples for external thread tid={ext_tid}"
+    );
+
+    let blocking_samples: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, TelemetryEvent::CpuSample { tid, worker_id, .. } if *tid == blocking_tid && *worker_id == UNKNOWN_WORKER))
+        .collect();
+    eprintln!(
+        "CPU samples for blocking thread (tid={blocking_tid}): {}",
+        blocking_samples.len()
+    );
+    assert!(
+        !blocking_samples.is_empty(),
+        "expected CPU samples for blocking thread tid={blocking_tid}"
+    );
+}
