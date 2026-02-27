@@ -16,33 +16,29 @@ fn do_sleep() {
 #[test]
 fn captures_lock_acquisition_stack() {
     if common::is_ci() {
-        eprintln!("Skipping test: perf_event_open unavailable in CI");
         return;
     }
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
-    let sampler = Arc::new(Mutex::new(require_sampler!(PerfSampler::new_per_thread(
-        SamplerConfig {
+    let sampler = Arc::new(Mutex::new(
+        PerfSampler::new_per_thread(SamplerConfig {
             frequency_hz: 1,
             event_source: EventSource::SwContextSwitches,
             include_kernel: false,
-        }
-    ))));
+        })
+        .expect("failed to create sampler"),
+    ));
 
-    // Track the main thread
-    require_perf_ok!(sampler.lock().unwrap().track_current_thread());
+    sampler.lock().unwrap().track_current_thread().unwrap();
 
     let lock = Arc::new(Mutex::new(()));
     let guard = lock.lock().unwrap();
 
-    // Spawn threads that block on the lock, each tracking itself
     let handles: Vec<_> = (0..4)
         .map(|_| {
             let lock2 = Arc::clone(&lock);
             let sampler2 = Arc::clone(&sampler);
             thread::spawn(move || {
-                // track_current_thread opens a new perf fd for this thread;
-                // ignore errors in spawned threads (permissions are checked above).
-                let _ = sampler2.lock().unwrap().track_current_thread();
+                sampler2.lock().unwrap().track_current_thread().unwrap();
                 block_on_lock(&lock2);
                 sampler2.lock().unwrap().stop_tracking_current_thread();
             })
@@ -85,19 +81,19 @@ fn captures_lock_acquisition_stack() {
 #[test]
 fn captures_sleep_stack() {
     if common::is_ci() {
-        eprintln!("Skipping test: perf_event_open unavailable in CI");
         return;
     }
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
-    let sampler = Arc::new(Mutex::new(require_sampler!(PerfSampler::new_per_thread(
-        SamplerConfig {
+    let sampler = Arc::new(Mutex::new(
+        PerfSampler::new_per_thread(SamplerConfig {
             frequency_hz: 1,
             event_source: EventSource::SwContextSwitches,
             include_kernel: false,
-        }
-    ))));
+        })
+        .expect("failed to create sampler"),
+    ));
 
-    require_perf_ok!(sampler.lock().unwrap().track_current_thread());
+    sampler.lock().unwrap().track_current_thread().unwrap();
     do_sleep();
 
     let mut sampler = sampler.lock().unwrap();
@@ -133,8 +129,7 @@ fn captures_sleep_stack() {
     }
 
     // Frame pointer unwinding may produce shallow stacks in test binaries,
-    // so we only assert that we resolved *something*. The sleep/main/sched_triggers
-    // check is best-effort.
+    // so we only assert that we resolved *something*.
     assert!(
         !resolved_names.is_empty(),
         "expected at least one resolved symbol from sleep stacks. \
@@ -142,3 +137,4 @@ fn captures_sleep_stack() {
         samples.len(),
     );
 }
+
