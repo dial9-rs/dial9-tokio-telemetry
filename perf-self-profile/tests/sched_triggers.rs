@@ -137,4 +137,3 @@ fn captures_sleep_stack() {
         samples.len(),
     );
 }
-
