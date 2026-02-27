@@ -467,14 +467,12 @@ impl TelemetryRecorder {
                 cpu_events = profiler.drain();
                 // Pull eagerly-cached thread names into our intern table
                 for event in &cpu_events {
-                    if let TelemetryEvent::CpuSample { tid, worker_id, .. } = event {
-                        if *worker_id == UNKNOWN_WORKER
-                            && !self.thread_name_intern.contains_key(tid)
-                        {
-                            if let Some(name) = profiler.thread_name(*tid) {
-                                self.thread_name_intern.insert(*tid, name.to_string());
-                            }
-                        }
+                    if let TelemetryEvent::CpuSample { tid, worker_id, .. } = event
+                        && *worker_id == UNKNOWN_WORKER
+                        && !self.thread_name_intern.contains_key(tid)
+                        && let Some(name) = profiler.thread_name(*tid)
+                    {
+                        self.thread_name_intern.insert(*tid, name.to_string());
                     }
                 }
             }
@@ -486,54 +484,53 @@ impl TelemetryRecorder {
             }
             for event in &cpu_events {
                 // Emit ThreadNameDef for non-worker tids before their first sample in this file
-                if let TelemetryEvent::CpuSample { worker_id, tid, .. } = event {
-                    if *worker_id == UNKNOWN_WORKER
-                        && !self.thread_name_emitted_this_file.contains(tid)
-                    {
-                        if self.writer.take_rotated() {
-                            self.flush_state.on_rotate();
-                            self.callframe_emitted_this_file.clear();
-                            self.thread_name_emitted_this_file.clear();
-                        }
-                        if let Some(name) = self.thread_name_intern.get(tid) {
-                            let def = TelemetryEvent::ThreadNameDef {
-                                tid: *tid,
-                                name: name.clone(),
+                if let TelemetryEvent::CpuSample { worker_id, tid, .. } = event
+                    && *worker_id == UNKNOWN_WORKER
+                    && !self.thread_name_emitted_this_file.contains(tid)
+                {
+                    if self.writer.take_rotated() {
+                        self.flush_state.on_rotate();
+                        self.callframe_emitted_this_file.clear();
+                        self.thread_name_emitted_this_file.clear();
+                    }
+                    if let Some(name) = self.thread_name_intern.get(tid) {
+                        let def = TelemetryEvent::ThreadNameDef {
+                            tid: *tid,
+                            name: name.clone(),
+                        };
+                        let _ = self.writer.write_event(&def);
+                    }
+                    self.thread_name_emitted_this_file.insert(*tid);
+                }
+                if self.inline_callframe_symbols
+                    && let TelemetryEvent::CpuSample { callchain, .. } = event
+                {
+                    // Check for rotation before writing defs
+                    if self.writer.take_rotated() {
+                        self.flush_state.on_rotate();
+                        self.callframe_emitted_this_file.clear();
+                        self.thread_name_emitted_this_file.clear();
+                    }
+                    for &addr in callchain {
+                        if !self.callframe_emitted_this_file.contains(&addr) {
+                            // Symbolicate if not yet interned
+                            self.callframe_intern.entry(addr).or_insert_with(|| {
+                                let sym = perf_self_profile::resolve_symbol(addr);
+                                let symbol = sym.name.unwrap_or_else(|| format!("{:#x}", addr));
+                                let location = sym.code_info.map(|info| match info.line {
+                                    Some(line) => format!("{}:{}", info.file, line),
+                                    None => info.file,
+                                });
+                                (symbol, location)
+                            });
+                            let (symbol, location) = self.callframe_intern[&addr].clone();
+                            let def = TelemetryEvent::CallframeDef {
+                                address: addr,
+                                symbol,
+                                location,
                             };
                             let _ = self.writer.write_event(&def);
-                        }
-                        self.thread_name_emitted_this_file.insert(*tid);
-                    }
-                }
-                if self.inline_callframe_symbols {
-                    if let TelemetryEvent::CpuSample { callchain, .. } = event {
-                        // Check for rotation before writing defs
-                        if self.writer.take_rotated() {
-                            self.flush_state.on_rotate();
-                            self.callframe_emitted_this_file.clear();
-                            self.thread_name_emitted_this_file.clear();
-                        }
-                        for &addr in callchain {
-                            if !self.callframe_emitted_this_file.contains(&addr) {
-                                // Symbolicate if not yet interned
-                                if !self.callframe_intern.contains_key(&addr) {
-                                    let sym = perf_self_profile::resolve_symbol(addr);
-                                    let symbol = sym.name.unwrap_or_else(|| format!("{:#x}", addr));
-                                    let location = sym.code_info.map(|info| match info.line {
-                                        Some(line) => format!("{}:{}", info.file, line),
-                                        None => info.file,
-                                    });
-                                    self.callframe_intern.insert(addr, (symbol, location));
-                                }
-                                let (symbol, location) = self.callframe_intern[&addr].clone();
-                                let def = TelemetryEvent::CallframeDef {
-                                    address: addr,
-                                    symbol,
-                                    location,
-                                };
-                                let _ = self.writer.write_event(&def);
-                                self.callframe_emitted_this_file.insert(addr);
-                            }
+                            self.callframe_emitted_this_file.insert(addr);
                         }
                     }
                 }
@@ -641,17 +638,17 @@ impl TelemetryRecorder {
             let s_stop = shared.clone();
             builder
                 .on_thread_start(move || {
-                    if let Ok(mut prof) = s_start.sched_profiler.lock() {
-                        if let Some(ref mut p) = *prof {
-                            let _ = p.track_current_thread();
-                        }
+                    if let Ok(mut prof) = s_start.sched_profiler.lock()
+                        && let Some(ref mut p) = *prof
+                    {
+                        let _ = p.track_current_thread();
                     }
                 })
                 .on_thread_stop(move || {
-                    if let Ok(mut prof) = s_stop.sched_profiler.lock() {
-                        if let Some(ref mut p) = *prof {
-                            p.stop_tracking_current_thread();
-                        }
+                    if let Ok(mut prof) = s_stop.sched_profiler.lock()
+                        && let Some(ref mut p) = *prof
+                    {
+                        p.stop_tracking_current_thread();
                     }
                 });
         }
@@ -862,25 +859,15 @@ impl TracedRuntimeBuilder {
 
         // Start CPU profiler if configured
         #[cfg(feature = "cpu-profiling")]
-        let sampler = if let Some(config) = self.cpu_profiling_config {
-            Some(crate::telemetry::cpu_profile::CpuProfiler::start(
-                config,
-                start_mono_ns,
-            ))
-        } else {
-            None
-        };
+        let sampler = self
+            .cpu_profiling_config
+            .map(|config| crate::telemetry::cpu_profile::CpuProfiler::start(config, start_mono_ns));
 
         // Start sched event profiler if configured
         #[cfg(feature = "cpu-profiling")]
-        let sched = if let Some(config) = self.sched_event_config {
-            Some(crate::telemetry::cpu_profile::SchedProfiler::new(
-                config,
-                start_mono_ns,
-            ))
-        } else {
-            None
-        };
+        let sched = self
+            .sched_event_config
+            .map(|config| crate::telemetry::cpu_profile::SchedProfiler::new(config, start_mono_ns));
 
         let recorder = TelemetryRecorder::install(
             &mut builder,

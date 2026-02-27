@@ -43,18 +43,10 @@ impl Default for CpuProfilingConfig {
 ///
 /// Uses `perf_event_open` with `SwContextSwitches` in per-thread mode,
 /// so each worker thread gets its own perf fd via `on_thread_start`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SchedEventConfig {
     /// Whether to include kernel stack frames.
     pub include_kernel: bool,
-}
-
-impl Default for SchedEventConfig {
-    fn default() -> Self {
-        Self {
-            include_kernel: false,
-        }
-    }
 }
 
 /// Manages the perf sampler and converts samples to telemetry events.
@@ -109,10 +101,11 @@ impl CpuProfiler {
                 .unwrap_or(UNKNOWN_WORKER);
             // Eagerly cache thread name for non-worker tids while the thread
             // is still alive and /proc/self/task/<tid>/comm is readable.
-            if worker_id == UNKNOWN_WORKER && !self.tid_to_name.contains_key(&sample.tid) {
-                if let Some(name) = read_thread_name(sample.tid) {
-                    self.tid_to_name.insert(sample.tid, name);
-                }
+            if worker_id == UNKNOWN_WORKER
+                && !self.tid_to_name.contains_key(&sample.tid)
+                && let Some(name) = read_thread_name(sample.tid)
+            {
+                self.tid_to_name.insert(sample.tid, name);
             }
             events.push(TelemetryEvent::CpuSample {
                 timestamp_nanos,
