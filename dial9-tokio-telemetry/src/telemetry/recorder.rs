@@ -461,11 +461,9 @@ impl TelemetryRecorder {
                                 if !self.callframe_intern.contains_key(&addr) {
                                     let sym = perf_self_profile::resolve_symbol(addr);
                                     let symbol = sym.name.unwrap_or_else(|| format!("{:#x}", addr));
-                                    let location = sym.code_info.map(|info| {
-                                        match info.line {
-                                            Some(line) => format!("{}:{}", info.file, line),
-                                            None => info.file,
-                                        }
+                                    let location = sym.code_info.map(|info| match info.line {
+                                        Some(line) => format!("{}:{}", info.file, line),
+                                        None => info.file,
                                     });
                                     self.callframe_intern.insert(addr, (symbol, location));
                                 }
@@ -483,16 +481,14 @@ impl TelemetryRecorder {
                 }
                 let _ = self.writer.write_event(event);
             }
-            let has_profiler = self.cpu_profiler.is_some()
-                || self.shared.sched_profiler.lock().unwrap().is_some();
+            let has_profiler =
+                self.cpu_profiler.is_some() || self.shared.sched_profiler.lock().unwrap().is_some();
             if has_profiler {
                 // only log once to confirm profiler is wired up
                 static LOGGED: std::sync::atomic::AtomicBool =
                     std::sync::atomic::AtomicBool::new(false);
                 if !LOGGED.swap(true, Ordering::Relaxed) {
-                    eprintln!(
-                        "[cpu-profiler] profiler active in flush path",
-                    );
+                    eprintln!("[cpu-profiler] profiler active in flush path",);
                 }
             }
         }
@@ -763,6 +759,8 @@ impl TracedRuntimeBuilder {
     ///
     /// Opens a per-thread perf event fd on each worker thread via `on_thread_start`,
     /// capturing the stack at every context switch. Can be used alongside CPU profiling.
+    ///
+    /// Requires `perf_event_paranoid <= 1`
     #[cfg(feature = "cpu-profiling")]
     pub fn with_sched_events(
         mut self,
@@ -818,7 +816,13 @@ impl TracedRuntimeBuilder {
                 recorder.lock().unwrap().cpu_profiler = Some(sampler);
             }
             if let Some(Ok(sched)) = sched {
-                *recorder.lock().unwrap().shared.sched_profiler.lock().unwrap() = Some(sched);
+                *recorder
+                    .lock()
+                    .unwrap()
+                    .shared
+                    .sched_profiler
+                    .lock()
+                    .unwrap() = Some(sched);
             }
             recorder.lock().unwrap().inline_callframe_symbols = self.inline_callframe_symbols;
         }
