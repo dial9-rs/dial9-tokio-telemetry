@@ -6,9 +6,10 @@ description = "Minimal self-profiling via Linux perf_event_open with frame-point
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-perf-event-open-sys = "6"
 libc = "0.2"
 blazesym = "0.2"
+perf-event-data = "0.1.8"
+perf-event-open-sys2 = "5.0.6"
 
 [dev-dependencies]
 # None needed

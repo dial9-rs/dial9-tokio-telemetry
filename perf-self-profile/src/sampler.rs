@@ -3,12 +3,14 @@
 use std::io;
 use std::ptr;
 
-use libc;
+use perf_event_data::Record;
+use perf_event_data::endian::Little;
+use perf_event_data::parse::{ParseConfig, Parser};
 use perf_event_open_sys::bindings::{
     PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_SW_CONTEXT_SWITCHES, PERF_COUNT_SW_CPU_CLOCK,
-    PERF_COUNT_SW_TASK_CLOCK, PERF_FLAG_FD_CLOEXEC, PERF_RECORD_SAMPLE, PERF_SAMPLE_CALLCHAIN,
-    PERF_SAMPLE_CPU, PERF_SAMPLE_IP, PERF_SAMPLE_PERIOD, PERF_SAMPLE_TID, PERF_SAMPLE_TIME,
-    PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE, perf_event_attr,
+    PERF_COUNT_SW_TASK_CLOCK, PERF_FLAG_FD_CLOEXEC, PERF_SAMPLE_CALLCHAIN, PERF_SAMPLE_CPU,
+    PERF_SAMPLE_IP, PERF_SAMPLE_PERIOD, PERF_SAMPLE_TID, PERF_SAMPLE_TIME, PERF_TYPE_HARDWARE,
+    PERF_TYPE_SOFTWARE, perf_event_attr,
 };
 
 use crate::ring_buffer::RingBuffer;
@@ -108,7 +110,20 @@ fn open_perf_event(attr: &mut perf_event_attr, pid: i32, cpu: i32) -> io::Result
         )
     };
     if fd < 0 {
-        return Err(io::Error::last_os_error());
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::PermissionDenied {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "perf_event_open denied ({}); for context-switch sampling \
+                     /proc/sys/kernel/perf_event_paranoid must be <= 1 \
+                     (current value can be checked with: \
+                     cat /proc/sys/kernel/perf_event_paranoid)",
+                    err
+                ),
+            ));
+        }
+        return Err(err);
     }
 
     let base = unsafe {
@@ -153,7 +168,7 @@ fn open_perf_event(attr: &mut perf_event_attr, pid: i32, cpu: i32) -> io::Result
 ///    including context switches.
 pub struct PerfSampler {
     events: Vec<PerfEvent>,
-    sample_type: u64,
+    parse_config: ParseConfig<Little>,
     attr: perf_event_attr,
 }
 
@@ -187,7 +202,6 @@ impl PerfSampler {
                 match open_perf_event(&mut attr, pid, cpu) {
                     Ok(ev) => events.push(ev),
                     Err(e) => {
-                        drop(events);
                         return Err(e);
                     }
                 }
@@ -196,7 +210,7 @@ impl PerfSampler {
 
         Ok(PerfSampler {
             events,
-            sample_type: attr.sample_type,
+            parse_config: ParseConfig::from(attr),
             attr,
         })
     }
@@ -212,7 +226,7 @@ impl PerfSampler {
         let attr = Self::build_attr(&config)?;
         Ok(PerfSampler {
             events: Vec::new(),
-            sample_type: attr.sample_type,
+            parse_config: ParseConfig::from(attr),
             attr,
         })
     }
@@ -222,8 +236,8 @@ impl PerfSampler {
     /// Must be called from the thread you want to monitor. Opens a perf event
     /// fd scoped to this thread's tid with `cpu=-1`.
     pub fn track_current_thread(&mut self) -> io::Result<()> {
-        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as i32;
-        let ev = open_perf_event(&mut self.attr, tid, -1)?;
+        //let tid = unsafe { libc::syscall(libc::SYS_gettid) } as i32;
+        let ev = open_perf_event(&mut self.attr, 0, -1)?;
         self.events.push(ev);
         Ok(())
     }
@@ -279,6 +293,8 @@ impl PerfSampler {
             }
         }
 
+        let is_event_based = matches!(config.event_source, EventSource::SwContextSwitches);
+
         attr.sample_type = PERF_SAMPLE_IP as u64
             | PERF_SAMPLE_CALLCHAIN as u64
             | PERF_SAMPLE_TID as u64
@@ -286,16 +302,16 @@ impl PerfSampler {
             | PERF_SAMPLE_CPU as u64
             | PERF_SAMPLE_PERIOD as u64;
 
-        let is_event_based = matches!(config.event_source, EventSource::SwContextSwitches);
+        attr.set_disabled(1);
         if is_event_based {
-            // Event-based: sample every event (period=1), no inherit.
-            // Context switches fire in kernel context, so we can't set exclude_kernel
-            // on the event itself. Kernel frames in the callchain are filtered at parse
-            // time via USER_ADDR_LIMIT (see parse_sample).
-            attr.__bindgen_anon_1.sample_period = 1;
+            // Sample every context switch. exclude_kernel must remain 0 since
+            // context switches fire in kernel context; kernel callchain frames
+            // are filtered at parse time via USER_ADDR_LIMIT.
+            attr.sample_period = 1;
+            attr.wakeup_events = 1;
             attr.set_sample_id_all(1);
         } else {
-            attr.__bindgen_anon_1.sample_freq = config.frequency_hz;
+            attr.sample_freq = config.frequency_hz;
             attr.set_freq(1);
             attr.set_sample_id_all(1);
             attr.set_inherit(1);
@@ -320,16 +336,53 @@ impl PerfSampler {
     where
         F: FnMut(&Sample),
     {
-        let sample_type = self.sample_type;
+        let parse_config = self.parse_config.clone();
 
         for ev in &mut self.events {
             ev.ring.for_each_record(|record| {
-                if record.header.type_ != PERF_RECORD_SAMPLE as u32 {
-                    return;
+                // Assemble header + body into a contiguous slice for perf-event-data.
+                // The header is 8 bytes; body may be split across the ring buffer wrap point.
+                let mut buf = Vec::with_capacity(record.header.size as usize);
+                // SAFETY: perf_event_header is POD; we write it as raw bytes.
+                let header_bytes: [u8; 8] = unsafe { std::mem::transmute(record.header) };
+                buf.extend_from_slice(&header_bytes);
+                match &record.body {
+                    crate::ring_buffer::RecordBody::Contiguous(data) => buf.extend_from_slice(data),
+                    crate::ring_buffer::RecordBody::Split(a, b) => {
+                        buf.extend_from_slice(a);
+                        buf.extend_from_slice(b);
+                    }
                 }
-                if let Some(sample) = parse_sample(sample_type, &record.body) {
-                    f(&sample);
-                }
+
+                let mut parser = Parser::new(buf.as_slice(), parse_config.clone());
+                let parsed = match parser.parse::<Record>() {
+                    Ok(r) => r,
+                    Err(_) => return,
+                };
+
+                let sample = match parsed {
+                    Record::Sample(s) => {
+                        let callchain = s
+                            .callchain()
+                            .unwrap_or(&[])
+                            .iter()
+                            .copied()
+                            .filter(|&a| a < USER_ADDR_LIMIT && a != 0)
+                            .collect();
+                        Sample {
+                            ip: s.ip().unwrap_or(0),
+                            pid: s.pid().unwrap_or(0),
+                            tid: s.tid().unwrap_or(0),
+                            time: s.time().unwrap_or(0),
+                            cpu: s.cpu().unwrap_or(0),
+                            period: s.period().unwrap_or(0),
+                            callchain,
+                        }
+                    }
+                    _ => return,
+                };
+
+                f(&sample);
             });
         }
     }
@@ -390,235 +443,9 @@ fn get_online_cpus() -> io::Result<Vec<i32>> {
     Ok(cpus)
 }
 
-/// Parse a PERF_RECORD_SAMPLE body according to the sample_type we configured.
-///
-/// The layout of a sample record body is defined by which PERF_SAMPLE_* bits
-/// are set. The fields appear in the PERF_RECORD_SAMPLE order documented in
-/// perf_event_open(2), which is NOT simply sorted by bit position:
-///
-/// ```text
-///   u64 ip;                          // PERF_SAMPLE_IP
-///   u32 pid, tid;                    // PERF_SAMPLE_TID
-///   u64 time;                        // PERF_SAMPLE_TIME
-///   u32 cpu, res;                    // PERF_SAMPLE_CPU
-///   u64 period;                      // PERF_SAMPLE_PERIOD
-///   u64 nr;                          // PERF_SAMPLE_CALLCHAIN
-///   u64 ips[nr];                     //   (callchain data)
-/// ```
-fn parse_sample(sample_type: u64, body: &crate::ring_buffer::RecordBody<'_>) -> Option<Sample> {
-    let mut offset: usize = 0;
-    let body_len = body.len();
-
-    macro_rules! read_u64 {
-        () => {{
-            if offset + 8 > body_len {
-                return None;
-            }
-            let v = body.read_u64(offset);
-            offset += 8;
-            v
-        }};
-    }
-    macro_rules! read_u32 {
-        () => {{
-            if offset + 4 > body_len {
-                return None;
-            }
-            let v = body.read_u32(offset);
-            offset += 4;
-            v
-        }};
-    }
-
-    // Fields appear in PERF_RECORD_SAMPLE order (see man page):
-    // IDENTIFIER, IP, TID, TIME, ADDR, ID, STREAM_ID, CPU, PERIOD, READ, CALLCHAIN, ...
-
-    let ip = if sample_type & PERF_SAMPLE_IP as u64 != 0 {
-        read_u64!()
-    } else {
-        0
-    };
-
-    let (pid, tid) = if sample_type & PERF_SAMPLE_TID as u64 != 0 {
-        let pid = read_u32!();
-        let tid = read_u32!();
-        (pid, tid)
-    } else {
-        (0, 0)
-    };
-
-    let time = if sample_type & PERF_SAMPLE_TIME as u64 != 0 {
-        read_u64!()
-    } else {
-        0
-    };
-
-    if sample_type & (1 << 3) != 0 {
-        read_u64!(); // PERF_SAMPLE_ADDR
-    }
-
-    if sample_type & (1 << 6) != 0 {
-        read_u64!(); // PERF_SAMPLE_ID
-    }
-
-    // PERF_SAMPLE_STREAM_ID (bit 9)
-    if sample_type & (1 << 9) != 0 {
-        read_u64!();
-    }
-
-    // PERF_SAMPLE_CPU (bit 7) — comes before PERIOD and CALLCHAIN in record layout
-    let cpu = if sample_type & PERF_SAMPLE_CPU as u64 != 0 {
-        let cpu = read_u32!();
-        let _res = read_u32!();
-        cpu
-    } else {
-        0
-    };
-
-    // PERF_SAMPLE_PERIOD (bit 8) — comes before CALLCHAIN in record layout
-    let period = if sample_type & PERF_SAMPLE_PERIOD as u64 != 0 {
-        read_u64!()
-    } else {
-        0
-    };
-
-    // PERF_SAMPLE_READ (bit 4) — variable length, we never set this
-
-    // PERF_SAMPLE_CALLCHAIN (bit 5) — comes after CPU and PERIOD
-    let callchain = if sample_type & PERF_SAMPLE_CALLCHAIN as u64 != 0 {
-        let nr = read_u64!() as usize;
-        if nr > 1024 {
-            return None;
-        }
-        let mut chain = Vec::with_capacity(nr);
-        for _ in 0..nr {
-            let addr = read_u64!();
-            if addr >= USER_ADDR_LIMIT || addr == 0 {
-                continue;
-            }
-            chain.push(addr);
-        }
-        chain
-    } else {
-        Vec::new()
-    };
-
-    Some(Sample {
-        ip,
-        pid,
-        tid,
-        time,
-        cpu,
-        period,
-        callchain,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ring_buffer::RecordBody;
-    use perf_event_open_sys::bindings::{PERF_CONTEXT_KERNEL, PERF_CONTEXT_USER};
-
-    /// Our standard sample_type: IP | TID | TIME | CPU | PERIOD | CALLCHAIN
-    const STD_SAMPLE_TYPE: u64 = PERF_SAMPLE_IP as u64
-        | PERF_SAMPLE_TID as u64
-        | PERF_SAMPLE_TIME as u64
-        | PERF_SAMPLE_CPU as u64
-        | PERF_SAMPLE_PERIOD as u64
-        | PERF_SAMPLE_CALLCHAIN as u64;
-
-    /// Build a fake sample body matching STD_SAMPLE_TYPE layout.
-    fn build_body(
-        ip: u64,
-        pid: u32,
-        tid: u32,
-        time: u64,
-        cpu: u32,
-        period: u64,
-        addrs: &[u64],
-    ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&ip.to_ne_bytes()); // IP
-        buf.extend_from_slice(&pid.to_ne_bytes()); // TID.pid
-        buf.extend_from_slice(&tid.to_ne_bytes()); // TID.tid
-        buf.extend_from_slice(&time.to_ne_bytes()); // TIME
-        buf.extend_from_slice(&cpu.to_ne_bytes()); // CPU
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // CPU.res
-        buf.extend_from_slice(&period.to_ne_bytes()); // PERIOD
-        buf.extend_from_slice(&(addrs.len() as u64).to_ne_bytes()); // nr
-        for &a in addrs {
-            buf.extend_from_slice(&a.to_ne_bytes());
-        }
-        buf
-    }
-
-    #[test]
-    fn parse_sample_basic() {
-        let body = build_body(0x4000, 100, 200, 999, 2, 1, &[0x4000, 0x4100]);
-        let s = parse_sample(STD_SAMPLE_TYPE, &RecordBody::Contiguous(&body)).unwrap();
-        assert_eq!(s.ip, 0x4000);
-        assert_eq!(s.pid, 100);
-        assert_eq!(s.tid, 200);
-        assert_eq!(s.time, 999);
-        assert_eq!(s.cpu, 2);
-        assert_eq!(s.period, 1);
-        assert_eq!(s.callchain, vec![0x4000, 0x4100]);
-    }
-
-    #[test]
-    fn parse_sample_filters_kernel_addrs() {
-        let kernel_addr = USER_ADDR_LIMIT + 1;
-        let body = build_body(0x4000, 1, 1, 1, 0, 1, &[0x4000, kernel_addr, 0x4100, 0]);
-        let s = parse_sample(STD_SAMPLE_TYPE, &RecordBody::Contiguous(&body)).unwrap();
-        // kernel addr and 0 should be filtered out
-        assert_eq!(s.callchain, vec![0x4000, 0x4100]);
-    }
-
-    #[test]
-    fn parse_sample_filters_context_markers() {
-        let body = build_body(
-            0x4000,
-            1,
-            1,
-            1,
-            0,
-            1,
-            &[
-                PERF_CONTEXT_KERNEL as u64,
-                0x4000,
-                PERF_CONTEXT_USER as u64,
-                0x4100,
-            ],
-        );
-        let s = parse_sample(STD_SAMPLE_TYPE, &RecordBody::Contiguous(&body)).unwrap();
-        // Context markers are >= USER_ADDR_LIMIT, so filtered
-        assert_eq!(s.callchain, vec![0x4000, 0x4100]);
-    }
-
-    #[test]
-    fn parse_sample_truncated_body() {
-        // Body too short to even read IP
-        let body = vec![0u8; 4];
-        assert!(parse_sample(STD_SAMPLE_TYPE, &RecordBody::Contiguous(&body)).is_none());
-    }
-
-    #[test]
-    fn parse_sample_rejects_huge_callchain() {
-        let body = build_body(0x4000, 1, 1, 1, 0, 1, &[]);
-        let mut buf = body[..body.len() - 8].to_vec(); // remove the nr=0
-        buf.extend_from_slice(&2000u64.to_ne_bytes()); // nr=2000 > 1024
-        assert!(parse_sample(STD_SAMPLE_TYPE, &RecordBody::Contiguous(&buf)).is_none());
-    }
-
-    #[test]
-    fn parse_sample_empty_callchain() {
-        let body = build_body(0x4000, 1, 1, 1, 0, 1, &[]);
-        let s = parse_sample(STD_SAMPLE_TYPE, &RecordBody::Contiguous(&body)).unwrap();
-        assert!(s.callchain.is_empty());
-    }
-
-    // --- get_online_cpus tests ---
 
     #[test]
     fn parse_online_cpus_range() {

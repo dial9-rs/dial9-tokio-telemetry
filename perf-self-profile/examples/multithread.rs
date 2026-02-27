@@ -3,7 +3,7 @@
 //! Build with frame pointers:
 //!   RUSTFLAGS="-C force-frame-pointers=yes" cargo run --release --example multithread
 
-use perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
+use perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +46,20 @@ fn main() {
     sampler.disable();
     let samples = sampler.drain_samples();
     eprintln!("Collected {} samples", samples.len());
+    for sample in samples.iter().take(10) {
+        let stack = sample
+            .callchain
+            .iter()
+            .map(|addr| resolve_symbol(*addr))
+            .map(|sym| {
+                sym.code_info
+                    .map(|ci| format!("  {}:{}", ci.file, ci.line.unwrap_or(0)))
+                    .unwrap_or("  unknown".to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("stack:\n{stack}");
+    }
 
     // Show samples per thread
     let mut by_tid: HashMap<u32, usize> = HashMap::new();

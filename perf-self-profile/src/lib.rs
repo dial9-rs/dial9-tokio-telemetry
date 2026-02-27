@@ -1,7 +1,11 @@
 //! # perf-self-profile
 //!
 //! Minimal crate for a program to capture its own perf events with stack traces
-//! using Linux `perf_event_open()`. Uses kernel frame-pointer-based stack walking
+//! using Linux `perf_event_open()`.
+//!
+//! This crate relies on `perf_event_paranoid <= 2`.
+//!
+//! Uses kernel frame-pointer-based stack walking
 //! (`PERF_SAMPLE_CALLCHAIN`), so your binary must be compiled with frame pointers:
 //!
 //! ```toml

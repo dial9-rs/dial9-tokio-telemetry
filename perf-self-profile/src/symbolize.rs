@@ -50,6 +50,17 @@ fn parse_maps_line(line: &str) -> Option<(u64, u64, String, u64)> {
     Some((start, end, path.to_string(), offset))
 }
 
+/// Source location information for a resolved symbol.
+#[derive(Debug, Clone)]
+pub struct CodeInfo {
+    /// Source file name (no directory component).
+    pub file: String,
+    /// Line number within the source file, if available.
+    pub line: Option<u32>,
+    /// Column number within the source file, if available.
+    pub column: Option<u16>,
+}
+
 /// A resolved symbol name and its base address.
 #[derive(Debug, Clone)]
 pub struct SymbolInfo {
@@ -57,8 +68,8 @@ pub struct SymbolInfo {
     pub name: Option<String>,
     /// Base address of the symbol (function start).
     pub base_addr: u64,
-    /// The shared object (or executable) containing this address.
-    pub object: Option<String>,
+    /// Source location (file, line, column) for this symbol, if available.
+    pub code_info: Option<CodeInfo>,
     /// Offset from the symbol base.
     pub offset: u64,
 }
@@ -66,7 +77,7 @@ pub struct SymbolInfo {
 const EMPTY: SymbolInfo = SymbolInfo {
     name: None,
     base_addr: 0,
-    object: None,
+    code_info: None,
     offset: 0,
 };
 
@@ -93,13 +104,15 @@ pub fn resolve_symbol(addr: u64) -> SymbolInfo {
                     && !results.is_empty()
                     && let Some(sym) = results[0].as_sym()
                 {
+                    // TODO: can we refactor this to borrow symbols?
                     return SymbolInfo {
                         name: Some(sym.name.to_string()),
                         base_addr: sym.addr,
-                        object: sym
-                            .code_info
-                            .as_ref()
-                            .map(|c| format!("{}:{}", c.to_path().display(), c.line.unwrap_or(0))),
+                        code_info: sym.code_info.as_ref().map(|c| CodeInfo {
+                            file: c.file.to_string_lossy().into_owned(),
+                            line: c.line,
+                            column: c.column,
+                        }),
                         offset: addr.saturating_sub(sym.addr),
                     };
                 }

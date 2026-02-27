@@ -10,7 +10,7 @@ use std::sync::atomic::{Ordering, fence};
 use perf_event_open_sys::bindings::{perf_event_header, perf_event_mmap_page};
 
 /// A mapped perf ring buffer.
-pub struct RingBuffer {
+pub(crate) struct RingBuffer {
     /// Pointer to the mmap'd region (metadata page + data pages).
     base: *mut u8,
     /// Size of the data region only (excluding the metadata page).
@@ -143,47 +143,4 @@ pub struct RawRecord<'a> {
 pub enum RecordBody<'a> {
     Contiguous(&'a [u8]),
     Split(&'a [u8], &'a [u8]),
-}
-
-impl<'a> RecordBody<'a> {
-    /// Read a u64 at the given byte offset within the body.
-    pub fn read_u64(&self, offset: usize) -> u64 {
-        let mut buf = [0u8; 8];
-        self.read_bytes(offset, &mut buf);
-        u64::from_ne_bytes(buf)
-    }
-
-    /// Read a u32 at the given byte offset within the body.
-    pub fn read_u32(&self, offset: usize) -> u32 {
-        let mut buf = [0u8; 4];
-        self.read_bytes(offset, &mut buf);
-        u32::from_ne_bytes(buf)
-    }
-
-    /// Copy `dst.len()` bytes from the given offset into `dst`.
-    pub fn read_bytes(&self, offset: usize, dst: &mut [u8]) {
-        match self {
-            RecordBody::Contiguous(data) => {
-                dst.copy_from_slice(&data[offset..offset + dst.len()]);
-            }
-            RecordBody::Split(first, second) => {
-                for (i, b) in dst.iter_mut().enumerate() {
-                    let pos = offset + i;
-                    if pos < first.len() {
-                        *b = first[pos];
-                    } else {
-                        *b = second[pos - first.len()];
-                    }
-                }
-            }
-        }
-    }
-
-    /// Total body length in bytes.
-    pub fn len(&self) -> usize {
-        match self {
-            RecordBody::Contiguous(data) => data.len(),
-            RecordBody::Split(first, second) => first.len() + second.len(),
-        }
-    }
 }
