@@ -1,4 +1,4 @@
-//! Binary trace wire format (v9).
+//! Binary trace wire format (v11).
 //!
 //! ## File layout
 //! ```text
@@ -12,7 +12,10 @@
 //!   4: QueueSample                  → code(u8) + timestamp_us(u32) + global_queue(u8)                                                   = 6 bytes
 //!   5: SpawnLocationDef             → code(u8) + spawn_loc_id(u16) + string_len(u16) + string_bytes(N)                                 = 5 + N bytes
 //!   6: TaskSpawn                    → code(u8) + task_id(u32) + spawn_loc_id(u16)                                                       = 7 bytes
-//!   7: WakeEvent                    → code(u8) + timestamp_us(u32) + waker_task_id(u32) + woken_task_id(u32) + target_worker(u8)        = 14 bytes
+//!   7: CpuSample                    → code(u8) + timestamp_us(u32) + worker_id(u8) + tid(u32) + source(u8) + num_frames(u8) + frames(N * u64)  = 12 + 8N bytes
+//!   8: CallframeDef                 → code(u8) + address(u64) + string_len(u16) + string_bytes(N)                                      = 11 + N bytes
+//!   9: WakeEvent                    → code(u8) + timestamp_us(u32) + waker_task_id(u32) + woken_task_id(u32) + target_worker(u8)        = 14 bytes
+//!  10: ThreadNameDef                → code(u8) + tid(u32) + string_len(u16) + string_bytes(N)                                          = 7 + N bytes
 //! ```
 //!
 //! Timestamps are microseconds since trace start. u32 micros supports traces up to ~71 minutes.
@@ -20,15 +23,19 @@
 //! `sched_wait_us` is the scheduling wait delta from schedstat during the park period.
 //! In-memory representation remains nanoseconds; conversion happens at the wire boundary.
 //!
-//! ### v8 → v9 changes
-//! - Added WakeEvent (code 7): emitted by Traced<F> waker wrapper, records who woke a task
+//! ### v10 → v11 changes
+//! - Added WakeEvent (code 9): emitted by `Traced<F>` waker wrapper, records who woke a task
+//!
+//! ### v12 → v13 changes
+//! - Added tid(u32) field to CpuSample (code 8) for thread identification
+//! - Added ThreadNameDef (code 10): maps OS tid to thread name for non-worker grouping
 
 use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::io::{Read, Result, Write};
 
 pub const MAGIC: &[u8; 8] = b"TOKIOTRC";
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 13;
 pub const HEADER_SIZE: usize = 12; // 8 magic + 4 version
 
 // Wire codes
@@ -40,6 +47,9 @@ const WIRE_QUEUE_SAMPLE: u8 = 4;
 const WIRE_SPAWN_LOCATION_DEF: u8 = 5;
 const WIRE_TASK_SPAWN: u8 = 6;
 const WIRE_WAKE_EVENT: u8 = 7;
+const WIRE_CPU_SAMPLE: u8 = 8;
+const WIRE_CALLFRAME_DEF: u8 = 9;
+const WIRE_THREAD_NAME_DEF: u8 = 10;
 
 /// Returns the wire size of an event.
 pub fn wire_event_size(event: &TelemetryEvent) -> usize {
@@ -51,6 +61,11 @@ pub fn wire_event_size(event: &TelemetryEvent) -> usize {
         TelemetryEvent::WorkerUnpark { .. } => 15,
         TelemetryEvent::SpawnLocationDef { location, .. } => 1 + 2 + 2 + location.len(),
         TelemetryEvent::TaskSpawn { .. } => 7,
+        TelemetryEvent::CpuSample { callchain, .. } => 12 + 8 * callchain.len(),
+        TelemetryEvent::CallframeDef {
+            symbol, location, ..
+        } => 1 + 8 + 2 + symbol.len() + 2 + location.as_ref().map_or(0, |l| l.len()),
+        TelemetryEvent::ThreadNameDef { name, .. } => 1 + 4 + 2 + name.len(),
         TelemetryEvent::WakeEvent { .. } => 14,
     }
 }
@@ -142,6 +157,54 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
             w.write_all(&task_id.to_u32().to_le_bytes())?;
             w.write_all(&spawn_loc_id.as_u16().to_le_bytes())?;
         }
+        TelemetryEvent::CpuSample {
+            timestamp_nanos,
+            worker_id,
+            tid,
+            source,
+            callchain,
+        } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
+            w.write_all(&[WIRE_CPU_SAMPLE])?;
+            w.write_all(&timestamp_us.to_le_bytes())?;
+            w.write_all(&[*worker_id as u8])?;
+            w.write_all(&tid.to_le_bytes())?;
+            w.write_all(&[*source as u8])?;
+            let num_frames = callchain.len().min(255) as u8;
+            w.write_all(&[num_frames])?;
+            for &addr in callchain.iter().take(num_frames as usize) {
+                w.write_all(&addr.to_le_bytes())?;
+            }
+        }
+        TelemetryEvent::CallframeDef {
+            address,
+            symbol,
+            location,
+        } => {
+            w.write_all(&[WIRE_CALLFRAME_DEF])?;
+            w.write_all(&address.to_le_bytes())?;
+            let len = symbol.len() as u16;
+            w.write_all(&len.to_le_bytes())?;
+            w.write_all(symbol.as_bytes())?;
+            // Write location as optional string: 0xFFFF = None, otherwise length + bytes
+            match location {
+                Some(loc) => {
+                    let loc_len = loc.len() as u16;
+                    w.write_all(&loc_len.to_le_bytes())?;
+                    w.write_all(loc.as_bytes())?;
+                }
+                None => {
+                    w.write_all(&0xFFFFu16.to_le_bytes())?;
+                }
+            }
+        }
+        TelemetryEvent::ThreadNameDef { tid, name } => {
+            w.write_all(&[WIRE_THREAD_NAME_DEF])?;
+            w.write_all(&tid.to_le_bytes())?;
+            let len = name.len() as u16;
+            w.write_all(&len.to_le_bytes())?;
+            w.write_all(name.as_bytes())?;
+        }
         TelemetryEvent::WakeEvent {
             timestamp_nanos,
             waker_task_id,
@@ -208,7 +271,56 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
             spawn_loc_id: SpawnLocationId::from_u16(u16::from_le_bytes(spawn_loc_id_bytes)),
         }));
     }
+    if tag[0] == WIRE_CALLFRAME_DEF {
+        let mut addr_bytes = [0u8; 8];
+        r.read_exact(&mut addr_bytes)?;
+        let address = u64::from_le_bytes(addr_bytes);
 
+        let mut len_bytes = [0u8; 2];
+        r.read_exact(&mut len_bytes)?;
+        let len = u16::from_le_bytes(len_bytes) as usize;
+
+        let mut string_bytes = vec![0u8; len];
+        r.read_exact(&mut string_bytes)?;
+        let symbol = String::from_utf8(string_bytes)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8"))?;
+
+        // Read optional location field
+        let mut loc_len_bytes = [0u8; 2];
+        r.read_exact(&mut loc_len_bytes)?;
+        let loc_len = u16::from_le_bytes(loc_len_bytes);
+        let location = if loc_len == 0xFFFF {
+            None
+        } else {
+            let mut loc_bytes = vec![0u8; loc_len as usize];
+            r.read_exact(&mut loc_bytes)?;
+            Some(String::from_utf8(loc_bytes).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8")
+            })?)
+        };
+
+        return Ok(Some(TelemetryEvent::CallframeDef {
+            address,
+            symbol,
+            location,
+        }));
+    }
+    if tag[0] == WIRE_THREAD_NAME_DEF {
+        let mut tid_bytes = [0u8; 4];
+        r.read_exact(&mut tid_bytes)?;
+        let tid = u32::from_le_bytes(tid_bytes);
+
+        let mut len_bytes = [0u8; 2];
+        r.read_exact(&mut len_bytes)?;
+        let len = u16::from_le_bytes(len_bytes) as usize;
+
+        let mut string_bytes = vec![0u8; len];
+        r.read_exact(&mut string_bytes)?;
+        let name = String::from_utf8(string_bytes)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8"))?;
+
+        return Ok(Some(TelemetryEvent::ThreadNameDef { tid, name }));
+    }
     let mut ts = [0u8; 4];
     r.read_exact(&mut ts)?;
     let timestamp_nanos = u32::from_le_bytes(ts) as u64 * 1000;
@@ -280,6 +392,30 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
             TelemetryEvent::QueueSample {
                 timestamp_nanos,
                 global_queue_depth: gq[0] as usize,
+            }
+        }
+        WIRE_CPU_SAMPLE => {
+            let mut wid = [0u8; 1];
+            let mut tid_bytes = [0u8; 4];
+            let mut src = [0u8; 1];
+            let mut nf = [0u8; 1];
+            r.read_exact(&mut wid)?;
+            r.read_exact(&mut tid_bytes)?;
+            r.read_exact(&mut src)?;
+            r.read_exact(&mut nf)?;
+            let num_frames = nf[0] as usize;
+            let mut callchain = Vec::with_capacity(num_frames);
+            for _ in 0..num_frames {
+                let mut addr = [0u8; 8];
+                r.read_exact(&mut addr)?;
+                callchain.push(u64::from_le_bytes(addr));
+            }
+            TelemetryEvent::CpuSample {
+                timestamp_nanos,
+                worker_id: wid[0] as usize,
+                tid: u32::from_le_bytes(tid_bytes),
+                source: crate::telemetry::events::CpuSampleSource::from_u8(src[0]),
+                callchain,
             }
         }
         WIRE_WAKE_EVENT => {

@@ -207,6 +207,63 @@
             canvas {
                 display: block;
             }
+
+            #selection-overlay {
+                position: absolute;
+                background: rgba(108, 99, 255, 0.15);
+                border: 1px solid rgba(108, 99, 255, 0.6);
+                pointer-events: none;
+                z-index: 9;
+                display: none;
+            }
+
+            #flamegraph-panel {
+                display: none;
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: #1a1a2e;
+                z-index: 50;
+                flex-direction: column;
+            }
+            #flamegraph-panel .fg-header {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 6px 12px;
+                background: #16213e;
+                border-bottom: 1px solid #333;
+                font-size: 0.8em;
+                flex-shrink: 0;
+            }
+            #flamegraph-panel .fg-header .fg-title { color: #6c63ff; font-weight: 600; }
+            #flamegraph-panel .fg-header .fg-stats { color: #888; }
+            #flamegraph-panel .fg-header .fg-close { cursor: pointer; color: #888; margin-left: auto; padding: 0 4px; }
+            #flamegraph-panel .fg-header .fg-close:hover { color: #fff; }
+            .fg-section-label {
+                padding: 4px 12px;
+                font-size: 0.78em;
+                color: #aaa;
+                background: #16213e;
+                border-bottom: 1px solid #222;
+                flex-shrink: 0;
+            }
+            #fg-tooltip {
+                display: none;
+                position: fixed;
+                background: #222244;
+                border: 1px solid #555;
+                padding: 6px 10px;
+                border-radius: 4px;
+                font-size: 0.78em;
+                pointer-events: none;
+                z-index: 200;
+                max-width: 600px;
+                white-space: nowrap;
+                color: #e0e0e0;
+            }
         </style>
     </head>
     <body>
@@ -231,6 +288,7 @@
                 <select id="poi-filter">
                     <option value="sched">Kernel Scheduling Delays</option>
                     <option value="long-poll">Long Polls (>1ms)</option>
+                    <option value="cpu-sampled">Polls with CPU Samples</option>
                     <option value="wake-delay">Wake→Poll Delays (>100µs)</option>
                 </select>
                 <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer">
@@ -241,12 +299,14 @@
                 <button id="btn-next-poi">Next ▶</button>
                 <span id="poi-counter" style="font-size:0.85em;color:#888"></span>
                 <span style="width:1px;height:20px;background:#444;margin:0 8px"></span>
+                <button id="btn-sched-panel" style="background:#3a1a1a;border-color:#ff4444;color:#ff8a65">⚠ Blocking Calls</button>
                 <button id="btn-zoom-in">Zoom +</button>
                 <button id="btn-zoom-out">Zoom −</button>
                 <button id="btn-fit">Fit All</button>
                 <button id="btn-reset">New File</button>
             </div>
             <div id="main-area">
+                <div id="selection-overlay"></div>
                 <canvas id="crosshair-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10"></canvas>
                 <div id="timeline-header">
                     <canvas id="timeline-canvas"></canvas>
@@ -263,170 +323,50 @@
                     >
                     <canvas id="queue-canvas"></canvas>
                 </div>
+                <div id="flamegraph-panel">
+                    <div class="fg-header">
+                        <span class="fg-title" id="fg-title">Flamegraph</span>
+                        <span class="fg-stats" id="fg-stats"></span>
+                        <select id="fg-spawn-filter" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em;max-width:350px"></select>
+                        <span class="fg-close" id="fg-close">✕ Close (Esc)</span>
+                    </div>
+                    <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column">
+                        <div class="fg-section-label" id="fg-worker-label">Worker threads</div>
+                        <canvas id="fg-canvas-worker"></canvas>
+                        <div class="fg-section-label" id="fg-offworker-label">Off-worker (sampler thread)</div>
+                        <canvas id="fg-canvas-offworker"></canvas>
+                    </div>
+                </div>
+                <div id="sched-panel" style="display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:#1a1a2e;z-index:50;flex-direction:column">
+                    <div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16213e;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0">
+                        <span style="color:#ff4444;font-weight:600" id="sched-panel-title">⚠ Scheduling Events</span>
+                        <span style="color:#888" id="sched-panel-stats"></span>
+                        <select id="sched-group-by" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em">
+                            <option value="leaf">Group by blocking call</option>
+                            <option value="full">Group by full stack</option>
+                        </select>
+                        <span style="flex:1"></span>
+                        <span id="sched-panel-close" style="cursor:pointer;color:#888;padding:0 4px">✕ Close (Esc)</span>
+                    </div>
+                    <div id="sched-panel-body" style="flex:1;overflow-y:auto;padding:8px 12px;font-family:monospace;font-size:0.82em;line-height:1.5"></div>
+                </div>
             </div>
         </div>
 
         <div id="tooltip"></div>
+        <div id="fg-tooltip"></div>
+        <div id="stack-popup" style="display:none;position:fixed;background:#1a1a2e;border:1px solid #6c63ff;border-radius:8px;padding:12px 16px;z-index:200;max-width:800px;max-height:600px;overflow-y:auto;font-size:0.8em;line-height:1.6;box-shadow:0 4px 20px rgba(0,0,0,0.5)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                <span id="stack-popup-title" style="color:#6c63ff;font-weight:600"></span>
+                <span id="stack-popup-close" style="cursor:pointer;color:#888;font-size:1.2em;padding:0 4px">&times;</span>
+            </div>
+            <div id="stack-popup-body" style="font-family:monospace;font-size:0.9em"></div>
+        </div>
 
+        <script src="trace_parser.js"></script>
         <script>
-            // ── Binary Parser (v9 format) ──
-            // Wire codes:
-            //   0: PollStart        → code(1) + ts(4) + worker(1) + local_q(1) + task_id(4) + spawn_loc_id(2) = 13 bytes
-            //   1: PollEnd          → code(1) + ts(4) + worker(1)                                              = 6 bytes
-            //   2: WorkerPark       → code(1) + ts(4) + worker(1) + local_q(1) + cpu_us(4)                    = 11 bytes
-            //   3: WorkerUnpark     → code(1) + ts(4) + worker(1) + local_q(1) + cpu_us(4) + sched_wait_us(4) = 15 bytes
-            //   4: QueueSample      → code(1) + ts(4) + global_q(1)                                           = 6 bytes
-            //   5: SpawnLocationDef → code(1) + spawn_loc_id(2) + string_len(2) + string_bytes(N)
-            //   6: TaskSpawn        → code(1) + task_id(4) + spawn_loc_id(2)                                  = 7 bytes
-            //   7: WakeEvent        → code(1) + ts(4) + waker_task_id(4) + woken_task_id(4) + target_worker(1) = 14 bytes
-            const MAX_EVENTS = 2_000_000; // cap parsed events to keep UI responsive
-
-            function parseTrace(buffer) {
-                const view = new DataView(buffer);
-                let off = 0;
-                const magic = String.fromCharCode(
-                    ...new Uint8Array(buffer, 0, 8),
-                );
-                off += 8;
-                const version = view.getUint32(off, true);
-                off += 4;
-                if (magic !== "TOKIOTRC")
-                    throw new Error("Not a TOKIOTRC file (got: " + magic + ")");
-                if (version !== 8 && version !== 9) {
-                    console.warn(`Expected version 8 or 9, got ${version}. Some data may be missing.`);
-                }
-                const hasCpuTime = version >= 5;
-                const hasSchedWait = version >= 6;
-                const hasTaskTracking = version >= 7;
-
-                const events = [];
-                const spawnLocations = new Map(); // SpawnLocationId (number) → string
-                const taskSpawnLocs = new Map();  // taskId (number) → SpawnLocationId (number)
-                const decoder = new TextDecoder();
-                while (off < buffer.byteLength && events.length < MAX_EVENTS) {
-                    if (off + 1 > buffer.byteLength) break;
-                    const wireCode = view.getUint8(off);
-                    off += 1;
-
-                    // SpawnLocationDef and TaskSpawn have no timestamp — handle before reading ts
-                    if (wireCode === 5) {
-                        if (off + 4 > buffer.byteLength) break;
-                        const spawnLocId = view.getUint16(off, true); off += 2;
-                        const strLen = view.getUint16(off, true); off += 2;
-                        if (off + strLen > buffer.byteLength) break;
-                        spawnLocations.set(spawnLocId, decoder.decode(new Uint8Array(buffer, off, strLen)));
-                        off += strLen;
-                        continue;
-                    }
-                    if (wireCode === 6) {
-                        if (off + 6 > buffer.byteLength) break;
-                        const taskId = view.getUint32(off, true); off += 4;
-                        const spawnLocId = view.getUint16(off, true); off += 2;
-                        taskSpawnLocs.set(taskId, spawnLocId);
-                        continue;
-                    }
-
-                    if (wireCode === 7) {
-                        // WakeEvent: ts(4) + waker_task_id(4) + woken_task_id(4) + target_worker(1) = 13 after code
-                        if (off + 13 > buffer.byteLength) break;
-                        const timestampUs = view.getUint32(off, true); off += 4;
-                        const wakerTaskId = view.getUint32(off, true); off += 4;
-                        const wokenTaskId = view.getUint32(off, true); off += 4;
-                        const targetWorker = view.getUint8(off); off += 1;
-                        events.push({
-                            eventType: 7, // WakeEvent
-                            timestamp: timestampUs * 1000,
-                            workerId: targetWorker,
-                            wakerTaskId,
-                            wokenTaskId,
-                            targetWorker,
-                            globalQueue: 0, localQueue: 0, cpuTime: 0, schedWait: 0,
-                            taskId: 0, spawnLocId: 0, spawnLoc: null,
-                        });
-                        continue;
-                    }
-
-                    if (wireCode > 7) break; // unknown code
-
-                    // All regular codes have a 4-byte timestamp next
-                    if (off + 4 > buffer.byteLength) break;
-                    const timestampUs = view.getUint32(off, true);
-                    off += 4;
-                    const timestamp = timestampUs * 1000;
-
-                    let eventType,
-                        workerId = 0,
-                        globalQueue = 0,
-                        localQueue = 0,
-                        cpuTime = 0,
-                        schedWait = 0,
-                        taskId = 0,
-                        spawnLocId = 0;
-                    switch (wireCode) {
-                        case 0: // PollStart
-                            if (hasTaskTracking) {
-                                // v8: worker(1) + lq(1) + task_id(4) + spawn_loc_id(2) = 8
-                                if (off + 8 > buffer.byteLength) break;
-                                eventType = 0;
-                                workerId = view.getUint8(off); off += 1;
-                                localQueue = view.getUint8(off); off += 1;
-                                taskId = view.getUint32(off, true); off += 4;
-                                spawnLocId = view.getUint16(off, true); off += 2;
-                            } else {
-                                if (off + 1 > buffer.byteLength) break;
-                                eventType = 0;
-                                workerId = view.getUint8(off); off += 1;
-                            }
-                            break;
-                        case 1: // PollEnd
-                            if (off + 1 > buffer.byteLength) break;
-                            eventType = 1;
-                            workerId = view.getUint8(off); off += 1;
-                            break;
-                        case 2: { // WorkerPark
-                            const need = hasCpuTime ? 6 : 2;
-                            if (off + need > buffer.byteLength) break;
-                            eventType = 2;
-                            workerId = view.getUint8(off); off += 1;
-                            localQueue = view.getUint8(off); off += 1;
-                            if (hasCpuTime) {
-                                cpuTime = view.getUint32(off, true) * 1000; off += 4;
-                            }
-                            break;
-                        }
-                        case 3: { // WorkerUnpark
-                            const need = hasCpuTime ? (hasSchedWait ? 10 : 6) : 2;
-                            if (off + need > buffer.byteLength) break;
-                            eventType = 3;
-                            workerId = view.getUint8(off); off += 1;
-                            localQueue = view.getUint8(off); off += 1;
-                            if (hasCpuTime) {
-                                cpuTime = view.getUint32(off, true) * 1000; off += 4;
-                            }
-                            if (hasSchedWait) {
-                                schedWait = view.getUint32(off, true); off += 4;
-                            }
-                            break;
-                        }
-                        case 4: // QueueSample
-                            if (off + 1 > buffer.byteLength) break;
-                            eventType = 4;
-                            globalQueue = view.getUint8(off); off += 1;
-                            break;
-                    }
-                    // Also build taskSpawnLocs from PollStart (covers tasks without TaskSpawn events)
-                    if (eventType === 0 && taskId && spawnLocId && !taskSpawnLocs.has(taskId)) {
-                        taskSpawnLocs.set(taskId, spawnLocId);
-                    }
-                    events.push({
-                        eventType, timestamp, workerId,
-                        globalQueue, localQueue, cpuTime, schedWait,
-                        taskId, spawnLocId,
-                        spawnLoc: spawnLocations.get(spawnLocId) ?? null,
-                    });
-                }
-                return { magic, version, events, truncated: events.length >= MAX_EVENTS, hasCpuTime, hasSchedWait, hasTaskTracking, spawnLocations, taskSpawnLocs };
-            }
+            // Use the external parser
+            const { parseTrace } = TraceParser;
 
             // ── Event type helpers ──
             const ET = {
@@ -435,7 +375,7 @@
                 WorkerPark: 2,
                 WorkerUnpark: 3,
                 QueueSample: 4,
-                WakeEvent: 7,
+                WakeEvent: 9,
             };
             const ET_NAMES = [
                 "PollStart",
@@ -668,6 +608,38 @@
                     .map((e) => ({ t: e.timestamp, global: e.globalQueue }));
                 console.log(`Found ${queueSamples.length} global queue samples`);
 
+                // Attach CPU samples to poll spans they fall within
+                if (trace.cpuSamples.length > 0) {
+                    for (const sample of trace.cpuSamples) {
+                        const spans = workerSpans[sample.workerId];
+                        if (!spans) { sample.spawnLoc = null; continue; }
+                        let found = false;
+                        for (const poll of spans.polls) {
+                            if (sample.timestamp >= poll.start && sample.timestamp <= poll.end) {
+                                if (sample.source === 1) {
+                                    // SchedEvent — kernel descheduled this worker during a poll (blocking!)
+                                    (poll.schedSamples ??= []).push(sample);
+                                } else {
+                                    (poll.cpuSamples ??= []).push(sample);
+                                }
+                                sample.spawnLoc = poll.spawnLoc;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) sample.spawnLoc = null;
+                    }
+                    let pollsWithSamples = 0;
+                    let pollsWithSched = 0;
+                    for (const w of workerIds) {
+                        for (const p of workerSpans[w].polls) {
+                            if (p.cpuSamples) pollsWithSamples++;
+                            if (p.schedSamples) pollsWithSched++;
+                        }
+                    }
+                    console.log(`CPU samples: ${trace.cpuSamples.length}, polls with cpu samples: ${pollsWithSamples}, polls with sched events: ${pollsWithSched}`);
+                }
+
                 // Per-worker local queue samples (from events that have local_queue)
                 workerQueueSamples = {};
                 maxLocalQueue = 1;
@@ -787,6 +759,15 @@
 
                 buildLanes();
                 updatePointsOfInterest();
+                // Show/hide sched panel button based on whether sched events exist
+                let hasSchedEvents = false;
+                for (const w of workerIds) {
+                    for (const p of workerSpans[w].polls) {
+                        if (p.schedSamples && p.schedSamples.length > 0) { hasSchedEvents = true; break; }
+                    }
+                    if (hasSchedEvents) break;
+                }
+                document.getElementById("btn-sched-panel").style.display = hasSchedEvents ? "" : "none";
                 requestAnimationFrame(renderAll);
             }
 
@@ -822,6 +803,20 @@
                                     worker: w,
                                     type: "long-poll",
                                     value: durMs,
+                                    span: s
+                                });
+                            }
+                        }
+                    } else if (filterType === "cpu-sampled") {
+                        for (const s of spans.polls) {
+                            const cpuCount = s.cpuSamples ? s.cpuSamples.length : 0;
+                            const schedCount = s.schedSamples ? s.schedSamples.length : 0;
+                            if (cpuCount + schedCount > 0) {
+                                pointsOfInterest.push({
+                                    time: s.start,
+                                    worker: w,
+                                    type: "cpu-sampled",
+                                    value: cpuCount + schedCount,
                                     span: s
                                 });
                             }
@@ -1137,6 +1132,32 @@
                         ctx.strokeStyle = "#ffffff";
                         ctx.lineWidth = 2;
                         ctx.strokeRect(x1, bandTop, w, bandH);
+                    }
+                }
+
+                // Mark polls that have CPU samples with an orange top stripe
+                ctx.fillStyle = "#ff8c00";
+                for (const s of spans.polls) {
+                    if (!s.cpuSamples || s.end < viewStart || s.start > viewEnd) continue;
+                    const x1 = Math.max(0, nsToX(s.start, pw));
+                    const x2 = Math.min(pw, nsToX(s.end, pw));
+                    const w = Math.max(x2 - x1, 3);
+                    ctx.fillRect(x1, bandTop, w, 3);
+                }
+
+                // Mark polls that have sched events with red triangles below the poll band
+                for (const s of spans.polls) {
+                    if (!s.schedSamples || s.end < viewStart || s.start > viewEnd) continue;
+                    for (const sample of s.schedSamples) {
+                        if (sample.timestamp < viewStart || sample.timestamp > viewEnd) continue;
+                        const x = nsToX(sample.timestamp, pw);
+                        ctx.fillStyle = "#ff2222";
+                        ctx.beginPath();
+                        ctx.moveTo(x, bandTop + bandH + 1);
+                        ctx.lineTo(x - 3, bandTop + bandH + 7);
+                        ctx.lineTo(x + 3, bandTop + bandH + 7);
+                        ctx.closePath();
+                        ctx.fill();
                     }
                 }
 
@@ -1640,6 +1661,7 @@
             // ── Zoom & Pan ──
             document.getElementById("poi-filter").addEventListener("change", updatePointsOfInterest);
             document.getElementById("sort-by-worst").addEventListener("change", updatePointsOfInterest);
+            document.getElementById("btn-sched-panel").addEventListener("click", showSchedPanel);
             document.getElementById("btn-prev-poi").addEventListener("click", () => {
                 if (currentPoiIndex > 0) jumpToPoi(currentPoiIndex - 1);
                 else if (currentPoiIndex < 0 && pointsOfInterest.length > 0) jumpToPoi(0);
@@ -1673,6 +1695,7 @@
             document.getElementById("main-area").addEventListener(
                 "wheel",
                 (e) => {
+                    if (document.getElementById("flamegraph-panel").style.display === "flex") return;
                     e.preventDefault();
                     const rect = lanesContainer.getBoundingClientRect();
                     const mouseX = e.clientX - rect.left - LABEL_W;
@@ -1684,15 +1707,39 @@
                 { passive: false },
             );
 
-            // Pan with mouse drag
+            // Pan with mouse drag (normal) or region select (shift+drag)
             let dragging = false,
                 dragStartX = 0,
                 dragViewStart = 0,
                 dragViewEnd = 0,
                 dragMoved = false;
+            let regionSelecting = false,
+                regionStartNs = 0,
+                regionEndNs = 0;
+            const selOverlay = document.getElementById("selection-overlay");
+
             document
                 .getElementById("main-area")
                 .addEventListener("mousedown", (e) => {
+                    if (e.shiftKey && trace && trace.cpuSamples.length > 0) {
+                        // Shift+drag: region select
+                        regionSelecting = true;
+                        dragMoved = false;
+                        dragStartX = e.clientX;
+                        const rect = lanesContainer.getBoundingClientRect();
+                        const mouseX = e.clientX - rect.left - LABEL_W;
+                        const drawW = rect.width - LABEL_W;
+                        regionStartNs = viewStart + (Math.max(0, mouseX) / drawW) * (viewEnd - viewStart);
+                        regionEndNs = regionStartNs;
+                        // Position overlay
+                        const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                        selOverlay.style.top = "0px";
+                        selOverlay.style.height = mainRect.height + "px";
+                        selOverlay.style.display = "block";
+                        updateSelOverlay(e.clientX);
+                        document.body.style.cursor = "crosshair";
+                        return;
+                    }
                     dragging = true;
                     dragMoved = false;
                     dragStartX = e.clientX;
@@ -1700,7 +1747,28 @@
                     dragViewEnd = viewEnd;
                     document.body.style.cursor = "grabbing";
                 });
+
+            function updateSelOverlay(clientX) {
+                const rect = lanesContainer.getBoundingClientRect();
+                const drawW = rect.width - LABEL_W;
+                const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                const lanesLeft = rect.left - mainRect.left + LABEL_W;
+                const x1 = lanesLeft + nsToX(Math.min(regionStartNs, regionEndNs), drawW);
+                const x2 = lanesLeft + nsToX(Math.max(regionStartNs, regionEndNs), drawW);
+                selOverlay.style.left = x1 + "px";
+                selOverlay.style.width = Math.max(1, x2 - x1) + "px";
+            }
+
             window.addEventListener("mousemove", (e) => {
+                if (regionSelecting) {
+                    if (Math.abs(e.clientX - dragStartX) > 3) dragMoved = true;
+                    const rect = lanesContainer.getBoundingClientRect();
+                    const drawW = rect.width - LABEL_W;
+                    const mouseX = e.clientX - rect.left - LABEL_W;
+                    regionEndNs = viewStart + (Math.max(0, Math.min(drawW, mouseX)) / drawW) * (viewEnd - viewStart);
+                    updateSelOverlay(e.clientX);
+                    return;
+                }
                 if (!dragging) return;
                 if (Math.abs(e.clientX - dragStartX) > 3) dragMoved = true;
                 const rect = lanesContainer.getBoundingClientRect();
@@ -1724,6 +1792,23 @@
                 renderAll();
             });
             window.addEventListener("mouseup", () => {
+                if (regionSelecting) {
+                    regionSelecting = false;
+                    selOverlay.style.display = "none";
+                    document.body.style.cursor = "";
+                    if (dragMoved) {
+                        const selStart = Math.min(regionStartNs, regionEndNs);
+                        const selEnd = Math.max(regionStartNs, regionEndNs);
+                        // Check if there are sched events in range
+                        const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
+                        if (hasSched) {
+                            showSelectionPicker(selStart, selEnd);
+                        } else {
+                            showFlamegraph(selStart, selEnd);
+                        }
+                    }
+                    return;
+                }
                 dragging = false;
                 document.body.style.cursor = "";
             });
@@ -1747,11 +1832,306 @@
                 const w = workerIds[laneIdx];
                 const spans = workerSpans[w];
                 let found = null;
+                let foundSpan = null;
                 for (const s of spans.polls) {
-                    if (ns >= s.start && ns <= s.end && s.taskId) { found = s.taskId; break; }
+                    if (ns >= s.start && ns <= s.end) {
+                        if (s.taskId) found = s.taskId;
+                        foundSpan = s;
+                        break;
+                    }
                 }
+
+                // Show stack popup if poll has CPU samples or sched events
+                if (foundSpan && ((foundSpan.cpuSamples && foundSpan.cpuSamples.length > 0) ||
+                                  (foundSpan.schedSamples && foundSpan.schedSamples.length > 0))) {
+                    showStackPopup(foundSpan, e.clientX, e.clientY);
+                } else {
+                    hideStackPopup();
+                }
+
                 selectedTaskId = (found && found !== selectedTaskId) ? found : null;
                 renderAll();
+            });
+
+            function symbolizeChain(chain) {
+                return chain.map(addr => trace.callframeSymbols.get(addr) || addr);
+            }
+
+            // Shorten a symbol for display: strip generic params, keep last path segment
+            function shortSym(sym) {
+                // Strip everything inside < > for readability
+                return sym.replace(/<[^>]*>/g, '<…>');
+            }
+
+            function showStackPopup(poll, x, y) {
+                const popup = document.getElementById("stack-popup");
+                const title = document.getElementById("stack-popup-title");
+                const body = document.getElementById("stack-popup-body");
+                const durUs = ((poll.end - poll.start) / 1e3).toFixed(1);
+                const cpuCount = poll.cpuSamples ? poll.cpuSamples.length : 0;
+                const schedCount = poll.schedSamples ? poll.schedSamples.length : 0;
+                title.textContent = `Poll ${durUs}µs` +
+                    (cpuCount ? ` · ${cpuCount} CPU sample${cpuCount > 1 ? "s" : ""}` : "") +
+                    (schedCount ? ` · ${schedCount} sched event${schedCount > 1 ? "s" : ""}` : "");
+
+                let html = "";
+
+                // Sched events: deduplicate by symbolized stack, show counts
+                if (poll.schedSamples && poll.schedSamples.length > 0) {
+                    html += `<div style="color:#ff4444;font-weight:600;margin-bottom:6px">⚠ Blocking during poll (${schedCount} sched event${schedCount > 1 ? "s" : ""})</div>`;
+                    const groups = deduplicateSamples(poll.schedSamples);
+                    for (const g of groups) {
+                        const pct = ((g.count / schedCount) * 100).toFixed(0);
+                        const barW = Math.max(2, (g.count / schedCount) * 200);
+                        html += `<div style="margin-bottom:10px;border-left:3px solid #ff4444;padding-left:8px">`;
+                        html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">`;
+                        html += `<span style="color:#ff4444;font-weight:600;font-size:1.1em">${g.count}×</span>`;
+                        html += `<span style="color:#fff;font-weight:600">${shortSym(g.leaf)}</span>`;
+                        html += `<span style="color:#888">(${pct}%)</span>`;
+                        html += `<span style="display:inline-block;height:8px;width:${barW}px;background:#ff4444;border-radius:2px;opacity:0.6"></span>`;
+                        html += `</div>`;
+                        // Show abbreviated context: leaf + first interesting caller
+                        const ctx = g.syms.slice(0, 3);
+                        for (let i = 0; i < ctx.length; i++) {
+                            html += `<div style="color:${i === 0 ? '#ff8a65' : '#777'};padding-left:${i * 8}px;font-size:0.9em">${shortSym(ctx[i])}</div>`;
+                        }
+                        if (g.syms.length > 3) {
+                            const id = 'sched-expand-' + Math.random().toString(36).slice(2);
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:16px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.syms.length - 3} more frames'">▶ ${g.syms.length - 3} more frames</div>`;
+                            html += `<div id="${id}" style="display:none">`;
+                            for (let i = 3; i < g.syms.length; i++) {
+                                html += `<div style="color:#666;padding-left:24px;font-size:0.85em">${shortSym(g.syms[i])}</div>`;
+                            }
+                            html += `</div>`;
+                        }
+                        html += `</div>`;
+                    }
+                }
+
+                // CPU profile samples: same dedup treatment
+                if (poll.cpuSamples && poll.cpuSamples.length > 0) {
+                    if (schedCount > 0) {
+                        html += `<div style="color:#ff8c00;font-weight:600;margin:8px 0 6px">CPU Profile (${cpuCount} sample${cpuCount > 1 ? "s" : ""})</div>`;
+                    }
+                    const groups = deduplicateSamples(poll.cpuSamples);
+                    for (const g of groups) {
+                        const pct = ((g.count / cpuCount) * 100).toFixed(0);
+                        html += `<div style="margin-bottom:8px;border-left:2px solid #333;padding-left:8px">`;
+                        html += `<span style="color:#ff8c00">${g.count}×</span> `;
+                        html += `<span style="color:#fff">${shortSym(g.leaf)}</span> `;
+                        html += `<span style="color:#888">(${pct}%)</span>`;
+                        const ctx = g.syms.slice(1, 3);
+                        for (const s of ctx) {
+                            html += `<div style="color:#777;padding-left:8px;font-size:0.9em">${shortSym(s)}</div>`;
+                        }
+                        if (g.syms.length > 3) {
+                            const id = 'cpu-expand-' + Math.random().toString(36).slice(2);
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:8px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.syms.length - 3} more frames'">▶ ${g.syms.length - 3} more frames</div>`;
+                            html += `<div id="${id}" style="display:none">`;
+                            for (let i = 3; i < g.syms.length; i++) {
+                                html += `<div style="color:#666;padding-left:16px;font-size:0.85em">${shortSym(g.syms[i])}</div>`;
+                            }
+                            html += `</div>`;
+                        }
+                        html += `</div>`;
+                    }
+                }
+
+                body.innerHTML = html;
+                popup.style.display = "block";
+                popup.style.left = Math.min(x + 12, window.innerWidth - 820) + "px";
+                popup.style.top = Math.min(y - 20, window.innerHeight - 620) + "px";
+            }
+
+            // Deduplicate samples by symbolized stack, return sorted groups
+            function deduplicateSamples(samples) {
+                const groups = new Map(); // key → {count, syms, leaf}
+                for (const sample of samples) {
+                    const syms = symbolizeChain(sample.callchain);
+                    const key = syms.join('\0');
+                    if (!groups.has(key)) {
+                        groups.set(key, { count: 0, syms, leaf: syms[0] || '(unknown)' });
+                    }
+                    groups.get(key).count++;
+                }
+                return [...groups.values()].sort((a, b) => b.count - a.count);
+            }
+
+            function hideStackPopup() {
+                document.getElementById("stack-popup").style.display = "none";
+            }
+
+            document.getElementById("stack-popup-close").addEventListener("click", hideStackPopup);
+            // Close popup when clicking outside it
+            document.addEventListener("click", (e) => {
+                const popup = document.getElementById("stack-popup");
+                if (popup.style.display !== "none" && !popup.contains(e.target) &&
+                    !e.target.closest("#main-area")) {
+                    hideStackPopup();
+                }
+            });
+
+            // ── Sched Events Panel (global view of all blocking operations) ──
+            let schedPanelTimeRange = null; // {start, end} or null for full trace
+
+            function showSchedPanel(startNs, endNs) {
+                schedPanelTimeRange = (startNs != null && endNs != null) ? { start: startNs, end: endNs } : null;
+                const allSched = collectSchedSamples(schedPanelTimeRange);
+                if (!allSched.length) {
+                    alert("No scheduling events found" + (schedPanelTimeRange ? " in selected range." : " in this trace."));
+                    return;
+                }
+                renderSchedPanel(allSched);
+                document.getElementById("sched-panel").style.display = "flex";
+            }
+
+            function collectSchedSamples(range) {
+                const allSched = [];
+                for (const w of workerIds) {
+                    for (const poll of workerSpans[w].polls) {
+                        if (!poll.schedSamples) continue;
+                        if (range && (poll.end < range.start || poll.start > range.end)) continue;
+                        for (const s of poll.schedSamples) {
+                            if (range && (s.timestamp < range.start || s.timestamp > range.end)) continue;
+                            allSched.push({ sample: s, poll, worker: w });
+                        }
+                    }
+                }
+                return allSched;
+            }
+
+            function renderSchedPanel(allSched) {
+                const groupBy = document.getElementById("sched-group-by").value;
+                const body = document.getElementById("sched-panel-body");
+                const total = allSched.length;
+                const rangeLabel = schedPanelTimeRange
+                    ? ` in ${((schedPanelTimeRange.end - schedPanelTimeRange.start) / 1e6).toFixed(2)}ms selection`
+                    : " (full trace)";
+                document.getElementById("sched-panel-stats").textContent =
+                    `${total} events across ${workerIds.length} workers${rangeLabel}`;
+
+                // Group by leaf frame or full stack
+                const groups = new Map();
+                for (const { sample, poll, worker } of allSched) {
+                    const syms = symbolizeChain(sample.callchain);
+                    const key = groupBy === "leaf" ? (syms[0] || "(unknown)") : syms.join('\0');
+                    if (!groups.has(key)) {
+                        groups.set(key, { leaf: syms[0] || "(unknown)", count: 0, stacks: new Map(), polls: [] });
+                    }
+                    const g = groups.get(key);
+                    g.count++;
+                    g.polls.push({ poll, worker, timestamp: sample.timestamp });
+                    // Sub-group by full stack within each leaf group
+                    const fullKey = syms.join('\0');
+                    if (!g.stacks.has(fullKey)) {
+                        g.stacks.set(fullKey, { count: 0, syms });
+                    }
+                    g.stacks.get(fullKey).count++;
+                }
+
+                const sorted = [...groups.values()].sort((a, b) => b.count - a.count);
+
+                let html = `<div style="margin-bottom:12px;color:#aaa;font-size:0.9em">
+                    Blocking calls that caused the kernel to deschedule a tokio worker thread during a poll.
+                    These indicate synchronous/blocking operations on the async runtime.
+                </div>`;
+
+                // Summary bar chart
+                html += `<div style="margin-bottom:16px">`;
+                for (const g of sorted) {
+                    const pct = ((g.count / total) * 100).toFixed(1);
+                    const barW = Math.max(4, (g.count / total) * 100);
+                    const color = g.leaf.includes("lock") || g.leaf.includes("mutex") ? "#ff4444"
+                        : g.leaf.includes("epoll") || g.leaf.includes("poll") ? "#4fc3f7"
+                        : g.leaf.includes("write") || g.leaf.includes("read") || g.leaf.includes("recv") || g.leaf.includes("send") ? "#ff8a65"
+                        : g.leaf.includes("syscall") ? "#888"
+                        : "#cc66ff";
+                    html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;cursor:pointer" class="sched-row" data-leaf="${encodeURIComponent(g.leaf)}">`;
+                    html += `<span style="width:50px;text-align:right;color:${color};font-weight:600">${g.count}</span>`;
+                    html += `<span style="display:inline-block;height:14px;width:${barW}%;background:${color};border-radius:2px;opacity:0.7"></span>`;
+                    html += `<span style="color:#fff">${g.leaf}</span>`;
+                    html += `<span style="color:#666">${pct}%</span>`;
+                    html += `</div>`;
+                }
+                html += `</div>`;
+
+                // Detailed stacks per group
+                for (const g of sorted) {
+                    const pct = ((g.count / total) * 100).toFixed(1);
+                    const color = g.leaf.includes("lock") || g.leaf.includes("mutex") ? "#ff4444" : "#ff8a65";
+                    const gid = 'sg-' + Math.random().toString(36).slice(2);
+
+                    html += `<div style="border:1px solid #333;border-radius:6px;margin-bottom:8px;overflow:hidden">`;
+                    html += `<div style="padding:8px 12px;background:#16213e;display:flex;align-items:center;gap:8px;cursor:pointer" onclick="document.getElementById('${gid}').style.display=document.getElementById('${gid}').style.display==='none'?'block':'none'">`;
+                    html += `<span style="color:${color};font-weight:700;font-size:1.1em">${g.count}×</span>`;
+                    html += `<span style="color:#fff;font-weight:600">${g.leaf}</span>`;
+                    html += `<span style="color:#888">(${pct}% of all sched events)</span>`;
+                    html += `<span style="color:#6c63ff;margin-left:auto;font-size:0.9em">▼ details</span>`;
+                    html += `</div>`;
+
+                    html += `<div id="${gid}" style="display:none;padding:8px 12px">`;
+
+                    // Show unique stacks within this group
+                    const subStacks = [...g.stacks.values()].sort((a, b) => b.count - a.count);
+                    for (const sub of subStacks) {
+                        const subPct = ((sub.count / g.count) * 100).toFixed(0);
+                        html += `<div style="margin-bottom:10px;border-left:3px solid ${color};padding-left:10px">`;
+                        html += `<div style="color:${color};margin-bottom:2px"><strong>${sub.count}×</strong> <span style="color:#888">(${subPct}% of group)</span></div>`;
+                        // Show full symbolized stack
+                        for (let i = 0; i < sub.syms.length; i++) {
+                            const isLeaf = i === 0;
+                            const isTokio = sub.syms[i].includes("tokio::runtime");
+                            const c = isLeaf ? "#fff" : isTokio ? "#555" : "#aaa";
+                            const weight = isLeaf ? "font-weight:600" : "";
+                            html += `<div style="color:${c};${weight};padding-left:${Math.min(i, 1) * 12}px">${shortSym(sub.syms[i])}</div>`;
+                        }
+                        html += `</div>`;
+                    }
+
+                    // Jump-to links: show a few example polls
+                    const examples = g.polls.slice(0, 5);
+                    html += `<div style="margin-top:6px;color:#6c63ff;font-size:0.9em">`;
+                    html += `Example polls: `;
+                    for (let i = 0; i < examples.length; i++) {
+                        const ex = examples[i];
+                        const tMs = ((ex.poll.start - minTs) / 1e6).toFixed(2);
+                        const durUs = ((ex.poll.end - ex.poll.start) / 1e3).toFixed(0);
+                        html += `<span class="sched-jump" style="cursor:pointer;text-decoration:underline;margin-right:8px" data-time="${ex.poll.start}" data-end="${ex.poll.end}" data-worker="${ex.worker}">W${ex.worker} @${tMs}ms (${durUs}µs)</span>`;
+                    }
+                    if (g.polls.length > 5) html += `<span style="color:#888">… ${g.polls.length - 5} more</span>`;
+                    html += `</div>`;
+
+                    html += `</div></div>`;
+                }
+
+                body.innerHTML = html;
+
+                // Wire up jump-to-poll links
+                body.querySelectorAll('.sched-jump').forEach(el => {
+                    el.addEventListener('click', (e) => {
+                        const t = parseFloat(el.dataset.time);
+                        const end = parseFloat(el.dataset.end);
+                        const w = parseInt(el.dataset.worker);
+                        const dur = end - t;
+                        const pad = Math.max(dur * 5, 1e6);
+                        viewStart = Math.max(minTs, t - pad * 0.3);
+                        viewEnd = Math.min(maxTs, viewStart + pad);
+                        document.getElementById("sched-panel").style.display = "none";
+                        // Scroll to worker lane
+                        const laneIdx = workerIds.indexOf(w);
+                        if (laneIdx >= 0) lanesContainer.scrollTop = laneIdx * LANE_H;
+                        renderAll();
+                    });
+                });
+            }
+
+            document.getElementById("sched-group-by").addEventListener("change", () => {
+                const allSched = collectSchedSamples(schedPanelTimeRange);
+                renderSchedPanel(allSched);
+            });
+
+            document.getElementById("sched-panel-close").addEventListener("click", () => {
+                document.getElementById("sched-panel").style.display = "none";
             });
 
             // ── Keyboard navigation ──
@@ -1761,6 +2141,13 @@
                 switch (e.key) {
                     case "Escape":
                         e.preventDefault();
+                        hideStackPopup();
+                        if (document.getElementById("sched-panel").style.display === "flex") {
+                            document.getElementById("sched-panel").style.display = "none";
+                        } else if (document.getElementById("flamegraph-panel").style.display === "flex") {
+                            document.getElementById("flamegraph-panel").style.display = "none";
+                            document.getElementById("fg-tooltip").style.display = "none";
+                        }
                         selectedTaskId = null;
                         renderAll();
                         break;
@@ -1804,6 +2191,11 @@
                 .getElementById("main-area")
                 .addEventListener("mousemove", (e) => {
                     if (dragging) {
+                        tooltip.style.display = "none";
+                        mouseNs = null;
+                        return;
+                    }
+                    if (document.getElementById("flamegraph-panel").style.display === "flex") {
                         tooltip.style.display = "none";
                         mouseNs = null;
                         return;
@@ -1882,6 +2274,12 @@
                                 if (s.spawnLoc) {
                                     pollInfo += `<span class="label">Spawned at:</span> <span class="value">${s.spawnLoc}</span><br>`;
                                 }
+                            }
+                            if (s.cpuSamples && s.cpuSamples.length > 0) {
+                                pollInfo += `<span class="label">CPU samples:</span> <span class="value">🔥 ${s.cpuSamples.length}</span> <span style="color:#666">(click to view)</span><br>`;
+                            }
+                            if (s.schedSamples && s.schedSamples.length > 0) {
+                                pollInfo += `<span class="label">Sched events:</span> <span class="value">⚠️ ${s.schedSamples.length} blocking</span> <span style="color:#666">(click to view)</span><br>`;
                             }
                             break;
                         }
@@ -1992,12 +2390,280 @@
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff4444;display:inline-block;border-radius:2px"></span>&gt;1ms</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a1520;border-top:3px solid #cc5533;display:inline-block;border-radius:2px"></span>Parked</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff0000;display:inline-block;border-radius:2px"></span>Kernel Sched Delay</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:3px;background:#ff8c00;display:inline-block"></span>CPU Sampled</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="color:#ff2222;font-size:10px">▲</span>Sched (blocking)</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#66bb6a;font-size:10px">▼</span>Wake</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
-    <span style="color:#666;margin-left:8px">│ ↑↓ zoom · ←→ pan · click poll for task + wake timeline · esc close</span>
+    <span style="color:#666;margin-left:8px">│ ↑↓ zoom · ←→ pan · click poll for task + wake timeline · shift+drag for flamegraph · esc close</span>
   `;
                 tb.insertBefore(leg, document.getElementById("btn-zoom-in"));
             })();
+
+            // ── Flamegraph ──
+            let fgWorkerData = null;    // {nodes, maxDepth, totalSamples}
+            let fgOffworkerData = null; // same shape, for worker 255
+            const FG_ROW_H = 18;
+            // Per-canvas hit regions
+            let fgHitRegions = { worker: [], offworker: [] };
+            // Raw samples for current flamegraph (for re-filtering)
+            let fgAllSamples = [];
+
+            function buildFlamegraphTree(samples) {
+                const root = { name: "(all)", children: new Map(), count: 0, self: 0 };
+                for (const s of samples) {
+                    const chain = s.callchain.slice().reverse();
+                    let node = root;
+                    node.count++;
+                    for (const addr of chain) {
+                        const name = trace.callframeSymbols.get(addr) || addr;
+                        if (!node.children.has(name)) {
+                            node.children.set(name, { name, children: new Map(), count: 0, self: 0 });
+                        }
+                        node = node.children.get(name);
+                        node.count++;
+                    }
+                    node.self++;
+                }
+                return root;
+            }
+
+            function flattenFlamegraph(root, total) {
+                const nodes = [];
+                let maxD = 0;
+                function walk(node, depth, xStart) {
+                    const w = node.count / total;
+                    if (w < 0.001) return;
+                    nodes.push({ name: node.name, depth, x: xStart, w, count: node.count, self: node.self });
+                    if (depth > maxD) maxD = depth;
+                    const kids = [...node.children.values()].sort((a, b) => b.count - a.count);
+                    let cx = xStart;
+                    for (const child of kids) {
+                        walk(child, depth + 1, cx);
+                        cx += child.count / total;
+                    }
+                }
+                const kids = [...root.children.values()].sort((a, b) => b.count - a.count);
+                let cx = 0;
+                for (const child of kids) {
+                    walk(child, 0, cx);
+                    cx += child.count / total;
+                }
+                return { nodes, maxDepth: maxD };
+            }
+
+            function buildFgData(samples) {
+                if (!samples.length) return null;
+                const tree = buildFlamegraphTree(samples);
+                const result = flattenFlamegraph(tree, samples.length);
+                return { nodes: result.nodes, maxDepth: result.maxDepth, totalSamples: samples.length };
+            }
+
+            // Selection picker: shown after shift+drag when both flamegraph and sched data exist
+            function showSelectionPicker(selStart, selEnd) {
+                const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
+                const schedCount = collectSchedSamples({ start: selStart, end: selEnd }).length;
+                const popup = document.getElementById("stack-popup");
+                const title = document.getElementById("stack-popup-title");
+                const body = document.getElementById("stack-popup-body");
+                title.textContent = `${durMs}ms selected`;
+                body.innerHTML = `
+                    <div style="display:flex;flex-direction:column;gap:8px;min-width:250px">
+                        <div style="padding:8px 12px;background:#2a2a4a;border:1px solid #444;border-radius:6px;cursor:pointer;transition:background 0.15s"
+                             onmouseover="this.style.background='#3a3a5a'" onmouseout="this.style.background='#2a2a4a'"
+                             id="pick-flamegraph">
+                            <div style="color:#ff8c00;font-weight:600">🔥 CPU Flamegraph</div>
+                            <div style="color:#888;font-size:0.9em">Profile where CPU time is spent</div>
+                        </div>
+                        <div style="padding:8px 12px;background:#2a2a4a;border:1px solid #444;border-radius:6px;cursor:pointer;transition:background 0.15s"
+                             onmouseover="this.style.background='#3a3a5a'" onmouseout="this.style.background='#2a2a4a'"
+                             id="pick-sched">
+                            <div style="color:#ff4444;font-weight:600">⚠ Blocking Calls <span style="color:#888;font-weight:400">(${schedCount})</span></div>
+                            <div style="color:#888;font-size:0.9em">Analyze what's blocking the runtime</div>
+                        </div>
+                    </div>`;
+                popup.style.display = "block";
+                // Center it roughly
+                popup.style.left = (window.innerWidth / 2 - 150) + "px";
+                popup.style.top = (window.innerHeight / 2 - 80) + "px";
+                document.getElementById("pick-flamegraph").onclick = () => { hideStackPopup(); showFlamegraph(selStart, selEnd); };
+                document.getElementById("pick-sched").onclick = () => { hideStackPopup(); showSchedPanel(selStart, selEnd); };
+            }
+
+            function showFlamegraph(selStart, selEnd) {
+                const allSamples = trace.cpuSamples.filter(s =>
+                    s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
+                );
+                if (!allSamples.length) {
+                    alert("No CPU samples in selected region. CPU sampling must be active during this time range.");
+                    return;
+                }
+
+                fgAllSamples = allSamples;
+                const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
+                document.getElementById("fg-title").textContent = "Flamegraph";
+                document.getElementById("fg-stats").textContent =
+                    `${allSamples.length} samples · ${durMs}ms selected`;
+
+                // Build spawn location dropdown
+                const locCounts = new Map(); // spawnLoc → count
+                for (const s of allSamples) {
+                    const loc = s.spawnLoc || "(unknown)";
+                    locCounts.set(loc, (locCounts.get(loc) || 0) + 1);
+                }
+                const sel = document.getElementById("fg-spawn-filter");
+                sel.innerHTML = `<option value="">All tasks (${allSamples.length} samples)</option>`;
+                // Sort by count descending
+                const sorted = [...locCounts.entries()].sort((a, b) => b[1] - a[1]);
+                for (const [loc, count] of sorted) {
+                    const short = loc.replace(/.*\//, '');
+                    const opt = document.createElement("option");
+                    opt.value = loc;
+                    opt.textContent = `${short} (${count})`;
+                    opt.title = loc;
+                    sel.appendChild(opt);
+                }
+
+                document.getElementById("flamegraph-panel").style.display = "flex";
+                applyFgFilter();
+            }
+
+            function applyFgFilter() {
+                const filterVal = document.getElementById("fg-spawn-filter").value;
+                const samples = filterVal
+                    ? fgAllSamples.filter(s => (s.spawnLoc || "(unknown)") === filterVal)
+                    : fgAllSamples;
+
+                const workerSamples = samples.filter(s => s.workerId !== 255);
+                const offworkerSamples = samples.filter(s => s.workerId === 255);
+
+                fgWorkerData = buildFgData(workerSamples);
+                fgOffworkerData = buildFgData(offworkerSamples);
+
+                document.getElementById("fg-worker-label").textContent =
+                    `Worker threads — ${workerSamples.length} samples`;
+                document.getElementById("fg-worker-label").style.display = fgWorkerData ? "" : "none";
+                document.getElementById("fg-canvas-worker").style.display = fgWorkerData ? "" : "none";
+
+                const offLabel = document.getElementById("fg-offworker-label");
+                offLabel.textContent =
+                    `Off-worker (sampler thread) — ${offworkerSamples.length} samples`;
+                offLabel.style.display = fgOffworkerData ? "" : "none";
+                document.getElementById("fg-canvas-offworker").style.display = fgOffworkerData ? "" : "none";
+
+                renderFlamegraph();
+            }
+
+            document.getElementById("fg-spawn-filter").addEventListener("change", applyFgFilter);
+
+            function flamegraphColor(name) {
+                let h = 0;
+                for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+                const hue = 10 + (Math.abs(h) % 40);
+                const sat = 60 + (Math.abs(h >> 8) % 30);
+                const lit = 40 + (Math.abs(h >> 16) % 15);
+                return `hsl(${hue},${sat}%,${lit}%)`;
+            }
+
+            function renderFgCanvas(canvasId, data, hitKey) {
+                const c = document.getElementById(canvasId);
+                if (!data) { c.width = 0; c.height = 0; fgHitRegions[hitKey] = []; return; }
+                const dpr = devicePixelRatio || 1;
+                const pw = c.parentElement.clientWidth;
+                const ph = (data.maxDepth + 2) * FG_ROW_H + 8;
+                c.width = pw * dpr;
+                c.height = ph * dpr;
+                c.style.width = pw + "px";
+                c.style.height = ph + "px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+                ctx.fillStyle = "#1a1a2e";
+                ctx.fillRect(0, 0, pw, ph);
+
+                const regions = [];
+                const padL = 4, padR = 4, drawW = pw - padL - padR;
+                const baseY = ph - 4;
+                ctx.font = "11px monospace";
+                ctx.textBaseline = "middle";
+                for (const node of data.nodes) {
+                    const x = padL + node.x * drawW;
+                    const w = node.w * drawW;
+                    const y = baseY - (node.depth + 1) * FG_ROW_H;
+                    if (w < 0.5) continue;
+                    ctx.fillStyle = flamegraphColor(node.name);
+                    ctx.fillRect(x, y, Math.max(w - 0.5, 0.5), FG_ROW_H - 1);
+                    regions.push({ x1: x, x2: x + w, y, node, totalSamples: data.totalSamples });
+                    if (w > 30) {
+                        ctx.fillStyle = "#fff";
+                        const label = node.name.length * 7 > w - 4
+                            ? node.name.slice(0, Math.floor((w - 10) / 7)) + "…"
+                            : node.name;
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.rect(x + 2, y, w - 4, FG_ROW_H);
+                        ctx.clip();
+                        ctx.fillText(label, x + 3, y + FG_ROW_H / 2);
+                        ctx.restore();
+                    }
+                }
+                fgHitRegions[hitKey] = regions;
+            }
+
+            function renderFlamegraph() {
+                renderFgCanvas("fg-canvas-worker", fgWorkerData, "worker");
+                renderFgCanvas("fg-canvas-offworker", fgOffworkerData, "offworker");
+            }
+
+            // Flamegraph tooltip — shared handler for both canvases
+            function fgCanvasMouseMove(e, hitKey) {
+                const c = e.target;
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+                const tip = document.getElementById("fg-tooltip");
+                const regions = fgHitRegions[hitKey] || [];
+                let hit = null;
+                for (let i = regions.length - 1; i >= 0; i--) {
+                    const r = regions[i];
+                    if (mx >= r.x1 && mx <= r.x2 && my >= r.y && my < r.y + FG_ROW_H) {
+                        hit = r;
+                        break;
+                    }
+                }
+                if (hit) {
+                    const total = hit.totalSamples;
+                    const pct = ((hit.node.count / total) * 100).toFixed(1);
+                    const selfPct = ((hit.node.self / total) * 100).toFixed(1);
+                    tip.innerHTML = `<b>${hit.node.name}</b><br>${hit.node.count} samples (${pct}%) · ${hit.node.self} self (${selfPct}%)`;
+                    tip.style.display = "block";
+                    tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 620) + "px";
+                    tip.style.top = (e.clientY - 50) + "px";
+                    c.style.cursor = "pointer";
+                } else {
+                    tip.style.display = "none";
+                    c.style.cursor = "";
+                }
+            }
+
+            document.getElementById("fg-canvas-worker").addEventListener("mousemove", (e) => fgCanvasMouseMove(e, "worker"));
+            document.getElementById("fg-canvas-offworker").addEventListener("mousemove", (e) => fgCanvasMouseMove(e, "offworker"));
+            document.getElementById("fg-canvas-worker").addEventListener("mouseleave", () => {
+                document.getElementById("fg-tooltip").style.display = "none";
+            });
+            document.getElementById("fg-canvas-offworker").addEventListener("mouseleave", () => {
+                document.getElementById("fg-tooltip").style.display = "none";
+            });
+
+            document.getElementById("fg-close").addEventListener("click", () => {
+                document.getElementById("flamegraph-panel").style.display = "none";
+                document.getElementById("fg-tooltip").style.display = "none";
+            });
+
+            // Re-render flamegraph on resize
+            window.addEventListener("resize", () => {
+                if (document.getElementById("flamegraph-panel").style.display === "flex") {
+                    renderFlamegraph();
+                }
+            });
         </script>
     </body>
 </html>

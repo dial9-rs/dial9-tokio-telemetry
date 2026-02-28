@@ -1,4 +1,4 @@
-use perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
+use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
 use std::sync::{Arc, Mutex};
 use std::thread;
 

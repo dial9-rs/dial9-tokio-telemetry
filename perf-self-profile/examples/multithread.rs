@@ -3,7 +3,7 @@
 //! Build with frame pointers:
 //!   RUSTFLAGS="-C force-frame-pointers=yes" cargo run --release --example multithread
 
-use perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
+use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

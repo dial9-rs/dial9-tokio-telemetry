@@ -1,6 +1,27 @@
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use serde::Serialize;
 
+/// Sentinel worker_id for events from non-worker threads (encoded as u8 on the wire).
+pub const UNKNOWN_WORKER: usize = 255;
+
+/// What triggered a [`TelemetryEvent::CpuSample`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum CpuSampleSource {
+    /// Periodic CPU profiling sample (frequency-based).
+    CpuProfile = 0,
+    /// Context switch captured by per-thread sched event tracking.
+    SchedEvent = 1,
+}
+
+impl CpuSampleSource {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::SchedEvent,
+            _ => Self::CpuProfile,
+        }
+    }
+}
+
 /// Wire event representing a telemetry record after interning.
 ///
 /// Compare with `RawEvent` which is emitted by worker threads and carries
@@ -68,6 +89,34 @@ pub enum TelemetryEvent {
         task_id: TaskId,
         spawn_loc_id: SpawnLocationId,
     },
+    /// A CPU stack trace sample from perf_event, attributed to a worker thread.
+    CpuSample {
+        #[serde(rename = "timestamp_ns")]
+        timestamp_nanos: u64,
+        #[serde(rename = "worker")]
+        worker_id: usize,
+        /// OS thread ID that was sampled.
+        tid: u32,
+        /// What triggered this sample.
+        source: CpuSampleSource,
+        /// Raw instruction pointer addresses (leaf first). Symbolized offline.
+        callchain: Vec<u64>,
+    },
+    /// Definition of a callframe symbol: maps an address to its resolved name.
+    /// Emitted before the first CpuSample that references this address (when inline
+    /// symbolication is enabled). Analogous to SpawnLocationDef.
+    CallframeDef {
+        /// The raw instruction pointer address.
+        address: u64,
+        /// Resolved symbol name (demangled), e.g. "my_crate::my_function".
+        symbol: String,
+        /// Source location, e.g. "my_file.rs:123". None if unavailable.
+        location: Option<String>,
+    },
+    /// Maps an OS thread ID to its name (from `/proc/self/task/<tid>/comm`).
+    /// Emitted before the first CpuSample referencing this tid in each file.
+    /// Allows grouping non-worker CPU samples by thread name.
+    ThreadNameDef { tid: u32, name: String },
     WakeEvent {
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
@@ -98,10 +147,16 @@ impl TelemetryEvent {
             | TelemetryEvent::QueueSample {
                 timestamp_nanos, ..
             }
+            | TelemetryEvent::CpuSample {
+                timestamp_nanos, ..
+            }
             | TelemetryEvent::WakeEvent {
                 timestamp_nanos, ..
             } => Some(*timestamp_nanos),
-            TelemetryEvent::SpawnLocationDef { .. } | TelemetryEvent::TaskSpawn { .. } => None,
+            TelemetryEvent::SpawnLocationDef { .. }
+            | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::CallframeDef { .. }
+            | TelemetryEvent::ThreadNameDef { .. } => None,
         }
     }
 
@@ -111,10 +166,13 @@ impl TelemetryEvent {
             TelemetryEvent::PollStart { worker_id, .. }
             | TelemetryEvent::PollEnd { worker_id, .. }
             | TelemetryEvent::WorkerPark { worker_id, .. }
-            | TelemetryEvent::WorkerUnpark { worker_id, .. } => Some(*worker_id),
+            | TelemetryEvent::WorkerUnpark { worker_id, .. }
+            | TelemetryEvent::CpuSample { worker_id, .. } => Some(*worker_id),
             TelemetryEvent::QueueSample { .. }
             | TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::CallframeDef { .. }
+            | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. } => None,
         }
     }
@@ -171,6 +229,11 @@ pub enum RawEvent {
     },
 }
 
+/// Get the OS thread ID (tid) of the calling thread via `gettid()`.
+pub fn current_tid() -> u32 {
+    unsafe { libc::syscall(libc::SYS_gettid) as u32 }
+}
+
 /// Read the calling thread's CPU time via `CLOCK_THREAD_CPUTIME_ID`.
 /// This is a vDSO call on Linux (~20-40ns), no actual syscall.
 pub fn thread_cpu_time_nanos() -> u64 {
@@ -186,7 +249,7 @@ pub fn thread_cpu_time_nanos() -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
-/// Per-thread scheduler stats from /proc/<pid>/task/<tid>/schedstat.
+/// Per-thread scheduler stats from `/proc/<pid>/task/<tid>/schedstat`.
 /// Fields: run_time_ns wait_time_ns timeslices
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SchedStat {
@@ -195,7 +258,7 @@ pub struct SchedStat {
 
 impl SchedStat {
     /// Read schedstat for the current thread using a cached per-thread file descriptor.
-    /// Opening /proc/self/task/<tid>/schedstat is done once per thread; subsequent reads
+    /// Opening `/proc/self/task/<tid>/schedstat` is done once per thread; subsequent reads
     /// use `pread(fd, buf, 0)` which is ~2-3x cheaper than open+read+close.
     pub fn read_current() -> std::io::Result<Self> {
         use std::os::unix::io::RawFd;
