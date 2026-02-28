@@ -1,0 +1,9 @@
+[workspace]
+git_release_enable = true
+changelog_update = false
+
+[[package]]
+name = "dial9-tokio-telemetry"
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+changelog_include = ["dial9-perf-self-profile"]
