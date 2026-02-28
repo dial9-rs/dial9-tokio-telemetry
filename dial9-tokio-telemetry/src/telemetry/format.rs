@@ -24,7 +24,7 @@
 //! In-memory representation remains nanoseconds; conversion happens at the wire boundary.
 //!
 //! ### v10 → v11 changes
-//! - Added WakeEvent (code 9): emitted by Traced<F> waker wrapper, records who woke a task
+//! - Added WakeEvent (code 9): emitted by `Traced<F>` waker wrapper, records who woke a task
 //!
 //! ### v12 → v13 changes
 //! - Added tid(u32) field to CpuSample (code 8) for thread identification

@@ -962,8 +962,7 @@ impl TracedRuntimeBuilder {
 
 /// Entry point for setting up a traced Tokio runtime.
 ///
-/// Use [`TracedRuntime::builder()`] for the full builder API, or
-/// [`TracedRuntime::build_and_start()`] for the simple one-liner (backwards-compatible).
+/// Use [`TracedRuntime::builder()`] for the full builder API, or [`TracedRuntime::build_and_start()`].
 pub struct TracedRuntime;
 
 impl TracedRuntime {
@@ -994,6 +993,16 @@ impl TracedRuntime {
     /// `builder` should already have `worker_threads` / `enable_all` configured
     /// but **not** yet built.  The guard owns the flush + sampler background
     /// thread; drop it after the runtime to get a clean final flush.
+    ///
+    /// ## Important Notes
+    /// Installing `TracedRuntime` will override any value previously set for:
+    /// - [`on_thread_park`](tokio::runtime::Builder::on_thread_park) — records worker park events
+    /// - [`on_thread_unpark`](tokio::runtime::Builder::on_thread_unpark) — records worker unpark events
+    /// - [`on_before_task_poll`](tokio::runtime::Builder::on_before_task_poll) — records poll-start events (with task ID and spawn location)
+    /// - [`on_after_task_poll`](tokio::runtime::Builder::on_after_task_poll) — records poll-end events
+    /// - [`on_task_spawn`](tokio::runtime::Builder::on_task_spawn) — records task spawn events (only when task tracking is enabled)
+    /// - [`on_thread_start`](tokio::runtime::Builder::on_thread_start) — opens a per-thread perf event fd for sched-event capture (only with the `cpu-profiling` feature)
+    /// - [`on_thread_stop`](tokio::runtime::Builder::on_thread_stop) — closes the per-thread perf event fd (only with the `cpu-profiling` feature)
     pub fn build(
         builder: tokio::runtime::Builder,
         writer: Box<dyn TraceWriter>,

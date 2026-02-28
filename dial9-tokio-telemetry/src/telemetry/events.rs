@@ -249,7 +249,7 @@ pub fn thread_cpu_time_nanos() -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
-/// Per-thread scheduler stats from /proc/<pid>/task/<tid>/schedstat.
+/// Per-thread scheduler stats from `/proc/<pid>/task/<tid>/schedstat`.
 /// Fields: run_time_ns wait_time_ns timeslices
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SchedStat {
@@ -258,7 +258,7 @@ pub struct SchedStat {
 
 impl SchedStat {
     /// Read schedstat for the current thread using a cached per-thread file descriptor.
-    /// Opening /proc/self/task/<tid>/schedstat is done once per thread; subsequent reads
+    /// Opening `/proc/self/task/<tid>/schedstat` is done once per thread; subsequent reads
     /// use `pread(fd, buf, 0)` which is ~2-3x cheaper than open+read+close.
     pub fn read_current() -> std::io::Result<Self> {
         use std::os::unix::io::RawFd;
