@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use clap::Parser;
-use dial9_tokio_telemetry::telemetry::{
-    CpuProfilingConfig, RotatingWriter, SchedEventConfig, TracedRuntime,
-};
+#[cfg(target_os = "linux")]
+use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
@@ -81,14 +81,18 @@ fn main() -> std::io::Result<()> {
 
     let mut builder = Builder::new_multi_thread();
     builder.worker_threads(args.worker_threads).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
-        .with_cpu_profiling(CpuProfilingConfig::default())
-        .with_inline_callframe_symbols(true)
-        .with_sched_events(SchedEventConfig {
-            include_kernel: true,
-        })
-        .build(builder, Box::new(writer))?;
+    #[allow(unused_mut)]
+    let mut traced_builder = TracedRuntime::builder().with_task_tracking(true);
+    #[cfg(target_os = "linux")]
+    {
+        traced_builder = traced_builder
+            .with_cpu_profiling(CpuProfilingConfig::default())
+            .with_inline_callframe_symbols(true)
+            .with_sched_events(SchedEventConfig {
+                include_kernel: true,
+            });
+    }
+    let (runtime, guard) = traced_builder.build(builder, Box::new(writer))?;
     guard.enable();
     let handle = guard.handle();
 
