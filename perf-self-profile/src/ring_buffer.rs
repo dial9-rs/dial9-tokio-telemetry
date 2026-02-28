@@ -119,10 +119,15 @@ impl RingBuffer {
 
     fn data_slice(&self) -> &[u8] {
         unsafe {
-            let data_ptr = self.base.add(4096); // skip metadata page
+            let data_ptr = self.base.add(page_size()); // skip metadata page
             std::slice::from_raw_parts(data_ptr, self.data_size as usize)
         }
     }
+}
+
+pub(crate) fn page_size() -> usize {
+    // Safety: sysconf(_SC_PAGESIZE) is always safe and always succeeds on Linux.
+    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
 }
 
 impl Drop for RingBuffer {
