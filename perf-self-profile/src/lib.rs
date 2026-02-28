@@ -21,7 +21,7 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! use perf_self_profile::{PerfSampler, SamplerConfig, EventSource, Sample};
+//! use dial9_perf_self_profile::{PerfSampler, SamplerConfig, EventSource, Sample};
 //!
 //! let mut sampler = PerfSampler::start(SamplerConfig {
 //!     frequency_hz: 999,

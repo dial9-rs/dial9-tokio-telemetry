@@ -508,7 +508,7 @@ impl CpuFlushState {
             for &addr in callchain {
                 if !self.callframe_emitted_this_file.contains(&addr) {
                     self.callframe_intern.entry(addr).or_insert_with(|| {
-                        let sym = perf_self_profile::resolve_symbol(addr);
+                        let sym = dial9_perf_self_profile::resolve_symbol(addr);
                         let symbol = sym.name.unwrap_or_else(|| format!("{:#x}", addr));
                         let location = sym.code_info.map(|info| match info.line {
                             Some(line) => format!("{}:{}", info.file, line),
@@ -1252,7 +1252,6 @@ mod tests {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
         use crate::telemetry::events::{CpuSampleSource, UNKNOWN_WORKER};
-        use crate::telemetry::format;
         use crate::telemetry::writer::RotatingWriter;
         use proptest::prelude::*;
         use std::collections::HashSet;

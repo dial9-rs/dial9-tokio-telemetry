@@ -943,16 +943,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dial9-perf-self-profile"
+version = "0.1.0"
+dependencies = [
+ "blazesym",
+ "libc",
+ "perf-event-data",
+ "perf-event-open-sys2",
+]
+
+[[package]]
 name = "dial9-tokio-telemetry"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
  "assert2",
  "criterion",
+ "dial9-perf-self-profile",
  "futures-util",
  "hdrhistogram",
  "libc",
- "perf-self-profile",
  "pin-project-lite",
  "proptest",
  "serde",
@@ -1964,16 +1974,6 @@ checksum = "d9c25955321465255e437600b54296983fab1feac2cd0c38958adeb26dbae49e"
 dependencies = [
  "libc",
  "memoffset",
-]
-
-[[package]]
-name = "perf-self-profile"
-version = "0.1.0"
-dependencies = [
- "blazesym",
- "libc",
- "perf-event-data",
- "perf-event-open-sys2",
 ]
 
 [[package]]

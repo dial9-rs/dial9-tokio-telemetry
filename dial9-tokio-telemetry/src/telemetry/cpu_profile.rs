@@ -5,7 +5,7 @@
 //! to tokio worker IDs, and writes `CpuSample` events into the trace.
 
 use crate::telemetry::events::{TelemetryEvent, UNKNOWN_WORKER};
-use perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
+use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
 use std::collections::HashMap;
 use std::io;
 

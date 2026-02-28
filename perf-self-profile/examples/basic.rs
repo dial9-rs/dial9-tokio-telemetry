@@ -6,7 +6,7 @@
 //! You may need:
 //!   echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
-use perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
+use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
 use std::collections::HashMap;
 
 fn main() {

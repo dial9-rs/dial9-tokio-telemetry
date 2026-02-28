@@ -1,5 +1,5 @@
 mod common;
-use perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
+use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

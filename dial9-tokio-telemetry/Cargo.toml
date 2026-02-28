@@ -13,10 +13,10 @@ pin-project-lite = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
-perf-self-profile = { path = "../perf-self-profile", optional = true }
+dial9-perf-self-profile = { workspace = true, optional = true }
 
 [features]
-cpu-profiling = ["perf-self-profile"]
+cpu-profiling = ["dial9-perf-self-profile"]
 
 default = ["cpu-profiling"]
 

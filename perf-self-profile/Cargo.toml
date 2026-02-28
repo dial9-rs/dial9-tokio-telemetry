@@ -1,9 +1,10 @@
 [package]
-name = "perf-self-profile"
-version = "0.1.0"
+name = "dial9-perf-self-profile"
+version.workspace = true
 edition = "2024"
 description = "Minimal self-profiling via Linux perf_event_open with frame-pointer-based stack traces"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/rcoh/dial9-tokio-telemetry"
 
 [dependencies]
 libc = "0.2"
