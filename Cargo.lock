@@ -960,6 +960,7 @@ dependencies = [
  "assert2",
  "criterion",
  "dial9-perf-self-profile",
+ "dial9-tokio-telemetry",
  "futures-util",
  "hdrhistogram",
  "libc",

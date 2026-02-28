@@ -16,9 +16,7 @@ smallvec = "1"
 dial9-perf-self-profile = { workspace = true, optional = true }
 
 [features]
-cpu-profiling = ["dial9-perf-self-profile"]
-
-default = ["cpu-profiling"]
+cpu-profiling = ["dep:dial9-perf-self-profile"]
 
 [dev-dependencies]
 assert2 = "0.3"
@@ -26,6 +24,7 @@ criterion = "0.5"
 hdrhistogram = "7"
 proptest = "1"
 tempfile = "3"
+dial9-tokio-telemetry = { path = ".", features = ["cpu-profiling"] }
 
 [[bench]]
 name = "poll_overhead"
