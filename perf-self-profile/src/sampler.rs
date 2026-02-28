@@ -372,6 +372,7 @@ impl PerfSampler {
                             .unwrap_or(&[])
                             .iter()
                             .copied()
+                            // TODO: imrpove this to allow capturing kernel traces when permissions are available
                             .filter(|&a| a < USER_ADDR_LIMIT && a != 0)
                             .collect();
                         Sample {

@@ -12,3 +12,6 @@ version = "0.1.0"
 [workspace.dependencies]
 libc = "0.2"
 dial9-perf-self-profile = { version = "0.1.0", path = "perf-self-profile" }
+
+[profile.release]
+debug = 1

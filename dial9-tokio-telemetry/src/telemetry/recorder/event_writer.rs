@@ -112,14 +112,11 @@ impl EventWriter {
             profiler.drain(|event, thread_name| {
                 if let TelemetryEvent::CpuSample { tid, worker_id, .. } = &event
                     && *worker_id == UNKNOWN_WORKER
+                    && let Some(ref mut cpu) = self.cpu_flush
+                    && !cpu.thread_name_intern.contains_key(tid)
+                    && let Some(name) = thread_name
                 {
-                    if let Some(ref mut cpu) = self.cpu_flush {
-                        if !cpu.thread_name_intern.contains_key(&tid) {
-                            if let Some(name) = thread_name {
-                                cpu.thread_name_intern.insert(*tid, name.to_string());
-                            }
-                        }
-                    }
+                    cpu.thread_name_intern.insert(*tid, name.to_string());
                 }
                 self.write_cpu_event(&event);
             });
