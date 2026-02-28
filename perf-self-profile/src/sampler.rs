@@ -236,7 +236,6 @@ impl PerfSampler {
     /// Must be called from the thread you want to monitor. Opens a perf event
     /// fd scoped to this thread's tid with `cpu=-1`.
     pub fn track_current_thread(&mut self) -> io::Result<()> {
-        //let tid = unsafe { libc::syscall(libc::SYS_gettid) } as i32;
         let ev = open_perf_event(&mut self.attr, 0, -1)?;
         self.events.push(ev);
         Ok(())

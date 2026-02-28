@@ -5,6 +5,20 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+/// Result of a [`TraceWriter::write_atomic`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteAtomicResult {
+    /// All events were written to the current file.
+    Written,
+    /// A file rotation occurred before writing. The events were not written;
+    /// callers should re-emit defs and retry into the new file.
+    Rotated,
+    /// The batch is larger than `max_file_size` and will never fit in a single
+    /// file. The events were not written. Callers should skip this batch rather
+    /// than retrying in an infinite loop.
+    OversizedBatch,
+}
+
 pub trait TraceWriter: Send {
     fn write_event(&mut self, event: &TelemetryEvent) -> std::io::Result<()>;
     fn write_batch(&mut self, events: &[TelemetryEvent]) -> std::io::Result<()>;
@@ -16,12 +30,11 @@ pub trait TraceWriter: Send {
     }
     /// Write a group of events atomically — all events land in the same file.
     /// Rotating writers pre-check total size and rotate before writing if needed.
-    /// Returns true if a file rotation occurred during this write.
-    fn write_atomic(&mut self, events: &[TelemetryEvent]) -> std::io::Result<bool> {
+    fn write_atomic(&mut self, events: &[TelemetryEvent]) -> std::io::Result<WriteAtomicResult> {
         for event in events {
             self.write_event(event)?;
         }
-        Ok(false)
+        Ok(WriteAtomicResult::Written)
     }
 }
 
@@ -231,20 +244,26 @@ impl TraceWriter for RotatingWriter {
         std::mem::replace(&mut self.rotated, false)
     }
 
-    fn write_atomic(&mut self, events: &[TelemetryEvent]) -> std::io::Result<bool> {
+    fn write_atomic(&mut self, events: &[TelemetryEvent]) -> std::io::Result<WriteAtomicResult> {
         let total: u64 = events
             .iter()
             .map(|e| format::wire_event_size(e) as u64)
             .sum();
         self.ensure_space(total)?;
         if self.rotated {
-            return Ok(true);
+            // We just rotated into a fresh file. If the batch still doesn't
+            // fit, it will *never* fit — report that instead of Rotated so the
+            // caller doesn't retry in an infinite loop.
+            if self.current_size + total > self.max_file_size {
+                return Ok(WriteAtomicResult::OversizedBatch);
+            }
+            return Ok(WriteAtomicResult::Rotated);
         }
 
         for event in events {
             self.write_event_inner(event)?;
         }
-        Ok(false)
+        Ok(WriteAtomicResult::Written)
     }
 }
 

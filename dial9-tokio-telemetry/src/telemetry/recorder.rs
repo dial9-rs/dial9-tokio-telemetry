@@ -2,7 +2,7 @@ use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::collector::CentralCollector;
 use crate::telemetry::events::{RawEvent, SchedStat, TelemetryEvent, UNKNOWN_WORKER};
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
-use crate::telemetry::writer::TraceWriter;
+use crate::telemetry::writer::{TraceWriter, WriteAtomicResult};
 use arc_swap::ArcSwap;
 use smallvec::SmallVec;
 use std::cell::Cell;
@@ -384,27 +384,187 @@ impl FlushState {
     }
 }
 
+/// Encapsulates all CPU-profiling flush state and logic.
+///
+/// This struct owns the cpu/sched profilers' drain-side state, thread-name and
+/// callframe interning tables, and per-file emission tracking. By isolating
+/// everything behind a single `#[cfg]`-gated type, the rest of
+/// `TelemetryRecorder` stays free of cpu-profiling feature gates.
+#[cfg(feature = "cpu-profiling")]
+struct CpuFlushState {
+    cpu_profiler: Option<crate::telemetry::cpu_profile::CpuProfiler>,
+    /// When true, symbolicate callframe addresses and emit CallframeDef events.
+    inline_callframe_symbols: bool,
+    /// Addresses already symbolicated (across all files). Maps addr → (symbol, location).
+    callframe_intern: HashMap<u64, (String, Option<String>)>,
+    /// Addresses whose CallframeDef has been emitted in the current file.
+    callframe_emitted_this_file: HashSet<u64>,
+    /// tid → thread name, cached across files. Only populated for non-worker tids.
+    thread_name_intern: HashMap<u32, String>,
+    /// tids whose ThreadNameDef has been emitted in the current file.
+    thread_name_emitted_this_file: HashSet<u32>,
+}
+
+#[cfg(feature = "cpu-profiling")]
+impl CpuFlushState {
+    fn new() -> Self {
+        Self {
+            cpu_profiler: None,
+            inline_callframe_symbols: false,
+            callframe_intern: HashMap::new(),
+            callframe_emitted_this_file: HashSet::new(),
+            thread_name_intern: HashMap::new(),
+            thread_name_emitted_this_file: HashSet::new(),
+        }
+    }
+
+    /// Called on file rotation — clear per-file tracking sets.
+    fn on_rotate(&mut self) {
+        self.callframe_emitted_this_file.clear();
+        self.thread_name_emitted_this_file.clear();
+    }
+
+    /// Sync worker tid→id mappings, drain samples from both profilers, and
+    /// write all CPU events (with their defs) directly to the writer.
+    fn flush(
+        &mut self,
+        shared: &SharedState,
+        writer: &mut dyn TraceWriter,
+        flush_state: &mut FlushState,
+    ) {
+        self.sync_worker_tids(shared);
+        self.flush_samples(writer, flush_state, shared);
+    }
+
+    /// Register worker tid→id mappings into both profilers.
+    fn sync_worker_tids(&mut self, shared: &SharedState) {
+        let tids = shared.worker_tids.lock().unwrap();
+        if let Some(ref mut profiler) = self.cpu_profiler {
+            for (&tid, &worker_id) in tids.iter() {
+                profiler.register_worker(worker_id, tid);
+            }
+        }
+        let mut shared_profiler = shared.sched_profiler.lock().unwrap();
+        if let Some(ref mut profiler) = *shared_profiler {
+            for (&tid, &worker_id) in tids.iter() {
+                profiler.register_worker(worker_id, tid);
+            }
+        }
+    }
+
+    /// Drain samples from both profilers, cache thread names, and write events.
+    fn flush_samples(
+        &mut self,
+        writer: &mut dyn TraceWriter,
+        flush_state: &mut FlushState,
+        shared: &SharedState,
+    ) {
+        // remove the profile, then reinsert it to allow splitting borrows
+        if let Some(mut profiler) = self.cpu_profiler.take() {
+            profiler.drain(|event, thread_name| {
+                if let TelemetryEvent::CpuSample { tid, worker_id, .. } = &event
+                    && *worker_id == UNKNOWN_WORKER
+                    && !self.thread_name_intern.contains_key(tid)
+                    && let Some(name) = thread_name
+                {
+                    self.thread_name_intern.insert(*tid, name.to_string());
+                }
+                self.write_cpu_event(&event, writer, flush_state);
+            });
+            self.cpu_profiler = Some(profiler);
+        }
+        {
+            let mut shared_profiler = shared.sched_profiler.lock().unwrap();
+            if let Some(ref mut profiler) = *shared_profiler {
+                profiler.drain(|event| {
+                    self.write_cpu_event(&event, writer, flush_state);
+                });
+            }
+        }
+    }
+
+    /// Collect the prerequisite def events (ThreadNameDef / CallframeDef) for a
+    /// CPU event, updating per-file tracking sets. The main event is appended
+    /// last so the full batch can be written atomically.
+    fn collect_cpu_event_batch(&mut self, event: &TelemetryEvent) -> Vec<TelemetryEvent> {
+        let mut batch = Vec::new();
+        // Emit ThreadNameDef for non-worker tids before their first sample in this file
+        if let TelemetryEvent::CpuSample { worker_id, tid, .. } = event
+            && *worker_id == UNKNOWN_WORKER
+            && !self.thread_name_emitted_this_file.contains(tid)
+        {
+            if let Some(name) = self.thread_name_intern.get(tid) {
+                batch.push(TelemetryEvent::ThreadNameDef {
+                    tid: *tid,
+                    name: name.clone(),
+                });
+            }
+            self.thread_name_emitted_this_file.insert(*tid);
+        }
+        // Emit CallframeDef events for any new addresses in the callchain
+        if self.inline_callframe_symbols
+            && let TelemetryEvent::CpuSample { callchain, .. } = event
+        {
+            for &addr in callchain {
+                if !self.callframe_emitted_this_file.contains(&addr) {
+                    self.callframe_intern.entry(addr).or_insert_with(|| {
+                        let sym = perf_self_profile::resolve_symbol(addr);
+                        let symbol = sym.name.unwrap_or_else(|| format!("{:#x}", addr));
+                        let location = sym.code_info.map(|info| match info.line {
+                            Some(line) => format!("{}:{}", info.file, line),
+                            None => info.file,
+                        });
+                        (symbol, location)
+                    });
+                    let (symbol, location) = self.callframe_intern[&addr].clone();
+                    batch.push(TelemetryEvent::CallframeDef {
+                        address: addr,
+                        symbol,
+                        location,
+                    });
+                    self.callframe_emitted_this_file.insert(addr);
+                }
+            }
+        }
+        batch.push(event.clone());
+        batch
+    }
+
+    /// Write a single CPU event, emitting any necessary ThreadNameDef /
+    /// CallframeDef events first. Uses `write_atomic` to guarantee all defs
+    /// and the event itself land in the same file.
+    fn write_cpu_event(
+        &mut self,
+        event: &TelemetryEvent,
+        writer: &mut dyn TraceWriter,
+        flush_state: &mut FlushState,
+    ) {
+        let batch = self.collect_cpu_event_batch(event);
+        match writer.write_atomic(&batch) {
+            Ok(WriteAtomicResult::Rotated) => {
+                // write_atomic rotated — defs we just collected were written to
+                // the old file. Clear per-file state and retry into the new file.
+                debug_assert!(
+                    writer.take_rotated(),
+                    "write_atomic returned Rotated but take_rotated is false"
+                );
+                flush_state.on_rotate();
+                self.on_rotate();
+                let batch = self.collect_cpu_event_batch(event);
+                let _ = writer.write_atomic(&batch);
+            }
+            Ok(WriteAtomicResult::Written | WriteAtomicResult::OversizedBatch) => {}
+            Err(_) => {}
+        }
+    }
+}
+
 pub struct TelemetryRecorder {
     shared: Arc<SharedState>,
     writer: Box<dyn TraceWriter>,
     flush_state: FlushState,
     #[cfg(feature = "cpu-profiling")]
-    cpu_profiler: Option<crate::telemetry::cpu_profile::CpuProfiler>,
-    /// When true, symbolicate callframe addresses and emit CallframeDef events.
-    #[cfg(feature = "cpu-profiling")]
-    inline_callframe_symbols: bool,
-    /// Addresses already symbolicated (across all files). Maps addr → (symbol, location).
-    #[cfg(feature = "cpu-profiling")]
-    callframe_intern: HashMap<u64, (String, Option<String>)>,
-    /// Addresses whose CallframeDef has been emitted in the current file.
-    #[cfg(feature = "cpu-profiling")]
-    callframe_emitted_this_file: HashSet<u64>,
-    /// tid → thread name, cached across files. Only populated for non-worker tids.
-    #[cfg(feature = "cpu-profiling")]
-    thread_name_intern: HashMap<u32, String>,
-    /// tids whose ThreadNameDef has been emitted in the current file.
-    #[cfg(feature = "cpu-profiling")]
-    thread_name_emitted_this_file: HashSet<u32>,
+    cpu_flush: Option<CpuFlushState>,
 }
 
 impl TelemetryRecorder {
@@ -414,17 +574,7 @@ impl TelemetryRecorder {
             writer,
             flush_state: FlushState::new(),
             #[cfg(feature = "cpu-profiling")]
-            cpu_profiler: None,
-            #[cfg(feature = "cpu-profiling")]
-            inline_callframe_symbols: false,
-            #[cfg(feature = "cpu-profiling")]
-            callframe_intern: HashMap::new(),
-            #[cfg(feature = "cpu-profiling")]
-            callframe_emitted_this_file: HashSet::new(),
-            #[cfg(feature = "cpu-profiling")]
-            thread_name_intern: HashMap::new(),
-            #[cfg(feature = "cpu-profiling")]
-            thread_name_emitted_this_file: HashSet::new(),
+            cpu_flush: None,
         }
     }
 
@@ -433,108 +583,23 @@ impl TelemetryRecorder {
         self.shared.metrics.store(Arc::new(Some(metrics)));
     }
 
-    fn flush(&mut self) {
-        // Sync worker tid→id mappings into both profilers with a single lock
-        // acquisition, then drain samples from each.
+    fn handle_rotation(&mut self) {
+        self.flush_state.on_rotate();
         #[cfg(feature = "cpu-profiling")]
-        {
-            let tids = self.shared.worker_tids.lock().unwrap();
-            if let Some(ref mut profiler) = self.cpu_profiler {
-                for (&tid, &worker_id) in tids.iter() {
-                    profiler.register_worker(worker_id, tid);
-                }
-            }
-            let mut shared_profiler = self.shared.sched_profiler.lock().unwrap();
-            if let Some(ref mut profiler) = *shared_profiler {
-                for (&tid, &worker_id) in tids.iter() {
-                    profiler.register_worker(worker_id, tid);
-                }
-            }
+        if let Some(ref mut cpu) = self.cpu_flush {
+            cpu.on_rotate();
+        }
+    }
+
+    fn flush(&mut self) {
+        #[cfg(feature = "cpu-profiling")]
+        if let Some(ref mut cpu) = self.cpu_flush {
+            cpu.flush(&self.shared, &mut *self.writer, &mut self.flush_state);
         }
 
         for batch in self.shared.collector.drain() {
             for raw in batch {
                 self.write_raw_event(raw).unwrap();
-            }
-        }
-        // Drain CPU profiler samples and write them
-        #[cfg(feature = "cpu-profiling")]
-        {
-            let mut cpu_events = Vec::new();
-            // Drain samples — this eagerly caches thread names in the profiler
-            // while threads are still alive.
-            if let Some(ref mut profiler) = self.cpu_profiler {
-                cpu_events = profiler.drain();
-                // Pull eagerly-cached thread names into our intern table
-                for event in &cpu_events {
-                    if let TelemetryEvent::CpuSample { tid, worker_id, .. } = event
-                        && *worker_id == UNKNOWN_WORKER
-                        && !self.thread_name_intern.contains_key(tid)
-                        && let Some(name) = profiler.thread_name(*tid)
-                    {
-                        self.thread_name_intern.insert(*tid, name.to_string());
-                    }
-                }
-            }
-            {
-                let mut shared_profiler = self.shared.sched_profiler.lock().unwrap();
-                if let Some(ref mut profiler) = *shared_profiler {
-                    cpu_events.extend(profiler.drain());
-                }
-            }
-            for event in &cpu_events {
-                // Emit ThreadNameDef for non-worker tids before their first sample in this file
-                if let TelemetryEvent::CpuSample { worker_id, tid, .. } = event
-                    && *worker_id == UNKNOWN_WORKER
-                    && !self.thread_name_emitted_this_file.contains(tid)
-                {
-                    if self.writer.take_rotated() {
-                        self.flush_state.on_rotate();
-                        self.callframe_emitted_this_file.clear();
-                        self.thread_name_emitted_this_file.clear();
-                    }
-                    if let Some(name) = self.thread_name_intern.get(tid) {
-                        let def = TelemetryEvent::ThreadNameDef {
-                            tid: *tid,
-                            name: name.clone(),
-                        };
-                        let _ = self.writer.write_event(&def);
-                    }
-                    self.thread_name_emitted_this_file.insert(*tid);
-                }
-                if self.inline_callframe_symbols
-                    && let TelemetryEvent::CpuSample { callchain, .. } = event
-                {
-                    // Check for rotation before writing defs
-                    if self.writer.take_rotated() {
-                        self.flush_state.on_rotate();
-                        self.callframe_emitted_this_file.clear();
-                        self.thread_name_emitted_this_file.clear();
-                    }
-                    for &addr in callchain {
-                        if !self.callframe_emitted_this_file.contains(&addr) {
-                            // Symbolicate if not yet interned
-                            self.callframe_intern.entry(addr).or_insert_with(|| {
-                                let sym = perf_self_profile::resolve_symbol(addr);
-                                let symbol = sym.name.unwrap_or_else(|| format!("{:#x}", addr));
-                                let location = sym.code_info.map(|info| match info.line {
-                                    Some(line) => format!("{}:{}", info.file, line),
-                                    None => info.file,
-                                });
-                                (symbol, location)
-                            });
-                            let (symbol, location) = self.callframe_intern[&addr].clone();
-                            let def = TelemetryEvent::CallframeDef {
-                                address: addr,
-                                symbol,
-                                location,
-                            };
-                            let _ = self.writer.write_event(&def);
-                            self.callframe_emitted_this_file.insert(addr);
-                        }
-                    }
-                }
-                let _ = self.writer.write_event(event);
             }
         }
         self.writer.flush().unwrap();
@@ -543,31 +608,29 @@ impl TelemetryRecorder {
     /// Convert a RawEvent to wire format, interning locations as needed.
     fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
         if self.writer.take_rotated() {
-            self.flush_state.on_rotate();
-            #[cfg(feature = "cpu-profiling")]
-            self.callframe_emitted_this_file.clear();
-            #[cfg(feature = "cpu-profiling")]
-            self.thread_name_emitted_this_file.clear();
+            self.handle_rotation();
         }
         let events = self.flush_state.resolve(raw);
-        if self.writer.write_atomic(&events)? {
-            // write_atomic rotated to a new file — defs referenced by these
-            // events were only in the old file. Emit them into the new file.
-            debug_assert!(
-                self.writer.take_rotated(),
-                "write atomic returned true, rotation occured"
-            );
-            self.flush_state.on_rotate();
-            #[cfg(feature = "cpu-profiling")]
-            self.callframe_emitted_this_file.clear();
-            #[cfg(feature = "cpu-profiling")]
-            self.thread_name_emitted_this_file.clear();
-            let events = self.flush_state.resolve(raw);
-            if self.writer.write_atomic(&events)? {
-                // Something bad is happening...
-                eprintln!("double failed to write events. this is a bug. disabling");
-                self.shared.enabled.store(false, Ordering::Relaxed);
-            };
+        match self.writer.write_atomic(&events)? {
+            WriteAtomicResult::Written | WriteAtomicResult::OversizedBatch => {}
+            WriteAtomicResult::Rotated => {
+                // write_atomic rotated to a new file — defs referenced by these
+                // events were only in the old file. Emit them into the new file.
+                debug_assert!(
+                    self.writer.take_rotated(),
+                    "write atomic returned true, rotation occured"
+                );
+                self.handle_rotation();
+                let events = self.flush_state.resolve(raw);
+                match self.writer.write_atomic(&events)? {
+                    WriteAtomicResult::Written | WriteAtomicResult::OversizedBatch => {}
+                    WriteAtomicResult::Rotated => {
+                        // Something bad is happening...
+                        eprintln!("double failed to write events. this is a bug. disabling");
+                        self.shared.enabled.store(false, Ordering::Relaxed);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -584,17 +647,7 @@ impl TelemetryRecorder {
             writer,
             flush_state: FlushState::new(),
             #[cfg(feature = "cpu-profiling")]
-            cpu_profiler: None,
-            #[cfg(feature = "cpu-profiling")]
-            inline_callframe_symbols: false,
-            #[cfg(feature = "cpu-profiling")]
-            callframe_intern: HashMap::new(),
-            #[cfg(feature = "cpu-profiling")]
-            callframe_emitted_this_file: HashSet::new(),
-            #[cfg(feature = "cpu-profiling")]
-            thread_name_intern: HashMap::new(),
-            #[cfg(feature = "cpu-profiling")]
-            thread_name_emitted_this_file: HashSet::new(),
+            cpu_flush: None,
         }));
 
         let s1 = shared.clone();
@@ -878,19 +931,16 @@ impl TracedRuntimeBuilder {
 
         #[cfg(feature = "cpu-profiling")]
         {
+            let mut rec = recorder.lock().unwrap();
+            let mut cpu_flush = CpuFlushState::new();
             if let Some(Ok(sampler)) = sampler {
-                recorder.lock().unwrap().cpu_profiler = Some(sampler);
+                cpu_flush.cpu_profiler = Some(sampler);
             }
             if let Some(Ok(sched)) = sched {
-                *recorder
-                    .lock()
-                    .unwrap()
-                    .shared
-                    .sched_profiler
-                    .lock()
-                    .unwrap() = Some(sched);
+                *rec.shared.sched_profiler.lock().unwrap() = Some(sched);
             }
-            recorder.lock().unwrap().inline_callframe_symbols = self.inline_callframe_symbols;
+            cpu_flush.inline_callframe_symbols = self.inline_callframe_symbols;
+            rec.cpu_flush = Some(cpu_flush);
         }
 
         let runtime = builder.build()?;
@@ -1042,7 +1092,7 @@ impl TracedRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::writer::NullWriter;
+    use crate::telemetry::writer::{NullWriter, WriteAtomicResult};
 
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
@@ -1182,5 +1232,329 @@ mod tests {
             total_events, 6,
             "all PollStart events should be readable across files"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Proptest: stress-test rotation correctness across CPU + raw event
+    // interleaving.
+    //
+    // The invariant under test: **every rotated file is self-contained**.
+    //   • Every PollStart must have a preceding SpawnLocationDef in the same file.
+    //   • Every CpuSample with worker_id == UNKNOWN_WORKER must have a preceding
+    //     ThreadNameDef for its tid in the same file.
+    //   • Every callchain address in a CpuSample must have a preceding
+    //     CallframeDef in the same file (when inline_callframe_symbols is on).
+    //   • No events are silently dropped.
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "cpu-profiling")]
+    mod rotation_proptest {
+        use super::*;
+        use crate::telemetry::analysis::TraceReader;
+        use crate::telemetry::events::{CpuSampleSource, UNKNOWN_WORKER};
+        use crate::telemetry::format;
+        use crate::telemetry::writer::RotatingWriter;
+        use proptest::prelude::*;
+        use std::collections::HashSet;
+
+        /// A single operation in our simulated flush sequence.
+        #[derive(Debug, Clone)]
+        enum FlushOp {
+            /// A CPU sample — optionally from a non-worker thread (which triggers
+            /// ThreadNameDef emission) and with callchain addresses (which trigger
+            /// CallframeDef emission).
+            CpuSample {
+                worker_id: usize,
+                tid: u32,
+                callchain: Vec<u64>,
+            },
+            /// A raw runtime event that carries a spawn-location reference.
+            /// We use PollStart because it exercises SpawnLocationDef interning.
+            PollStart {
+                /// Index into a small set of distinct spawn locations.
+                location_idx: usize,
+            },
+        }
+
+        /// Generate a single flush operation.
+        fn arb_flush_op() -> impl Strategy<Value = FlushOp> {
+            prop_oneof![
+                // CPU sample: 50% worker, 50% non-worker; 0..4 callchain addrs
+                (
+                    prop::bool::ANY,
+                    0u32..4,
+                    prop::collection::vec(0u64..8, 0..3),
+                )
+                    .prop_map(|(is_worker, tid, callchain)| {
+                        FlushOp::CpuSample {
+                            worker_id: if is_worker { 0 } else { UNKNOWN_WORKER },
+                            tid,
+                            callchain,
+                        }
+                    }),
+                // PollStart referencing one of 3 distinct locations
+                (0usize..3).prop_map(|idx| FlushOp::PollStart { location_idx: idx }),
+            ]
+        }
+
+        /// A single flush round: some CPU events followed by some raw events,
+        /// mirroring the real `TelemetryRecorder::flush` ordering.
+        #[derive(Debug, Clone)]
+        struct FlushRound {
+            cpu_ops: Vec<FlushOp>,
+            raw_ops: Vec<FlushOp>,
+        }
+
+        fn arb_flush_round() -> impl Strategy<Value = FlushRound> {
+            (
+                prop::collection::vec(arb_flush_op(), 0..12).prop_map(|ops| {
+                    ops.into_iter()
+                        .filter(|o| matches!(o, FlushOp::CpuSample { .. }))
+                        .collect()
+                }),
+                prop::collection::vec(arb_flush_op(), 0..12).prop_map(|ops| {
+                    ops.into_iter()
+                        .filter(|o| matches!(o, FlushOp::PollStart { .. }))
+                        .collect()
+                }),
+            )
+                .prop_map(|(cpu_ops, raw_ops)| FlushRound { cpu_ops, raw_ops })
+        }
+
+        /// Execute one flush round, simulating the real
+        /// `TelemetryRecorder::flush` sequence:
+        ///   1. cpu_flush.write_cpu_event(...) for each CPU op
+        ///   2. for each raw op: check take_rotated → handle_rotation → resolve → write_atomic
+        ///
+        /// `expected_raw` is incremented for each raw event that is actually
+        /// written. CPU events may be silently dropped by `write_cpu_event`
+        /// when the batch is oversized, so we don't attempt to predict their
+        /// count — the self-containedness check in `verify_files` is the
+        /// primary assertion for CPU correctness.
+        fn execute_flush_round(
+            round: &FlushRound,
+            cpu: &mut CpuFlushState,
+            flush_state: &mut FlushState,
+            writer: &mut dyn TraceWriter,
+            locations: &[&'static Location<'static>],
+            timestamp: &mut u64,
+            expected_raw: &mut usize,
+        ) {
+            // Phase 1: CPU flush
+            for op in &round.cpu_ops {
+                if let FlushOp::CpuSample {
+                    worker_id,
+                    tid,
+                    callchain,
+                } = op
+                {
+                    let event = TelemetryEvent::CpuSample {
+                        timestamp_nanos: *timestamp,
+                        worker_id: *worker_id,
+                        tid: *tid,
+                        source: CpuSampleSource::CpuProfile,
+                        callchain: callchain.clone(),
+                    };
+                    *timestamp += 1;
+                    cpu.write_cpu_event(&event, writer, flush_state);
+                }
+            }
+
+            // Phase 2: raw event flush (mirrors write_raw_event logic)
+            for op in &round.raw_ops {
+                if let FlushOp::PollStart { location_idx } = op {
+                    // Check for rotation left over from CPU phase (or previous raw event)
+                    if writer.take_rotated() {
+                        flush_state.on_rotate();
+                        cpu.on_rotate();
+                    }
+
+                    let loc = locations[*location_idx];
+                    let task_id = TaskId::from_u32(*timestamp as u32);
+                    let raw = RawEvent::PollStart {
+                        timestamp_nanos: *timestamp,
+                        worker_id: 0,
+                        worker_local_queue_depth: 0,
+                        task_id,
+                        location: loc,
+                    };
+                    *timestamp += 1;
+
+                    let events = flush_state.resolve(raw);
+                    match writer.write_atomic(&events).unwrap() {
+                        WriteAtomicResult::Written => {
+                            *expected_raw += 1;
+                        }
+                        WriteAtomicResult::OversizedBatch => {
+                            // Batch won't ever fit — drop it, same as production code.
+                        }
+                        WriteAtomicResult::Rotated => {
+                            assert!(writer.take_rotated());
+                            flush_state.on_rotate();
+                            cpu.on_rotate();
+                            let events = flush_state.resolve(raw);
+                            match writer.write_atomic(&events).unwrap() {
+                                WriteAtomicResult::Written => {
+                                    *expected_raw += 1;
+                                }
+                                WriteAtomicResult::OversizedBatch => {
+                                    // Still too big after rotation — drop.
+                                }
+                                WriteAtomicResult::Rotated => {
+                                    panic!("double rotation on raw event retry");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Read all .bin files from `dir`, verify each is self-contained, and
+        /// return total PollStart event count.
+        fn verify_files(dir: &std::path::Path) -> usize {
+            let mut files: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().map_or(false, |ext| ext == "bin"))
+                .collect();
+            files.sort();
+
+            let mut total_raw = 0;
+
+            for file in &files {
+                let path_str = file.to_str().unwrap();
+                let mut reader = TraceReader::new(path_str)
+                    .unwrap_or_else(|e| panic!("failed to open {path_str}: {e}"));
+                reader.read_header().unwrap();
+
+                // Read ALL events (including defs) so we can check ordering.
+                let mut events = Vec::new();
+                while let Some(ev) = reader.read_raw_event().unwrap() {
+                    events.push(ev);
+                }
+
+                // Track which defs have appeared so far in this file.
+                let mut spawn_loc_defs: HashSet<SpawnLocationId> = HashSet::new();
+                let mut thread_name_defs: HashSet<u32> = HashSet::new();
+                let mut callframe_defs: HashSet<u64> = HashSet::new();
+
+                for ev in &events {
+                    match ev {
+                        TelemetryEvent::SpawnLocationDef { id, location } => {
+                            assert!(
+                                location.contains(':'),
+                                "{path_str}: SpawnLocationDef has bad location: {location:?}"
+                            );
+                            spawn_loc_defs.insert(*id);
+                        }
+                        TelemetryEvent::ThreadNameDef { tid, .. } => {
+                            thread_name_defs.insert(*tid);
+                        }
+                        TelemetryEvent::CallframeDef { address, .. } => {
+                            callframe_defs.insert(*address);
+                        }
+                        TelemetryEvent::PollStart { spawn_loc_id, .. } => {
+                            assert!(
+                                spawn_loc_defs.contains(spawn_loc_id),
+                                "{path_str}: PollStart references spawn_loc_id \
+                                 {spawn_loc_id:?} but no SpawnLocationDef was emitted \
+                                 in this file. Defs present: {spawn_loc_defs:?}"
+                            );
+                            total_raw += 1;
+                        }
+                        TelemetryEvent::CpuSample {
+                            worker_id,
+                            tid,
+                            callchain,
+                            ..
+                        } => {
+                            if *worker_id == UNKNOWN_WORKER {
+                                assert!(
+                                    thread_name_defs.contains(tid),
+                                    "{path_str}: CpuSample for non-worker tid {tid} \
+                                     has no ThreadNameDef in this file. \
+                                     Defs present: {thread_name_defs:?}"
+                                );
+                            }
+                            for addr in callchain {
+                                assert!(
+                                    callframe_defs.contains(addr),
+                                    "{path_str}: CpuSample references callchain \
+                                     address {addr:#x} but no CallframeDef in this \
+                                     file. Defs present: {callframe_defs:?}"
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            total_raw
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            #[test]
+            fn rotation_preserves_self_containedness(
+                rounds in prop::collection::vec(arb_flush_round(), 1..6),
+                max_file_size in 60u64..300,
+            ) {
+                let dir = tempfile::TempDir::new().unwrap();
+                let base = dir.path().join("trace");
+
+                let mut writer = RotatingWriter::new(&base, max_file_size, 1_000_000).unwrap();
+
+                let mut flush_state = FlushState::new();
+                let mut cpu = CpuFlushState::new();
+                // Enable callframe symbolication so CallframeDef paths are exercised.
+                cpu.inline_callframe_symbols = true;
+                // Pre-populate the thread-name intern table for non-worker tids 0..4
+                // (in production these come from /proc; we just seed them here).
+                for tid in 0u32..4 {
+                    cpu.thread_name_intern.insert(tid, format!("thread-{tid}"));
+                }
+
+                // Three distinct static locations to reference from PollStart events.
+                #[track_caller]
+                fn loc0() -> &'static Location<'static> { Location::caller() }
+                #[track_caller]
+                fn loc1() -> &'static Location<'static> { Location::caller() }
+                #[track_caller]
+                fn loc2() -> &'static Location<'static> { Location::caller() }
+                let locations: Vec<&'static Location<'static>> = vec![loc0(), loc1(), loc2()];
+
+                let mut timestamp = 1u64;
+                let mut expected_raw = 0usize;
+
+                for round in &rounds {
+                    execute_flush_round(
+                        round,
+                        &mut cpu,
+                        &mut flush_state,
+                        &mut writer,
+                        &locations,
+                        &mut timestamp,
+                        &mut expected_raw,
+                    );
+                }
+                writer.flush().unwrap();
+
+                let actual_raw = verify_files(dir.path());
+
+                // Raw events are tracked precisely — every written one must appear.
+                prop_assert_eq!(
+                    actual_raw, expected_raw,
+                    "raw event count mismatch: expected {}, got {}", expected_raw, actual_raw
+                );
+                // CPU event counts are not checked here because write_cpu_event
+                // silently drops oversized batches and doesn't return a result.
+                // The self-containedness invariants in verify_files are the
+                // primary assertion: every event that *does* appear must have
+                // all its defs in the same file.
+            }
+        }
     }
 }

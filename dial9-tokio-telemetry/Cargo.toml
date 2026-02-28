@@ -24,6 +24,7 @@ default = ["cpu-profiling"]
 assert2 = "0.3"
 criterion = "0.5"
 hdrhistogram = "7"
+proptest = "1"
 tempfile = "3"
 
 [[bench]]

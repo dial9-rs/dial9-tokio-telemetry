@@ -90,8 +90,7 @@ impl CpuProfiler {
     ///
     /// Eagerly reads `/proc/self/task/<tid>/comm` for non-worker tids so that
     /// thread names are captured before short-lived threads exit.
-    pub fn drain(&mut self) -> Vec<TelemetryEvent> {
-        let mut events = Vec::new();
+    pub fn drain(&mut self, mut f: impl FnMut(TelemetryEvent, Option<&str>)) {
         self.sampler.for_each_sample(|sample| {
             let timestamp_nanos = sample.time.saturating_sub(self.clock_offset);
             let worker_id = self
@@ -107,20 +106,18 @@ impl CpuProfiler {
             {
                 self.tid_to_name.insert(sample.tid, name);
             }
-            events.push(TelemetryEvent::CpuSample {
-                timestamp_nanos,
-                worker_id,
-                tid: sample.tid,
-                source: crate::telemetry::events::CpuSampleSource::CpuProfile,
-                callchain: sample.callchain.clone(),
-            });
+            let thread_name = self.tid_to_name.get(&sample.tid).map(|s| s.as_str());
+            f(
+                TelemetryEvent::CpuSample {
+                    timestamp_nanos,
+                    worker_id,
+                    tid: sample.tid,
+                    source: crate::telemetry::events::CpuSampleSource::CpuProfile,
+                    callchain: sample.callchain.clone(),
+                },
+                thread_name,
+            );
         });
-        events
-    }
-
-    /// Return the cached thread name for a non-worker tid, if known.
-    pub fn thread_name(&self, tid: u32) -> Option<&str> {
-        self.tid_to_name.get(&tid).map(|s| s.as_str())
     }
 }
 
@@ -170,8 +167,7 @@ impl SchedProfiler {
         self.tid_to_worker.insert(tid, worker_id);
     }
 
-    pub fn drain(&mut self) -> Vec<TelemetryEvent> {
-        let mut events = Vec::new();
+    pub fn drain(&mut self, mut f: impl FnMut(TelemetryEvent)) {
         self.sampler.for_each_sample(|sample| {
             let timestamp_nanos = sample.time.saturating_sub(self.clock_offset);
             let worker_id = self
@@ -179,7 +175,7 @@ impl SchedProfiler {
                 .get(&sample.tid)
                 .copied()
                 .unwrap_or(UNKNOWN_WORKER);
-            events.push(TelemetryEvent::CpuSample {
+            f(TelemetryEvent::CpuSample {
                 timestamp_nanos,
                 worker_id,
                 tid: sample.tid,
@@ -187,6 +183,5 @@ impl SchedProfiler {
                 callchain: sample.callchain.clone(),
             });
         });
-        events
     }
 }
