@@ -13,7 +13,7 @@ use perf_event_open_sys::bindings::{
     PERF_TYPE_SOFTWARE, perf_event_attr,
 };
 
-use crate::ring_buffer::RingBuffer;
+use crate::ring_buffer::{RingBuffer, page_size};
 
 // On x86_64, userspace virtual addresses are below 0x0000_8000_0000_0000.
 const USER_ADDR_LIMIT: u64 = 0x0000_8000_0000_0000;
@@ -93,13 +93,14 @@ impl Drop for PerfEvent {
     }
 }
 
-const PAGE_SIZE: usize = 4096;
 const PAGE_COUNT: usize = 16; // power of 2
-const MMAP_SIZE: usize = (PAGE_COUNT + 1) * PAGE_SIZE;
-const DATA_SIZE: usize = PAGE_COUNT * PAGE_SIZE;
 
 /// Open a perf event fd, mmap the ring buffer, and enable it.
 fn open_perf_event(attr: &mut perf_event_attr, pid: i32, cpu: i32) -> io::Result<PerfEvent> {
+    let page_size = page_size();
+    let data_size = PAGE_COUNT * page_size;
+    let mmap_size = (PAGE_COUNT + 1) * page_size;
+
     let fd = unsafe {
         perf_event_open_sys::perf_event_open(
             attr,
@@ -129,7 +130,7 @@ fn open_perf_event(attr: &mut perf_event_attr, pid: i32, cpu: i32) -> io::Result
     let base = unsafe {
         libc::mmap(
             ptr::null_mut(),
-            MMAP_SIZE,
+            mmap_size,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_SHARED,
             fd,
@@ -143,7 +144,7 @@ fn open_perf_event(attr: &mut perf_event_attr, pid: i32, cpu: i32) -> io::Result
         return Err(err);
     }
 
-    let ring = unsafe { RingBuffer::new(base as *mut u8, DATA_SIZE as u64, MMAP_SIZE) };
+    let ring = unsafe { RingBuffer::new(base as *mut u8, data_size as u64, mmap_size) };
 
     if unsafe { perf_event_open_sys::ioctls::ENABLE(fd, 0) } < 0 {
         let err = io::Error::last_os_error();
