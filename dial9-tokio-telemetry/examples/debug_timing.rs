@@ -1,4 +1,4 @@
-use dial9_tokio_telemetry::{DetectLongWait, LongPollTracker, SentinelStatus};
+use dial9_tokio_telemetry::task_dump::{DetectLongWait, LongPollTracker, SentinelStatus};
 use tokio::time::Duration;
 
 #[tokio::main]
