@@ -1,5 +1,5 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use dial9_tokio_telemetry::DetectLongWait;
+use dial9_tokio_telemetry::task_dump::DetectLongWait;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};

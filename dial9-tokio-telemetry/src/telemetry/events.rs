@@ -230,12 +230,23 @@ pub enum RawEvent {
 }
 
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.
+#[cfg(target_os = "linux")]
 pub fn current_tid() -> u32 {
     unsafe { libc::syscall(libc::SYS_gettid) as u32 }
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn current_tid() -> u32 {
+    // No gettid on non-Linux; use a thread-local counter as a unique ID.
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    thread_local! { static TID: u32 = NEXT.fetch_add(1, Ordering::Relaxed); }
+    TID.with(|t| *t)
+}
+
 /// Read the calling thread's CPU time via `CLOCK_THREAD_CPUTIME_ID`.
 /// This is a vDSO call on Linux (~20-40ns), no actual syscall.
+#[cfg(target_os = "linux")]
 pub fn thread_cpu_time_nanos() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -249,6 +260,11 @@ pub fn thread_cpu_time_nanos() -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn thread_cpu_time_nanos() -> u64 {
+    0
+}
+
 /// Per-thread scheduler stats from `/proc/<pid>/task/<tid>/schedstat`.
 /// Fields: run_time_ns wait_time_ns timeslices
 #[derive(Debug, Clone, Copy, Default)]
@@ -256,6 +272,7 @@ pub struct SchedStat {
     pub wait_time_ns: u64,
 }
 
+#[cfg(target_os = "linux")]
 impl SchedStat {
     /// Read schedstat for the current thread using a cached per-thread file descriptor.
     /// Opening `/proc/self/task/<tid>/schedstat` is done once per thread; subsequent reads
@@ -316,6 +333,16 @@ impl SchedStat {
         let _run_time_ns: u64 = parts.next()?.parse().ok()?;
         let wait_time_ns: u64 = parts.next()?.parse().ok()?;
         Some(SchedStat { wait_time_ns })
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl SchedStat {
+    pub fn read_current() -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "schedstat not available on this platform",
+        ))
     }
 }
 
