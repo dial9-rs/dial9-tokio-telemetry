@@ -3,6 +3,8 @@ name = "dial9-tokio-telemetry"
 edition = "2024"
 version = "0.1.0"
 publish = true
+description = "Low-overhead runtime telemetry for Tokio with poll timing, wake events, and CPU profiling"
+license = "Apache-2.0"
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "rt-multi-thread", "sync", "net", "io-util"] }
