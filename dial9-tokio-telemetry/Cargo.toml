@@ -25,6 +25,8 @@ criterion = "0.5"
 hdrhistogram = "7"
 proptest = "1"
 tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 dial9-tokio-telemetry = { path = ".", features = ["cpu-profiling"] }
 
 [[bench]]
@@ -51,3 +53,11 @@ required-features = ["task-dump"]
 [[example]]
 name = "debug_timing"
 required-features = ["task-dump"]
+
+[[example]]
+name = "blocking_sleep"
+required-features = ["cpu-profiling"]
+
+[[example]]
+name = "cpu_profile_workload"
+required-features = ["cpu-profiling"]
