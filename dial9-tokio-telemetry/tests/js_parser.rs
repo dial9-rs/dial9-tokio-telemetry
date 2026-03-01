@@ -1,6 +1,6 @@
 //! Integration test: verify JS trace parser matches Rust parser
 
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SimpleBinaryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{SimpleBinaryWriter, TracedRuntime};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -27,18 +27,21 @@ fn test_js_parser_matches_rust() {
     let trace_path = temp_dir.path().join("test_trace.bin");
     let jsonl_path = temp_dir.path().join("expected.jsonl");
 
-    // Generate a trace with CPU profiling
+    // Generate a trace — enable CPU profiling on Linux where it's available
     {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.worker_threads(2).enable_all();
 
         let writer = Box::new(SimpleBinaryWriter::new(&trace_path).unwrap());
-        let (runtime, _guard) = TracedRuntime::builder()
-            .with_task_tracking(true)
-            .with_cpu_profiling(CpuProfilingConfig::default())
-            .with_inline_callframe_symbols(true)
-            .build_and_start(builder, writer)
-            .unwrap();
+        #[allow(unused_mut)]
+        let mut tb = TracedRuntime::builder().with_task_tracking(true);
+        #[cfg(feature = "cpu-profiling")]
+        {
+            tb = tb
+                .with_cpu_profiling(dial9_tokio_telemetry::telemetry::CpuProfilingConfig::default())
+                .with_inline_callframe_symbols(true);
+        }
+        let (runtime, _guard) = tb.build_and_start(builder, writer).unwrap();
 
         runtime.block_on(async {
             let mut tasks = vec![];

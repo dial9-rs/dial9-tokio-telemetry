@@ -13,9 +13,10 @@
 //!
 //! Duration defaults to 30 seconds. A 3-second warmup precedes measurement.
 
+#[cfg(target_os = "linux")]
+use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    CpuProfilingConfig, NullWriter, SimpleBinaryWriter, TelemetryGuard, TelemetryHandle,
-    TracedRuntime,
+    NullWriter, SimpleBinaryWriter, TelemetryGuard, TelemetryHandle, TracedRuntime,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -173,12 +174,14 @@ fn main() {
         "telemetry" => {
             let writer =
                 Box::new(SimpleBinaryWriter::new("/tmp/overhead_bench_trace.bin").unwrap());
-            let (rt, g) = TracedRuntime::builder()
-                .with_task_tracking(true)
-                .with_cpu_profiling(CpuProfilingConfig::default())
-                .with_inline_callframe_symbols(true)
-                .build_and_start(builder, writer)
-                .unwrap();
+            let mut tb = TracedRuntime::builder().with_task_tracking(true);
+            #[cfg(target_os = "linux")]
+            {
+                tb = tb
+                    .with_cpu_profiling(CpuProfilingConfig::default())
+                    .with_inline_callframe_symbols(true);
+            }
+            let (rt, g) = tb.build_and_start(builder, writer).unwrap();
             (rt, Some(g))
         }
         "noop" => {
