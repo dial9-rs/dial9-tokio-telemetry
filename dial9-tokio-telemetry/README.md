@@ -118,7 +118,3 @@ The system uses `.cargo/config.toml` to enable the `tokio_unstable` flag require
 - `arc-swap` (for lock-free sentinel updates)
 - `pin-project-lite` (for proper pinning in the future wrapper)
 - `smallvec` (for efficient small vector storage)
-
-## Useful links
-
-- [Code Browser](https://code.amazon.com/packages/RustProfilingExperiments/)
