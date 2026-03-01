@@ -33,15 +33,20 @@ dial9-tokio-telemetry is designed for always-on production use, but it's still e
 ## Is there a demo?
 Yes, checkout this [quick walkthrough (YouTube)](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)!
 
+The [viewer for the code](https://dial9-tokio-telemetry.russell-r-cohen.workers.dev/) in main is hosted on cloudflare pages, but you can also use serve.py (pure HTML and JS, client side only)
+
+<img width="1288" height="659" alt="Screenshot 2026-03-01 at 3 52 59 PM" src="https://github.com/user-attachments/assets/77225801-70b1-4aef-b064-32bc2326b1ef" />
+
+
 ## Why dial9-tokio-telemetry?
 
-Understanding how Tokio is actually running your application — which tasks are slow, why workers are idle, where scheduling delays come from — is hard to do from the outside. This crate records a continuous, low-overhead trace of runtime behavior.
+It can be hard to understand application performance and behavior, in async code. Dial9 tracks every event Tokio emits to create a detailed, micro-second-by-microsecond trace of your application behavior that you can analyze.
 
-Compared to [tokio-console](https://github.com/tokio-rs/console), which is designed for live debugging, dial9-tokio-telemetry is designed for post-hoc analysis. Because traces are written to files with bounded disk usage, you can leave it running in production and come back later to deeply analyze what went wrong or why a specific request was slow. On Linux, traces include CPU profile samples and scheduler events, so you can see not just *that* a task was delayed but *what code* was running on the worker instead.
+Compared to [tokio-console](https://github.com/tokio-rs/console), which is designed for live debugging, dial9-tokio-telemetry is designed for post-hoc analysis. Because traces are written to files with bounded disk usage, you can leave it running in production and come back later to deeply analyze what went wrong or why a specific request was slow. On Linux, traces include CPU profile samples and kernel scheduling events, so you can see not just *that* a task was delayed but *what code* was running on the worker instead.
 
 ## What gets recorded automatically
 
-`TracedRuntime` installs hooks on the Tokio runtime builder. These fire for every task on the runtime with no code changes required:
+`TracedRuntime` installs hooks on the Tokio runtime. The following events are recorded out of the box:
 
 | Event | Fields |
 |-------|--------|
@@ -52,7 +57,7 @@ Compared to [tokio-console](https://github.com/tokio-rs/console), which is desig
 
 ## Wake event tracking
 
-Wake events — which task woke which other task — are *not* captured automatically. Tokio's runtime hooks don't expose waker identity, so capturing this requires wrapping the future in `Traced<F>`, which installs a custom waker that records a `WakeEvent` before forwarding to the real waker.
+To understand when Tokio itself is delaying your code, generally referred to as scheduler delay, you need to know when your future was _ready_ to run. Wake events — which task woke which other task — are *not* captured automatically. Tokio's runtime hooks don't currently allow instrumenting wakes: capturing wakes requires wrapping the future. The simplest way to do that is by using `handle.spawn` instead of `task::spawn`. 
 
 Use `handle.spawn()` instead of `tokio::spawn()`:
 
@@ -65,10 +70,10 @@ let (runtime, guard) = TracedRuntime::build_and_start(builder, Box::new(writer))
 let handle = guard.handle();
 
 runtime.block_on(async {
-    // wake events captured — uses Traced<F> wrapper
+    // wake events / scheduling delay captured
     handle.spawn(async { /* ... */ });
 
-    // wake events NOT captured — still gets poll/park/queue telemetry
+    // this task is still tracked, but won't have wake events
     tokio::spawn(async { /* ... */ });
 });
 # Ok(())
@@ -83,13 +88,17 @@ Core telemetry (poll timing, park/unpark, queue depth, wake events) works on all
 
 On Linux, you get additional data for free:
 - **Thread CPU time** in park/unpark events via `CLOCK_THREAD_CPUTIME_ID` (vDSO, ~20–40 ns)
-- **Scheduler wait time** via `/proc/self/task/<tid>/schedstat` — shows how long the OS kept your thread off-CPU
+- **Scheduler wait time** via `/proc/self/task/<tid>/schedstat` — shows when the Tokio worker was not scheduled by the OS when it was ready.
 
 On non-Linux platforms these fields are zero.
 
 ### CPU profiling (Linux only)
 
-With the `cpu-profiling` feature, you can enable `perf_event_open`-based CPU sampling and scheduler event capture. This records stack traces attributed to specific worker threads, so you can see *what code* was running during a scheduling delay.
+With the `cpu-profiling` feature, you can enable `perf_event_open`-based CPU sampling. This gives two key pieces of data:
+1. Stack traces when code was running on the CPU — aka flamegraphs
+2. 2. Stack traces when the kernel _descheduled_ your thread. For example, if you use `std::thread::sleep` in your future or are seeing `std::sync::Mutex` contention, this will allow you to see precisely where this is happening in async code.
+
+Both of these events are tied to the precise instant and thread that they happened on, so you can compare what was different between degraded and normal performance.
 
 ```rust,no_run
 # #[cfg(feature = "cpu-profiling")]
@@ -138,7 +147,7 @@ handle.disable();
 
 ### Writers
 
-`RotatingWriter` is what you want for production — it rotates files and evicts old ones to stay within a total size budget. `SimpleBinaryWriter` writes a single file with no size management, useful for quick experiments. `NullWriter` measures hook overhead without doing any I/O.
+`RotatingWriter` rotates files and evicts old ones to stay within a total size budget. `SimpleBinaryWriter` writes a single file with no size management, useful for quick experiments.
 
 ### Analyzing traces
 
