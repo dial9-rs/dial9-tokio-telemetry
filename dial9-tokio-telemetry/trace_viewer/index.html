@@ -488,6 +488,27 @@
                 reader.readAsArrayBuffer(blob);
             }
 
+            async function loadTraceFromUrl(url) {
+                try {
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const arrayBuffer = await response.arrayBuffer();
+                    trace = parseTrace(arrayBuffer);
+                    processTrace();
+                    showViewer(url.split('/').pop() || 'trace.bin');
+                } catch (err) {
+                    alert("Error loading trace from URL: " + err.message);
+                    dropZone.style.display = "flex";
+                }
+            }
+
+            // Check for URL parameter on load
+            const urlParams = new URLSearchParams(window.location.search);
+            const traceUrl = urlParams.get('trace');
+            if (traceUrl) {
+                loadTraceFromUrl(traceUrl);
+            }
+
             function processTrace() {
                 const evts = trace.events;
                 if (!evts.length) {
