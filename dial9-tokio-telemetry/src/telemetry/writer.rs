@@ -257,6 +257,9 @@ impl TraceWriter for RotatingWriter {
             if self.current_size + total > self.max_file_size {
                 return Ok(WriteAtomicResult::OversizedBatch);
             }
+            // The batch fits in the new file — signal rotation so the caller
+            // can re-emit defs, but don't write yet (the caller will retry
+            // with the augmented batch).
             return Ok(WriteAtomicResult::Rotated);
         }
 
