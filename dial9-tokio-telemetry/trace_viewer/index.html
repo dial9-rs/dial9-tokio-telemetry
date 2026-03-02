@@ -447,6 +447,8 @@
             let wakesByWorker = {}; // workerId → [{timestamp, wakerTaskId, wokenTaskId}]
             // Scheduling delays: wake → next poll for same task
             let schedDelays = []; // [{wakeTime, pollTime, delay, taskId, wakerTaskId, worker}]
+            // Lane canvases per worker (populated by buildLanes)
+            let laneCanvases = {};
 
             const LABEL_W = 100;
             const LANE_H = 60;
@@ -523,7 +525,7 @@
                 loadTraceFromUrl(traceUrl);
             }
 
-            document.getElementById("load-demo").addEventListener("click", (e) => {
+            document.getElementById("load-demo")?.addEventListener("click", (e) => {
                 e.stopPropagation();
                 e.preventDefault();
                 dropZone.innerHTML = 'Loading demo trace…';
@@ -944,7 +946,6 @@
             }
 
             // ── Lane DOM ──
-            let laneCanvases = {};
             function buildLanes() {
                 lanesContainer.innerHTML = "";
                 laneCanvases = {};
