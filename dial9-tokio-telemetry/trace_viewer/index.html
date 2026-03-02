@@ -506,6 +506,7 @@
             const urlParams = new URLSearchParams(window.location.search);
             const traceUrl = urlParams.get('trace');
             if (traceUrl) {
+                dropZone.innerHTML = 'Loading trace…';
                 loadTraceFromUrl(traceUrl);
             }
 
