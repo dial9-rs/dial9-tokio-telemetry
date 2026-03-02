@@ -5,6 +5,12 @@
 If you modify the trace format (event structure, encoding, parser, etc.), you MUST regenerate the demo trace:
 
 ```bash
+./scripts/regenerate_demo_trace.sh
+```
+
+Or manually:
+
+```bash
 cd dial9-tokio-telemetry
 rm -f trace_viewer/demo-trace.bin
 cargo build --release -p metrics-service

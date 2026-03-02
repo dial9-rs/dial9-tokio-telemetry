@@ -41,6 +41,11 @@ The [viewer](https://dial9-tokio-telemetry.russell-r-cohen.workers.dev/) (autode
 
 To generate your own demo trace:
 ```bash
+./scripts/regenerate_demo_trace.sh
+```
+
+Or manually:
+```bash
 cargo build --release -p metrics-service
 AWS_PROFILE=your-profile cargo run --release -p metrics-service --bin metrics-service -- --demo
 ```
