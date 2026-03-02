@@ -53,7 +53,7 @@ fn parse_maps_line(line: &str) -> Option<(u64, u64, String, u64)> {
 /// Source location information for a resolved symbol.
 #[derive(Debug, Clone)]
 pub struct CodeInfo {
-    /// Source file name (no directory component).
+    /// Source file path (includes directory when available from debug info).
     pub file: String,
     /// Line number within the source file, if available.
     pub line: Option<u32>,
@@ -108,10 +108,19 @@ pub fn resolve_symbol(addr: u64) -> SymbolInfo {
                     return SymbolInfo {
                         name: Some(sym.name.to_string()),
                         base_addr: sym.addr,
-                        code_info: sym.code_info.as_ref().map(|c| CodeInfo {
-                            file: c.file.to_string_lossy().into_owned(),
-                            line: c.line,
-                            column: c.column,
+                        code_info: sym.code_info.as_ref().map(|c| {
+                            let file = match &c.dir {
+                                Some(dir) => dir
+                                    .join(c.file.as_ref() as &std::path::Path)
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                None => c.file.to_string_lossy().into_owned(),
+                            };
+                            CodeInfo {
+                                file,
+                                line: c.line,
+                                column: c.column,
+                            }
                         }),
                         offset: addr.saturating_sub(sym.addr),
                     };

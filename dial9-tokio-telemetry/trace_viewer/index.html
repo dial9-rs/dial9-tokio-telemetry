@@ -369,8 +369,18 @@
         <script src="trace_parser.js"></script>
         <script>
             // Use the external parser
-            const { parseTrace } = TraceParser;
+            const { parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
 
+            function esc(s) {
+                return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            }
+
+            /** Render a raw frame {symbol, location} as HTML, with docs.rs link if available. */
+            function renderFrame(frame) {
+                const f = formatFrame(frame);
+                if (f.docsUrl) return `<a href="${esc(f.docsUrl)}" target="_blank" style="color:inherit;text-decoration:underline dotted">${esc(f.text)}</a>`;
+                return esc(f.text);
+            }
             // ── Event type helpers ──
             const ET = {
                 PollStart: 0,
@@ -1885,16 +1895,6 @@
                 renderAll();
             });
 
-            function symbolizeChain(chain) {
-                return chain.map(addr => trace.callframeSymbols.get(addr) || addr);
-            }
-
-            // Shorten a symbol for display: strip generic params, keep last path segment
-            function shortSym(sym) {
-                // Strip everything inside < > for readability
-                return sym.replace(/<[^>]*>/g, '<…>');
-            }
-
             function showStackPopup(poll, x, y) {
                 const popup = document.getElementById("stack-popup");
                 const title = document.getElementById("stack-popup-title");
@@ -1911,28 +1911,28 @@
                 // Sched events: deduplicate by symbolized stack, show counts
                 if (poll.schedSamples && poll.schedSamples.length > 0) {
                     html += `<div style="color:#ff4444;font-weight:600;margin-bottom:6px">⚠ Blocking during poll (${schedCount} sched event${schedCount > 1 ? "s" : ""})</div>`;
-                    const groups = deduplicateSamples(poll.schedSamples);
+                    const groups = deduplicateSamples(poll.schedSamples, trace.callframeSymbols);
                     for (const g of groups) {
                         const pct = ((g.count / schedCount) * 100).toFixed(0);
                         const barW = Math.max(2, (g.count / schedCount) * 200);
                         html += `<div style="margin-bottom:10px;border-left:3px solid #ff4444;padding-left:8px">`;
                         html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">`;
                         html += `<span style="color:#ff4444;font-weight:600;font-size:1.1em">${g.count}×</span>`;
-                        html += `<span style="color:#fff;font-weight:600">${shortSym(g.leaf)}</span>`;
+                        html += `<span style="color:#fff;font-weight:600">${g.leaf}</span>`;
                         html += `<span style="color:#888">(${pct}%)</span>`;
                         html += `<span style="display:inline-block;height:8px;width:${barW}px;background:#ff4444;border-radius:2px;opacity:0.6"></span>`;
                         html += `</div>`;
                         // Show abbreviated context: leaf + first interesting caller
-                        const ctx = g.syms.slice(0, 3);
+                        const ctx = g.frames.slice(0, 3);
                         for (let i = 0; i < ctx.length; i++) {
-                            html += `<div style="color:${i === 0 ? '#ff8a65' : '#777'};padding-left:${i * 8}px;font-size:0.9em">${shortSym(ctx[i])}</div>`;
+                            html += `<div style="color:${i === 0 ? '#ff8a65' : '#777'};padding-left:${i * 8}px;font-size:0.9em">${renderFrame(ctx[i])}</div>`;
                         }
-                        if (g.syms.length > 3) {
+                        if (g.frames.length > 3) {
                             const id = 'sched-expand-' + Math.random().toString(36).slice(2);
-                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:16px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.syms.length - 3} more frames'">▶ ${g.syms.length - 3} more frames</div>`;
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:16px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▶ ${g.frames.length - 3} more frames</div>`;
                             html += `<div id="${id}" style="display:none">`;
-                            for (let i = 3; i < g.syms.length; i++) {
-                                html += `<div style="color:#666;padding-left:24px;font-size:0.85em">${shortSym(g.syms[i])}</div>`;
+                            for (let i = 3; i < g.frames.length; i++) {
+                                html += `<div style="color:#666;padding-left:24px;font-size:0.85em">${renderFrame(g.frames[i])}</div>`;
                             }
                             html += `</div>`;
                         }
@@ -1945,23 +1945,23 @@
                     if (schedCount > 0) {
                         html += `<div style="color:#ff8c00;font-weight:600;margin:8px 0 6px">CPU Profile (${cpuCount} sample${cpuCount > 1 ? "s" : ""})</div>`;
                     }
-                    const groups = deduplicateSamples(poll.cpuSamples);
+                    const groups = deduplicateSamples(poll.cpuSamples, trace.callframeSymbols);
                     for (const g of groups) {
                         const pct = ((g.count / cpuCount) * 100).toFixed(0);
                         html += `<div style="margin-bottom:8px;border-left:2px solid #333;padding-left:8px">`;
                         html += `<span style="color:#ff8c00">${g.count}×</span> `;
-                        html += `<span style="color:#fff">${shortSym(g.leaf)}</span> `;
+                        html += `<span style="color:#fff">${g.leaf}</span> `;
                         html += `<span style="color:#888">(${pct}%)</span>`;
-                        const ctx = g.syms.slice(1, 3);
-                        for (const s of ctx) {
-                            html += `<div style="color:#777;padding-left:8px;font-size:0.9em">${shortSym(s)}</div>`;
+                        const ctx = g.frames.slice(1, 3);
+                        for (const f of ctx) {
+                            html += `<div style="color:#777;padding-left:8px;font-size:0.9em">${renderFrame(f)}</div>`;
                         }
-                        if (g.syms.length > 3) {
+                        if (g.frames.length > 3) {
                             const id = 'cpu-expand-' + Math.random().toString(36).slice(2);
-                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:8px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.syms.length - 3} more frames'">▶ ${g.syms.length - 3} more frames</div>`;
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:8px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▶ ${g.frames.length - 3} more frames</div>`;
                             html += `<div id="${id}" style="display:none">`;
-                            for (let i = 3; i < g.syms.length; i++) {
-                                html += `<div style="color:#666;padding-left:16px;font-size:0.85em">${shortSym(g.syms[i])}</div>`;
+                            for (let i = 3; i < g.frames.length; i++) {
+                                html += `<div style="color:#666;padding-left:16px;font-size:0.85em">${renderFrame(g.frames[i])}</div>`;
                             }
                             html += `</div>`;
                         }
@@ -1973,20 +1973,6 @@
                 popup.style.display = "block";
                 popup.style.left = Math.min(x + 12, window.innerWidth - 820) + "px";
                 popup.style.top = Math.min(y - 20, window.innerHeight - 620) + "px";
-            }
-
-            // Deduplicate samples by symbolized stack, return sorted groups
-            function deduplicateSamples(samples) {
-                const groups = new Map(); // key → {count, syms, leaf}
-                for (const sample of samples) {
-                    const syms = symbolizeChain(sample.callchain);
-                    const key = syms.join('\0');
-                    if (!groups.has(key)) {
-                        groups.set(key, { count: 0, syms, leaf: syms[0] || '(unknown)' });
-                    }
-                    groups.get(key).count++;
-                }
-                return [...groups.values()].sort((a, b) => b.count - a.count);
             }
 
             function hideStackPopup() {
@@ -2045,18 +2031,20 @@
                 // Group by leaf frame or full stack
                 const groups = new Map();
                 for (const { sample, poll, worker } of allSched) {
-                    const syms = symbolizeChain(sample.callchain);
-                    const key = groupBy === "leaf" ? (syms[0] || "(unknown)") : syms.join('\0');
+                    const frames = symbolizeChain(sample.callchain, trace.callframeSymbols);
+                    const leafRaw = frames[0] ? frames[0].symbol : '(unknown)';
+                    const leafDisplay = frames[0] ? renderFrame(frames[0]) : '(unknown)';
+                    const key = groupBy === "leaf" ? leafRaw : frames.map(f => f.symbol).join('\0');
                     if (!groups.has(key)) {
-                        groups.set(key, { leaf: syms[0] || "(unknown)", count: 0, stacks: new Map(), polls: [] });
+                        groups.set(key, { leaf: leafDisplay, leafRaw, count: 0, stacks: new Map(), polls: [] });
                     }
                     const g = groups.get(key);
                     g.count++;
                     g.polls.push({ poll, worker, timestamp: sample.timestamp });
                     // Sub-group by full stack within each leaf group
-                    const fullKey = syms.join('\0');
+                    const fullKey = frames.map(f => f.symbol).join('\0');
                     if (!g.stacks.has(fullKey)) {
-                        g.stacks.set(fullKey, { count: 0, syms });
+                        g.stacks.set(fullKey, { count: 0, frames });
                     }
                     g.stacks.get(fullKey).count++;
                 }
@@ -2073,12 +2061,13 @@
                 for (const g of sorted) {
                     const pct = ((g.count / total) * 100).toFixed(1);
                     const barW = Math.max(4, (g.count / total) * 100);
-                    const color = g.leaf.includes("lock") || g.leaf.includes("mutex") ? "#ff4444"
-                        : g.leaf.includes("epoll") || g.leaf.includes("poll") ? "#4fc3f7"
-                        : g.leaf.includes("write") || g.leaf.includes("read") || g.leaf.includes("recv") || g.leaf.includes("send") ? "#ff8a65"
-                        : g.leaf.includes("syscall") ? "#888"
+                    const lr = g.leafRaw;
+                    const color = lr.includes("lock") || lr.includes("mutex") ? "#ff4444"
+                        : lr.includes("epoll") || lr.includes("poll") ? "#4fc3f7"
+                        : lr.includes("write") || lr.includes("read") || lr.includes("recv") || lr.includes("send") ? "#ff8a65"
+                        : lr.includes("syscall") ? "#888"
                         : "#cc66ff";
-                    html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;cursor:pointer" class="sched-row" data-leaf="${encodeURIComponent(g.leaf)}">`;
+                    html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;cursor:pointer" class="sched-row" data-leaf="${encodeURIComponent(g.leafRaw)}">`;
                     html += `<span style="width:50px;text-align:right;color:${color};font-weight:600">${g.count}</span>`;
                     html += `<span style="display:inline-block;height:14px;width:${barW}%;background:${color};border-radius:2px;opacity:0.7"></span>`;
                     html += `<span style="color:#fff">${g.leaf}</span>`;
@@ -2090,7 +2079,7 @@
                 // Detailed stacks per group
                 for (const g of sorted) {
                     const pct = ((g.count / total) * 100).toFixed(1);
-                    const color = g.leaf.includes("lock") || g.leaf.includes("mutex") ? "#ff4444" : "#ff8a65";
+                    const color = g.leafRaw.includes("lock") || g.leafRaw.includes("mutex") ? "#ff4444" : "#ff8a65";
                     const gid = 'sg-' + Math.random().toString(36).slice(2);
 
                     html += `<div style="border:1px solid #333;border-radius:6px;margin-bottom:8px;overflow:hidden">`;
@@ -2110,12 +2099,13 @@
                         html += `<div style="margin-bottom:10px;border-left:3px solid ${color};padding-left:10px">`;
                         html += `<div style="color:${color};margin-bottom:2px"><strong>${sub.count}×</strong> <span style="color:#888">(${subPct}% of group)</span></div>`;
                         // Show full symbolized stack
-                        for (let i = 0; i < sub.syms.length; i++) {
+                        for (let i = 0; i < sub.frames.length; i++) {
                             const isLeaf = i === 0;
-                            const isTokio = sub.syms[i].includes("tokio::runtime");
+                            const raw = sub.frames[i].symbol || '';
+                            const isTokio = raw.includes("tokio::runtime");
                             const c = isLeaf ? "#fff" : isTokio ? "#555" : "#aaa";
                             const weight = isLeaf ? "font-weight:600" : "";
-                            html += `<div style="color:${c};${weight};padding-left:${Math.min(i, 1) * 12}px">${shortSym(sub.syms[i])}</div>`;
+                            html += `<div style="color:${c};${weight};padding-left:${Math.min(i, 1) * 12}px">${renderFrame(sub.frames[i])}</div>`;
                         }
                         html += `</div>`;
                     }
@@ -2447,11 +2437,13 @@
                     let node = root;
                     node.count++;
                     for (const addr of chain) {
-                        const name = trace.callframeSymbols.get(addr) || addr;
-                        if (!node.children.has(name)) {
-                            node.children.set(name, { name, children: new Map(), count: 0, self: 0 });
+                        const entry = trace.callframeSymbols.get(addr);
+                        const key = entry ? entry.symbol : (addr || '??');
+                        const name = formatFrame(addr, trace.callframeSymbols).text;
+                        if (!node.children.has(key)) {
+                            node.children.set(key, { name, children: new Map(), count: 0, self: 0 });
                         }
-                        node = node.children.get(name);
+                        node = node.children.get(key);
                         node.count++;
                     }
                     node.self++;

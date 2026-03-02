@@ -92,8 +92,12 @@ function main() {
     console.log(`  Rust: ${rustCallframes.size} symbols`);
 
     let mismatchCount = 0;
-    for (const [addr, jsSymbol] of trace.callframeSymbols) {
+    for (const [addr, jsEntry] of trace.callframeSymbols) {
         const rustSymbol = rustCallframes.get(addr);
+        // jsEntry is {symbol, location} object
+        const jsSymbol = jsEntry.location
+            ? `${jsEntry.symbol} @ ${jsEntry.location}`
+            : jsEntry.symbol;
         if (!rustSymbol) {
             console.log(`  MISSING in Rust: ${addr}`);
             mismatchCount++;
