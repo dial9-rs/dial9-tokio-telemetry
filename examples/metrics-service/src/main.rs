@@ -77,7 +77,7 @@ fn main() -> std::io::Result<()> {
     let mut args = Args::parse();
 
     if args.demo {
-        args.run_duration = 6;
+        args.run_duration = 4;
         args.worker_threads = 2;
         args.trace_max_file_size = 2_000_000;
         args.trace_max_total_size = 2_000_000;
