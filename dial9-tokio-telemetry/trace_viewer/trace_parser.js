@@ -123,8 +123,8 @@
                     off += locationLen;
                 }
                 
-                // Store symbol with location if available
-                callframeSymbols.set(addrKey, location ? `${symbol} @ ${location}` : symbol);
+                // Store symbol and location separately
+                callframeSymbols.set(addrKey, { symbol, location });
                 continue;
             }
 
@@ -234,11 +234,137 @@
         };
     }
 
+    // ── Symbol formatting utilities ──
+
+    function _stripBoringGenerics(s) {
+        const boring = /^[A-Z]$|^(Fut|Req|Res|Bs|InnerFuture)$/;
+        return s.replace(/<([^<>]*)>/g, (match, inner) => {
+            const params = inner.split(',').map(p => p.trim());
+            if (params.every(p => boring.test(p))) return '';
+            const kept = params.filter(p => !boring.test(p));
+            return kept.length ? `<${kept.join(',')}>` : '';
+        });
+    }
+
+    function _lastSeg(s) { return s.split('::').pop(); }
+
+    function _shortenPath(s) {
+        const parts = s.split('::');
+        let closures = 0;
+        for (let i = parts.length - 1; i >= 0; i--) {
+            if (parts[i] === '{{closure}}') closures++; else break;
+        }
+        const meaningful = parts.length - closures;
+        if (meaningful <= 3) return s;
+        return parts.slice(meaningful - 3).join('::');
+    }
+
+    /**
+     * Try to build a docs.rs source link from a cargo registry location path.
+     * Location looks like: /home/user/.cargo/registry/src/index.crates.io-HASH/hyper-0.14.28/src/client/connect/http.rs:474
+     * Returns URL string or null.
+     */
+    function _docsRsUrl(location) {
+        if (!location) return null;
+        const m = location.match(/\.cargo\/registry\/src\/[^/]+\/([^/]+?)-([\d][^/]*)\/(.+?)(?::(\d+))?$/);
+        if (!m) return null;
+        const [, crate_, version, rawPath, line] = m;
+        // docs.rs URL: /src/{crate}/{path_without_leading_src}.html
+        // Source path segment uses underscores, not hyphens
+        const crateSrc = crate_.replace(/-/g, '_');
+        const path = rawPath.replace(/^src\//, '');
+        let url = `https://docs.rs/${crate_}/${version}/src/${crateSrc}/${path}.html`;
+        if (line) url += `#${line}`;
+        return url;
+    }
+
+    /**
+     * Extract just the filename from a location string.
+     * e.g. "/home/user/.cargo/registry/src/.../hyper-0.14.28/src/client/connect/http.rs:474" → "http.rs"
+     */
+    function _fileName(location) {
+        if (!location) return null;
+        const m = location.match(/([^/]+\.rs)(?::\d+)?$/);
+        return m ? m[1] : null;
+    }
+
+    /**
+     * Format a stack frame for human-readable display.
+     * @param {{symbol: string, location: string|null}} frame
+     * @returns {{text: string, docsUrl: string|null}}
+     */
+    function formatFrame(frame) {
+        if (typeof frame === 'string') return { text: frame, docsUrl: null };
+        const { symbol: sym, location } = frame;
+        if (!sym || sym.startsWith('0x')) return { text: sym || '(unknown)', docsUrl: null };
+
+        let result = sym;
+
+        const traitImplMatch = result.match(/^<(.+?) as (.+?)>::(.+)$/);
+        if (traitImplMatch) {
+            let [, implType, trait_, method] = traitImplMatch;
+            const shortType = _lastSeg(_stripBoringGenerics(implType));
+            if (shortType.length <= 2) {
+                result = `${_lastSeg(_stripBoringGenerics(trait_))}::${method}`;
+            } else {
+                result = `${shortType}::${method}`;
+            }
+        } else if (result.includes('::')) {
+            result = _shortenPath(_stripBoringGenerics(result));
+        }
+
+        const fileName = _fileName(location);
+        if (location) {
+            const m = location.match(/:(\d+)$/);
+            if (m) result += ` ${fileName || ''}:${m[1]}`;
+        }
+        return { text: result, docsUrl: _docsRsUrl(location) };
+    }
+
+    /**
+     * Resolve a callchain (array of address strings) to frame objects.
+     * @param {string[]} callchain - Address strings like "0x55cc6d053893"
+     * @param {Map<string, {symbol: string, location: string|null}>} callframeSymbols
+     * @returns {{symbol: string, location: string|null}[]}
+     */
+    function symbolizeChain(callchain, callframeSymbols) {
+        return callchain.map(addr => {
+            const entry = callframeSymbols.get(addr);
+            if (!entry) return { symbol: addr, location: null };
+            if (typeof entry === 'string') return { symbol: entry, location: null };
+            return entry;
+        });
+    }
+
+    /**
+     * Deduplicate CPU/sched samples by symbolized stack trace.
+     * @param {Object[]} samples - Array of {callchain, ...} sample objects
+     * @param {Map} callframeSymbols
+     * @returns {{count: number, frames: Object[], leaf: string, leafRaw: string}[]}
+     */
+    function deduplicateSamples(samples, callframeSymbols) {
+        const groups = new Map();
+        for (const sample of samples) {
+            const frames = symbolizeChain(sample.callchain, callframeSymbols);
+            const key = frames.map(f => f.symbol).join('\0');
+            if (!groups.has(key)) {
+                groups.set(key, {
+                    count: 0,
+                    frames,
+                    leaf: frames[0] ? formatFrame(frames[0]).text : '(unknown)',
+                    leafRaw: frames[0] ? frames[0].symbol : '',
+                });
+            }
+            groups.get(key).count++;
+        }
+        return [...groups.values()].sort((a, b) => b.count - a.count);
+    }
+
     // Export for both browser and Node.js
     if (typeof module !== 'undefined' && module.exports) {
-        module.exports = { parseTrace };
+        module.exports = { parseTrace, formatFrame, symbolizeChain, deduplicateSamples };
     } else {
-        exports.TraceParser = { parseTrace };
+        exports.TraceParser = { parseTrace, formatFrame, symbolizeChain, deduplicateSamples };
     }
 
 })(typeof exports === 'undefined' ? this : exports);
