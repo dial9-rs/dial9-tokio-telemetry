@@ -110,7 +110,10 @@ pub fn resolve_symbol(addr: u64) -> SymbolInfo {
                         base_addr: sym.addr,
                         code_info: sym.code_info.as_ref().map(|c| {
                             let file = match &c.dir {
-                                Some(dir) => dir.join(c.file.as_ref() as &std::path::Path).to_string_lossy().into_owned(),
+                                Some(dir) => dir
+                                    .join(c.file.as_ref() as &std::path::Path)
+                                    .to_string_lossy()
+                                    .into_owned(),
                                 None => c.file.to_string_lossy().into_owned(),
                             };
                             CodeInfo {
