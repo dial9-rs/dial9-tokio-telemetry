@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 const METRICS: &[&str] = &["cpu", "memory", "latency", "error_rate", "queue_depth"];
 const MAX_WORKERS: usize = 40;
 const THUNDERING_HERD: usize = 200;
+const THUNDERING_HERD_DEMO: usize = 80;
 const BASELINE: usize = 4;
 
 /// Stats for a single operation (GET or POST) within one tracking scope.
@@ -150,12 +151,13 @@ impl AllStats {
 }
 
 // ramp up for 3 seconds -> crushing load -> baseline
-fn target_concurrency(elapsed: f64) -> usize {
+fn target_concurrency(elapsed: f64, demo: bool) -> usize {
+    let herd_size = if demo { THUNDERING_HERD_DEMO } else { THUNDERING_HERD };
     if elapsed < 3.0 {
         let t = elapsed / 10.0;
         (BASELINE as f64 + t * (MAX_WORKERS - BASELINE) as f64) as usize
     } else if elapsed < 10.0 {
-        THUNDERING_HERD
+        herd_size
     } else {
         BASELINE
     }
@@ -168,14 +170,16 @@ struct WorkResult {
     ok: bool,
 }
 
-pub async fn run(base_url: &str, shutdown: CancellationToken) {
+pub async fn run(base_url: &str, shutdown: CancellationToken, demo: bool) {
     let client = Arc::new(Client::new());
     let sem = Arc::new(Semaphore::new(0));
     let stats = Arc::new(Mutex::new(AllStats::new()));
     let start = Instant::now();
 
+    let max_workers = if demo { THUNDERING_HERD_DEMO } else { THUNDERING_HERD };
+
     // spawn a large pool of workers that each wait for a permit
-    for i in 0..THUNDERING_HERD {
+    for i in 0..max_workers {
         let client = client.clone();
         let sem = sem.clone();
         let stats = stats.clone();
@@ -209,7 +213,7 @@ pub async fn run(base_url: &str, shutdown: CancellationToken) {
             break;
         }
         let elapsed = start.elapsed().as_secs_f64();
-        let target = target_concurrency(elapsed);
+        let target = target_concurrency(elapsed, demo);
         if target != current {
             match target.cmp(&current) {
                 std::cmp::Ordering::Greater => {

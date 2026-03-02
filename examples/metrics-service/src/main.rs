@@ -59,6 +59,9 @@ struct Args {
 
     #[arg(long, default_value = "4", help = "Number of worker threads")]
     worker_threads: usize,
+
+    #[arg(long, help = "Demo mode: shorter run with smaller trace (<2MB)")]
+    demo: bool,
 }
 
 #[derive(Clone)]
@@ -71,7 +74,14 @@ pub struct AppState {
 }
 
 fn main() -> std::io::Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    if args.demo {
+        args.run_duration = 6;
+        args.worker_threads = 2;
+        args.trace_max_file_size = 2_000_000;
+        args.trace_max_total_size = 2_000_000;
+    }
 
     let writer = RotatingWriter::new(
         &args.trace_path,
@@ -140,11 +150,18 @@ fn main() -> std::io::Result<()> {
             .expect("executable has no parent directory")
             .join("client");
 
-        let mut client_child = tokio::process::Command::new(&client_exe)
+        let mut client_cmd = tokio::process::Command::new(&client_exe);
+        client_cmd
             .arg("--server-url")
             .arg(&server_url)
             .arg("--run-duration")
-            .arg(args.run_duration.to_string())
+            .arg(args.run_duration.to_string());
+        
+        if args.demo {
+            client_cmd.arg("--demo");
+        }
+        
+        let mut client_child = client_cmd
             .spawn()
             .unwrap_or_else(|e| {
                 panic!(

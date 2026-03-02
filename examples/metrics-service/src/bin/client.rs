@@ -16,6 +16,9 @@ struct Args {
         help = "How long to run the load profile (seconds)"
     )]
     run_duration: u64,
+
+    #[arg(long, help = "Demo mode: reduced thundering herd size")]
+    demo: bool,
 }
 
 #[tokio::main]
@@ -35,7 +38,7 @@ async fn main() {
         "Client starting load profile against {}...",
         args.server_url
     );
-    metrics_service::client::run(&args.server_url, shutdown).await;
+    metrics_service::client::run(&args.server_url, shutdown, args.demo).await;
 
     // Load profile finished – tell the server to shut down gracefully.
     println!("Client load complete, sending /terminate to server...");
