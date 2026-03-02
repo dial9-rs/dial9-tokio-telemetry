@@ -23,9 +23,9 @@ check_package() {
 }
 
 if [ $# -eq 0 ]; then
-    # Run on all workspace packages
+    # Run on all workspace packages (skip packages with publish = false)
     packages=$(cargo metadata --no-deps --format-version 1 | \
-        jq -r '.packages[] | select(.publish != false) | "\(.name) \(.version)"')
+        jq -r '.packages[] | select(.publish == null or (.publish | length) > 0) | "\(.name) \(.version)"')
     
     while IFS= read -r line; do
         pkg_name=$(echo "$line" | cut -d' ' -f1)
