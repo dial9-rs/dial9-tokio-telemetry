@@ -37,7 +37,15 @@ dial9-tokio-telemetry is designed for always-on production use, but it's still e
 ## Is there a demo?
 Yes, checkout this [quick walkthrough (YouTube)](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)!
 
-The [viewer](https://dial9-tokio-telemetry.russell-r-cohen.workers.dev/) (autodeployed from code in `main`) is hosted on cloudflare pages for convenience, but you can also use [serve.py](/dial9-tokio-telemetry/serve.py) (pure HTML and JS, client side only)
+The [viewer](https://dial9-tokio-telemetry.russell-r-cohen.workers.dev/) (autodeployed from code in `main`) is hosted on cloudflare pages for convenience. You can [load the demo trace](https://dial9-tokio-telemetry.russell-r-cohen.workers.dev/?trace=demo-trace.bin) directly, or use [serve.py](/dial9-tokio-telemetry/serve.py) to run it locally (pure HTML and JS, client side only).
+
+To generate your own demo trace:
+```bash
+cargo build --release -p metrics-service
+AWS_PROFILE=your-profile cargo run --release -p metrics-service --bin metrics-service -- --demo
+```
+
+This produces a ~700KB trace with thundering herd behavior in under 10 seconds.
 
 <img width="1288" height="659" alt="Screenshot 2026-03-01 at 3 52 59 PM" src="https://github.com/user-attachments/assets/77225801-70b1-4aef-b064-32bc2326b1ef" />
 
