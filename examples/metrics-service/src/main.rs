@@ -156,19 +156,17 @@ fn main() -> std::io::Result<()> {
             .arg(&server_url)
             .arg("--run-duration")
             .arg(args.run_duration.to_string());
-        
+
         if args.demo {
             client_cmd.arg("--demo");
         }
-        
-        let mut client_child = client_cmd
-            .spawn()
-            .unwrap_or_else(|e| {
-                panic!(
-                    "failed to spawn client binary at {}: {e}",
-                    client_exe.display()
-                )
-            });
+
+        let mut client_child = client_cmd.spawn().unwrap_or_else(|e| {
+            panic!(
+                "failed to spawn client binary at {}: {e}",
+                client_exe.display()
+            )
+        });
 
         // Reap the child when it exits so it doesn't become a zombie.
         handle.spawn(async move {

@@ -152,7 +152,11 @@ impl AllStats {
 
 // ramp up for 3 seconds -> crushing load -> baseline
 fn target_concurrency(elapsed: f64, demo: bool) -> usize {
-    let herd_size = if demo { THUNDERING_HERD_DEMO } else { THUNDERING_HERD };
+    let herd_size = if demo {
+        THUNDERING_HERD_DEMO
+    } else {
+        THUNDERING_HERD
+    };
     if elapsed < 3.0 {
         let t = elapsed / 10.0;
         (BASELINE as f64 + t * (MAX_WORKERS - BASELINE) as f64) as usize
@@ -176,7 +180,11 @@ pub async fn run(base_url: &str, shutdown: CancellationToken, demo: bool) {
     let stats = Arc::new(Mutex::new(AllStats::new()));
     let start = Instant::now();
 
-    let max_workers = if demo { THUNDERING_HERD_DEMO } else { THUNDERING_HERD };
+    let max_workers = if demo {
+        THUNDERING_HERD_DEMO
+    } else {
+        THUNDERING_HERD
+    };
 
     // spawn a large pool of workers that each wait for a permit
     for i in 0..max_workers {
