@@ -276,6 +276,9 @@
                 <div style="font-size: 0.8em; margin-top: 8px; color: #666">
                     Expects TOKIOTRC binary format
                 </div>
+                <div style="margin-top: 12px">
+                    <a href="#" id="load-demo" style="color: #6c63ff; font-size: 0.9em">or load demo trace</a>
+                </div>
             </div>
             <input type="file" id="file-input" accept=".bin" />
         </div>
@@ -487,6 +490,35 @@
                 const blob = file.size > maxBytes ? file.slice(0, maxBytes) : file;
                 reader.readAsArrayBuffer(blob);
             }
+
+            async function loadTraceFromUrl(url) {
+                try {
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const arrayBuffer = await response.arrayBuffer();
+                    trace = parseTrace(arrayBuffer);
+                    processTrace();
+                    showViewer(url.split('/').pop() || 'trace.bin');
+                } catch (err) {
+                    alert("Error loading trace from URL: " + err.message);
+                    dropZone.style.display = "flex";
+                }
+            }
+
+            // Check for URL parameter on load
+            const urlParams = new URLSearchParams(window.location.search);
+            const traceUrl = urlParams.get('trace');
+            if (traceUrl) {
+                dropZone.innerHTML = 'Loading trace…';
+                loadTraceFromUrl(traceUrl);
+            }
+
+            document.getElementById("load-demo").addEventListener("click", (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                dropZone.innerHTML = 'Loading demo trace…';
+                loadTraceFromUrl("demo-trace.bin");
+            });
 
             function processTrace() {
                 const evts = trace.events;
