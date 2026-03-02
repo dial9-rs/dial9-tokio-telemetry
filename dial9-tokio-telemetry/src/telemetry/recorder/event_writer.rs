@@ -58,9 +58,10 @@ impl EventWriter {
             WriteAtomicResult::Written => Ok(WriteAtomicResult::Written),
             WriteAtomicResult::OversizedBatch => Ok(WriteAtomicResult::OversizedBatch),
             WriteAtomicResult::Rotated => {
+                let was_rotated = self.writer.take_rotated();
                 debug_assert!(
-                    self.writer.take_rotated(),
-                    "write atomic returned true, rotation occured"
+                    was_rotated,
+                    "write atomic returned Rotated, but take_rotated() was false"
                 );
                 self.handle_rotation();
                 let events = self.flush_state.resolve(raw);
