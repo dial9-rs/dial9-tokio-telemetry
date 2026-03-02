@@ -1,0 +1,27 @@
+name: Check docs.rs
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-docs
+      
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      
+      - name: Install cargo-docs-rs
+        run: cargo install cargo-docs-rs
+      
+      - name: Check docs.rs builds
+        run: ./scripts/check-docsrs.sh
