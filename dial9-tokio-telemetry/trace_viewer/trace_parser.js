@@ -260,17 +260,15 @@
     }
 
     /**
-     * Try to build a docs.rs source link from a cargo registry location path.
-     * Location looks like: /home/user/.cargo/registry/src/index.crates.io-HASH/hyper-0.14.28/src/client/connect/http.rs:474
+     * Try to build a docs.rs source link from a location path containing a crate-version segment.
+     * Matches any path like: .../hyper-0.14.28/src/client/connect/http.rs:474
      * Returns URL string or null.
      */
     function _docsRsUrl(location) {
         if (!location) return null;
-        const m = location.match(/\.cargo\/registry\/src\/[^/]+\/([^/]+?)-([\d][^/]*)\/(.+?)(?::(\d+))?$/);
+        const m = location.match(/\/([a-z][a-z0-9_-]*)-(\d+\.\d+[^/]*)\/(.+?)(?::(\d+))?$/);
         if (!m) return null;
         const [, crate_, version, rawPath, line] = m;
-        // docs.rs URL: /src/{crate}/{path_without_leading_src}.html
-        // Source path segment uses underscores, not hyphens
         const crateSrc = crate_.replace(/-/g, '_');
         const path = rawPath.replace(/^src\//, '');
         let url = `https://docs.rs/${crate_}/${version}/src/${crateSrc}/${path}.html`;
@@ -290,11 +288,20 @@
 
     /**
      * Format a stack frame for human-readable display.
-     * @param {{symbol: string, location: string|null}} frame
+     * Accepts either a resolved frame object or a raw address + callframeSymbols map.
+     * @param {{symbol: string, location: string|null}|string} frame - Resolved frame or address string
+     * @param {Map<string, {symbol: string, location: string|null}>} [callframeSymbols] - Required when frame is an address string
      * @returns {{text: string, docsUrl: string|null}}
      */
-    function formatFrame(frame) {
-        if (typeof frame === 'string') return { text: frame, docsUrl: null };
+    function formatFrame(frame, callframeSymbols) {
+        if (typeof frame === 'string') {
+            if (!callframeSymbols) {
+                throw new Error('formatFrame requires callframeSymbols when given an address string');
+            }
+            const entry = callframeSymbols.get(frame);
+            if (!entry) return { text: frame || '(unknown)', docsUrl: null };
+            frame = entry;
+        }
         const { symbol: sym, location } = frame;
         if (!sym || sym.startsWith('0x')) return { text: sym || '(unknown)', docsUrl: null };
 

@@ -368,11 +368,15 @@
             // Use the external parser
             const { parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
 
+            function esc(s) {
+                return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            }
+
             /** Render a raw frame {symbol, location} as HTML, with docs.rs link if available. */
             function renderFrame(frame) {
                 const f = formatFrame(frame);
-                if (f.docsUrl) return `<a href="${f.docsUrl}" target="_blank" style="color:inherit;text-decoration:underline dotted">${f.text}</a>`;
-                return f.text;
+                if (f.docsUrl) return `<a href="${esc(f.docsUrl)}" target="_blank" style="color:inherit;text-decoration:underline dotted">${esc(f.text)}</a>`;
+                return esc(f.text);
             }
             // ── Event type helpers ──
             const ET = {
@@ -2403,7 +2407,7 @@
                     for (const addr of chain) {
                         const entry = trace.callframeSymbols.get(addr);
                         const key = entry ? entry.symbol : (addr || '??');
-                        const name = entry ? formatFrame(entry).text : (addr || '??');
+                        const name = formatFrame(addr, trace.callframeSymbols).text;
                         if (!node.children.has(key)) {
                             node.children.set(key, { name, children: new Map(), count: 0, self: 0 });
                         }
