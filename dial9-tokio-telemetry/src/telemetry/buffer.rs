@@ -36,17 +36,16 @@ impl ThreadLocalBuffer {
     }
 
     #[cfg(feature = "metrique-events")]
-    pub fn record_metrique_entry<E: metrique::writer::Entry>(&mut self, entry: &E, worker_id: usize) {
-        let timestamp_nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        
+    pub fn record_metrique_entry<E: metrique::writer::Entry>(&mut self, entry: &E, worker_id: usize, entry_name: &'static str) {
         let data = serialize_entry(entry);
-        
+        let task_id = tokio::task::try_id()
+            .map(crate::telemetry::task_metadata::TaskId::from)
+            .unwrap_or(crate::telemetry::task_metadata::TaskId::from_u32(0));
         self.record_event(RawEvent::MetriqueEvent {
-            timestamp_nanos,
+            instant: std::time::Instant::now(),
             worker_id,
+            task_id,
+            entry_name: entry_name.to_string(),
             data,
         });
     }

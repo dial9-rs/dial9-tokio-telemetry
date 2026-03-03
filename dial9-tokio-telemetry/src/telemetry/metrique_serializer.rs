@@ -5,12 +5,8 @@ use metrique::writer::{EntryWriter, Observation, Unit, ValueWriter};
 #[cfg(feature = "metrique-events")]
 use std::borrow::Cow;
 
-#[cfg(feature = "metrique-events")]
-#[derive(Debug)]
-enum WriteMode {
-    SizeCalculation,
-    Writing,
-}
+use serde::ser::{SerializeMap, Serializer};
+use serde::Serialize;
 
 /// Collects entry data for serialization
 #[cfg(feature = "metrique-events")]
@@ -26,7 +22,7 @@ struct CollectedMetric {
     name: String,
     observations: Vec<Observation>,
     unit: Unit,
-    is_kpi: bool,
+    is_span: bool,
 }
 
 /// EntryWriter that collects all fields
@@ -59,6 +55,7 @@ impl BinaryEntryWriter {
         for metric in &self.entry.metrics {
             size += 2 + metric.name.len(); // name
             size += 1; // flags
+            size += 1 + metric.unit.name().len(); // unit name (u8 len + bytes)
             size += 2; // observation count
             size += metric.observations.len() * 8; // observations as f64
         }
@@ -81,16 +78,20 @@ impl BinaryEntryWriter {
             buf.extend_from_slice(&(metric.name.len() as u16).to_le_bytes());
             buf.extend_from_slice(metric.name.as_bytes());
             
-            let flags = if metric.is_kpi { 1u8 } else { 0u8 };
+            let flags = if metric.is_span { 1u8 } else { 0u8 };
             buf.push(flags);
+            
+            let unit_name = metric.unit.name();
+            buf.push(unit_name.len() as u8);
+            buf.extend_from_slice(unit_name.as_bytes());
             
             buf.extend_from_slice(&(metric.observations.len() as u16).to_le_bytes());
             for obs in &metric.observations {
                 let val = match obs {
                     Observation::Floating(v) => *v,
                     Observation::Unsigned(v) => *v as f64,
-                    Observation::Repeated { total, occurrences } => total / *occurrences as f64,
-                    _ => 0.0, // Handle other variants
+                    Observation::Repeated { total, .. } => *total,
+                    _ => f64::NAN,
                 };
                 buf.extend_from_slice(&val.to_le_bytes());
             }
@@ -112,7 +113,7 @@ impl<'a> EntryWriter<'a> for BinaryEntryWriter {
         value: &(impl metrique::writer::Value + ?Sized),
     ) {
         let name = name.into().to_string();
-        let mut collector = ValueCollector {
+        let collector = ValueCollector {
             name,
             entry: &mut self.entry,
         };
@@ -139,17 +140,19 @@ impl ValueWriter for ValueCollector<'_> {
     fn metric<'a>(
         self,
         distribution: impl IntoIterator<Item = Observation>,
-        _unit: Unit,
+        unit: Unit,
         _dimensions: impl IntoIterator<Item = (&'a str, &'a str)>,
-        _flags: metrique::writer::MetricFlags<'_>,
+        flags: metrique::writer::MetricFlags<'_>,
     ) {
         let observations: Vec<_> = distribution.into_iter().collect();
-        // TODO: check flags for KPI marker
+        let is_span = flags
+            .downcast::<crate::telemetry::entry_sink::SpanFlag>()
+            .is_some();
         self.entry.metrics.push(CollectedMetric {
             name: self.name,
             observations,
-            unit: _unit,
-            is_kpi: false, // TODO: extract from flags
+            unit,
+            is_span,
         });
     }
 
@@ -163,4 +166,71 @@ pub fn serialize_entry<E: metrique::writer::Entry>(entry: &E) -> Vec<u8> {
     let mut writer = BinaryEntryWriter::new();
     entry.write(&mut writer);
     writer.into_bytes()
+}
+
+/// Parsed representation of the binary metrique data blob.
+#[derive(Debug, Clone, Serialize)]
+pub struct ParsedMetriqueData {
+    pub properties: Vec<(String, String)>,
+    pub metrics: Vec<ParsedMetric>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ParsedMetric {
+    pub name: String,
+    pub is_span: bool,
+    pub unit: String,
+    pub values: Vec<f64>,
+}
+
+/// Parse the binary data blob written by `BinaryEntryWriter::into_bytes`.
+pub fn parse_metrique_data(data: &[u8]) -> Option<ParsedMetriqueData> {
+    let mut off = 0;
+    let r = |off: &mut usize, n: usize| -> Option<&[u8]> {
+        if *off + n > data.len() { return None; }
+        let s = &data[*off..*off + n];
+        *off += n;
+        Some(s)
+    };
+
+    let num_props = u16::from_le_bytes(r(&mut off, 2)?.try_into().ok()?) as usize;
+    let mut properties = Vec::with_capacity(num_props);
+    for _ in 0..num_props {
+        let kl = u16::from_le_bytes(r(&mut off, 2)?.try_into().ok()?) as usize;
+        let key = std::str::from_utf8(r(&mut off, kl)?).ok()?.to_string();
+        let vl = u16::from_le_bytes(r(&mut off, 2)?.try_into().ok()?) as usize;
+        let val = std::str::from_utf8(r(&mut off, vl)?).ok()?.to_string();
+        properties.push((key, val));
+    }
+
+    let num_metrics = u16::from_le_bytes(r(&mut off, 2)?.try_into().ok()?) as usize;
+    let mut metrics = Vec::with_capacity(num_metrics);
+    for _ in 0..num_metrics {
+        let nl = u16::from_le_bytes(r(&mut off, 2)?.try_into().ok()?) as usize;
+        let name = std::str::from_utf8(r(&mut off, nl)?).ok()?.to_string();
+        let flags = r(&mut off, 1)?[0];
+        let unit_len = r(&mut off, 1)?[0] as usize;
+        let unit = std::str::from_utf8(r(&mut off, unit_len)?).ok()?.to_string();
+        let count = u16::from_le_bytes(r(&mut off, 2)?.try_into().ok()?) as usize;
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            values.push(f64::from_le_bytes(r(&mut off, 8)?.try_into().ok()?));
+        }
+        metrics.push(ParsedMetric { name, is_span: flags & 1 != 0, unit, values });
+    }
+
+    Some(ParsedMetriqueData { properties, metrics })
+}
+
+/// Custom serde serializer for the `data` field that emits parsed structure instead of raw bytes.
+pub fn serialize_metrique_data<S: Serializer>(data: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+    match parse_metrique_data(data) {
+        Some(parsed) => parsed.serialize(s),
+        None => {
+            // Fallback: emit as map with raw bytes
+            let mut m = s.serialize_map(Some(1))?;
+            m.serialize_entry("raw", data)?;
+            m.end()
+        }
+    }
 }

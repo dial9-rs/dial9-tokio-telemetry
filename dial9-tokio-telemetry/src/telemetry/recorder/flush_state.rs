@@ -3,6 +3,7 @@ use crate::telemetry::task_metadata::SpawnLocationId;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::panic::Location;
+use std::time::Instant;
 
 /// Flush-thread state for interning spawn locations and tracking per-file emissions.
 pub(super) struct FlushState {
@@ -13,16 +14,19 @@ pub(super) struct FlushState {
     /// Which SpawnLocationIds have been emitted as SpawnLocationDef in the current file.
     pub(super) emitted_this_file: HashSet<SpawnLocationId>,
     next_id: u16,
+    /// Telemetry epoch — used to convert `Instant` on metrique events to relative nanos.
+    start_time: Instant,
 }
 
 impl FlushState {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(start_time: Instant) -> Self {
         let intern_strings = vec!["<unknown>".to_string()];
         Self {
             intern_map: HashMap::new(),
             intern_strings,
             emitted_this_file: HashSet::new(),
             next_id: 1,
+            start_time,
         }
     }
 
@@ -146,16 +150,18 @@ impl FlushState {
             }
             #[cfg(feature = "metrique-events")]
             RawEvent::MetriqueEvent {
-                timestamp_nanos,
+                ref instant,
                 worker_id,
+                task_id,
+                ref entry_name,
                 ref data,
             } => {
-                // TODO: Extract entry name and KPI fields from data
+                let timestamp_nanos = instant.duration_since(self.start_time).as_nanos() as u64;
                 events.push(TelemetryEvent::MetriqueEvent {
                     timestamp_nanos,
                     worker_id,
-                    entry_name: String::from("unknown"), // TODO
-                    kpi_field_names: Vec::new(), // TODO
+                    task_id,
+                    entry_name: entry_name.clone(),
                     data: data.clone(),
                 });
             }

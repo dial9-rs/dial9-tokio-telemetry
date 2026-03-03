@@ -177,5 +177,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
         | TelemetryEvent::TaskSpawn { .. }
         | TelemetryEvent::CallframeDef { .. }
         | TelemetryEvent::ThreadNameDef { .. } => None,
+        #[cfg(feature = "metrique-events")]
+        TelemetryEvent::MetriqueEvent { .. } => None,
     }
 }

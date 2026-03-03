@@ -131,11 +131,11 @@ pub enum TelemetryEvent {
         timestamp_nanos: u64,
         #[serde(rename = "worker")]
         worker_id: usize,
+        task_id: TaskId,
         /// Name of the entry type
         entry_name: String,
-        /// Field names marked as KPIs (for graphing in viewer)
-        kpi_field_names: Vec<String>,
-        /// Serialized metrique entry data
+        /// Serialized metrique entry data (contains per-metric flags byte with span bit)
+        #[serde(serialize_with = "crate::telemetry::metrique_serializer::serialize_metrique_data")]
         data: Vec<u8>,
     },
 }
@@ -249,8 +249,11 @@ pub enum RawEvent {
     },
     #[cfg(feature = "metrique-events")]
     MetriqueEvent {
-        timestamp_nanos: u64,
+        instant: std::time::Instant,
         worker_id: usize,
+        task_id: crate::telemetry::task_metadata::TaskId,
+        /// Entry type name (e.g. "RequestMetrics")
+        entry_name: String,
         /// Serialized metrique entry data
         data: Vec<u8>,
     },

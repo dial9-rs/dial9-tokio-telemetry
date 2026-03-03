@@ -29,10 +29,10 @@ pub(crate) struct EventWriter {
 }
 
 impl EventWriter {
-    pub(crate) fn new(writer: Box<dyn TraceWriter>) -> Self {
+    pub(crate) fn new(writer: Box<dyn TraceWriter>, start_time: std::time::Instant) -> Self {
         Self {
             writer,
-            flush_state: FlushState::new(),
+            flush_state: FlushState::new(start_time),
             #[cfg(feature = "cpu-profiling")]
             cpu_flush: None,
             #[cfg(feature = "cpu-profiling")]

@@ -35,6 +35,7 @@
         const callframeSymbols = new Map(); // address (bigint as string) → symbol name
         const cpuSamples = []; // {timestamp, workerId, tid, source, callchain: [addr strings]}
         const threadNames = new Map(); // tid (number) → thread name (string)
+        let metriqueEvents = null; // [{timestamp, workerId, entryName, properties, metrics}]
         const decoder = new TextDecoder();
         
         while (off < buffer.byteLength && events.length < MAX_EVENTS) {
@@ -139,7 +140,36 @@
                 continue;
             }
 
-            if (wireCode > 10) break; // unknown code
+            if (wireCode === 11) {
+                // MetriqueEvent: timestamp_us(4) + worker_id(1) + task_id(4) + entry_name_len(2) + entry_name(N) + data_len(4) + data(N)
+                if (off + 4 > buffer.byteLength) break;
+                const tsUs = view.getUint32(off, true); off += 4;
+                if (off + 1 > buffer.byteLength) break;
+                const wid = view.getUint8(off); off += 1;
+                if (off + 4 > buffer.byteLength) break;
+                const taskId = view.getUint32(off, true); off += 4;
+                if (off + 2 > buffer.byteLength) break;
+                const nameLen = view.getUint16(off, true); off += 2;
+                if (off + nameLen > buffer.byteLength) break;
+                const entryName = decoder.decode(new Uint8Array(buffer, off, nameLen));
+                off += nameLen;
+                if (off + 4 > buffer.byteLength) break;
+                const dataLen = view.getUint32(off, true); off += 4;
+                if (off + dataLen > buffer.byteLength) break;
+                const data = parseMetriqueData(new DataView(buffer, off, dataLen), new Uint8Array(buffer, off, dataLen));
+                off += dataLen;
+                (metriqueEvents ??= []).push({
+                    timestamp: tsUs * 1000,
+                    workerId: wid,
+                    taskId,
+                    entryName,
+                    properties: data.properties,
+                    metrics: data.metrics,
+                });
+                continue;
+            }
+
+            if (wireCode > 11) break; // unknown code
 
             // All regular codes have a 4-byte timestamp next
             if (off + 4 > buffer.byteLength) break;
@@ -230,8 +260,48 @@
             taskSpawnLocs, 
             cpuSamples, 
             callframeSymbols,
-            threadNames
+            threadNames,
+            metriqueEvents: metriqueEvents || [],
         };
+    }
+
+    /**
+     * Parse the binary data blob from a MetriqueEvent.
+     * Format: [num_properties:2] [key_len:2][key:N][value_len:2][value:N]...
+     *         [num_metrics:2] [key_len:2][key:N][flags:1][unit_len:1][unit:N][count:2][values:8*count]...
+     */
+    function parseMetriqueData(view, bytes) {
+        const dec = new TextDecoder();
+        let off = 0;
+        const properties = [];
+        const metrics = [];
+
+        const numProps = view.getUint16(off, true); off += 2;
+        for (let i = 0; i < numProps; i++) {
+            const kLen = view.getUint16(off, true); off += 2;
+            const key = dec.decode(bytes.slice(off, off + kLen)); off += kLen;
+            const vLen = view.getUint16(off, true); off += 2;
+            const value = dec.decode(bytes.slice(off, off + vLen)); off += vLen;
+            properties.push({ key, value });
+        }
+
+        const numMetrics = view.getUint16(off, true); off += 2;
+        for (let i = 0; i < numMetrics; i++) {
+            const kLen = view.getUint16(off, true); off += 2;
+            const key = dec.decode(bytes.slice(off, off + kLen)); off += kLen;
+            const flags = view.getUint8(off); off += 1;
+            const isSpan = !!(flags & 1);
+            const unitLen = view.getUint8(off); off += 1;
+            const unit = unitLen > 0 ? dec.decode(bytes.slice(off, off + unitLen)) : null; off += unitLen;
+            const count = view.getUint16(off, true); off += 2;
+            const values = [];
+            for (let j = 0; j < count; j++) {
+                values.push(view.getFloat64(off, true)); off += 8;
+            }
+            metrics.push({ key, isSpan, unit, values });
+        }
+
+        return { properties, metrics };
     }
 
     // ── Symbol formatting utilities ──
@@ -369,9 +439,9 @@
 
     // Export for both browser and Node.js
     if (typeof module !== 'undefined' && module.exports) {
-        module.exports = { parseTrace, formatFrame, symbolizeChain, deduplicateSamples };
+        module.exports = { parseTrace, parseMetriqueData, formatFrame, symbolizeChain, deduplicateSamples };
     } else {
-        exports.TraceParser = { parseTrace, formatFrame, symbolizeChain, deduplicateSamples };
+        exports.TraceParser = { parseTrace, parseMetriqueData, formatFrame, symbolizeChain, deduplicateSamples };
     }
 
 })(typeof exports === 'undefined' ? this : exports);

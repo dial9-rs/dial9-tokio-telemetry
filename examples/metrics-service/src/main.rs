@@ -10,7 +10,7 @@ use aws_config::BehaviorVersion;
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, SimpleBinaryWriter, TracedRuntime};
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
@@ -83,11 +83,15 @@ fn main() -> std::io::Result<()> {
         args.trace_max_total_size = 2_000_000;
     }
 
-    let writer = RotatingWriter::new(
-        &args.trace_path,
-        args.trace_max_file_size,
-        args.trace_max_total_size,
-    )?;
+    let writer: Box<dyn dial9_tokio_telemetry::telemetry::TraceWriter> = if args.demo {
+        Box::new(SimpleBinaryWriter::new(&args.trace_path)?)
+    } else {
+        Box::new(RotatingWriter::new(
+            &args.trace_path,
+            args.trace_max_file_size,
+            args.trace_max_total_size,
+        )?)
+    };
 
     let mut builder = Builder::new_multi_thread();
     builder.worker_threads(args.worker_threads).enable_all();
@@ -102,7 +106,7 @@ fn main() -> std::io::Result<()> {
                 include_kernel: true,
             });
     }
-    let (runtime, guard) = traced_builder.build(builder, Box::new(writer))?;
+    let (runtime, guard) = traced_builder.build(builder, writer)?;
     guard.enable();
     let handle = guard.handle();
 

@@ -23,58 +23,49 @@ metrique entry → Dial9MetricSink<E> → [serialize to RawEvent] → thread-loc
 
 ### Components
 
-#### 1. Macro-based Sink Definition
+#### 1. Entry Sink
 
 ```rust
-dial9_sink! { RequestMetrics<MyRequestEntry> }
+use dial9_tokio_telemetry::telemetry::{Dial9EntrySink, Kpi};
+
+static SINK: Dial9EntrySink<metrique::RootMetric<RequestEntry>> =
+    Dial9EntrySink::new("RequestEntry");
 ```
 
-Generates:
-- `RequestMetrics` struct implementing `EntrySink<MyRequestEntry>`
-- Static `INSTANCE` with type-safe access (using `OnceLock`)
-- `RequestMetrics::attach_backing_sink(sink)` method
+`Dial9EntrySink<E>` implements `EntrySink<E>` and writes serialized entries
+into the thread-local trace buffer. It's `const fn new` so it works as a static.
 
-The macro ensures strong typing and avoids boxing until the backing sink.
+#### 2. KPI Flag
 
-#### 2. Force Flags
-
-Define dial9-specific flags following metrique's `ForceFlag` pattern:
+`Kpi<T>` is a `ForceFlag` type alias that marks a metric field for graphing in the viewer:
 
 ```rust
-pub struct Kpi;
-impl ForceFlag for Kpi { /* ... */ }
-
-pub struct Dial9Metadata<T> {
-    start: Timestamp,
-    end: TimestampOnClose,
-    _phantom: PhantomData<T>,
-}
+pub type Kpi<T> = ForceFlag<T, KpiFlagCtor>;
 ```
+
+The flag is detected during serialization via `flags.downcast::<KpiFlag>()` and
+written as bit 0 of the per-metric flags byte in the data blob.
 
 Usage:
 ```rust
 #[metrics]
 struct MyRequestEntry {
-    dial9: Dial9Metadata<MetriqueEvent>,
-    #[metric(flags = [Kpi])]
-    latency_ms: f64,
+    #[metrics(unit = Millisecond)]
+    latency: Kpi<Timer>,
     // ...
 }
 ```
 
 #### 3. Serialization
 
-Two-pass serialization for efficiency:
+`BinaryEntryWriter` implements metrique's `EntryWriter` trait, collecting properties
+and metrics. `into_bytes()` pre-calculates the exact size and writes in one pass:
 
 ```rust
-struct BinaryValueWriter {
-    buf: Vec<u8>,
-    mode: WriteMode, // SizeCalculation or Writing
-}
-
-impl ValueWriter for BinaryValueWriter {
-    // First pass: compute required size
-    // Second pass: write to pre-allocated buffer
+pub fn serialize_entry<E: Entry>(entry: &E) -> Vec<u8> {
+    let mut writer = BinaryEntryWriter::new();
+    entry.write(&mut writer);
+    writer.into_bytes()
 }
 ```
 
@@ -88,14 +79,14 @@ data format:
 [num_properties:2]
   [key_len:2][key:N][value_len:2][value:N] ... (for each property)
 [num_metrics:2]
-  [key_len:2][key:N][flags:1][count:2][values:8*count] ... (for each metric)
+  [key_len:2][key:N][flags:1][unit_len:1][unit:N][count:2][values:8*count] ... (for each metric)
 
 flags byte:
   bit 0: is_kpi
   bits 1-7: reserved
 ```
 
-Wire tag: `WIRE_METRIQUE_EVENT = 0x0A`
+Wire tag: `WIRE_METRIQUE_EVENT = 11`
 
 #### 5. Event Types
 
@@ -105,6 +96,7 @@ Wire tag: `WIRE_METRIQUE_EVENT = 0x0A`
 RawEvent::MetriqueEvent {
     timestamp_nanos: u64,
     worker_id: usize,
+    entry_name: String,
     data: Vec<u8>,  // Serialized entry
 }
 
@@ -114,8 +106,7 @@ TelemetryEvent::MetriqueEvent {
     timestamp_nanos: u64,
     worker_id: usize,
     entry_name: String,
-    kpi_field_names: Vec<String>,  // For viewer to graph
-    data: Vec<u8>,
+    data: Vec<u8>,  // KPI info is in per-metric flags byte
 }
 ```
 
@@ -145,41 +136,47 @@ pub fn record_metrique_entry(&mut self, entry: &impl Entry) {
 - [x] Add `record_metrique_entry` to `ThreadLocalBuffer`
 - [x] Add match arms for MetriqueEvent in all event handling code
 
-### Phase 2: Flags and Metadata
-- [ ] Define `Kpi` force flag
-- [ ] Define `Dial9Metadata<T>` with `Timestamp` and `TimestampOnClose`
-- [ ] Implement flag serialization in `BinaryValueWriter`
+### Phase 2: Flags and Metadata ✅
+- [x] Define `Kpi` force flag (via `ForceFlag<T, KpiFlagCtor>`)
+- [x] Implement flag serialization in `BinaryEntryWriter` (flags.downcast::<KpiFlag>() → bit 0)
+- [ ] Define `Dial9Metadata<T>` with `Timestamp` and `TimestampOnClose` (deferred — not needed for v0)
 
-### Phase 3: Macro and Sink
-- [ ] Implement `dial9_sink!` macro
-- [ ] Generate strongly-typed sink struct
-- [ ] Generate static instance with `OnceLock`
-- [ ] Implement `attach_backing_sink` method
-- [ ] Implement `EntrySink` trait for generated sink
+### Phase 3: Sink ✅
+- [x] Implement `Dial9EntrySink<E>` struct with `EntrySink` trait
+- [x] Static instance support (const fn new, works with `static SINK: Dial9EntrySink<...>`)
+- [ ] Implement `dial9_sink!` macro (deferred — manual sink works fine)
+- [ ] Implement `attach_backing_sink` for dual-sink (deferred)
 
-### Phase 4: Wire Format
-- [ ] Implement `write_event` for `TelemetryEvent::MetriqueEvent`
-- [ ] Implement `read_event` for `TelemetryEvent::MetriqueEvent`
-- [ ] Add tests for serialization roundtrip
+### Phase 4: Wire Format ✅
+- [x] Implement `write_event` for `TelemetryEvent::MetriqueEvent`
+- [x] Implement `read_event` for `TelemetryEvent::MetriqueEvent`
+- [x] Skip metrique events gracefully when feature is disabled
+- [x] Add tests for serialization roundtrip
+- [x] Unit name serialized in data blob (u8 len-prefixed)
 
-### Phase 5: Viewer Support
-- [ ] Update trace viewer to parse metrique events
-- [ ] Add KPI graphing UI
-- [ ] Add metrique event filtering/search
+### Phase 5: Example Integration ✅
+- [x] Wire up metrique in metrics-service example
+- [x] Define `RequestEntry` with `Kpi<Timer>` for duration
+
+### Phase 6: Viewer Support
+- [ ] Update trace viewer JS parser to handle wire code 11
+- [ ] Parse data blob (properties, metrics with flags/unit)
+- [ ] Render metrique events in the UI
+- [ ] KPI graphing
 
 ## Design Decisions
 
 ### Why not intern field names?
 Metrique events are less frequent than poll events, and the overhead of storing field names inline is acceptable for v0. We can add interning later if needed.
 
-### Why 2-pass serialization?
-Pre-allocating the exact buffer size avoids reallocations and is more efficient than growing the buffer dynamically.
-
 ### Why store all observations?
 Most metrique users will use compressed histograms (which are already compact). Storing all observations gives maximum fidelity for analysis.
 
-### Why macro instead of generic function?
-The macro generates a static with strong typing, avoiding the need for `BoxEntrySink` at the call site. This keeps the hot path zero-cost.
+### Why KPI in the data blob instead of the wire envelope?
+Each metric already has a flags byte in the data blob. Storing KPI as bit 0 there costs zero extra bytes, vs duplicating field names in a separate `kpi_field_names` list in the wire format.
+
+### Why `Dial9EntrySink` instead of a macro?
+A simple generic struct with `const fn new` covers the common case (static sink, single entry type). A macro could be added later for dual-sink (trace + logging) support.
 
 ## Open Questions
 

@@ -50,7 +50,6 @@ const WIRE_WAKE_EVENT: u8 = 7;
 const WIRE_CPU_SAMPLE: u8 = 8;
 const WIRE_CALLFRAME_DEF: u8 = 9;
 const WIRE_THREAD_NAME_DEF: u8 = 10;
-#[cfg(feature = "metrique-events")]
 const WIRE_METRIQUE_EVENT: u8 = 11;
 
 /// Returns the wire size of an event.
@@ -70,8 +69,8 @@ pub fn wire_event_size(event: &TelemetryEvent) -> usize {
         TelemetryEvent::ThreadNameDef { name, .. } => 1 + 4 + 2 + name.len(),
         TelemetryEvent::WakeEvent { .. } => 14,
         #[cfg(feature = "metrique-events")]
-        TelemetryEvent::MetriqueEvent { entry_name, data, kpi_field_names, .. } => {
-            1 + 4 + 1 + 2 + entry_name.len() + 4 + data.len() + 2 + kpi_field_names.iter().map(|s| 2 + s.len()).sum::<usize>()
+        TelemetryEvent::MetriqueEvent { entry_name, data, .. } => {
+            1 + 4 + 1 + 4 + 2 + entry_name.len() + 4 + data.len()
         }
     }
 }
@@ -228,30 +227,22 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
         TelemetryEvent::MetriqueEvent {
             timestamp_nanos,
             worker_id,
+            task_id,
             entry_name,
-            kpi_field_names,
             data,
         } => {
             let timestamp_us = (*timestamp_nanos / 1000) as u32;
             w.write_all(&[WIRE_METRIQUE_EVENT])?;
             w.write_all(&timestamp_us.to_le_bytes())?;
             w.write_all(&[*worker_id as u8])?;
+            w.write_all(&task_id.to_u32().to_le_bytes())?;
             
             // Write entry name
             let name_len = entry_name.len() as u16;
             w.write_all(&name_len.to_le_bytes())?;
             w.write_all(entry_name.as_bytes())?;
             
-            // Write KPI field names
-            let kpi_count = kpi_field_names.len() as u16;
-            w.write_all(&kpi_count.to_le_bytes())?;
-            for field_name in kpi_field_names {
-                let field_len = field_name.len() as u16;
-                w.write_all(&field_len.to_le_bytes())?;
-                w.write_all(field_name.as_bytes())?;
-            }
-            
-            // Write data
+            // Write data (contains per-metric flags byte with span bit)
             let data_len = data.len() as u32;
             w.write_all(&data_len.to_le_bytes())?;
             w.write_all(data)?;
@@ -468,6 +459,47 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
                 waker_task_id: TaskId::from_u32(u32::from_le_bytes(waker_task_id_bytes)),
                 woken_task_id: TaskId::from_u32(u32::from_le_bytes(woken_task_id_bytes)),
                 target_worker: tw[0],
+            }
+        }
+        WIRE_METRIQUE_EVENT => {
+            // MetriqueEvent: worker_id(1) + task_id(4) + entry_name_len(2) + entry_name(N)
+            //   + data_len(4) + data(N)
+            let mut wid = [0u8; 1];
+            r.read_exact(&mut wid)?;
+
+            let mut task_id_bytes = [0u8; 4];
+            r.read_exact(&mut task_id_bytes)?;
+
+            let mut name_len_bytes = [0u8; 2];
+            r.read_exact(&mut name_len_bytes)?;
+            let name_len = u16::from_le_bytes(name_len_bytes) as usize;
+            let mut name_bytes = vec![0u8; name_len];
+            r.read_exact(&mut name_bytes)?;
+
+            let mut data_len_bytes = [0u8; 4];
+            r.read_exact(&mut data_len_bytes)?;
+            let data_len = u32::from_le_bytes(data_len_bytes) as usize;
+            let mut data = vec![0u8; data_len];
+            r.read_exact(&mut data)?;
+
+            #[cfg(feature = "metrique-events")]
+            {
+                let entry_name = String::from_utf8(name_bytes).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8")
+                })?;
+                TelemetryEvent::MetriqueEvent {
+                    timestamp_nanos,
+                    worker_id: wid[0] as usize,
+                    task_id: TaskId::from_u32(u32::from_le_bytes(task_id_bytes)),
+                    entry_name,
+                    data,
+                }
+            }
+            #[cfg(not(feature = "metrique-events"))]
+            {
+                // Skip metrique events when feature is disabled, but bytes are consumed
+                let _ = (name_bytes, data, task_id_bytes);
+                return read_event(r);
             }
         }
         _ => return Ok(None),
@@ -1118,6 +1150,97 @@ mod tests {
                 assert_eq!(target_worker, 3);
             }
             _ => panic!("expected WakeEvent"),
+        }
+    }
+
+    #[cfg(feature = "metrique-events")]
+    #[test]
+    fn test_metrique_event_roundtrip() {
+        let event = TelemetryEvent::MetriqueEvent {
+            timestamp_nanos: 7_000_000,
+            worker_id: 2,
+            task_id: TaskId::from_u32(42),
+            entry_name: "RequestMetrics".to_string(),
+            data: vec![1, 2, 3, 4, 5],
+        };
+        let decoded = roundtrip(&event);
+        match decoded {
+            TelemetryEvent::MetriqueEvent {
+                timestamp_nanos,
+                worker_id,
+                task_id,
+                entry_name,
+                data,
+            } => {
+                assert_eq!(timestamp_nanos, 7_000_000);
+                assert_eq!(worker_id, 2);
+                assert_eq!(task_id.to_u32(), 42);
+                assert_eq!(entry_name, "RequestMetrics");
+                assert_eq!(data, vec![1, 2, 3, 4, 5]);
+            }
+            _ => panic!("expected MetriqueEvent"),
+        }
+    }
+
+    #[cfg(feature = "metrique-events")]
+    #[test]
+    fn test_metrique_event_empty_fields_roundtrip() {
+        let event = TelemetryEvent::MetriqueEvent {
+            timestamp_nanos: 1_000_000,
+            worker_id: 0,
+            task_id: TaskId::from_u32(0),
+            entry_name: "Empty".to_string(),
+            data: vec![],
+        };
+        let decoded = roundtrip(&event);
+        match decoded {
+            TelemetryEvent::MetriqueEvent {
+                entry_name,
+                data,
+                ..
+            } => {
+                assert_eq!(entry_name, "Empty");
+                assert!(data.is_empty());
+            }
+            _ => panic!("expected MetriqueEvent"),
+        }
+    }
+
+    #[test]
+    fn test_metrique_event_skipped_without_feature() {
+        // Write a metrique event manually (wire code 11) followed by a PollEnd,
+        // and verify the reader skips it and reads the PollEnd correctly.
+        let mut buf = Vec::new();
+        // Wire format: tag(1) + ts(4) + worker(1) + task_id(4) + name_len(2) + name + data_len(4) + data
+        buf.push(11u8); // tag
+        buf.extend_from_slice(&100u32.to_le_bytes()); // timestamp_us
+        buf.push(0u8); // worker_id
+        buf.extend_from_slice(&0u32.to_le_bytes()); // task_id
+        buf.extend_from_slice(&4u16.to_le_bytes()); // entry_name_len
+        buf.extend_from_slice(b"test"); // entry_name
+        buf.extend_from_slice(&3u32.to_le_bytes()); // data_len
+        buf.extend_from_slice(&[1, 2, 3]); // data
+
+        // Write a PollEnd after it
+        let poll_end = TelemetryEvent::PollEnd {
+            timestamp_nanos: 999_000,
+            worker_id: 1,
+        };
+        write_event(&mut buf, &poll_end).unwrap();
+
+        let mut cursor = Cursor::new(buf);
+        // First event: either MetriqueEvent (feature on) or skipped to PollEnd (feature off)
+        let first = read_event(&mut cursor).unwrap().unwrap();
+        #[cfg(feature = "metrique-events")]
+        assert!(matches!(first, TelemetryEvent::MetriqueEvent { .. }));
+        #[cfg(not(feature = "metrique-events"))]
+        assert!(matches!(first, TelemetryEvent::PollEnd { .. }));
+
+        // If feature is on, the next event should be PollEnd
+        #[cfg(feature = "metrique-events")]
+        {
+            let second = read_event(&mut cursor).unwrap().unwrap();
+            assert!(matches!(second, TelemetryEvent::PollEnd { .. }));
         }
     }
 }
