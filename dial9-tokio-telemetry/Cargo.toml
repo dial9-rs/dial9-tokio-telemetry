@@ -1,7 +1,7 @@
 [package]
 name = "dial9-tokio-telemetry"
 edition = "2024"
-version = "0.1.0"
+version = "0.1.1"
 publish = true
 description = "Low-overhead runtime telemetry for Tokio with poll timing, wake events, and CPU profiling"
 license = "Apache-2.0"
