@@ -57,9 +57,9 @@ impl FlushState {
     }
 
     /// Resolve a RawEvent into a SmallVec of wire events: defs first, then the event itself.
-    pub(super) fn resolve(&mut self, raw: RawEvent) -> SmallVec<[TelemetryEvent; 3]> {
+    pub(super) fn resolve(&mut self, raw: &RawEvent) -> SmallVec<[TelemetryEvent; 3]> {
         let mut events = SmallVec::new();
-        match raw {
+        match *raw {
             RawEvent::TaskSpawn { task_id, location } => {
                 let spawn_loc_id = self.intern(location);
                 self.collect_def(spawn_loc_id, &mut events);
