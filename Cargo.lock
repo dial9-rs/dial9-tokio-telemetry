@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blazesym",
  "libc",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "assert2",

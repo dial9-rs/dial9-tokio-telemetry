@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.1.0...dial9-tokio-telemetry-v0.1.1) - 2026-03-03
+
+- Fix trace viewer crash when loading trace from URL parameter ([#42](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/42))
+- Improve symbolization and include docs.rs links in call frames ([#39](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/39))
+- Add demo trace ([#40](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/40))
+- fix: take_rotated() was inside debug_assert, never ran in release builds ([#41](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/41))
+
 ## [0.1.0](https://github.com/dial9-rs/dial9-tokio-telemetry/releases/tag/dial9-tokio-telemetry-v0.1.0) - 2026-03-01
 
 ### Other

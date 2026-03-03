@@ -3,11 +3,13 @@ name: Check docs.rs
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: 
+      - main
 
 jobs:
   check-docs:
     runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.head_ref, 'release-') && !startsWith(github.ref_name, 'release-') }}
     steps:
       - uses: actions/checkout@v4
       
