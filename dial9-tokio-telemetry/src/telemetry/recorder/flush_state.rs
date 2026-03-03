@@ -144,6 +144,21 @@ impl FlushState {
                     target_worker,
                 });
             }
+            #[cfg(feature = "metrique-events")]
+            RawEvent::MetriqueEvent {
+                timestamp_nanos,
+                worker_id,
+                ref data,
+            } => {
+                // TODO: Extract entry name and KPI fields from data
+                events.push(TelemetryEvent::MetriqueEvent {
+                    timestamp_nanos,
+                    worker_id,
+                    entry_name: String::from("unknown"), // TODO
+                    kpi_field_names: Vec::new(), // TODO
+                    data: data.clone(),
+                });
+            }
         }
         events
     }

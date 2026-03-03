@@ -239,6 +239,8 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
             | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. } => {}
+            #[cfg(feature = "metrique-events")]
+            TelemetryEvent::MetriqueEvent { .. } => {}
         }
     }
 

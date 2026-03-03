@@ -50,6 +50,8 @@ const WIRE_WAKE_EVENT: u8 = 7;
 const WIRE_CPU_SAMPLE: u8 = 8;
 const WIRE_CALLFRAME_DEF: u8 = 9;
 const WIRE_THREAD_NAME_DEF: u8 = 10;
+#[cfg(feature = "metrique-events")]
+const WIRE_METRIQUE_EVENT: u8 = 11;
 
 /// Returns the wire size of an event.
 pub fn wire_event_size(event: &TelemetryEvent) -> usize {
@@ -67,6 +69,10 @@ pub fn wire_event_size(event: &TelemetryEvent) -> usize {
         } => 1 + 8 + 2 + symbol.len() + 2 + location.as_ref().map_or(0, |l| l.len()),
         TelemetryEvent::ThreadNameDef { name, .. } => 1 + 4 + 2 + name.len(),
         TelemetryEvent::WakeEvent { .. } => 14,
+        #[cfg(feature = "metrique-events")]
+        TelemetryEvent::MetriqueEvent { entry_name, data, kpi_field_names, .. } => {
+            1 + 4 + 1 + 2 + entry_name.len() + 4 + data.len() + 2 + kpi_field_names.iter().map(|s| 2 + s.len()).sum::<usize>()
+        }
     }
 }
 
@@ -217,6 +223,38 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
             w.write_all(&waker_task_id.to_u32().to_le_bytes())?;
             w.write_all(&woken_task_id.to_u32().to_le_bytes())?;
             w.write_all(&[*target_worker])?;
+        }
+        #[cfg(feature = "metrique-events")]
+        TelemetryEvent::MetriqueEvent {
+            timestamp_nanos,
+            worker_id,
+            entry_name,
+            kpi_field_names,
+            data,
+        } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
+            w.write_all(&[WIRE_METRIQUE_EVENT])?;
+            w.write_all(&timestamp_us.to_le_bytes())?;
+            w.write_all(&[*worker_id as u8])?;
+            
+            // Write entry name
+            let name_len = entry_name.len() as u16;
+            w.write_all(&name_len.to_le_bytes())?;
+            w.write_all(entry_name.as_bytes())?;
+            
+            // Write KPI field names
+            let kpi_count = kpi_field_names.len() as u16;
+            w.write_all(&kpi_count.to_le_bytes())?;
+            for field_name in kpi_field_names {
+                let field_len = field_name.len() as u16;
+                w.write_all(&field_len.to_le_bytes())?;
+                w.write_all(field_name.as_bytes())?;
+            }
+            
+            // Write data
+            let data_len = data.len() as u32;
+            w.write_all(&data_len.to_le_bytes())?;
+            w.write_all(data)?;
         }
     }
     Ok(())

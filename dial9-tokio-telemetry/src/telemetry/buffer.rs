@@ -1,6 +1,9 @@
 use crate::telemetry::events::RawEvent;
 use std::cell::RefCell;
 
+#[cfg(feature = "metrique-events")]
+use crate::telemetry::metrique_serializer::serialize_entry;
+
 const BUFFER_CAPACITY: usize = 1024;
 
 pub struct ThreadLocalBuffer {
@@ -30,6 +33,22 @@ impl ThreadLocalBuffer {
 
     pub fn flush(&mut self) -> Vec<RawEvent> {
         std::mem::replace(&mut self.events, Vec::with_capacity(BUFFER_CAPACITY))
+    }
+
+    #[cfg(feature = "metrique-events")]
+    pub fn record_metrique_entry<E: metrique::writer::Entry>(&mut self, entry: &E, worker_id: usize) {
+        let timestamp_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        
+        let data = serialize_entry(entry);
+        
+        self.record_event(RawEvent::MetriqueEvent {
+            timestamp_nanos,
+            worker_id,
+            data,
+        });
     }
 }
 

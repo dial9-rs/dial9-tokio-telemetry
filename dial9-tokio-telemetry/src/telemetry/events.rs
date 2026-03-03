@@ -124,6 +124,20 @@ pub enum TelemetryEvent {
         woken_task_id: TaskId,
         target_worker: u8,
     },
+    /// A metrique event with serialized key-value data.
+    #[cfg(feature = "metrique-events")]
+    MetriqueEvent {
+        #[serde(rename = "timestamp_ns")]
+        timestamp_nanos: u64,
+        #[serde(rename = "worker")]
+        worker_id: usize,
+        /// Name of the entry type
+        entry_name: String,
+        /// Field names marked as KPIs (for graphing in viewer)
+        kpi_field_names: Vec<String>,
+        /// Serialized metrique entry data
+        data: Vec<u8>,
+    },
 }
 
 impl TelemetryEvent {
@@ -153,6 +167,10 @@ impl TelemetryEvent {
             | TelemetryEvent::WakeEvent {
                 timestamp_nanos, ..
             } => Some(*timestamp_nanos),
+            #[cfg(feature = "metrique-events")]
+            TelemetryEvent::MetriqueEvent {
+                timestamp_nanos, ..
+            } => Some(*timestamp_nanos),
             TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
             | TelemetryEvent::CallframeDef { .. }
@@ -168,6 +186,8 @@ impl TelemetryEvent {
             | TelemetryEvent::WorkerPark { worker_id, .. }
             | TelemetryEvent::WorkerUnpark { worker_id, .. }
             | TelemetryEvent::CpuSample { worker_id, .. } => Some(*worker_id),
+            #[cfg(feature = "metrique-events")]
+            TelemetryEvent::MetriqueEvent { worker_id, .. } => Some(*worker_id),
             TelemetryEvent::QueueSample { .. }
             | TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
@@ -187,7 +207,7 @@ impl TelemetryEvent {
 /// Raw event emitted by worker threads into thread-local buffers.
 /// Carries rich data (including `&'static Location`) with no locking.
 /// Converted to wire format by the flush thread.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum RawEvent {
     PollStart {
         timestamp_nanos: u64,
@@ -226,6 +246,13 @@ pub enum RawEvent {
         waker_task_id: crate::telemetry::task_metadata::TaskId,
         woken_task_id: crate::telemetry::task_metadata::TaskId,
         target_worker: u8,
+    },
+    #[cfg(feature = "metrique-events")]
+    MetriqueEvent {
+        timestamp_nanos: u64,
+        worker_id: usize,
+        /// Serialized metrique entry data
+        data: Vec<u8>,
     },
 }
 

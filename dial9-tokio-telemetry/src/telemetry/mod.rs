@@ -5,6 +5,8 @@ pub mod collector;
 pub mod cpu_profile;
 pub mod events;
 pub mod format;
+#[cfg(feature = "metrique-events")]
+pub mod metrique_serializer;
 pub mod recorder;
 pub mod task_metadata;
 pub mod writer;
