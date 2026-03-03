@@ -2,11 +2,11 @@ name: Check docs.rs
 
 on:
   pull_request:
+    branches-ignore:
+      - 'release-*'
   push:
     branches: 
       - main
-    branches-ignore:
-      - 'release-*'
 
 jobs:
   check-docs:
