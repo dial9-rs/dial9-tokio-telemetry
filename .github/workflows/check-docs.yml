@@ -3,7 +3,10 @@ name: Check docs.rs
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: 
+      - main
+    branches-ignore:
+      - 'release-*'
 
 jobs:
   check-docs:
