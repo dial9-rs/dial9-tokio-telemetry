@@ -725,19 +725,15 @@
                 // Build active task count timeline from TaskSpawn/TaskTerminate
                 activeTaskSamples = [];
                 taskFirstPoll = new Map();
-                if (trace.taskTerminateTimes && trace.taskTerminateTimes.size > 0) {
+                if (trace.taskSpawnTimes && trace.taskSpawnTimes.size > 0) {
                     const taskEvents = []; // [{t, delta: +1 or -1}]
-                    for (const e of evts) {
-                        if (e.eventType === ET.PollStart && e.taskId && !taskFirstPoll.has(e.taskId)) {
-                            taskFirstPoll.set(e.taskId, e.timestamp);
-                        }
-                    }
-                    for (const [, t] of taskFirstPoll) {
+                    // Use real spawn timestamps
+                    for (const [taskId, t] of trace.taskSpawnTimes) {
+                        taskFirstPoll.set(taskId, t);
                         taskEvents.push({ t, delta: 1 });
                     }
-                    for (const [, evtIdx] of trace.taskTerminateTimes) {
-                        let t = maxTs;
-                        if (evtIdx < evts.length) t = evts[evtIdx].timestamp;
+                    // Use real terminate timestamps
+                    for (const [, t] of trace.taskTerminateTimes) {
                         taskEvents.push({ t, delta: -1 });
                     }
                     taskEvents.sort((a, b) => a.t - b.t);
@@ -1376,14 +1372,12 @@
                 panel.style.display = "block";
                 const loc = trace.spawnLocations.get(polls[0].spawnLocId);
                 const wakeCount = wakes.length;
-                const terminateIdx = trace.taskTerminateTimes?.get(selectedTaskId);
-                const hasTerminate = terminateIdx != null;
+                const terminateTs = trace.taskTerminateTimes?.get(selectedTaskId);
+                const hasTerminate = terminateTs != null;
+                const spawnTs = trace.taskSpawnTimes?.get(selectedTaskId);
                 let lifecycleStr = "";
-                if (hasTerminate) {
-                    const firstPoll = polls[0].start;
-                    let termTs = maxTs;
-                    if (terminateIdx < trace.events.length) termTs = trace.events[terminateIdx].timestamp;
-                    const dur = termTs - firstPoll;
+                if (hasTerminate && spawnTs != null) {
+                    const dur = terminateTs - spawnTs;
                     const durMs = dur / 1e6;
                     lifecycleStr = ` · lifetime ${durMs < 1 ? (durMs * 1000).toFixed(1) + "µs" : durMs.toFixed(2) + "ms"}`;
                 }
@@ -1526,14 +1520,13 @@
                     }
                 }
 
-                // Draw task lifespan bar (first poll → terminate) if it fits in view
-                if (hasTerminate) {
-                    const firstPoll = polls[0].start;
-                    let termTs = maxTs;
-                    if (terminateIdx < trace.events.length) termTs = trace.events[terminateIdx].timestamp;
-                    if (firstPoll < viewEnd && termTs > viewStart) {
-                        const lx1 = LABEL_W + Math.max(0, nsToX(firstPoll, drawW));
-                        const lx2 = LABEL_W + Math.min(drawW, nsToX(termTs, drawW));
+                // Draw task lifespan bar (spawn → terminate) if it fits in view
+                if (hasTerminate && spawnTs != null) {
+                    const lifeStart = spawnTs;
+                    const lifeEnd = terminateTs;
+                    if (lifeStart < viewEnd && lifeEnd > viewStart) {
+                        const lx1 = LABEL_W + Math.max(0, nsToX(lifeStart, drawW));
+                        const lx2 = LABEL_W + Math.min(drawW, nsToX(lifeEnd, drawW));
                         ctx.fillStyle = "rgba(129,199,132,0.08)";
                         ctx.fillRect(lx1, bandTop - 2, lx2 - lx1, bandH + 4);
                         ctx.strokeStyle = "rgba(129,199,132,0.3)";
@@ -1543,13 +1536,13 @@
                         ctx.moveTo(lx1, bandTop - 2); ctx.lineTo(lx2, bandTop - 2);
                         ctx.moveTo(lx1, bandTop + bandH + 2); ctx.lineTo(lx2, bandTop + bandH + 2);
                         ctx.stroke();
-                        if (firstPoll >= viewStart) {
+                        if (lifeStart >= viewStart) {
                             ctx.strokeStyle = "#81c784";
                             ctx.beginPath(); ctx.moveTo(lx1, bandTop - 6); ctx.lineTo(lx1, bandTop + bandH + 6); ctx.stroke();
                             ctx.fillStyle = "#81c784"; ctx.font = "8px monospace"; ctx.textAlign = "left";
                             ctx.fillText("spawn▸", lx1 + 2, bandTop - 8);
                         }
-                        if (termTs <= viewEnd) {
+                        if (lifeEnd <= viewEnd) {
                             ctx.strokeStyle = "#81c784";
                             ctx.beginPath(); ctx.moveTo(lx2, bandTop - 6); ctx.lineTo(lx2, bandTop + bandH + 6); ctx.stroke();
                             ctx.fillStyle = "#81c784"; ctx.font = "8px monospace"; ctx.textAlign = "right";

@@ -60,16 +60,27 @@ impl FlushState {
     pub(super) fn resolve(&mut self, raw: RawEvent) -> SmallVec<[TelemetryEvent; 3]> {
         let mut events = SmallVec::new();
         match raw {
-            RawEvent::TaskSpawn { task_id, location } => {
+            RawEvent::TaskSpawn {
+                timestamp_nanos,
+                task_id,
+                location,
+            } => {
                 let spawn_loc_id = self.intern(location);
                 self.collect_def(spawn_loc_id, &mut events);
                 events.push(TelemetryEvent::TaskSpawn {
+                    timestamp_nanos,
                     task_id,
                     spawn_loc_id,
                 });
             }
-            RawEvent::TaskTerminate { task_id } => {
-                events.push(TelemetryEvent::TaskTerminate { task_id });
+            RawEvent::TaskTerminate {
+                timestamp_nanos,
+                task_id,
+            } => {
+                events.push(TelemetryEvent::TaskTerminate {
+                    timestamp_nanos,
+                    task_id,
+                });
             }
             RawEvent::PollStart {
                 timestamp_nanos,
