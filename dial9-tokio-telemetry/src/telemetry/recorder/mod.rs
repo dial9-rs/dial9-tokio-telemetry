@@ -103,6 +103,17 @@ impl TelemetryRecorder {
             let s_stop = shared.clone();
             builder
                 .on_thread_start(move || {
+                    // Register as Blocking initially; worker threads will
+                    // overwrite this to Worker(i) in resolve_worker_id.
+                    {
+                        let tid = crate::telemetry::events::current_tid();
+                        s_start
+                            .thread_roles
+                            .lock()
+                            .unwrap()
+                            .entry(tid)
+                            .or_insert(crate::telemetry::events::ThreadRole::Blocking);
+                    }
                     if let Ok(mut prof) = s_start.sched_profiler.lock()
                         && let Some(ref mut p) = *prof
                     {

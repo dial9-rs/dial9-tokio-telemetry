@@ -4,6 +4,19 @@ use serde::Serialize;
 /// Sentinel worker_id for events from non-worker threads (encoded as u8 on the wire).
 pub const UNKNOWN_WORKER: usize = 255;
 
+/// Sentinel worker_id for events from tokio's blocking thread pool.
+pub const BLOCKING_WORKER: usize = 254;
+
+/// Role of a thread known to the telemetry system.
+#[cfg(feature = "cpu-profiling")]
+#[derive(Debug, Clone, Copy)]
+pub enum ThreadRole {
+    /// A tokio worker thread with the given index.
+    Worker(usize),
+    /// A thread in tokio's blocking pool.
+    Blocking,
+}
+
 /// What triggered a [`TelemetryEvent::CpuSample`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum CpuSampleSource {

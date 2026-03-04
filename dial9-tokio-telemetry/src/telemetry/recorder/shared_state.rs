@@ -1,5 +1,7 @@
 use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::collector::CentralCollector;
+#[cfg(feature = "cpu-profiling")]
+use crate::telemetry::events::ThreadRole;
 use crate::telemetry::events::{RawEvent, SchedStat, UNKNOWN_WORKER};
 use crate::telemetry::task_metadata::TaskId;
 use arc_swap::ArcSwap;
@@ -52,7 +54,11 @@ pub(super) fn resolve_worker_id(
                             if !emitted.get() {
                                 emitted.set(true);
                                 let os_tid = crate::telemetry::events::current_tid();
-                                shared.worker_tids.lock().unwrap().insert(os_tid, i);
+                                shared
+                                    .thread_roles
+                                    .lock()
+                                    .unwrap()
+                                    .insert(os_tid, ThreadRole::Worker(i));
                             }
                         });
                     }
@@ -80,7 +86,7 @@ pub(crate) struct SharedState {
     pub(crate) start_time: Instant,
     pub(crate) metrics: ArcSwap<Option<RuntimeMetrics>>,
     #[cfg(feature = "cpu-profiling")]
-    pub(crate) worker_tids: Mutex<HashMap<u32, usize>>,
+    pub(crate) thread_roles: Mutex<HashMap<u32, ThreadRole>>,
     #[cfg(feature = "cpu-profiling")]
     pub(crate) sched_profiler: Mutex<Option<crate::telemetry::cpu_profile::SchedProfiler>>,
 }
@@ -93,7 +99,7 @@ impl SharedState {
             start_time,
             metrics: ArcSwap::from_pointee(None),
             #[cfg(feature = "cpu-profiling")]
-            worker_tids: Mutex::new(HashMap::new()),
+            thread_roles: Mutex::new(HashMap::new()),
             #[cfg(feature = "cpu-profiling")]
             sched_profiler: Mutex::new(None),
         }
