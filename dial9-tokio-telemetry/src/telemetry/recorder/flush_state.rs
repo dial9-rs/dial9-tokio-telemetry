@@ -68,6 +68,9 @@ impl FlushState {
                     spawn_loc_id,
                 });
             }
+            RawEvent::TaskTerminate { task_id } => {
+                events.push(TelemetryEvent::TaskTerminate { task_id });
+            }
             RawEvent::PollStart {
                 timestamp_nanos,
                 worker_id,

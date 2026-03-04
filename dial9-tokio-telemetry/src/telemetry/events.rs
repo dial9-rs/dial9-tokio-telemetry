@@ -109,6 +109,9 @@ pub enum TelemetryEvent {
         task_id: TaskId,
         spawn_loc_id: SpawnLocationId,
     },
+    TaskTerminate {
+        task_id: TaskId,
+    },
     /// A CPU stack trace sample from perf_event, attributed to a worker thread.
     CpuSample {
         #[serde(rename = "timestamp_ns")]
@@ -136,7 +139,10 @@ pub enum TelemetryEvent {
     /// Maps an OS thread ID to its name (from `/proc/self/task/<tid>/comm`).
     /// Emitted before the first CpuSample referencing this tid in each file.
     /// Allows grouping non-worker CPU samples by thread name.
-    ThreadNameDef { tid: u32, name: String },
+    ThreadNameDef {
+        tid: u32,
+        name: String,
+    },
     WakeEvent {
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
@@ -175,6 +181,7 @@ impl TelemetryEvent {
             } => Some(*timestamp_nanos),
             TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. } => None,
         }
@@ -191,6 +198,7 @@ impl TelemetryEvent {
             TelemetryEvent::QueueSample { .. }
             | TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. } => None,
@@ -240,6 +248,9 @@ pub enum RawEvent {
     TaskSpawn {
         task_id: crate::telemetry::task_metadata::TaskId,
         location: &'static std::panic::Location<'static>,
+    },
+    TaskTerminate {
+        task_id: crate::telemetry::task_metadata::TaskId,
     },
     WakeEvent {
         timestamp_nanos: u64,

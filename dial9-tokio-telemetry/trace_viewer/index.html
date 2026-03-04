@@ -437,6 +437,8 @@
             let currentPoiIndex = -1;
             // Task selection state
             let selectedTaskId = null;
+            // Active task count timeline: [{t, count}]
+            let activeTaskSamples = [];
             // Hovered waker task in task detail panel
             let hoveredWakerTaskId = null;
             // Stored wake hit regions for task detail mouseover: [{x1, x2, y1, y2, wakerTaskId}]
@@ -701,6 +703,32 @@
                             if (e.localQueue > maxLocalQueue)
                                 maxLocalQueue = e.localQueue;
                         }
+                    }
+                }
+
+                // Build active task count timeline from TaskSpawn/TaskTerminate
+                activeTaskSamples = [];
+                if (trace.taskTerminateTimes && trace.taskTerminateTimes.size > 0) {
+                    const taskEvents = []; // [{t, delta: +1 or -1}]
+                    const firstPollTime = new Map();
+                    for (const e of evts) {
+                        if (e.eventType === ET.PollStart && e.taskId && !firstPollTime.has(e.taskId)) {
+                            firstPollTime.set(e.taskId, e.timestamp);
+                        }
+                    }
+                    for (const [, t] of firstPollTime) {
+                        taskEvents.push({ t, delta: 1 });
+                    }
+                    for (const [, evtIdx] of trace.taskTerminateTimes) {
+                        let t = maxTs;
+                        if (evtIdx < evts.length) t = evts[evtIdx].timestamp;
+                        taskEvents.push({ t, delta: -1 });
+                    }
+                    taskEvents.sort((a, b) => a.t - b.t);
+                    let count = 0;
+                    for (const te of taskEvents) {
+                        count += te.delta;
+                        activeTaskSamples.push({ t: te.t, count: Math.max(0, count) });
                     }
                 }
 
@@ -1332,8 +1360,19 @@
                 panel.style.display = "block";
                 const loc = trace.spawnLocations.get(polls[0].spawnLocId);
                 const wakeCount = wakes.length;
+                const terminateIdx = trace.taskTerminateTimes?.get(selectedTaskId);
+                const hasTerminate = terminateIdx != null;
+                let lifecycleStr = "";
+                if (hasTerminate) {
+                    const firstPoll = polls[0].start;
+                    let termTs = maxTs;
+                    if (terminateIdx < trace.events.length) termTs = trace.events[terminateIdx].timestamp;
+                    const dur = termTs - firstPoll;
+                    const durMs = dur / 1e6;
+                    lifecycleStr = ` · lifetime ${durMs < 1 ? (durMs * 1000).toFixed(1) + "µs" : durMs.toFixed(2) + "ms"}`;
+                }
                 document.getElementById("task-detail-label").textContent =
-                    `Task 0x${selectedTaskId.toString(16)}${loc ? " — " + loc : ""} · ${polls.length} polls · ${wakeCount} wakes`;
+                    `Task 0x${selectedTaskId.toString(16)}${loc ? " — " + loc : ""} · ${polls.length} polls · ${wakeCount} wakes${lifecycleStr}${hasTerminate ? " ✓" : ""}`;
 
                 const parent = c.parentElement;
                 const dpr = devicePixelRatio || 1;
@@ -1550,7 +1589,7 @@
                 ctx.fillStyle = "#16213e";
                 ctx.fillRect(0, 0, pw, ph);
 
-                if (!queueSamples.length) return;
+                if (!queueSamples.length && !activeTaskSamples.length) return;
 
                 const chartLeft = LABEL_W,
                     chartW = pw - LABEL_W - (scrollbarW || 0);
@@ -1668,6 +1707,41 @@
                 ctx.strokeStyle = "#ff8a65";
                 ctx.lineWidth = 1;
                 ctx.stroke();
+
+                // Draw active task count as step line (green, separate Y-axis)
+                if (activeTaskSamples.length > 0) {
+                    let maxTasks = 1;
+                    for (const s of activeTaskSamples) {
+                        if (s.t >= viewStart && s.t <= viewEnd && s.count > maxTasks) maxTasks = s.count;
+                    }
+                    let countAtViewStart = 0;
+                    for (const s of activeTaskSamples) {
+                        if (s.t > viewStart) break;
+                        countAtViewStart = s.count;
+                    }
+                    if (countAtViewStart > maxTasks) maxTasks = countAtViewStart;
+
+                    ctx.fillStyle = "#81c784";
+                    ctx.font = "10px monospace";
+                    ctx.textAlign = "left";
+                    ctx.fillText("tasks:" + maxTasks, chartLeft + chartW + 4, chartTop + 10);
+
+                    ctx.beginPath();
+                    let ty = chartTop + chartH - (countAtViewStart / maxTasks) * chartH;
+                    ctx.moveTo(chartLeft, ty);
+                    for (const s of activeTaskSamples) {
+                        if (s.t < viewStart) continue;
+                        if (s.t > viewEnd) break;
+                        const x = chartLeft + ((s.t - viewStart) / viewDur) * chartW;
+                        ctx.lineTo(x, ty);
+                        ty = chartTop + chartH - (s.count / maxTasks) * chartH;
+                        ctx.lineTo(x, ty);
+                    }
+                    ctx.lineTo(chartLeft + chartW, ty);
+                    ctx.strokeStyle = "#81c784";
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
             }
 
             function renderCrosshair() {
@@ -2340,12 +2414,23 @@
                     const totalEst = (nearestGlobal != null ? nearestGlobal.global : 0) + (nearest != null ? nearest.local : 0);
                     qInfo = `<span class="label">Global Q:</span> <span class="value">${globalStr}</span> · <span class="label">Local Q:</span> <span class="value">${localStr}</span> · <span class="label">Est. Total:</span> <span class="value">${totalEst}</span>`;
 
+                    let taskCountInfo = "";
+                    if (activeTaskSamples.length > 0) {
+                        let taskCount = 0;
+                        for (const s of activeTaskSamples) {
+                            if (s.t > ns) break;
+                            taskCount = s.count;
+                        }
+                        taskCountInfo = `<br><span class="label">Active Tasks:</span> <span class="value">${taskCount}</span>`;
+                    }
+
                     tooltip.innerHTML =
                         `<span class="label">Worker</span> <span class="value">${w}</span> · <span class="label">Time</span> <span class="value">${relMs.toFixed(3)}ms</span><br>` +
                         `<span class="label">State:</span> ${state}${stateDetail}<br>` +
                         schedInfo +
                         pollInfo +
-                        qInfo;
+                        qInfo +
+                        taskCountInfo;
                     tooltip.style.display = "block";
                     tooltip.style.left =
                         Math.min(e.clientX + 12, window.innerWidth - 340) +
@@ -2421,6 +2506,7 @@
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#ff2222;font-size:10px">▲</span>Sched (blocking)</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#66bb6a;font-size:10px">▼</span>Wake</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#81c784;display:inline-block"></span>Active Tasks</span>
     <span style="color:#666;margin-left:8px">│ ↑↓ zoom · ←→ pan · click poll for task + wake timeline · shift+drag for flamegraph · esc close</span>
   `;
                 tb.insertBefore(leg, document.getElementById("btn-zoom-in"));

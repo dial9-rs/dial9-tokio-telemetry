@@ -22,8 +22,8 @@
         off += 4;
         if (magic !== "TOKIOTRC")
             throw new Error("Not a TOKIOTRC file (got: " + magic + ")");
-        if (version < 8 || version > 13) {
-            console.warn(`Expected version 8-13, got ${version}. Some data may be missing.`);
+        if (version < 8 || version > 14) {
+            console.warn(`Expected version 8-14, got ${version}. Some data may be missing.`);
         }
         const hasCpuTime = version >= 5;
         const hasSchedWait = version >= 6;
@@ -32,6 +32,7 @@
         const events = [];
         const spawnLocations = new Map(); // SpawnLocationId (number) → string
         const taskSpawnLocs = new Map();  // taskId (number) → SpawnLocationId (number)
+        const taskTerminateTimes = new Map(); // taskId (number) → event index (for timestamp approximation)
         const callframeSymbols = new Map(); // address (bigint as string) → symbol name
         const cpuSamples = []; // {timestamp, workerId, tid, source, callchain: [addr strings]}
         const threadNames = new Map(); // tid (number) → thread name (string)
@@ -139,7 +140,15 @@
                 continue;
             }
 
-            if (wireCode > 10) break; // unknown code
+            if (wireCode === 11) {
+                // TaskTerminate: task_id(4)
+                if (off + 4 > buffer.byteLength) break;
+                const taskId = view.getUint32(off, true); off += 4;
+                taskTerminateTimes.set(taskId, events.length);
+                continue;
+            }
+
+            if (wireCode > 11) break; // unknown code
 
             // All regular codes have a 4-byte timestamp next
             if (off + 4 > buffer.byteLength) break;
@@ -230,7 +239,8 @@
             taskSpawnLocs, 
             cpuSamples, 
             callframeSymbols,
-            threadNames
+            threadNames,
+            taskTerminateTimes
         };
     }
 

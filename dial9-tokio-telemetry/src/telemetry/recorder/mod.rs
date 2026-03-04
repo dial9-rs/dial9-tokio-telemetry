@@ -96,6 +96,11 @@ impl TelemetryRecorder {
                 let location = meta.spawned_at();
                 s5.record_event(RawEvent::TaskSpawn { task_id, location });
             });
+            let s6 = shared.clone();
+            builder.on_task_terminate(move |meta| {
+                let task_id = TaskId::from(meta.id());
+                s6.record_event(RawEvent::TaskTerminate { task_id });
+            });
         }
 
         #[cfg(feature = "cpu-profiling")]

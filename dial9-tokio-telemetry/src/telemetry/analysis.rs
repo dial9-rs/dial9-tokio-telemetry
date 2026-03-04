@@ -84,6 +84,9 @@ impl TraceReader {
                 Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
                     self.thread_names.insert(tid, name);
                 }
+                Some(TelemetryEvent::TaskTerminate { .. }) => {
+                    // metadata record — skip
+                }
                 Some(e) => return Ok(Some(e)),
             }
         }
@@ -235,6 +238,7 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
             }
             TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::CpuSample { .. }
             | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. }
