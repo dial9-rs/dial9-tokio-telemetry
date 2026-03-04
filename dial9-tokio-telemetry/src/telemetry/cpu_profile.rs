@@ -55,6 +55,9 @@ pub(crate) struct CpuProfiler {
     /// Offset to convert perf timestamps (CLOCK_MONOTONIC nanos, via use_clockid) to trace-relative nanos.
     /// trace_ns = perf_time - clock_offset
     clock_offset: u64,
+    /// Our process ID — used to filter out samples from child processes
+    /// (perf `inherit` causes child process samples to land in our ring buffer).
+    pid: u32,
     /// OS tid → worker_id mapping, populated from SharedState.worker_tids.
     tid_to_worker: HashMap<u32, usize>,
     /// OS tid → thread name, eagerly cached at drain time so short-lived threads
@@ -76,6 +79,7 @@ impl CpuProfiler {
         Ok(Self {
             sampler,
             clock_offset: trace_start_mono_ns,
+            pid: std::process::id(),
             tid_to_worker: HashMap::new(),
             tid_to_name: HashMap::new(),
         })
@@ -91,7 +95,13 @@ impl CpuProfiler {
     /// Eagerly reads `/proc/self/task/<tid>/comm` for non-worker tids so that
     /// thread names are captured before short-lived threads exit.
     pub fn drain(&mut self, mut f: impl FnMut(TelemetryEvent, Option<&str>)) {
+        let pid = self.pid;
         self.sampler.for_each_sample(|sample| {
+            // Skip samples from child processes — perf `inherit` causes their
+            // samples to land in our ring buffer, but we can't symbolize them.
+            if sample.pid != pid {
+                return;
+            }
             let timestamp_nanos = sample.time.saturating_sub(self.clock_offset);
             let worker_id = self
                 .tid_to_worker

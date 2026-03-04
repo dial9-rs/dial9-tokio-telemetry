@@ -1,4 +1,4 @@
-//! Minimal symbol resolution using `blazesym`.
+//! Minimal symbol resolution using `blazesym` with `backtrace` fallback.
 
 use blazesym::symbolize::{Input, Symbolizer, source};
 use std::cell::RefCell;
@@ -129,8 +129,32 @@ pub fn resolve_symbol(addr: u64) -> SymbolInfo {
             }
         }
 
-        EMPTY
+        // Fallback: use backtrace::resolve for addresses not in /proc/self/maps
+        // (e.g. vdso, or addresses that blazesym couldn't symbolize)
+        resolve_with_backtrace(addr)
     })
+}
+
+/// Fallback symbol resolution using the `backtrace` crate.
+/// Handles addresses that blazesym can't resolve (e.g. vdso, JIT code).
+fn resolve_with_backtrace(addr: u64) -> SymbolInfo {
+    let mut info = EMPTY;
+    backtrace::resolve(addr as *mut std::ffi::c_void, |sym| {
+        if info.name.is_some() {
+            return; // take only the first resolution
+        }
+        info.name = sym.name().map(|n| n.to_string());
+        info.base_addr = sym.addr().map_or(0, |a| a as u64);
+        info.offset = addr.saturating_sub(info.base_addr);
+        if let Some(filename) = sym.filename() {
+            info.code_info = Some(CodeInfo {
+                file: filename.to_string_lossy().into_owned(),
+                line: sym.lineno(),
+                column: sym.colno().map(|c| c as u16),
+            });
+        }
+    });
+    info
 }
 
 #[cfg(test)]
@@ -170,5 +194,52 @@ mod tests {
         assert!(parse_maps_line("garbage").is_none());
         assert!(parse_maps_line("").is_none());
         assert!(parse_maps_line("not-hex r-xp 00000000 08:01 1234 /foo").is_none());
+    }
+
+    #[inline(never)]
+    fn known_function_for_test() -> u64 {
+        42
+    }
+
+    /// Verify that resolve_symbol resolves a known function in the current process.
+    #[test]
+    fn resolve_symbol_finds_known_function() {
+        let addr = known_function_for_test as *const () as u64;
+        let info = resolve_symbol(addr);
+        let name = info
+            .name
+            .expect("resolve_symbol should resolve a known function");
+        assert!(
+            name.contains("known_function_for_test"),
+            "expected symbol containing 'known_function_for_test', got: {name}"
+        );
+    }
+
+    /// Verify that a bogus kernel-space address doesn't panic and returns no name.
+    #[test]
+    fn resolve_symbol_bogus_address_returns_no_name() {
+        let info = resolve_symbol(0xffff_ffff_dead_beef);
+        assert!(info.name.is_none(), "kernel address should not resolve");
+    }
+
+    /// Verify that the backtrace fallback resolves real instruction pointers
+    /// (as would come from perf_event callchains).
+    #[test]
+    fn backtrace_fallback_resolves_real_instruction_pointer() {
+        // Capture a real IP from the current call stack
+        let mut real_ip = 0u64;
+        backtrace::trace(|frame| {
+            if real_ip == 0 {
+                real_ip = frame.ip() as u64;
+            }
+            false
+        });
+        assert_ne!(real_ip, 0, "should capture a real IP");
+        let info = resolve_with_backtrace(real_ip);
+        assert!(
+            info.name.is_some(),
+            "backtrace should resolve a real instruction pointer, got None for {:#x}",
+            real_ip
+        );
     }
 }

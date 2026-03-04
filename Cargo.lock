@@ -946,6 +946,7 @@ dependencies = [
 name = "dial9-perf-self-profile"
 version = "0.1.1"
 dependencies = [
+ "backtrace",
  "blazesym",
  "libc",
  "perf-event-data",
