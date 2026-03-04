@@ -1,10 +1,13 @@
+use crate::telemetry::collector::CentralCollector;
 use crate::telemetry::events::RawEvent;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 const BUFFER_CAPACITY: usize = 1024;
 
 pub struct ThreadLocalBuffer {
     events: Vec<RawEvent>,
+    collector: Option<Arc<CentralCollector>>,
 }
 
 impl Default for ThreadLocalBuffer {
@@ -17,6 +20,15 @@ impl ThreadLocalBuffer {
     pub fn new() -> Self {
         Self {
             events: Vec::with_capacity(BUFFER_CAPACITY),
+            collector: None,
+        }
+    }
+
+    /// Ensure the collector reference is set. Called on every record_event;
+    /// only the first call per thread actually stores the Arc.
+    pub fn set_collector(&mut self, collector: &Arc<CentralCollector>) {
+        if self.collector.is_none() {
+            self.collector = Some(Arc::clone(collector));
         }
     }
 
@@ -30,6 +42,21 @@ impl ThreadLocalBuffer {
 
     pub fn flush(&mut self) -> Vec<RawEvent> {
         std::mem::replace(&mut self.events, Vec::with_capacity(BUFFER_CAPACITY))
+    }
+}
+
+impl Drop for ThreadLocalBuffer {
+    fn drop(&mut self) {
+        if !self.events.is_empty() {
+            if let Some(collector) = self.collector.take() {
+                collector.accept_flush(std::mem::take(&mut self.events));
+            } else {
+                eprintln!(
+                    "dial9-tokio-telemetry: dropping {} unflushed events (no collector registered on this thread)",
+                    self.events.len()
+                );
+            }
+        }
     }
 }
 

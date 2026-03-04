@@ -10,6 +10,7 @@ use event_writer::EventWriter;
 #[cfg(feature = "cpu-profiling")]
 use cpu_flush_state::CpuFlushState;
 
+use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::writer::{TraceWriter, WriteAtomicResult};
@@ -229,6 +230,15 @@ impl Drop for TelemetryGuard {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+        // Flush the current thread's buffer (e.g. main thread in block_on)
+        // which may contain TaskSpawn events that were never flushed.
+        BUFFER.with(|buf| {
+            let mut buf = buf.borrow_mut();
+            let events = buf.flush();
+            if !events.is_empty() {
+                self.handle.shared.collector.accept_flush(events);
+            }
+        });
         self.handle.recorder.lock().unwrap().flush();
     }
 }
