@@ -2109,6 +2109,8 @@
                 if (selectedTaskId && foundSpan) {
                     for (const e of trace.metriqueEvents) {
                         if (e.taskId !== selectedTaskId) continue;
+                        const group = (e.properties.find(p => p.key.toLowerCase() === 'operation') || {}).value;
+                        if (!group) continue;
                         for (const m of e.metrics) {
                             if (!m.isSpan || !m.values.length) continue;
                             const rawVal = m.values[m.values.length - 1];
@@ -2121,7 +2123,6 @@
                             const end = e.timestamp;
                             const start = end - durNs;
                             if (foundSpan.start >= start && foundSpan.end <= end) {
-                                const group = e.properties.length ? e.properties[0].value : e.entryName;
                                 selectedSpan = { start, end, durNs, rawVal, unit: m.unit, group, key: m.key, taskId: e.taskId };
                                 spanChartMode = "bars";
                                 document.getElementById("btn-span-mode").textContent = "Bars";
@@ -2726,7 +2727,8 @@
                 const spans = [];
                 const groups = new Set();
                 for (const e of trace.metriqueEvents) {
-                    const group = e.properties.length ? e.properties[0].value : e.entryName;
+                    const group = (e.properties.find(p => p.key.toLowerCase() === 'operation') || {}).value;
+                    if (!group) continue;
                     groups.add(group);
                     for (const m of e.metrics) {
                         if (!m.isSpan || !m.values.length) continue;

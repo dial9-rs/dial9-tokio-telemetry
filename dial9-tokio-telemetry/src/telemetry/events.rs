@@ -253,7 +253,7 @@ pub enum RawEvent {
         worker_id: usize,
         task_id: crate::telemetry::task_metadata::TaskId,
         /// Entry type name (e.g. "RequestMetrics")
-        entry_name: String,
+        entry_name: &'static str,
         /// Serialized metrique entry data
         data: Vec<u8>,
     },

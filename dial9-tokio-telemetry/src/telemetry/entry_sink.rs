@@ -43,6 +43,11 @@ pub type Kpi<T> = Span<T>;
 ///
 /// `entry_name` is a static label written into the trace so the viewer can
 /// identify the entry type (e.g. `"RequestMetrics"`).
+///
+/// Entries should include a string property named `Operation` (case-insensitive).
+/// The trace viewer uses this as the display name for span bars and grouping.
+/// Events without an `Operation` property are still recorded but ignored by the
+/// viewer's span chart.
 pub struct Dial9EntrySink<E> {
     entry_name: &'static str,
     _phantom: PhantomData<fn(E)>,

@@ -153,7 +153,7 @@ impl FlushState {
                 ref instant,
                 worker_id,
                 task_id,
-                ref entry_name,
+                entry_name,
                 ref data,
             } => {
                 let timestamp_nanos = instant.duration_since(self.start_time).as_nanos() as u64;
@@ -161,7 +161,7 @@ impl FlushState {
                     timestamp_nanos,
                     worker_id,
                     task_id,
-                    entry_name: entry_name.clone(),
+                    entry_name: entry_name.to_string(),
                     data: data.clone(),
                 });
             }

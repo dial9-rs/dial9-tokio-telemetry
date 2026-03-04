@@ -45,7 +45,7 @@ impl ThreadLocalBuffer {
             instant: std::time::Instant::now(),
             worker_id,
             task_id,
-            entry_name: entry_name.to_string(),
+            entry_name,
             data,
         });
     }
