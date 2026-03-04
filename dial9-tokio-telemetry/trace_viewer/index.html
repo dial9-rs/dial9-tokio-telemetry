@@ -163,6 +163,23 @@
                 z-index: 2;
             }
 
+            #span-chart {
+                height: 140px;
+                background: #16213e;
+                border-top: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+            #span-chart .chart-label {
+                position: absolute;
+                top: 4px;
+                left: 8px;
+                font-size: 0.75em;
+                color: #888;
+                z-index: 2;
+            }
+
             #queue-chart {
                 height: 120px;
                 background: #16213e;
@@ -216,6 +233,52 @@
                 z-index: 9;
                 display: none;
             }
+
+            #metrique-panel {
+                display: none;
+                position: absolute;
+                top: 0; left: 0; right: 0; bottom: 0;
+                background: #1a1a2e;
+                z-index: 50;
+                flex-direction: column;
+            }
+            #metrique-panel .mq-header {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 6px 12px;
+                background: #16213e;
+                border-bottom: 1px solid #333;
+                font-size: 0.8em;
+                flex-shrink: 0;
+            }
+            #metrique-panel .mq-header .mq-title { color: #6c63ff; font-weight: 600; }
+            #metrique-panel .mq-header .mq-stats { color: #888; }
+            #metrique-panel .mq-header .mq-close { cursor: pointer; color: #888; margin-left: auto; padding: 0 4px; }
+            #metrique-panel .mq-header .mq-close:hover { color: #fff; }
+            #metrique-panel .mq-body {
+                flex: 1;
+                overflow-y: auto;
+                padding: 8px 12px;
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+            }
+            #metrique-panel table {
+                border-collapse: collapse;
+                font-size: 0.82em;
+                font-family: monospace;
+                width: 100%;
+            }
+            #metrique-panel th, #metrique-panel td {
+                padding: 3px 8px;
+                border-bottom: 1px solid #333;
+                text-align: left;
+                white-space: nowrap;
+            }
+            #metrique-panel th { color: #888; font-weight: 600; }
+            #metrique-panel td { color: #ccc; }
+            #metrique-panel .span-badge { color: #ff8a65; font-size: 0.8em; margin-left: 4px; }
 
             #flamegraph-panel {
                 display: none;
@@ -303,6 +366,7 @@
                 <span id="poi-counter" style="font-size:0.85em;color:#888"></span>
                 <span style="width:1px;height:20px;background:#444;margin:0 8px"></span>
                 <button id="btn-sched-panel" style="background:#3a1a1a;border-color:#ff4444;color:#ff8a65">⚠ Blocking Calls</button>
+                <button id="btn-metrique-panel" style="display:none">📊 Metrique</button>
                 <button id="btn-zoom-in">Zoom +</button>
                 <button id="btn-zoom-out">Zoom −</button>
                 <button id="btn-fit">Fit All</button>
@@ -320,11 +384,27 @@
                     <span id="task-detail-status" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2"></span>
                     <canvas id="task-detail-canvas"></canvas>
                 </div>
+                <div id="span-chart" style="display:none">
+                    <span class="chart-label">Metrique Data <button id="btn-span-mode" style="font-size:0.9em;padding:0 5px;cursor:pointer;background:#2a2a4a;border:1px solid #444;color:#aaa;border-radius:3px;margin-left:6px">Auto</button></span>
+                    <div id="span-info" style="position:absolute;top:18px;left:4px;width:192px;z-index:2;font-size:0.65em;color:#aaa;font-family:monospace;overflow:hidden;line-height:1.4;background:#16213eee;border-radius:0 4px 4px 0;padding:0 4px"></div>
+                    <canvas id="span-canvas"></canvas>
+                </div>
                 <div id="queue-chart">
                     <span class="chart-label"
                         >Queue Depth (global=blue, local max=orange)</span
                     >
                     <canvas id="queue-canvas"></canvas>
+                </div>
+                <div id="metrique-panel">
+                    <div class="mq-header">
+                        <span class="mq-title" id="mq-title">📊 Metrique Events</span>
+                        <span class="mq-stats" id="mq-stats"></span>
+                        <select id="mq-entry-filter" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em"></select>
+                        <span class="mq-close" id="mq-close">✕ Close (Esc)</span>
+                    </div>
+                    <div class="mq-body">
+                        <div id="mq-table-container" style="flex:1;overflow-y:auto"></div>
+                    </div>
                 </div>
                 <div id="flamegraph-panel">
                     <div class="fg-header">
@@ -449,6 +529,13 @@
             let schedDelays = []; // [{wakeTime, pollTime, delay, taskId, wakerTaskId, worker}]
             // Lane canvases per worker (populated by buildLanes)
             let laneCanvases = {};
+            // Span chart hit regions: [{x1, x2, y, span}] populated by renderSpanChart
+            let spanChartHits = [];
+            let spanChartLegendHits = []; // [{x1, x2, y1, y2, group}]
+            const hiddenGroups = new Set();
+            let spanChartMode = "auto"; // "auto" | "bars" | "dots"
+            // Currently selected span (from clicking in span chart)
+            let selectedSpan = null;
 
             const LABEL_W = 100;
             const LANE_H = 60;
@@ -486,11 +573,35 @@
                     dropZone.style.display = "flex";
                 });
 
+            async function maybeDecompress(arrayBuffer) {
+                const bytes = new Uint8Array(arrayBuffer);
+                if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+                    const ds = new DecompressionStream('gzip');
+                    const writer = ds.writable.getWriter();
+                    writer.write(bytes);
+                    writer.close();
+                    const chunks = [];
+                    const reader = ds.readable.getReader();
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        chunks.push(value);
+                    }
+                    const total = chunks.reduce((s, c) => s + c.length, 0);
+                    const out = new Uint8Array(total);
+                    let off = 0;
+                    for (const c of chunks) { out.set(c, off); off += c.length; }
+                    return out.buffer;
+                }
+                return arrayBuffer;
+            }
+
             function loadFile(file) {
                 const reader = new FileReader();
-                reader.onload = (e) => {
+                reader.onload = async (e) => {
                     try {
-                        trace = parseTrace(e.target.result);
+                        const buf = await maybeDecompress(e.target.result);
+                        trace = parseTrace(buf);
                         processTrace();
                         showViewer(file.name);
                     } catch (err) {
@@ -507,7 +618,7 @@
                 try {
                     const response = await fetch(url);
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    const arrayBuffer = await response.arrayBuffer();
+                    const arrayBuffer = await maybeDecompress(await response.arrayBuffer());
                     trace = parseTrace(arrayBuffer);
                     processTrace();
                     showViewer(url.split('/').pop() || 'trace.bin');
@@ -529,7 +640,7 @@
                 e.stopPropagation();
                 e.preventDefault();
                 dropZone.innerHTML = 'Loading demo trace…';
-                loadTraceFromUrl("demo-trace.bin");
+                loadTraceFromUrl("demo-trace.bin.gz");
             });
 
             function processTrace() {
@@ -798,8 +909,9 @@
                 document.getElementById("tb-filename").textContent = filename;
                 const durMs = durationNs / 1e6;
                 const truncNote = trace.truncated ? " (truncated)" : "";
+                const metriqueNote = trace.metriqueEvents.length > 0 ? ` · ${trace.metriqueEvents.length} metrique` : "";
                 document.getElementById("tb-stats").textContent =
-                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durMs.toFixed(1)}ms${truncNote}`;
+                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durMs.toFixed(1)}ms${truncNote}${metriqueNote}`;
 
                 buildLanes();
                 updatePointsOfInterest();
@@ -812,6 +924,7 @@
                     if (hasSchedEvents) break;
                 }
                 document.getElementById("btn-sched-panel").style.display = hasSchedEvents ? "" : "none";
+                document.getElementById("btn-metrique-panel").style.display = trace.metriqueEvents.length > 0 ? "" : "none";
                 requestAnimationFrame(renderAll);
             }
 
@@ -995,6 +1108,7 @@
                 renderTimeline(drawW - scrollbarW);
                 for (const w of workerIds) renderLane(w, drawW);
                 renderTaskDetail(scrollbarW);
+                renderSpanChart(drawW, scrollbarW);
                 renderQueueChart(drawW, scrollbarW);
             }
 
@@ -1476,7 +1590,7 @@
                     if (s.end < viewStart || s.start > viewEnd) continue;
                     const x1 = LABEL_W + Math.max(0, nsToX(s.start, drawW));
                     const x2 = LABEL_W + Math.min(drawW, nsToX(s.end, drawW));
-                    const w = Math.max(x2 - x1, 1);
+                    const w = Math.max(x2 - x1, 3);
                     ctx.fillStyle = "#4fc3f7";
                     ctx.fillRect(x1, bandTop, w, bandH);
                     if (w > 35) {
@@ -1705,6 +1819,103 @@
             document.getElementById("poi-filter").addEventListener("change", updatePointsOfInterest);
             document.getElementById("sort-by-worst").addEventListener("change", updatePointsOfInterest);
             document.getElementById("btn-sched-panel").addEventListener("click", showSchedPanel);
+            document.getElementById("btn-metrique-panel").addEventListener("click", showMetriquePanel);
+            document.getElementById("mq-close").addEventListener("click", () => {
+                document.getElementById("metrique-panel").style.display = "none";
+            });
+
+            // ── Span chart: mousemove tooltip + click to select task ──
+            (function setupSpanChartEvents() {
+                const canvas = document.getElementById("span-canvas");
+
+                function hitTest(e) {
+                    const rect = canvas.getBoundingClientRect();
+                    const mx = e.clientX - rect.left;
+                    const my = e.clientY - rect.top;
+                    let best = null, bestDist = 8;
+                    for (const h of spanChartHits) {
+                        if (mx < h.x1 - 4 || mx > h.x2 + 4) continue;
+                        const dy = Math.abs(my - h.y);
+                        if (dy < bestDist) { bestDist = dy; best = h; }
+                    }
+                    return best;
+                }
+
+                canvas.addEventListener("mousemove", (e) => {
+                    e.stopPropagation(); // prevent main-area handler from hiding tooltip
+                    const rect = canvas.getBoundingClientRect();
+                    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+                    for (const lh of spanChartLegendHits) {
+                        if (mx >= lh.x1 && mx <= lh.x2 && my >= lh.y1 && my <= lh.y2) {
+                            canvas.style.cursor = "pointer";
+                            tooltip.style.display = "none";
+                            return;
+                        }
+                    }
+                    const hit = hitTest(e);
+                    if (!hit) { tooltip.style.display = "none"; canvas.style.cursor = "default"; return; }
+                    canvas.style.cursor = "pointer";
+                    const s = hit.span;
+                    const durMs = s.durNs / 1e6;
+                    const endMs = (s.end - minTs) / 1e6;
+                    const startMs = (s.start - minTs) / 1e6;
+                    let html = `<span class="label">Span</span> <span class="value">${esc(s.group)}</span> · <span class="label">${esc(s.key)}</span> <span class="value">${fmtMetricVal(durMs, 'Millisecond')}</span><br>`;
+                    html += `<span class="label">Start:</span> <span class="value">${startMs.toFixed(3)}ms</span> · <span class="label">End:</span> <span class="value">${endMs.toFixed(3)}ms</span>`;
+                    if (s.taskId) html += ` · <span class="label">Task:</span> <span class="value">0x${s.taskId.toString(16)}</span>`;
+                    // Show metrique event details
+                    const evt = trace.metriqueEvents.find(me => me.timestamp === s.end && me.taskId === s.taskId);
+                    if (evt) {
+                        for (const p of evt.properties) {
+                            html += `<br><span class="label">${esc(p.key)}:</span> <span class="value">${esc(p.value)}</span>`;
+                        }
+                        for (const m of evt.metrics) {
+                            if (m.isSpan) continue;
+                            const val = m.values.map(v => fmtMetricVal(v, m.unit)).join(', ');
+                            html += `<br><span class="label">${esc(m.key)}:</span> <span class="value">${val}</span>`;
+                        }
+                    }
+                    tooltip.innerHTML = html;
+                    tooltip.style.display = "block";
+                    tooltip.style.left = Math.min(e.clientX + 12, window.innerWidth - 340) + "px";
+                    tooltip.style.top = e.clientY + 16 + "px";
+                });
+
+                canvas.addEventListener("mouseleave", () => {
+                    tooltip.style.display = "none";
+                    canvas.style.cursor = "default";
+                });
+
+                canvas.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    const rect = canvas.getBoundingClientRect();
+                    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+                    for (const lh of spanChartLegendHits) {
+                        if (mx >= lh.x1 && mx <= lh.x2 && my >= lh.y1 && my <= lh.y2) {
+                            if (hiddenGroups.has(lh.group)) hiddenGroups.delete(lh.group);
+                            else hiddenGroups.add(lh.group);
+                            renderAll();
+                            return;
+                        }
+                    }
+                    const hit = hitTest(e);
+                    if (!hit) { selectedSpan = null; selectedTaskId = null; renderAll(); return; }
+                    const s = hit.span;
+                    selectedSpan = s;
+                    selectedTaskId = s.taskId || null;
+                    // Zoom to fit the span with 10% padding on each side
+                    const dur = s.end - s.start;
+                    const pad = dur * 0.1 || 1000; // fallback 1µs for zero-width
+                    viewStart = Math.max(minTs, s.start - pad);
+                    viewEnd = Math.min(maxTs, s.end + pad);
+                    renderAll();
+                });
+            })();
+            document.getElementById("btn-span-mode").addEventListener("click", () => {
+                const modes = ["auto", "bars", "dots"];
+                spanChartMode = modes[(modes.indexOf(spanChartMode) + 1) % modes.length];
+                document.getElementById("btn-span-mode").textContent = spanChartMode[0].toUpperCase() + spanChartMode.slice(1);
+                renderAll();
+            });
             document.getElementById("btn-prev-poi").addEventListener("click", () => {
                 if (currentPoiIndex > 0) jumpToPoi(currentPoiIndex - 1);
                 else if (currentPoiIndex < 0 && pointsOfInterest.length > 0) jumpToPoi(0);
@@ -1893,6 +2104,34 @@
                 }
 
                 selectedTaskId = (found && found !== selectedTaskId) ? found : null;
+                // Find the metrique span that contains this poll
+                selectedSpan = null;
+                if (selectedTaskId && foundSpan) {
+                    for (const e of trace.metriqueEvents) {
+                        if (e.taskId !== selectedTaskId) continue;
+                        const group = (e.properties.find(p => p.key.toLowerCase() === 'operation') || {}).value;
+                        if (!group) continue;
+                        for (const m of e.metrics) {
+                            if (!m.isSpan || !m.values.length) continue;
+                            const rawVal = m.values[m.values.length - 1];
+                            const u = (m.unit || '').toLowerCase();
+                            let durNs;
+                            if (u.startsWith('millisecond')) durNs = rawVal * 1e6;
+                            else if (u.startsWith('second')) durNs = rawVal * 1e9;
+                            else if (u.startsWith('microsecond')) durNs = rawVal * 1e3;
+                            else durNs = rawVal;
+                            const end = e.timestamp;
+                            const start = end - durNs;
+                            if (foundSpan.start >= start && foundSpan.end <= end) {
+                                selectedSpan = { start, end, durNs, rawVal, unit: m.unit, group, key: m.key, taskId: e.taskId };
+                                spanChartMode = "bars";
+                                document.getElementById("btn-span-mode").textContent = "Bars";
+                                break;
+                            }
+                        }
+                        if (selectedSpan) break;
+                    }
+                }
                 renderAll();
             });
 
@@ -2165,13 +2404,16 @@
                     case "Escape":
                         e.preventDefault();
                         hideStackPopup();
-                        if (document.getElementById("sched-panel").style.display === "flex") {
+                        if (document.getElementById("metrique-panel").style.display === "flex") {
+                            document.getElementById("metrique-panel").style.display = "none";
+                        } else if (document.getElementById("sched-panel").style.display === "flex") {
                             document.getElementById("sched-panel").style.display = "none";
                         } else if (document.getElementById("flamegraph-panel").style.display === "flex") {
                             document.getElementById("flamegraph-panel").style.display = "none";
                             document.getElementById("fg-tooltip").style.display = "none";
                         }
                         selectedTaskId = null;
+                        selectedSpan = null;
                         renderAll();
                         break;
                     case "ArrowUp":
@@ -2399,6 +2641,275 @@
             window.addEventListener("resize", () => {
                 if (trace) renderAll();
             });
+
+            // ── Metrique Panel ──
+            function showMetriquePanel() {
+                const panel = document.getElementById("metrique-panel");
+                panel.style.display = "flex";
+                const events = trace.metriqueEvents;
+                const filterEl = document.getElementById("mq-entry-filter");
+
+                // Populate entry name filter
+                const names = [...new Set(events.map(e => e.entryName))].sort();
+                filterEl.innerHTML = '<option value="">All entries</option>' +
+                    names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+                filterEl.onchange = () => renderMetriqueTable();
+
+                document.getElementById("mq-stats").textContent = `${events.length} events, ${names.length} entry type${names.length !== 1 ? 's' : ''}`;
+                renderMetriqueTable();
+            }
+
+            function renderMetriqueTable() {
+                const filter = document.getElementById("mq-entry-filter").value;
+                const events = trace.metriqueEvents.filter(e => !filter || e.entryName === filter);
+                const container = document.getElementById("mq-table-container");
+
+                if (!events.length) {
+                    container.innerHTML = '<div style="color:#888;padding:20px">No metrique events</div>';
+                    document.getElementById("span-canvas").style.display = "none";
+                    return;
+                }
+
+                // Collect all property and metric keys across filtered events
+                const propKeys = [...new Set(events.flatMap(e => e.properties.map(p => p.key)))];
+                const metricKeys = [...new Set(events.flatMap(e => e.metrics.map(m => m.key)))];
+                // Track which metric keys are span boundaries
+                const spanKeys = new Set();
+                for (const e of events) {
+                    for (const m of e.metrics) {
+                        if (m.isSpan) spanKeys.add(m.key);
+                    }
+                }
+
+                let html = '<table><thead><tr><th>Time</th><th>Worker</th><th>Task</th><th>Entry</th>';
+                for (const k of propKeys) html += `<th>${esc(k)}</th>`;
+                for (const k of metricKeys) {
+                    const badge = spanKeys.has(k) ? '<span class="span-badge">Span</span>' : '';
+                    html += `<th>${esc(k)}${badge}</th>`;
+                }
+                html += '</tr></thead><tbody>';
+
+                for (const e of events) {
+                    const tMs = ((e.timestamp - minTs) / 1e6).toFixed(2);
+                    const taskLabel = e.taskId ? '0x' + e.taskId.toString(16) : '–';
+                    html += `<tr><td>${tMs}ms</td><td>${e.workerId}</td><td>${taskLabel}</td><td>${esc(e.entryName)}</td>`;
+                    const propMap = Object.fromEntries(e.properties.map(p => [p.key, p.value]));
+                    for (const k of propKeys) html += `<td>${esc(propMap[k] || '')}</td>`;
+                    const metricMap = Object.fromEntries(e.metrics.map(m => [m.key, m]));
+                    for (const k of metricKeys) {
+                        const m = metricMap[k];
+                        if (!m) { html += '<td></td>'; continue; }
+                        const val = m.values.length === 1 ? fmtMetricVal(m.values[0], m.unit) :
+                            m.values.map(v => fmtMetricVal(v, m.unit)).join(', ');
+                        html += `<td>${esc(val)}</td>`;
+                    }
+                    html += '</tr>';
+                }
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            }
+
+            function fmtMetricVal(v, unit) {
+                const u = (unit || '').toLowerCase();
+                if (u.startsWith('millisecond')) return v < 1 ? (v * 1000).toFixed(1) + 'µs' : v.toFixed(2) + 'ms';
+                if (u.startsWith('second')) return v.toFixed(3) + 's';
+                if (u.startsWith('microsecond')) return v.toFixed(0) + 'µs';
+                if (u.startsWith('byte')) return v >= 1024 ? (v / 1024).toFixed(1) + 'KB' : v + 'B';
+                return Number.isInteger(v) ? v.toString() : v.toPrecision(3);
+            }
+
+            function renderSpanChart(drawW, scrollbarW) {
+                const container = document.getElementById("span-chart");
+                const canvas = document.getElementById("span-canvas");
+                if (!trace.metriqueEvents.length) { container.style.display = "none"; return; }
+
+                // Build span bars: each span-flagged metric becomes a bar with start/end/duration
+                const spans = [];
+                const groups = new Set();
+                for (const e of trace.metriqueEvents) {
+                    const group = (e.properties.find(p => p.key.toLowerCase() === 'operation') || {}).value;
+                    if (!group) continue;
+                    groups.add(group);
+                    for (const m of e.metrics) {
+                        if (!m.isSpan || !m.values.length) continue;
+                        const rawVal = m.values[m.values.length - 1];
+                        // Convert duration to nanoseconds based on unit
+                        const u = (m.unit || '').toLowerCase();
+                        let durNs;
+                        if (u.startsWith('millisecond')) durNs = rawVal * 1e6;
+                        else if (u.startsWith('second')) durNs = rawVal * 1e9;
+                        else if (u.startsWith('microsecond')) durNs = rawVal * 1e3;
+                        else durNs = rawVal; // assume ns
+                        const end = e.timestamp;
+                        const start = end - durNs;
+                        spans.push({ start, end, durNs, rawVal, unit: m.unit, group, key: m.key, taskId: e.taskId });
+                    }
+                }
+                if (!spans.length) { container.style.display = "none"; return; }
+                container.style.display = "block";
+
+                const dpr = window.devicePixelRatio || 1;
+                const pw = container.clientWidth;
+                const h = 140;
+                canvas.width = pw * dpr;
+                canvas.height = h * dpr;
+                canvas.style.width = pw + 'px';
+                canvas.style.height = h + 'px';
+                const ctx = canvas.getContext('2d');
+                ctx.scale(dpr, dpr);
+                ctx.clearRect(0, 0, pw, h);
+
+                const colors = ['#4fc3f7', '#ff8a65', '#66bb6a', '#ce93d8', '#fff176', '#ef5350'];
+                const groupList = [...groups].sort();
+                const groupColor = (g) => colors[groupList.indexOf(g) % colors.length];
+
+                const pad = { top: 18, right: 4, bottom: 14, left: LABEL_W };
+                const plotW = pw - pad.left - pad.right - (scrollbarW || 0);
+                const plotH = h - pad.top - pad.bottom;
+
+                const tMin = viewStart, tMax = viewEnd;
+                const tRange = tMax - tMin || 1;
+
+                // Filter to visible spans (any overlap with view window, not hidden)
+                const visible = spans.filter(s => s.end >= tMin && s.start <= tMax && !hiddenGroups.has(s.group));
+                spanChartHits = []; // reset hit regions
+
+                // Always draw legend (even when all groups hidden)
+                spanChartLegendHits = [];
+                groupList.forEach((g, i) => {
+                    const lx = pad.left + 80 + i * 120;
+                    const hidden = hiddenGroups.has(g);
+                    ctx.globalAlpha = hidden ? 0.3 : 1.0;
+                    ctx.fillStyle = groupColor(g);
+                    ctx.fillRect(lx, 2, 8, 8);
+                    ctx.fillStyle = hidden ? '#555' : '#aaa';
+                    ctx.textAlign = 'left';
+                    ctx.font = '9px monospace';
+                    ctx.fillText(g, lx + 12, 10);
+                    if (hidden) {
+                        const tw = ctx.measureText(g).width;
+                        ctx.fillRect(lx + 12, 6, tw, 1);
+                    }
+                    ctx.globalAlpha = 1.0;
+                    const tw = ctx.measureText(g).width;
+                    spanChartLegendHits.push({ x1: lx, x2: lx + 12 + tw, y1: 0, y2: 14, group: g });
+                });
+
+                if (!visible.length) {
+                    ctx.fillStyle = '#555';
+                    ctx.font = '10px monospace';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('No spans in view', pw / 2, h / 2);
+                    document.getElementById("span-info").innerHTML = '';
+                    return;
+                }
+
+                // Y-axis: duration. Use p99 of visible as max to avoid outlier compression.
+                const sortedDurs = visible.map(s => s.durNs).sort((a, b) => a - b);
+                const p99Idx = Math.min(Math.floor(sortedDurs.length * 0.99), sortedDurs.length - 1);
+                const durMax = sortedDurs[p99Idx] || 1;
+
+                // Decide rendering mode: individual bars vs aggregated
+                const spansPerPx = visible.length / plotW;
+                const useBars = spanChartMode === "bars" || (spanChartMode === "auto" && spansPerPx <= 3);
+
+                if (useBars) {
+                    // ── Individual span bars: thin horizontal line at Y = duration ──
+                    let selHit = null;
+                    for (const s of visible) {
+                        const x1 = pad.left + Math.max(0, ((s.start - tMin) / tRange) * plotW);
+                        const x2 = pad.left + Math.min(plotW, ((s.end - tMin) / tRange) * plotW);
+                        const barW = Math.max(2, x2 - x1);
+                        const yFrac = Math.min(s.durNs / durMax, 1);
+                        const y = pad.top + plotH - yFrac * plotH;
+                        const isSelected = selectedSpan && selectedSpan.end === s.end && selectedSpan.taskId === s.taskId;
+
+                        if (isSelected) { selHit = { x1, barW, y, s }; }
+                        else {
+                            ctx.fillStyle = groupColor(s.group);
+                            ctx.globalAlpha = selectedSpan ? 0.08 : 0.8;
+                            ctx.fillRect(x1, y - 1, barW, 3);
+                            ctx.globalAlpha = 1.0;
+                        }
+                        spanChartHits.push({ x1, x2: x1 + barW, y, span: s });
+                    }
+                    // Draw selected span last so it's on top
+                    if (selHit) {
+                        // Soft glow
+                        ctx.fillStyle = 'rgba(79, 195, 247, 0.25)';
+                        ctx.fillRect(selHit.x1 - 2, selHit.y - 6, selHit.barW + 4, 13);
+                        // Core bar
+                        ctx.fillStyle = '#4fc3f7';
+                        ctx.globalAlpha = 1.0;
+                        ctx.fillRect(selHit.x1, selHit.y - 3, selHit.barW, 7);
+                        // Bright center line
+                        ctx.fillStyle = '#e0f7fa';
+                        ctx.fillRect(selHit.x1, selHit.y - 1, selHit.barW, 3);
+                    }
+                } else {
+                    // ── Aggregated mode: dots at Y = duration ──
+                    let selHit = null;
+                    for (const s of visible) {
+                        const x = pad.left + ((s.end - tMin) / tRange) * plotW;
+                        const yFrac = Math.min(s.durNs / durMax, 1);
+                        const y = pad.top + plotH - yFrac * plotH;
+                        const isSelected = selectedSpan && selectedSpan.end === s.end && selectedSpan.taskId === s.taskId;
+
+                        if (isSelected) { selHit = { x, y, s }; }
+                        else {
+                            ctx.fillStyle = groupColor(s.group);
+                            ctx.globalAlpha = selectedSpan ? 0.08 : 0.6;
+                            ctx.fillRect(x, y - 1, 2, 2);
+                        }
+                        spanChartHits.push({ x1: x, x2: x + 2, y, span: s });
+                    }
+                    // Draw selected dot last
+                    if (selHit) {
+                        ctx.fillStyle = 'rgba(79, 195, 247, 0.3)';
+                        ctx.beginPath();
+                        ctx.arc(selHit.x, selHit.y, 6, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.fillStyle = '#4fc3f7';
+                        ctx.beginPath();
+                        ctx.arc(selHit.x, selHit.y, 3, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.fillStyle = '#e0f7fa';
+                        ctx.beginPath();
+                        ctx.arc(selHit.x, selHit.y, 1.5, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                    ctx.globalAlpha = 1.0;
+                }
+
+                // Y-axis labels
+                ctx.fillStyle = '#555';
+                ctx.font = '10px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText('0', pad.left - 4, pad.top + plotH);
+                ctx.fillText(fmtMetricVal(durMax / 1e6, 'Millisecond'), pad.left - 4, pad.top + 8);
+
+                // Bottom: span count
+                ctx.fillStyle = '#666';
+                ctx.textAlign = 'left';
+                ctx.font = '9px monospace';
+                ctx.fillText(`${visible.length} spans in view`, pad.left + 4, h - 2);
+
+                // Show metrique info for selected span
+                const infoEl = document.getElementById("span-info");
+                if (selectedSpan) {
+                    const evt = trace.metriqueEvents.find(e => e.timestamp === selectedSpan.end && e.taskId === selectedSpan.taskId);
+                    if (evt) {
+                        let html = `<div style="color:#4fc3f7;margin-bottom:2px">${esc(selectedSpan.group)}</div><table style="border-collapse:collapse;font-size:1em">`;
+                        for (const p of evt.properties) html += `<tr><td style="color:#666;padding-right:4px;white-space:nowrap">${esc(p.key)}</td><td>${esc(p.value)}</td></tr>`;
+                        for (const m of evt.metrics) {
+                            const val = m.values.map(v => fmtMetricVal(v, m.unit)).join(', ');
+                            html += `<tr><td style="color:#666;padding-right:4px;white-space:nowrap">${esc(m.key)}</td><td>${val}</td></tr>`;
+                        }
+                        html += '</table>';
+                        infoEl.innerHTML = html;
+                    } else { infoEl.innerHTML = ''; }
+                } else { infoEl.innerHTML = ''; }
+            }
 
             // ── Legend (inline in toolbar area) ──
             (function addLegend() {

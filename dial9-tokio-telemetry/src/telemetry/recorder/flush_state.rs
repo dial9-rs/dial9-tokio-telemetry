@@ -3,6 +3,7 @@ use crate::telemetry::task_metadata::SpawnLocationId;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::panic::Location;
+use std::time::Instant;
 
 /// Flush-thread state for interning spawn locations and tracking per-file emissions.
 pub(super) struct FlushState {
@@ -13,16 +14,19 @@ pub(super) struct FlushState {
     /// Which SpawnLocationIds have been emitted as SpawnLocationDef in the current file.
     pub(super) emitted_this_file: HashSet<SpawnLocationId>,
     next_id: u16,
+    /// Telemetry epoch — used to convert `Instant` on metrique events to relative nanos.
+    start_time: Instant,
 }
 
 impl FlushState {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(start_time: Instant) -> Self {
         let intern_strings = vec!["<unknown>".to_string()];
         Self {
             intern_map: HashMap::new(),
             intern_strings,
             emitted_this_file: HashSet::new(),
             next_id: 1,
+            start_time,
         }
     }
 
@@ -57,9 +61,9 @@ impl FlushState {
     }
 
     /// Resolve a RawEvent into a SmallVec of wire events: defs first, then the event itself.
-    pub(super) fn resolve(&mut self, raw: RawEvent) -> SmallVec<[TelemetryEvent; 3]> {
+    pub(super) fn resolve(&mut self, raw: &RawEvent) -> SmallVec<[TelemetryEvent; 3]> {
         let mut events = SmallVec::new();
-        match raw {
+        match *raw {
             RawEvent::TaskSpawn { task_id, location } => {
                 let spawn_loc_id = self.intern(location);
                 self.collect_def(spawn_loc_id, &mut events);
@@ -142,6 +146,23 @@ impl FlushState {
                     waker_task_id,
                     woken_task_id,
                     target_worker,
+                });
+            }
+            #[cfg(feature = "metrique-events")]
+            RawEvent::MetriqueEvent {
+                ref instant,
+                worker_id,
+                task_id,
+                entry_name,
+                ref data,
+            } => {
+                let timestamp_nanos = instant.duration_since(self.start_time).as_nanos() as u64;
+                events.push(TelemetryEvent::MetriqueEvent {
+                    timestamp_nanos,
+                    worker_id,
+                    task_id,
+                    entry_name: entry_name.to_string(),
+                    data: data.clone(),
                 });
             }
         }

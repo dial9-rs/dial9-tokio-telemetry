@@ -25,9 +25,10 @@ pub struct TelemetryRecorder {
 
 impl TelemetryRecorder {
     pub fn new(writer: Box<dyn TraceWriter>) -> Self {
+        let start_time = Instant::now();
         Self {
-            shared: Arc::new(SharedState::new(Instant::now())),
-            event_writer: EventWriter::new(writer),
+            shared: Arc::new(SharedState::new(start_time)),
+            event_writer: EventWriter::new(writer, start_time),
         }
     }
 
@@ -60,7 +61,7 @@ impl TelemetryRecorder {
         let shared = Arc::new(SharedState::new(start_time));
         let recorder = Arc::new(Mutex::new(Self {
             shared: shared.clone(),
-            event_writer: EventWriter::new(writer),
+            event_writer: EventWriter::new(writer, start_time),
         }));
 
         let s1 = shared.clone();
@@ -443,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_flush_state_intern() {
-        let mut fs = FlushState::new();
+        let mut fs = FlushState::new(Instant::now());
         #[track_caller]
         fn get_loc() -> &'static Location<'static> {
             Location::caller()
@@ -457,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_flush_state_on_rotate_clears_emitted() {
-        let mut fs = FlushState::new();
+        let mut fs = FlushState::new(Instant::now());
         #[track_caller]
         fn get_loc() -> &'static Location<'static> {
             Location::caller()
@@ -492,7 +493,7 @@ mod tests {
         let location_b = loc_b();
 
         let writer = crate::telemetry::writer::RotatingWriter::new(&base, 100, 100_000).unwrap();
-        let mut ew = EventWriter::new(Box::new(writer));
+        let mut ew = EventWriter::new(Box::new(writer), Instant::now());
 
         let locations = [
             location_a, location_b, location_a, location_b, location_a, location_b,
@@ -766,7 +767,7 @@ mod tests {
 
                 let writer = RotatingWriter::new(&base, max_file_size, 1_000_000).unwrap();
 
-                let mut ew = EventWriter::new(Box::new(writer));
+                let mut ew = EventWriter::new(Box::new(writer), Instant::now());
                 let mut cpu = CpuFlushState::new();
                 cpu.inline_callframe_symbols = true;
                 for tid in 0u32..4 {

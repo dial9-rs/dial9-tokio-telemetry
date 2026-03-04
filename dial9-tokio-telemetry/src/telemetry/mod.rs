@@ -5,6 +5,10 @@ pub mod collector;
 pub mod cpu_profile;
 pub mod events;
 pub mod format;
+#[cfg(feature = "metrique-events")]
+pub mod entry_sink;
+#[cfg(feature = "metrique-events")]
+pub mod metrique_serializer;
 pub mod recorder;
 pub mod task_metadata;
 pub mod writer;
@@ -21,3 +25,6 @@ pub use events::{CpuSampleSource, SchedStat, TelemetryEvent};
 pub use recorder::{TelemetryGuard, TelemetryHandle, TracedRuntime, TracedRuntimeBuilder};
 pub use task_metadata::{SpawnLocationId, TaskId, UNKNOWN_SPAWN_LOCATION_ID, UNKNOWN_TASK_ID};
 pub use writer::{NullWriter, RotatingWriter, SimpleBinaryWriter, TraceWriter};
+#[cfg(feature = "metrique-events")]
+#[allow(deprecated)]
+pub use entry_sink::{Dial9EntrySink, Kpi, Span, SpanFlag};

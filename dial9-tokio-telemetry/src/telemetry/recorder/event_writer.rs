@@ -29,10 +29,10 @@ pub(crate) struct EventWriter {
 }
 
 impl EventWriter {
-    pub(crate) fn new(writer: Box<dyn TraceWriter>) -> Self {
+    pub(crate) fn new(writer: Box<dyn TraceWriter>, start_time: std::time::Instant) -> Self {
         Self {
             writer,
-            flush_state: FlushState::new(),
+            flush_state: FlushState::new(start_time),
             #[cfg(feature = "cpu-profiling")]
             cpu_flush: None,
             #[cfg(feature = "cpu-profiling")]
@@ -53,7 +53,7 @@ impl EventWriter {
         if self.writer.take_rotated() {
             self.handle_rotation();
         }
-        let events = self.flush_state.resolve(raw);
+        let events = self.flush_state.resolve(&raw);
         match self.writer.write_atomic(&events)? {
             WriteAtomicResult::Written => Ok(WriteAtomicResult::Written),
             WriteAtomicResult::OversizedBatch => Ok(WriteAtomicResult::OversizedBatch),
@@ -64,7 +64,7 @@ impl EventWriter {
                     "write atomic returned Rotated, but take_rotated() was false"
                 );
                 self.handle_rotation();
-                let events = self.flush_state.resolve(raw);
+                let events = self.flush_state.resolve(&raw);
                 match self.writer.write_atomic(&events)? {
                     r @ (WriteAtomicResult::Written | WriteAtomicResult::OversizedBatch) => Ok(r),
                     WriteAtomicResult::Rotated => {

@@ -132,8 +132,8 @@ impl SharedState {
         }
         BUFFER.with(|buf| {
             let mut buf = buf.borrow_mut();
+            let should_flush = buf.should_flush() || matches!(&event, RawEvent::WorkerPark { .. });
             buf.record_event(event);
-            let should_flush = buf.should_flush() || matches!(event, RawEvent::WorkerPark { .. });
             if should_flush {
                 self.collector.accept_flush(buf.flush());
             }
