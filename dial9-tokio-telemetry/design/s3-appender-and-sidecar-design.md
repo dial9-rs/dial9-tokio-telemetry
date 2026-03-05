@@ -147,8 +147,9 @@ fn main() {
                 .bucket("my-bucket")
                 .prefix("my-prefix")
                 .build()))
-        .build_and_start(builder, Box::new(writer))?;
+        .build_and_start(builder, writer)?;
 }
+
 
 // In-process mode — can pass SdkConfig directly (no process boundary)
 fn main() {
@@ -162,13 +163,13 @@ fn main() {
                     .sdk_config(sdk_config)
                     .build())
                 .build())
-        .build_and_start(builder, Box::new(writer))?;
+        .build_and_start(builder, writer)?;
 }
 
 // No worker — local traces only, as today
 fn main() {
     TracedRuntime::builder()
-        .build_and_start(builder, Box::new(writer))?;
+        .build_and_start(builder, writer)?;
 }
 ```
 
@@ -502,7 +503,7 @@ fn main() {
             S3RemoteConfig::builder()
                 .bucket("my-bucket")
                 .build()))
-        .build_and_start(builder, Box::new(writer))?;
+        .build_and_start(builder, writer)?;
 }
 ```
 

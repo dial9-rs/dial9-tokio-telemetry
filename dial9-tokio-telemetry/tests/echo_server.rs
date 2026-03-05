@@ -1,8 +1,6 @@
 mod validation;
 
-use dial9_tokio_telemetry::telemetry::{
-    SimpleBinaryWriter, TraceReader, TracedRuntime, analyze_trace,
-};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TraceReader, TracedRuntime, analyze_trace};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -61,10 +59,10 @@ fn overhead_bench_validates() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(num_workers).enable_all();
 
-    let writer = SimpleBinaryWriter::new(&trace_path).unwrap();
+    let writer = RotatingWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .build_and_start(builder, Box::new(writer))
+        .build_and_start(builder, writer)
         .unwrap();
 
     let running = Arc::new(AtomicBool::new(true));

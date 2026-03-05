@@ -25,10 +25,10 @@ pub struct TelemetryRecorder {
 }
 
 impl TelemetryRecorder {
-    pub fn new(writer: Box<dyn TraceWriter>) -> Self {
+    pub fn new(writer: impl TraceWriter + 'static) -> Self {
         Self {
             shared: Arc::new(SharedState::new(Instant::now())),
-            event_writer: EventWriter::new(writer),
+            event_writer: EventWriter::new(Box::new(writer)),
         }
     }
 
@@ -308,7 +308,7 @@ impl TracedRuntimeBuilder {
     pub fn build(
         self,
         mut builder: tokio::runtime::Builder,
-        writer: Box<dyn TraceWriter>,
+        writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         let start_instant = Instant::now();
         #[cfg(feature = "cpu-profiling")]
@@ -326,7 +326,7 @@ impl TracedRuntimeBuilder {
 
         let recorder = TelemetryRecorder::install(
             &mut builder,
-            writer,
+            Box::new(writer),
             self.task_tracking_enabled,
             start_instant,
         );
@@ -407,7 +407,7 @@ impl TracedRuntimeBuilder {
     pub fn build_and_start(
         self,
         builder: tokio::runtime::Builder,
-        writer: Box<dyn TraceWriter>,
+        writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         let (runtime, guard) = self.build(builder, writer)?;
         guard.enable();
@@ -436,7 +436,7 @@ impl TracedRuntime {
     /// [`TracedRuntime::build_and_start`].
     pub fn build(
         builder: tokio::runtime::Builder,
-        writer: Box<dyn TraceWriter>,
+        writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
             task_tracking_enabled: false,
@@ -456,7 +456,7 @@ impl TracedRuntime {
     /// [`TelemetryGuard::enable`].
     pub fn build_and_start(
         builder: tokio::runtime::Builder,
-        writer: Box<dyn TraceWriter>,
+        writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
             task_tracking_enabled: false,

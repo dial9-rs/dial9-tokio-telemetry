@@ -16,7 +16,7 @@
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    NullWriter, SimpleBinaryWriter, TelemetryGuard, TelemetryHandle, TracedRuntime,
+    NullWriter, RotatingWriter, TelemetryGuard, TelemetryHandle, TracedRuntime,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -172,8 +172,7 @@ fn main() {
 
     let (server_rt, _guard): (tokio::runtime::Runtime, Option<TelemetryGuard>) = match mode {
         "telemetry" => {
-            let writer =
-                Box::new(SimpleBinaryWriter::new("/tmp/overhead_bench_trace.bin").unwrap());
+            let writer = RotatingWriter::single_file("/tmp/overhead_bench_trace.bin").unwrap();
             let mut tb = TracedRuntime::builder().with_task_tracking(true);
             #[cfg(target_os = "linux")]
             {
@@ -186,7 +185,7 @@ fn main() {
         }
         "noop" => {
             let (rt, g) = TracedRuntime::builder()
-                .build_and_start(builder, Box::new(NullWriter))
+                .build_and_start(builder, NullWriter)
                 .unwrap();
             (rt, Some(g))
         }
