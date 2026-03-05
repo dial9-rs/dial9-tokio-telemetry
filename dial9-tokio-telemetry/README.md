@@ -117,9 +117,7 @@ let (runtime, guard) = TracedRuntime::builder()
     .with_cpu_profiling(CpuProfilingConfig::default())
     .with_sched_events(SchedEventConfig { include_kernel: true })
     .with_inline_callframe_symbols(true)
-    .build(builder, Box::new(writer))?;
-// Note: `.build()` starts disabled — call `guard.enable()` to begin recording,
-// or use `.build_and_start()` to enable immediately.
+    .build_and_start(builder, Box::new(writer))?;
 # Ok(())
 # }
 # #[cfg(not(feature = "cpu-profiling"))]
@@ -138,13 +136,13 @@ This pulls in [`dial9-perf-self-profile`](/perf-self-profile) for `perf_event_op
 rustflags = ["-C", "force-frame-pointers=yes"]
 ```
 
-**Scheduler events** (`with_sched_events`) require `perf_event_paranoid` ≤ 1:
+**`perf_event_paranoid`**: CPU profiling features require `perf_event_paranoid` ≤ 2 for sampling, and ≤ 1 for scheduler event tracking (`with_sched_events`):
 
 ```bash
 # check current value
 cat /proc/sys/kernel/perf_event_paranoid
 
-# allow unprivileged users to collect scheduling events
+# allow CPU sampling and scheduler event tracking
 sudo sysctl kernel.perf_event_paranoid=1
 ```
 

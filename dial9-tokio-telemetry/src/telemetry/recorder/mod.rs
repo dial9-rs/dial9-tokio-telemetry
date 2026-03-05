@@ -371,6 +371,10 @@ impl TracedRuntimeBuilder {
         Ok((runtime, guard))
     }
 
+    /// Build the traced runtime and immediately enable recording.
+    ///
+    /// Equivalent to calling [`build`](Self::build) followed by
+    /// [`TelemetryGuard::enable`].
     pub fn build_and_start(
         self,
         builder: tokio::runtime::Builder,
@@ -417,12 +421,16 @@ impl TracedRuntime {
         .build(builder, writer)
     }
 
+    /// Build the traced runtime and immediately enable recording.
+    ///
+    /// Equivalent to calling [`build`](Self::build) followed by
+    /// [`TelemetryGuard::enable`].
     pub fn build_and_start(
         builder: tokio::runtime::Builder,
         writer: Box<dyn TraceWriter>,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
-            task_tracking_enabled: true,
+            task_tracking_enabled: false,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
             #[cfg(feature = "cpu-profiling")]

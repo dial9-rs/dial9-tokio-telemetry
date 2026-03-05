@@ -1768,7 +1768,7 @@
                         alert("No CPU samples in this trace. Enable cpu-profiling to use shift+drag region select for flamegraphs.");
                         return;
                     }
-                    if (e.shiftKey && trace && trace.cpuSamples.length > 0) {
+                    if (e.shiftKey && trace) {
                         // Shift+drag: region select
                         regionSelecting = true;
                         dragMoved = false;
