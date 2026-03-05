@@ -48,3 +48,7 @@ Failing to update it will cause the viewer to fail when loading the demo.
 ## Meta
 
 - Never declare done after pushing or opening a PR until CI is green. Check CI status and fix any failures before moving on.
+
+## Ways of working
+- After finishing your work use showboat to demonstrate what you have done. include key code, tests, and what was changed.
+- Use a progress doc to keep track of what you are doing. progress docs are just for you. when we are ready for PR, we unstage the progress docs
