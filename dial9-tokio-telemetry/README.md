@@ -100,7 +100,7 @@ On non-Linux platforms these fields are zero.
 
 With the `cpu-profiling` feature, you can enable `perf_event_open`-based CPU sampling. This gives two key pieces of data:
 1. Stack traces when code was running on the CPU — aka flamegraphs
-2. 2. Stack traces when the kernel _descheduled_ your thread. For example, if you use `std::thread::sleep` in your future or are seeing `std::sync::Mutex` contention, this will allow you to see precisely where this is happening in async code.
+2. Stack traces when the kernel _descheduled_ your thread. For example, if you use `std::thread::sleep` in your future or are seeing `std::sync::Mutex` contention, this will allow you to see precisely where this is happening in async code.
 
 Both of these events are tied to the precise instant and thread that they happened on, so you can compare what was different between degraded and normal performance.
 
@@ -118,6 +118,8 @@ let (runtime, guard) = TracedRuntime::builder()
     .with_sched_events(SchedEventConfig { include_kernel: true })
     .with_inline_callframe_symbols(true)
     .build(builder, Box::new(writer))?;
+// Note: `.build()` starts disabled — call `guard.enable()` to begin recording,
+// or use `.build_and_start()` to enable immediately.
 # Ok(())
 # }
 # #[cfg(not(feature = "cpu-profiling"))]
@@ -125,6 +127,30 @@ let (runtime, guard) = TracedRuntime::builder()
 ```
 
 This pulls in [`dial9-perf-self-profile`](/perf-self-profile) for `perf_event_open` access. It records `CpuSample` events with full callchains and `CallframeDef` / `ThreadNameDef` metadata for offline symbolization.
+
+#### Requirements
+
+**Frame pointers**: CPU profile stack traces rely on frame-pointer-based unwinding. Compile your application with frame pointers enabled, otherwise stack traces will be truncated or missing:
+
+```toml
+# .cargo/config.toml
+[build]
+rustflags = ["-C", "force-frame-pointers=yes"]
+```
+
+**Scheduler events** (`with_sched_events`) require `perf_event_paranoid` ≤ 1:
+
+```bash
+# check current value
+cat /proc/sys/kernel/perf_event_paranoid
+
+# allow unprivileged users to collect scheduling events
+sudo sysctl kernel.perf_event_paranoid=1
+```
+
+#### Diagnosing long polls with CPU samples
+
+Because CPU samples are tagged with the worker thread they were collected on, and the trace records which task is being polled on each worker at each instant, the viewer can correlate samples with individual polls. When a poll takes an unusually long time (a "long poll"), the CPU samples collected during that poll show you exactly what code was running — expensive serialization, accidental blocking I/O, lock contention, etc. In the trace viewer, click on a long poll to see its flamegraph, or shift+drag to aggregate CPU samples across a time range.
 
 ## Getting started
 

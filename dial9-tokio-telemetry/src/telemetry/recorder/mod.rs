@@ -273,6 +273,9 @@ impl TracedRuntimeBuilder {
         self
     }
 
+    /// Build the traced runtime. Recording starts **disabled** — call
+    /// [`TelemetryGuard::enable`] to begin, or use
+    /// [`build_and_start`](Self::build_and_start).
     pub fn build(
         self,
         mut builder: tokio::runtime::Builder,
@@ -395,6 +398,9 @@ impl TracedRuntime {
         }
     }
 
+    /// Build the traced runtime. Recording starts **disabled** — call
+    /// [`TelemetryGuard::enable`] to begin, or use
+    /// [`TracedRuntime::build_and_start`].
     pub fn build(
         builder: tokio::runtime::Builder,
         writer: Box<dyn TraceWriter>,
