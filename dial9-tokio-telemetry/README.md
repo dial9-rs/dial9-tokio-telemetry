@@ -19,7 +19,7 @@ fn main() -> std::io::Result<()> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let (runtime, _guard) = TracedRuntime::build_and_start(builder, Box::new(writer))?;
+    let (runtime, _guard) = TracedRuntime::build_and_start(builder, writer)?;
 
     runtime.block_on(async {
         // your async code here
@@ -70,7 +70,7 @@ Use `handle.spawn()` instead of `tokio::spawn()`:
 # fn main() -> std::io::Result<()> {
 # let writer = RotatingWriter::new("/tmp/t.bin", 1024, 4096)?;
 # let builder = tokio::runtime::Builder::new_multi_thread();
-let (runtime, guard) = TracedRuntime::build_and_start(builder, Box::new(writer))?;
+let (runtime, guard) = TracedRuntime::build_and_start(builder, writer)?;
 let handle = guard.handle();
 
 runtime.block_on(async {
@@ -117,7 +117,7 @@ let (runtime, guard) = TracedRuntime::builder()
     .with_cpu_profiling(CpuProfilingConfig::default())
     .with_sched_events(SchedEventConfig { include_kernel: true })
     .with_inline_callframe_symbols(true)
-    .build_and_start(builder, Box::new(writer))?;
+    .build(builder, writer)?;
 # Ok(())
 # }
 # #[cfg(not(feature = "cpu-profiling"))]
@@ -161,7 +161,7 @@ Because CPU samples are tagged with the worker thread they were collected on, an
 # let builder = tokio::runtime::Builder::new_multi_thread();
 let (runtime, guard) = TracedRuntime::builder()
     .with_task_tracking(true)
-    .build(builder, Box::new(writer))?;
+    .build(builder, writer)?;
 
 // start disabled, enable later
 guard.enable();
@@ -175,7 +175,7 @@ handle.disable();
 
 ### Writers
 
-`RotatingWriter` rotates files and evicts old ones to stay within a total size budget. `SimpleBinaryWriter` writes a single file with no size management, useful for quick experiments.
+`RotatingWriter` rotates files and evicts old ones to stay within a total size budget. For quick experiments, `RotatingWriter::single_file(path)` writes a single file with no rotation.
 
 ### Analyzing traces
 

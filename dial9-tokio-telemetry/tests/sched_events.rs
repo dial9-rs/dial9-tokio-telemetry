@@ -19,7 +19,7 @@ fn sched_events_capture_context_switches() {
     let (runtime, guard) = TracedRuntime::builder()
         .with_sched_events(SchedEventConfig::default())
         .with_inline_callframe_symbols(true)
-        .build_and_start(builder, Box::new(writer))
+        .build_and_start(builder, writer)
         .unwrap();
 
     runtime.block_on(async {

@@ -27,7 +27,7 @@ fn sched_event_timestamps_align_with_wall_clock() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_sched_events(SchedEventConfig::default())
-        .build_and_start(builder, Box::new(writer))
+        .build_and_start(builder, writer)
         .unwrap();
 
     // Use the guard's start_time so we're in the same clock domain as trace timestamps.

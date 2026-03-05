@@ -33,7 +33,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
             frequency_hz: 999,
             ..Default::default()
         })
-        .build_and_start(builder, Box::new(writer))
+        .build_and_start(builder, writer)
         .unwrap();
 
     // Use the guard's start_time so we're in the same clock domain as trace timestamps.
@@ -275,7 +275,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
             frequency_hz: 999,
             ..Default::default()
         })
-        .build_and_start(builder, Box::new(writer))
+        .build_and_start(builder, writer)
         .unwrap();
 
     // ── std::thread with a known name — exits before flush ───────────────

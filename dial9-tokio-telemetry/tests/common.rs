@@ -16,7 +16,7 @@ pub fn is_ci() -> bool {
 ///
 /// ```rust,ignore
 /// let (writer, events) = CapturingWriter::new();
-/// // ... build runtime with Box::new(writer) ...
+/// // ... build runtime with writer ...
 /// let captured = events.lock().unwrap();
 /// ```
 pub struct CapturingWriter(Arc<Mutex<Vec<TelemetryEvent>>>);

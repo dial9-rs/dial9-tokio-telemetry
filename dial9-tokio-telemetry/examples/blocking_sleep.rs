@@ -1,4 +1,4 @@
-use dial9_tokio_telemetry::telemetry::{SimpleBinaryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::time::Duration;
 
 async fn blocking_task(id: usize) {
@@ -14,7 +14,7 @@ fn main() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
-    let writer = Box::new(SimpleBinaryWriter::new("blocking_sleep_trace.bin").unwrap());
+    let writer = RotatingWriter::single_file("blocking_sleep_trace.bin").unwrap();
     let (runtime, _guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_cpu_profiling(Default::default())

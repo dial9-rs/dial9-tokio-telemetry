@@ -1,6 +1,6 @@
 //! Integration test: verify JS trace parser matches Rust parser
 
-use dial9_tokio_telemetry::telemetry::{SimpleBinaryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -32,7 +32,7 @@ fn test_js_parser_matches_rust() {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.worker_threads(2).enable_all();
 
-        let writer = Box::new(SimpleBinaryWriter::new(&trace_path).unwrap());
+        let writer = RotatingWriter::single_file(&trace_path).unwrap();
         #[allow(unused_mut)]
         let mut tb = TracedRuntime::builder().with_task_tracking(true);
         #[cfg(feature = "cpu-profiling")]
