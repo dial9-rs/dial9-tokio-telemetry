@@ -49,7 +49,16 @@ impl TelemetryRecorder {
                 }
             }
         }
-        self.event_writer.flush().unwrap();
+        if let Err(e) = self.event_writer.flush() {
+            tracing::warn!("failed to flush trace data: {e}");
+        }
+    }
+
+    fn seal(&mut self) {
+        self.flush();
+        if let Err(e) = self.event_writer.seal() {
+            tracing::warn!("failed to seal trace segment: {e}");
+        }
     }
 
     pub(crate) fn install(
@@ -258,7 +267,8 @@ impl Drop for TelemetryGuard {
                 self.handle.shared.collector.accept_flush(events);
             }
         });
-        self.handle.recorder.lock().unwrap().flush();
+        // seal() flushes internally before renaming .active → .bin
+        self.handle.recorder.lock().unwrap().seal();
     }
 }
 
@@ -557,6 +567,7 @@ mod tests {
             .unwrap();
         }
         ew.flush().unwrap();
+        ew.seal().unwrap();
 
         let mut files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -838,6 +849,7 @@ mod tests {
                     );
                 }
                 ew.flush().unwrap();
+                ew.seal().unwrap();
 
                 let actual_raw = verify_files(dir.path());
 

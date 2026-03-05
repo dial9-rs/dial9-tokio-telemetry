@@ -1,5 +1,8 @@
 # Agent Guidelines
 
+- You MUST use Red/Green TDD.
+- BEFORE COMMITING: `cargo nextest run --stress-duration 20`. The package has no flaky tests. If you find a flaky test, you created it.
+
 ## API Design
 
 This is a published library with backwards compatibility requirements. Follow
@@ -17,6 +20,16 @@ these rules for all public APIs:
 - **Think about semver hazards:** adding a required parameter, removing a
   public type, or changing a trait signature are all breaking. When in doubt,
   keep it private or behind a builder.
+
+## Coding practices
+Avoid dropping an error without logging it. Use `tracing` for logging.
+```
+let _ = ...
+```
+
+## Running tests
+
+- Always run `cargo nextest run` to run tests
 
 ## Demo Trace
 
