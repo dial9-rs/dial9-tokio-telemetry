@@ -1,5 +1,23 @@
 # Agent Guidelines
 
+## API Design
+
+This is a published library with backwards compatibility requirements. Follow
+these rules for all public APIs:
+
+- **Use builders for all configuration.** Never use positional arguments for
+  config that may grow. Use `#[bon::builder]` (v3) to derive builders.
+- **All builder fields should be private** with setter methods, so we can add
+  fields without breaking changes.
+- **Prefer `impl Into<String>` over `&str`** in builder setters for ergonomics.
+- **Non-required fields must have defaults.** New fields added later must be
+  optional or defaulted to avoid breaking existing callers.
+- **Mark config structs `#[non_exhaustive]`** if not using `#[bon::builder]`,
+  so adding fields is not a breaking change.
+- **Think about semver hazards:** adding a required parameter, removing a
+  public type, or changing a trait signature are all breaking. When in doubt,
+  keep it private or behind a builder.
+
 ## Demo Trace
 
 If you modify the trace format (event structure, encoding, parser, etc.), you MUST regenerate the demo trace:
