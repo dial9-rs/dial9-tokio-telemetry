@@ -238,7 +238,8 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
             | TelemetryEvent::CpuSample { .. }
             | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. }
-            | TelemetryEvent::WakeEvent { .. } => {}
+            | TelemetryEvent::WakeEvent { .. }
+            | TelemetryEvent::SegmentMetadata { .. } => {}
         }
     }
 
