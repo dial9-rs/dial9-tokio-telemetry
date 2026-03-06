@@ -104,6 +104,21 @@ impl TelemetryRecorder {
             let s_stop = shared.clone();
             builder
                 .on_thread_start(move || {
+                    // Register as Blocking initially; worker threads will
+                    // overwrite this to Worker(i) in resolve_worker_id.
+                    // Note: there is a brief window between thread start and the
+                    // first poll event where worker threads appear as Blocking.
+                    // This is benign — resolve_worker_id corrects it on first poll.
+                    // We use insert (not or_insert) so that a recycled OS tid always
+                    // starts fresh rather than inheriting a stale Worker entry.
+                    {
+                        let tid = crate::telemetry::events::current_tid();
+                        s_start
+                            .thread_roles
+                            .lock()
+                            .unwrap()
+                            .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
+                    }
                     if let Ok(mut prof) = s_start.sched_profiler.lock()
                         && let Some(ref mut p) = *prof
                     {
@@ -111,6 +126,10 @@ impl TelemetryRecorder {
                     }
                 })
                 .on_thread_stop(move || {
+                    {
+                        let tid = crate::telemetry::events::current_tid();
+                        s_stop.thread_roles.lock().unwrap().remove(&tid);
+                    }
                     if let Ok(mut prof) = s_stop.sched_profiler.lock()
                         && let Some(ref mut p) = *prof
                     {

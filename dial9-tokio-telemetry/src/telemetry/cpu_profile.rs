@@ -1,10 +1,10 @@
 //! CPU profiling integration: merges perf stack traces into the telemetry stream.
 //!
 //! When enabled, a process-wide `PerfSampler` captures CPU stack traces at a
-//! configurable frequency. The flush thread drains samples, maps OS thread IDs
-//! to tokio worker IDs, and writes `CpuSample` events into the trace.
+//! configurable frequency. The flush thread drains raw samples; the caller
+//! (EventWriter) maps OS thread IDs to worker IDs via SharedState.thread_roles.
 
-use crate::telemetry::events::{TelemetryEvent, UNKNOWN_WORKER};
+use crate::telemetry::events::CpuSampleSource;
 use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
 use std::collections::HashMap;
 use std::io;
@@ -49,24 +49,25 @@ pub struct SchedEventConfig {
     pub include_kernel: bool,
 }
 
-/// Manages the perf sampler and converts samples to telemetry events.
+/// A raw CPU sample before worker-id resolution.
+pub(crate) struct RawCpuSample {
+    pub tid: u32,
+    pub timestamp_nanos: u64,
+    pub callchain: Vec<u64>,
+    pub source: CpuSampleSource,
+}
+
+/// Manages the process-wide perf sampler. Yields raw samples without worker IDs.
 pub(crate) struct CpuProfiler {
     sampler: PerfSampler,
-    /// Offset to convert perf timestamps (CLOCK_MONOTONIC nanos, via use_clockid) to trace-relative nanos.
-    /// trace_ns = perf_time - clock_offset
     clock_offset: u64,
-    /// OS tid → worker_id mapping, populated from SharedState.worker_tids.
-    tid_to_worker: HashMap<u32, usize>,
+    pid: u32,
     /// OS tid → thread name, eagerly cached at drain time so short-lived threads
     /// are captured before they exit and `/proc/self/task/<tid>/comm` disappears.
     tid_to_name: HashMap<u32, String>,
 }
 
 impl CpuProfiler {
-    /// Start the profiler. Captures the clock offset for timestamp correlation.
-    ///
-    /// `trace_start_mono` is `clock_gettime(CLOCK_MONOTONIC)` captured at the same
-    /// moment as the telemetry `Instant::now()` start time.
     pub fn start(config: CpuProfilingConfig, trace_start_mono_ns: u64) -> io::Result<Self> {
         let sampler = PerfSampler::start(SamplerConfig {
             frequency_hz: config.frequency_hz,
@@ -76,44 +77,33 @@ impl CpuProfiler {
         Ok(Self {
             sampler,
             clock_offset: trace_start_mono_ns,
-            tid_to_worker: HashMap::new(),
+            pid: std::process::id(),
             tid_to_name: HashMap::new(),
         })
     }
 
-    /// Update the tid→worker mapping.
-    pub fn register_worker(&mut self, worker_id: usize, tid: u32) {
-        self.tid_to_worker.insert(tid, worker_id);
-    }
-
-    /// Drain all pending perf samples and convert to CpuSample events.
+    /// Drain all pending perf samples as raw (tid, callchain) tuples.
     ///
-    /// Eagerly reads `/proc/self/task/<tid>/comm` for non-worker tids so that
-    /// thread names are captured before short-lived threads exit.
-    pub fn drain(&mut self, mut f: impl FnMut(TelemetryEvent, Option<&str>)) {
+    /// Filters out child-process samples (perf `inherit` leaks them).
+    /// Eagerly caches thread names for non-worker tids.
+    pub fn drain(&mut self, mut f: impl FnMut(RawCpuSample, Option<&str>)) {
+        let pid = self.pid;
         self.sampler.for_each_sample(|sample| {
-            let timestamp_nanos = sample.time.saturating_sub(self.clock_offset);
-            let worker_id = self
-                .tid_to_worker
-                .get(&sample.tid)
-                .copied()
-                .unwrap_or(UNKNOWN_WORKER);
-            // Eagerly cache thread name for non-worker tids while the thread
-            // is still alive and /proc/self/task/<tid>/comm is readable.
-            if worker_id == UNKNOWN_WORKER
-                && !self.tid_to_name.contains_key(&sample.tid)
+            if sample.pid != pid {
+                return;
+            }
+            if !self.tid_to_name.contains_key(&sample.tid)
                 && let Some(name) = read_thread_name(sample.tid)
             {
                 self.tid_to_name.insert(sample.tid, name);
             }
             let thread_name = self.tid_to_name.get(&sample.tid).map(|s| s.as_str());
             f(
-                TelemetryEvent::CpuSample {
-                    timestamp_nanos,
-                    worker_id,
+                RawCpuSample {
                     tid: sample.tid,
-                    source: crate::telemetry::events::CpuSampleSource::CpuProfile,
+                    timestamp_nanos: sample.time.saturating_sub(self.clock_offset),
                     callchain: sample.callchain.clone(),
+                    source: CpuSampleSource::CpuProfile,
                 },
                 thread_name,
             );
@@ -133,25 +123,22 @@ pub(crate) fn clock_monotonic_ns() -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
-/// Per-thread sched event profiler. Each worker thread calls `track_current_thread`
-/// from `on_thread_start`; the flush thread drains samples via `drain`.
+/// Per-thread sched event profiler. Yields raw samples without worker IDs.
 pub(crate) struct SchedProfiler {
     sampler: PerfSampler,
     clock_offset: u64,
-    tid_to_worker: HashMap<u32, usize>,
 }
 
 impl SchedProfiler {
     pub fn new(config: SchedEventConfig, trace_start_mono_ns: u64) -> io::Result<Self> {
         let sampler = PerfSampler::new_per_thread(SamplerConfig {
-            frequency_hz: 1, // ignored for event-based; period=1
+            frequency_hz: 1,
             event_source: EventSource::SwContextSwitches,
             include_kernel: config.include_kernel,
         })?;
         Ok(Self {
             sampler,
             clock_offset: trace_start_mono_ns,
-            tid_to_worker: HashMap::new(),
         })
     }
 
@@ -163,24 +150,13 @@ impl SchedProfiler {
         self.sampler.stop_tracking_current_thread()
     }
 
-    pub fn register_worker(&mut self, worker_id: usize, tid: u32) {
-        self.tid_to_worker.insert(tid, worker_id);
-    }
-
-    pub fn drain(&mut self, mut f: impl FnMut(TelemetryEvent)) {
+    pub fn drain(&mut self, mut f: impl FnMut(RawCpuSample)) {
         self.sampler.for_each_sample(|sample| {
-            let timestamp_nanos = sample.time.saturating_sub(self.clock_offset);
-            let worker_id = self
-                .tid_to_worker
-                .get(&sample.tid)
-                .copied()
-                .unwrap_or(UNKNOWN_WORKER);
-            f(TelemetryEvent::CpuSample {
-                timestamp_nanos,
-                worker_id,
+            f(RawCpuSample {
                 tid: sample.tid,
-                source: crate::telemetry::events::CpuSampleSource::SchedEvent,
+                timestamp_nanos: sample.time.saturating_sub(self.clock_offset),
                 callchain: sample.callchain.clone(),
+                source: CpuSampleSource::SchedEvent,
             });
         });
     }
