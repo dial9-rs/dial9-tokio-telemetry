@@ -19,6 +19,8 @@ mod worker_config {
         trace_path: PathBuf,
         #[cfg(feature = "worker-s3")]
         s3: Option<super::s3::S3Config>,
+        #[cfg(feature = "worker-s3")]
+        client: Option<aws_sdk_s3_transfer_manager::Client>,
     }
 
     impl WorkerConfig {
@@ -49,6 +51,12 @@ mod worker_config {
         pub fn s3(&self) -> Option<&super::s3::S3Config> {
             self.s3.as_ref()
         }
+
+        /// Pre-built S3 transfer manager client, if any.
+        #[cfg(feature = "worker-s3")]
+        pub(crate) fn take_client(&mut self) -> Option<aws_sdk_s3_transfer_manager::Client> {
+            self.client.take()
+        }
     }
 
     #[derive(Default)]
@@ -57,6 +65,8 @@ mod worker_config {
         trace_path: Option<PathBuf>,
         #[cfg(feature = "worker-s3")]
         s3: Option<super::s3::S3Config>,
+        #[cfg(feature = "worker-s3")]
+        client: Option<aws_sdk_s3_transfer_manager::Client>,
     }
 
     impl WorkerConfigBuilder {
@@ -80,12 +90,23 @@ mod worker_config {
             self
         }
 
+        /// Set a pre-built S3 transfer manager client.
+        /// When provided, the worker uses this client directly instead of
+        /// building one from `aws_config::load_defaults`.
+        #[cfg(feature = "worker-s3")]
+        pub fn client(mut self, client: aws_sdk_s3_transfer_manager::Client) -> Self {
+            self.client = Some(client);
+            self
+        }
+
         pub fn build(self) -> Result<WorkerConfig, &'static str> {
             Ok(WorkerConfig {
                 poll_interval: self.poll_interval.unwrap_or(DEFAULT_POLL_INTERVAL),
                 trace_path: self.trace_path.ok_or("trace_path is required")?,
                 #[cfg(feature = "worker-s3")]
                 s3: self.s3,
+                #[cfg(feature = "worker-s3")]
+                client: self.client,
             })
         }
     }
@@ -98,7 +119,8 @@ pub use worker_config::*;
 /// segments and processes them (upload to S3 if configured).
 #[cfg(feature = "worker")]
 pub(crate) fn run_worker(
-    config: WorkerConfig,
+    #[cfg_attr(not(feature = "worker-s3"), allow(unused_mut))]
+    mut config: WorkerConfig,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let dir = config.trace_dir().to_path_buf();
@@ -106,7 +128,7 @@ pub(crate) fn run_worker(
     let poll_interval = config.poll_interval();
 
     #[cfg(feature = "worker-s3")]
-    let mut s3_state = s3_worker_state(&config);
+    let mut s3_state = s3_worker_state(&mut config);
 
     loop {
         if stop.load(std::sync::atomic::Ordering::Acquire) {
@@ -155,20 +177,24 @@ struct S3WorkerState {
 }
 
 #[cfg(feature = "worker-s3")]
-fn s3_worker_state(config: &WorkerConfig) -> Option<S3WorkerState> {
+fn s3_worker_state(config: &mut WorkerConfig) -> Option<S3WorkerState> {
     let s3_config = config.s3()?.clone();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .ok()?;
-    let sdk_config = rt.block_on(aws_config::load_defaults(aws_config::BehaviorVersion::latest()));
-    let s3_client = aws_sdk_s3_transfer_manager::Client::new(
-        aws_sdk_s3_transfer_manager::Config::builder()
-            .client(aws_sdk_s3::Client::new(&sdk_config))
-            .build(),
-    );
+    let client = if let Some(client) = config.take_client() {
+        client
+    } else {
+        let sdk_config = rt.block_on(aws_config::load_defaults(aws_config::BehaviorVersion::latest()));
+        aws_sdk_s3_transfer_manager::Client::new(
+            aws_sdk_s3_transfer_manager::Config::builder()
+                .client(aws_sdk_s3::Client::new(&sdk_config))
+                .build(),
+        )
+    };
     Some(S3WorkerState {
-        uploader: s3::S3Uploader::new(s3_client, s3_config),
+        uploader: s3::S3Uploader::new(client, s3_config),
         connection: connection::S3ConnectionState::healthy(),
         runtime: rt,
     })
