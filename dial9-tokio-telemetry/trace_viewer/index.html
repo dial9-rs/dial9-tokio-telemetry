@@ -2072,19 +2072,27 @@
             window.addEventListener("mouseup", () => {
                 if (regionSelecting) {
                     regionSelecting = false;
-                    selOverlay.style.display = "none";
                     document.body.style.cursor = "";
                     if (dragMoved) {
                         clearToasts();
                         const selStart = Math.min(regionStartNs, regionEndNs);
                         const selEnd = Math.max(regionStartNs, regionEndNs);
-                        // Check if there are sched events in range
                         const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
-                        if (hasSched) {
+                        const hasCpu = trace.cpuSamples.some(s =>
+                            s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
+                        );
+                        if (hasSched && !hasCpu) {
+                            selOverlay.style.display = "none";
+                            showSchedPanel(selStart, selEnd);
+                        } else if (hasSched) {
+                            // Keep overlay visible while picker is shown
                             showSelectionPicker(selStart, selEnd);
                         } else {
+                            selOverlay.style.display = "none";
                             showFlamegraph(selStart, selEnd);
                         }
+                    } else {
+                        selOverlay.style.display = "none";
                     }
                     return;
                 }
