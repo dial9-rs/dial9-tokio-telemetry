@@ -236,6 +236,8 @@ pub struct TelemetryGuard {
     worker_stop: Option<Arc<AtomicBool>>,
     #[cfg(feature = "worker")]
     worker_thread: Option<std::thread::JoinHandle<()>>,
+    #[cfg(feature = "worker")]
+    trace_dir: Option<std::path::PathBuf>,
 }
 
 impl TelemetryGuard {
@@ -253,6 +255,51 @@ impl TelemetryGuard {
 
     pub fn disable(&self) {
         self.handle.disable();
+    }
+
+    /// Flush remaining events, seal the final segment, write a `.shutdown`
+    /// sentinel, and wait for the worker to drain. Returns `Ok(())` if the
+    /// worker finishes within the timeout, `Err` if it times out.
+    ///
+    /// Consumes the guard so `Drop` becomes a no-op.
+    #[cfg(feature = "worker")]
+    pub async fn graceful_shutdown(
+        mut self,
+        timeout: Duration,
+    ) -> Result<(), std::io::Error> {
+        // 1. Stop flush thread
+        self.stop.store(true, Ordering::Release);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+
+        // 2. Seal final segment
+        self.handle.recorder.lock().unwrap().seal();
+
+        // 3. Write .shutdown sentinel
+        if let Some(ref dir) = self.trace_dir {
+            let sentinel = dir.join(".shutdown");
+            std::fs::write(&sentinel, b"")?;
+        }
+
+        // 4. Signal worker to stop and wait with timeout
+        if let Some(ref ws) = self.worker_stop {
+            ws.store(true, Ordering::Release);
+        }
+        if let Some(t) = self.worker_thread.take() {
+            let result = tokio::time::timeout(timeout, tokio::task::spawn_blocking(move || {
+                let _ = t.join();
+            }))
+            .await;
+            if result.is_err() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "worker did not finish within timeout",
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -425,7 +472,8 @@ impl TracedRuntimeBuilder {
         let guard_shared = recorder.lock().unwrap().shared.clone();
 
         #[cfg(feature = "worker")]
-        let (worker_stop, worker_thread) = if let Some(config) = self.worker_config {
+        let (worker_stop, worker_thread, trace_dir) = if let Some(config) = self.worker_config {
+            let td = Some(config.trace_dir().to_path_buf());
             let ws = Arc::new(AtomicBool::new(false));
             let ws_clone = ws.clone();
             let wt = std::thread::Builder::new()
@@ -434,9 +482,9 @@ impl TracedRuntimeBuilder {
                     crate::worker::run_worker(config, ws_clone);
                 })
                 .expect("failed to spawn dial9-worker thread");
-            (Some(ws), Some(wt))
+            (Some(ws), Some(wt), td)
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         let guard = TelemetryGuard {
@@ -450,6 +498,8 @@ impl TracedRuntimeBuilder {
             worker_stop,
             #[cfg(feature = "worker")]
             worker_thread,
+            #[cfg(feature = "worker")]
+            trace_dir,
         };
 
         Ok((runtime, guard))
