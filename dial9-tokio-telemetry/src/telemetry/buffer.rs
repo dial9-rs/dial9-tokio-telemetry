@@ -6,7 +6,7 @@ use std::sync::Arc;
 const BUFFER_CAPACITY: usize = 1024;
 
 pub struct ThreadLocalBuffer {
-    events: Vec<RawEvent>,
+    pub(crate) events: Vec<RawEvent>,
     collector: Option<Arc<CentralCollector>>,
 }
 
