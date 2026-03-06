@@ -1,5 +1,5 @@
 #[cfg(feature = "cpu-profiling")]
-use crate::telemetry::events::{TelemetryEvent, UNKNOWN_WORKER};
+use crate::telemetry::events::TelemetryEvent;
 #[cfg(feature = "cpu-profiling")]
 use std::collections::{HashMap, HashSet};
 
@@ -47,8 +47,7 @@ impl CpuFlushState {
         event: &TelemetryEvent,
     ) -> Vec<TelemetryEvent> {
         let mut batch = Vec::new();
-        if let TelemetryEvent::CpuSample { worker_id, tid, .. } = event
-            && *worker_id == UNKNOWN_WORKER
+        if let TelemetryEvent::CpuSample { tid, .. } = event
             && !self.thread_name_emitted_this_file.contains(tid)
         {
             if let Some(name) = self.thread_name_intern.get(tid) {

@@ -2,7 +2,27 @@ use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use serde::Serialize;
 
 /// Sentinel worker_id for events from non-worker threads (encoded as u8 on the wire).
+///
+/// Collides with a real worker index if the runtime has 255 worker threads.
+/// In practice this only affects very large machines; a future wire-format change
+/// (e.g. u16 worker index) would remove the limitation.
 pub const UNKNOWN_WORKER: usize = 255;
+
+/// Sentinel worker_id for events from tokio's blocking thread pool (encoded as u8 on the wire).
+///
+/// Same collision caveat as [`UNKNOWN_WORKER`]: collides with worker index 254 on machines
+/// with ≥254 runtime worker threads.
+pub const BLOCKING_WORKER: usize = 254;
+
+/// Role of a thread known to the telemetry system.
+#[cfg(feature = "cpu-profiling")]
+#[derive(Debug, Clone, Copy)]
+pub enum ThreadRole {
+    /// A tokio worker thread with the given index.
+    Worker(usize),
+    /// A thread in tokio's blocking pool.
+    Blocking,
+}
 
 /// What triggered a [`TelemetryEvent::CpuSample`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
