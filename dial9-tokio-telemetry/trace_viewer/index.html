@@ -277,6 +277,41 @@
                 white-space: nowrap;
                 color: #e0e0e0;
             }
+            @keyframes toast-in {
+                from { opacity: 0; transform: translateY(-8px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            @keyframes toast-wiggle {
+                0%, 100% { transform: translateX(0); }
+                20% { transform: translateX(-4px); }
+                40% { transform: translateX(4px); }
+                60% { transform: translateX(-3px); }
+                80% { transform: translateX(2px); }
+            }
+            .toast {
+                z-index: 60;
+                padding: 4px 12px;
+                border-radius: 6px;
+                font-size: 0.78em;
+                pointer-events: auto;
+                animation: toast-in 0.2s ease-out;
+                white-space: nowrap;
+            }
+            .toast-info {
+                background: #1e2050;
+                border: 1px solid rgba(108, 99, 255, 0.7);
+                color: #d0ccff;
+            }
+            .toast-warn {
+                background: #2a1e00;
+                border: 1px solid rgba(255, 152, 0, 0.7);
+                color: #ffd180;
+            }
+            .toast-error {
+                background: #2a0a0a;
+                border: 1px solid rgba(255, 68, 68, 0.7);
+                color: #ff8a8a;
+            }
         </style>
     </head>
     <body>
@@ -326,6 +361,7 @@
                 <canvas id="crosshair-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10"></canvas>
                 <div id="timeline-header">
                     <canvas id="timeline-canvas"></canvas>
+                    <div id="toast-container" style="position:absolute;top:0;bottom:0;left:0;display:flex;align-items:center;gap:8px;z-index:60;pointer-events:none"></div>
                 </div>
                 <div id="lanes-container" id="lanes"></div>
                 <div id="task-detail">
@@ -395,6 +431,39 @@
                 if (f.docsUrl) return `<a href="${esc(f.docsUrl)}" target="_blank" style="color:inherit;text-decoration:underline dotted">${esc(f.text)}</a>`;
                 return esc(f.text);
             }
+            // ── Toast notifications ──
+            const _toasts = {};  // id → element
+            const _toastTimers = {};  // id → timeout
+            function showToast(id, msg, type = "info", autoHideMs = 0) {
+                const container = document.getElementById("toast-container");
+                let el = _toasts[id];
+                if (el) {
+                    el.style.animation = "none";
+                    el.offsetHeight;
+                    el.style.animation = "toast-wiggle 0.4s ease";
+                    return;
+                }
+                el = document.createElement("div");
+                el.className = `toast toast-${type}`;
+                el.textContent = msg;
+                container.appendChild(el);
+                _toasts[id] = el;
+                if (autoHideMs > 0) {
+                    _toastTimers[id] = setTimeout(() => hideToast(id), autoHideMs);
+                }
+            }
+            function hideToast(id) {
+                const el = _toasts[id];
+                if (!el) return;
+                el.remove();
+                delete _toasts[id];
+                clearTimeout(_toastTimers[id]);
+                delete _toastTimers[id];
+            }
+            function clearToasts() {
+                for (const id of Object.keys(_toasts)) hideToast(id);
+            }
+
             // ── Event type helpers ──
             const ET = {
                 PollStart: 0,
@@ -852,6 +921,7 @@
                     if (hasSchedEvents) break;
                 }
                 document.getElementById("btn-sched-panel").style.display = hasSchedEvents ? "" : "none";
+                showToast("shift-drag-hint", "⇧ Shift + drag to select a region", "info");
                 requestAnimationFrame(renderAll);
             }
 
@@ -1887,6 +1957,7 @@
             });
 
             function zoom(factor, centerFrac = 0.5) {
+                clearToasts();
                 const viewDur = viewEnd - viewStart;
                 const center = viewStart + viewDur * centerFrac;
                 const newDur = Math.max(viewDur * factor, 100); // min 100ns
@@ -1926,7 +1997,7 @@
                 .getElementById("main-area")
                 .addEventListener("mousedown", (e) => {
                     if (e.shiftKey && trace && trace.cpuSamples.length === 0) {
-                        alert("No CPU samples in this trace. Enable cpu-profiling to use shift+drag region select for flamegraphs.");
+                        showToast("no-cpu-samples", "No CPU samples in trace — enable cpu-profiling for flamegraphs", "error", 4000);
                         return;
                     }
                     if (e.shiftKey && trace) {
@@ -2005,6 +2076,7 @@
                     selOverlay.style.display = "none";
                     document.body.style.cursor = "";
                     if (dragMoved) {
+                        clearToasts();
                         const selStart = Math.min(regionStartNs, regionEndNs);
                         const selEnd = Math.max(regionStartNs, regionEndNs);
                         // Check if there are sched events in range
@@ -2024,6 +2096,7 @@
             // Click on a poll to highlight all polls for the same task
             document.getElementById("main-area").addEventListener("click", (e) => {
                 if (dragMoved) return; // was a drag, not a click
+                clearToasts();
                 // Only handle clicks inside the lanes container
                 const lanesRect = lanesContainer.getBoundingClientRect();
                 if (e.clientY < lanesRect.top || e.clientY > lanesRect.bottom ||
@@ -2143,6 +2216,7 @@
 
             function hideStackPopup() {
                 document.getElementById("stack-popup").style.display = "none";
+                selOverlay.style.display = "none";
             }
 
             document.getElementById("stack-popup-close").addEventListener("click", hideStackPopup);
@@ -2162,10 +2236,11 @@
                 schedPanelTimeRange = (startNs != null && endNs != null) ? { start: startNs, end: endNs } : null;
                 const allSched = collectSchedSamples(schedPanelTimeRange);
                 if (!allSched.length) {
-                    alert("No scheduling events found" + (schedPanelTimeRange ? " in selected range." : " in this trace."));
+                    showToast("no-sched-events", "No scheduling events found" + (schedPanelTimeRange ? " in selected range" : " in trace"), "error", 4000);
                     return;
                 }
                 renderSchedPanel(allSched);
+                clearToasts();
                 document.getElementById("sched-panel").style.display = "flex";
             }
 
@@ -2329,6 +2404,7 @@
                 switch (e.key) {
                     case "Escape":
                         e.preventDefault();
+                        clearToasts();
                         hideStackPopup();
                         if (document.getElementById("sched-panel").style.display === "flex") {
                             document.getElementById("sched-panel").style.display = "none";
@@ -2696,7 +2772,7 @@
                     s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
                 );
                 if (!allSamples.length) {
-                    alert("No CPU samples in selected region. CPU sampling must be active during this time range.");
+                    showToast("no-cpu-samples-region", "No CPU samples in selected region", "error", 4000);
                     return;
                 }
 
@@ -2725,6 +2801,7 @@
                     sel.appendChild(opt);
                 }
 
+                clearToasts();
                 document.getElementById("flamegraph-panel").style.display = "flex";
                 applyFgFilter();
             }
@@ -2921,6 +2998,7 @@
                 selOverlay.style.display = "none";
                 document.body.style.cursor = "";
                 if (qcDragMoved) {
+                    clearToasts();
                     const selStart = Math.min(qcDragStartNs, qcDragEndNs);
                     const selEnd = Math.max(qcDragStartNs, qcDragEndNs);
                     showSpawnedTasks(selStart, selEnd);
