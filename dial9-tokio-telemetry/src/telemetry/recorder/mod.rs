@@ -94,11 +94,6 @@ impl TelemetryRecorder {
             builder.on_task_spawn(move |meta| {
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
-                eprintln!(
-                    "[dial9-dbg] on_task_spawn thread={:?} enabled={}",
-                    std::thread::current().id(),
-                    s5.enabled.load(std::sync::atomic::Ordering::Relaxed),
-                );
                 s5.record_event(RawEvent::TaskSpawn { task_id, location });
             });
         }
@@ -231,10 +226,6 @@ impl TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        eprintln!(
-            "[dial9-dbg] TelemetryGuard::drop on thread={:?}",
-            std::thread::current().id()
-        );
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -243,21 +234,11 @@ impl Drop for TelemetryGuard {
         // which may contain TaskSpawn events that were never flushed.
         BUFFER.with(|buf| {
             let mut buf = buf.borrow_mut();
-            eprintln!(
-                "[dial9-dbg] BUFFER on thread={:?} has {} events before flush",
-                std::thread::current().id(),
-                buf.events.len(),
-            );
             let events = buf.flush();
             if !events.is_empty() {
                 self.handle.shared.collector.accept_flush(events);
             }
         });
-        eprintln!(
-            "[dial9-dbg] collector has {} events before recorder.flush(), enabled={}",
-            self.handle.shared.collector.len(),
-            self.handle.shared.enabled.load(Ordering::Relaxed),
-        );
         self.handle.recorder.lock().unwrap().flush();
     }
 }

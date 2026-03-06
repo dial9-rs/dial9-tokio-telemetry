@@ -73,7 +73,10 @@ fn task_spawn_events_from_main_thread_are_captured() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
-    let (runtime, guard) = TracedRuntime::build_and_start(builder, Box::new(writer)).unwrap();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .build_and_start(builder, Box::new(writer))
+        .unwrap();
 
     // All tokio::spawn calls here fire on the main (block_on) thread,
     // so their TaskSpawn events land in the main thread's buffer.

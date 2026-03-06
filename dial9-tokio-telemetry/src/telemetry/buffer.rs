@@ -51,7 +51,7 @@ impl Drop for ThreadLocalBuffer {
             if let Some(collector) = self.collector.take() {
                 collector.accept_flush(std::mem::take(&mut self.events));
             } else {
-                eprintln!(
+                tracing::warn!(
                     "dial9-tokio-telemetry: dropping {} unflushed events (no collector registered on this thread)",
                     self.events.len()
                 );

@@ -29,6 +29,10 @@ impl CentralCollector {
     pub fn len(&self) -> usize {
         self.buffers.lock().unwrap().iter().map(|b| b.len()).sum()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 #[cfg(test)]
