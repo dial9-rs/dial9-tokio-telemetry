@@ -101,6 +101,8 @@ pub struct RotatingWriter {
     stopped: bool,
     /// Set to true when a rotation occurs; cleared by `take_rotated`.
     rotated: bool,
+    /// Optional metadata written at the start of each segment.
+    segment_metadata: Option<Vec<(String, String)>>,
 }
 
 impl RotatingWriter {
@@ -133,6 +135,7 @@ impl RotatingWriter {
             next_index: 1,
             stopped: false,
             rotated: false,
+            segment_metadata: None,
         })
     }
 
@@ -162,7 +165,32 @@ impl RotatingWriter {
             next_index: 1,
             stopped: false,
             rotated: false,
+            segment_metadata: None,
         })
+    }
+
+    /// Set key-value metadata to be written at the start of each new segment.
+    /// Immediately writes metadata to the current segment (call before writing events).
+    pub fn set_segment_metadata(&mut self, entries: Vec<(String, String)>) -> std::io::Result<()> {
+        self.segment_metadata = Some(entries);
+        self.write_segment_metadata()
+    }
+
+    /// Write the segment metadata event if configured. Called after writing the header.
+    fn write_segment_metadata(&mut self) -> std::io::Result<()> {
+        if let Some(ref entries) = self.segment_metadata {
+            let event = TelemetryEvent::SegmentMetadata {
+                entries: entries.clone(),
+            };
+            let size = format::wire_event_size(&event) as u64;
+            format::write_event(&mut self.current_writer, &event)?;
+            self.current_size += size;
+            self.total_size += size;
+            if let Some(last) = self.files.back_mut() {
+                last.1 = self.current_size;
+            }
+        }
+        Ok(())
     }
 
     fn file_path(base: &Path, index: u32) -> PathBuf {
@@ -197,6 +225,7 @@ impl RotatingWriter {
         self.current_size = header_size;
         self.total_size += header_size;
         self.files.push_back((new_path, header_size));
+        self.write_segment_metadata()?;
         self.rotated = true;
 
         self.evict_oldest()?;
@@ -763,5 +792,91 @@ mod tests {
         // single_file writes directly to the given path, no .active suffix
         assert!(path.exists());
         assert!(!dir.path().join("test.bin.active").exists());
+    }
+
+    #[test]
+    fn test_segment_metadata_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("trace.bin");
+        let mut writer = RotatingWriter::single_file(&path).unwrap();
+        writer
+            .set_segment_metadata(vec![
+                ("service".into(), "checkout-api".into()),
+                ("host".into(), "i-0abc123".into()),
+            ])
+            .unwrap();
+        writer.write_event(&park_event()).unwrap();
+        writer.flush().unwrap();
+
+        let events = read_trace_events(path.to_str().unwrap());
+        // First event should be SegmentMetadata, second should be the park event
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            TelemetryEvent::SegmentMetadata { entries } => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0], ("service".to_string(), "checkout-api".to_string()));
+                assert_eq!(entries[1], ("host".to_string(), "i-0abc123".to_string()));
+            }
+            other => panic!("expected SegmentMetadata, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_segment_metadata_written_in_every_rotated_file() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let event_size = 11u64; // WorkerPark
+        let metadata_size = format::wire_event_size(&TelemetryEvent::SegmentMetadata {
+            entries: vec![("k".into(), "v".into())],
+        }) as u64;
+        // File fits header + metadata + 1 event, rotation on 2nd event
+        let max_file_size = format::HEADER_SIZE as u64 + metadata_size + event_size;
+        let mut writer = RotatingWriter::new(&base, max_file_size, 100_000).unwrap();
+        writer
+            .set_segment_metadata(vec![("k".into(), "v".into())])
+            .unwrap();
+
+        // Write 3 events → should produce 3 files (1 event each)
+        for _ in 0..3 {
+            writer.write_event(&park_event()).unwrap();
+        }
+        writer.flush().unwrap();
+        writer.seal().unwrap();
+
+        // Check each file has SegmentMetadata as first event
+        for i in 0..3 {
+            let path = rotating_file(&base, i);
+            let events = read_trace_events(&path);
+            assert!(
+                events.len() >= 2,
+                "file {i} should have metadata + event, got {} events",
+                events.len()
+            );
+            match &events[0] {
+                TelemetryEvent::SegmentMetadata { entries } => {
+                    assert_eq!(entries, &[("k".to_string(), "v".to_string())]);
+                }
+                other => panic!("file {i}: expected SegmentMetadata first, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_segment_metadata_empty_entries() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("trace.bin");
+        let mut writer = RotatingWriter::single_file(&path).unwrap();
+        writer.set_segment_metadata(vec![]).unwrap();
+        writer.write_event(&park_event()).unwrap();
+        writer.flush().unwrap();
+
+        let events = read_trace_events(path.to_str().unwrap());
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            TelemetryEvent::SegmentMetadata { entries } => {
+                assert!(entries.is_empty());
+            }
+            other => panic!("expected SegmentMetadata, got {other:?}"),
+        }
     }
 }

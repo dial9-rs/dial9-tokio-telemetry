@@ -10,10 +10,10 @@ proceed in parallel. Workstream C depends on both.
 Core path: RotatingWriter seals files → worker watches → uploads to S3.
 No symbolization yet — just get raw traces into S3.
 
-- [ ] A1. Remove `SimpleBinaryWriter` (replace all usages with `RotatingWriter`)
-- [ ] A2. `RotatingWriter` rename-on-seal (`.active` → `.bin`)
-- [ ] A3. `SegmentMetadata` event (written at start of each segment)
-- [ ] A4. Sealed-file watcher (finds `.bin` files, ignores `.active`, oldest-first)
+- [x] A1. Remove `SimpleBinaryWriter` (replace all usages with `RotatingWriter`)
+- [x] A2. `RotatingWriter` rename-on-seal (`.active` → `.bin`)
+- [x] A3. `SegmentMetadata` event (written at start of each segment)
+- [x] A4. Sealed-file watcher (finds `.bin` files, ignores `.active`, oldest-first)
 - [ ] A5. S3 uploader with `aws-sdk-s3-transfer-manager` (gzip + upload + delete)
 - [ ] A6. S3 object metadata headers on `PutObject`
 - [ ] A7. Machine identity detection (`ImdsMetadata` or explicit string)
