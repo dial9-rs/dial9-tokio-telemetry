@@ -7,7 +7,7 @@
 //! Usage:
 //!   cargo run --release --features cpu-profiling --example blocking_pool_tracking
 
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SimpleBinaryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RotatingWriter, TracedRuntime};
 use std::time::Duration;
 
 fn burn_cpu(duration: Duration) {
@@ -25,7 +25,7 @@ fn main() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
-    let writer = Box::new(SimpleBinaryWriter::new("blocking_pool_trace.bin").unwrap());
+    let writer = RotatingWriter::single_file("blocking_pool_trace.bin").unwrap();
     let (runtime, _guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig {

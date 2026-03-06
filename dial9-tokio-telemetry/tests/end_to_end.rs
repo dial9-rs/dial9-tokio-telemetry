@@ -1,6 +1,7 @@
 mod common;
 mod validation;
 
+use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TraceReader, TracedRuntime, analyze_trace};
 use std::time::Duration;
 
