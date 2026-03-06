@@ -31,3 +31,11 @@
   - `src/worker/mod.rs`: new module
   - `src/worker/sealed.rs`: `SealedSegment` struct, `find_sealed_segments()`, `parse_segment_index()`
   - `src/lib.rs`: registered `worker` module
+
+## A5: S3 uploader with transfer manager
+- **Status**: ✅ Complete
+- **Summary**: Added `worker-s3` feature flag with `aws-sdk-s3-transfer-manager`, `aws-config`, and `flate2` as optional deps. Implemented `S3Uploader` with `S3Config` builder (bucket, prefix, service_name, instance_path), `gzip_compress` free function, `object_key` on `S3Config`, and `upload_and_delete` async method using the transfer manager. 9 new tests covering key format, gzip roundtrip, builder validation, and file read+compress. All 97 tests pass (stress clean, excluding pre-existing flaky `cpu_sample_timestamps_align_with_wall_clock`).
+- **Key changes**:
+  - `Cargo.toml`: `worker = []` and `worker-s3 = ["worker", ...]` feature flags; optional deps for aws-sdk-s3-transfer-manager, aws-config, flate2
+  - `src/worker/s3.rs`: `S3Config` builder, `S3Uploader`, `gzip_compress()`, `upload_and_delete()`
+  - `src/worker/mod.rs`: registered `s3` module behind `worker-s3` feature
