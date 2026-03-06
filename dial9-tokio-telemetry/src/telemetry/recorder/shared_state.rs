@@ -85,6 +85,9 @@ pub(crate) struct SharedState {
     pub(crate) collector: CentralCollector,
     pub(crate) start_time: Instant,
     pub(crate) metrics: ArcSwap<Option<RuntimeMetrics>>,
+    /// Maps OS tid → thread role so that CPU samples returned from perf can be
+    /// attributed to the correct worker or blocking-pool bucket at flush time.
+    /// Entries are inserted in `on_thread_start` and removed in `on_thread_stop`.
     #[cfg(feature = "cpu-profiling")]
     pub(crate) thread_roles: Mutex<HashMap<u32, ThreadRole>>,
     #[cfg(feature = "cpu-profiling")]
