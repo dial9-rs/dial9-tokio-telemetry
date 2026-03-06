@@ -975,6 +975,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dial9-trace-format"
+version = "0.1.1"
+dependencies = [
+ "criterion",
+ "dial9-perf-self-profile",
+ "dial9-trace-format-derive",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "dial9-trace-format-derive"
+version = "0.1.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
