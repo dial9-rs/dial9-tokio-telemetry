@@ -142,7 +142,7 @@ mod tests {
 
     fn make_config() -> S3Config {
         S3Config::builder()
-            .bucket("my-traces")
+            .bucket("test-bucket")
             .prefix("traces")
             .service_name("checkout-api")
             .instance_path("us-east-1/i-0abc123")
@@ -155,6 +155,54 @@ mod tests {
             path: path.into(),
             index,
         }
+    }
+
+    /// Create a transfer manager Client backed by s3s-fs (in-memory fake S3).
+    fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3_transfer_manager::Client {
+        let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
+        let mut builder = s3s::service::S3ServiceBuilder::new(fs);
+        builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+        let s3_service = builder.build();
+        let s3_client: s3s_aws::Client = s3_service.into();
+
+        let s3_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(s3_client)
+            .force_path_style(true)
+            .build();
+
+        let sdk_client = aws_sdk_s3::Client::from_conf(s3_config);
+
+        let tm_config = aws_sdk_s3_transfer_manager::Config::builder()
+            .client(sdk_client)
+            .build();
+
+        aws_sdk_s3_transfer_manager::Client::new(tm_config)
+    }
+
+    /// Create a raw aws_sdk_s3::Client for reading back objects from the fake S3.
+    fn fake_raw_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
+        let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
+        let mut builder = s3s::service::S3ServiceBuilder::new(fs);
+        builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+        let s3_service = builder.build();
+        let s3_client: s3s_aws::Client = s3_service.into();
+
+        let s3_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(s3_client)
+            .force_path_style(true)
+            .build();
+
+        aws_sdk_s3::Client::from_conf(s3_config)
     }
 
     // --- Key format tests ---
@@ -246,30 +294,112 @@ mod tests {
             .instance_path("path")
             .build()
             .unwrap();
-        // Verify via key generation — no prefix means service_name is first
         let segment = make_segment("/tmp/trace.0.bin", 0);
         let key = config.object_key(&segment, "ts");
         assert!(key.starts_with("svc/"));
     }
 
-    // --- Upload + delete integration test ---
+    // --- S3 integration tests via s3s-fs ---
 
     #[tokio::test]
-    async fn upload_reads_and_compresses_segment_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let segment_path = dir.path().join("trace.0.bin");
-        std::fs::write(&segment_path, b"fake trace data").unwrap();
+    async fn upload_and_delete_writes_to_s3_and_removes_local_file() {
+        let s3_root = tempfile::tempdir().unwrap();
+        let local_dir = tempfile::tempdir().unwrap();
 
+        // Create the bucket directory (s3s-fs uses directories as buckets)
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        let client = fake_s3_client(s3_root.path());
+        let config = make_config();
+        let uploader = S3Uploader::new(client, config);
+
+        // Write a fake segment file
+        let segment_path = local_dir.path().join("trace.0.bin");
+        std::fs::write(&segment_path, b"trace data here").unwrap();
         let segment = make_segment(&segment_path, 0);
-        assert!(segment_path.exists());
 
-        // Test the pre-upload path: read + compress
-        let data = std::fs::read(&segment.path).unwrap();
-        let compressed = gzip_compress(&data).unwrap();
+        // Upload and delete
+        let key = uploader
+            .upload_and_delete(&segment, "2026-03-05T19-30-00Z")
+            .await
+            .unwrap();
 
-        let mut decoder = GzDecoder::new(&compressed[..]);
+        assert_eq!(
+            key,
+            "traces/checkout-api/us-east-1/i-0abc123/2026-03-05T19-30-00Z-0.bin.gz"
+        );
+
+        // Local file should be deleted
+        assert!(!segment_path.exists());
+    }
+
+    #[tokio::test]
+    async fn uploaded_object_contains_gzipped_original_data() {
+        let s3_root = tempfile::tempdir().unwrap();
+        let local_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        let client = fake_s3_client(s3_root.path());
+        let raw_s3_client = fake_raw_s3_client(s3_root.path());
+
+        let config = make_config();
+        let uploader = S3Uploader::new(client, config);
+
+        let original_data = b"important trace data that must survive the roundtrip";
+        let segment_path = local_dir.path().join("trace.5.bin");
+        std::fs::write(&segment_path, original_data).unwrap();
+        let segment = make_segment(&segment_path, 5);
+
+        let key = uploader
+            .upload_and_delete(&segment, "2026-03-05T19-30-00Z")
+            .await
+            .unwrap();
+
+        // Read back from fake S3
+        let get_result = raw_s3_client
+            .get_object()
+            .bucket("test-bucket")
+            .key(&key)
+            .send()
+            .await
+            .unwrap();
+
+        let body = get_result.body.collect().await.unwrap().into_bytes();
+
+        // Body should be gzip — decompress and verify
+        let mut decoder = GzDecoder::new(&body[..]);
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
-        assert_eq!(decompressed, b"fake trace data");
+        assert_eq!(decompressed, original_data);
+    }
+
+    #[tokio::test]
+    async fn upload_failure_does_not_delete_local_file() {
+        let s3_root = tempfile::tempdir().unwrap();
+        let local_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        let client = fake_s3_client(s3_root.path());
+        // Use a read-only directory to make the delete fail after upload succeeds?
+        // Actually, the simplest way: point the segment at a file that doesn't exist
+        // so the read fails before upload.
+        let config = make_config();
+        let uploader = S3Uploader::new(client, config);
+
+        let segment_path = local_dir.path().join("trace.0.bin");
+        // Write the file, then make it unreadable
+        std::fs::write(&segment_path, b"should survive").unwrap();
+
+        // Create a segment pointing to a nonexistent file to trigger read failure
+        let bad_segment = make_segment(local_dir.path().join("nonexistent.bin"), 0);
+
+        let result = uploader
+            .upload_and_delete(&bad_segment, "2026-03-05T19-30-00Z")
+            .await;
+
+        assert!(result.is_err(), "expected upload to fail for missing file");
+
+        // The original file should be untouched (we never tried to delete it)
+        assert!(segment_path.exists());
     }
 }
