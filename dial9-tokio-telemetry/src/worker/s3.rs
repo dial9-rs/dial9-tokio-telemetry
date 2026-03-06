@@ -12,6 +12,7 @@ mod inner {
     use std::io::Write;
 
     /// Configuration for S3 uploads.
+    #[derive(Clone)]
     pub struct S3Config {
         bucket: String,
         prefix: String,

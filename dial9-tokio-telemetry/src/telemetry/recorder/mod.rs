@@ -232,6 +232,10 @@ pub struct TelemetryGuard {
     handle: TelemetryHandle,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    #[cfg(feature = "worker")]
+    worker_stop: Option<Arc<AtomicBool>>,
+    #[cfg(feature = "worker")]
+    worker_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl TelemetryGuard {
@@ -254,6 +258,7 @@ impl TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
+        // 1. Stop the flush thread
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -267,8 +272,18 @@ impl Drop for TelemetryGuard {
                 self.handle.shared.collector.accept_flush(events);
             }
         });
-        // seal() flushes internally before renaming .active → .bin
+        // 2. Seal the final segment (.active → .bin)
         self.handle.recorder.lock().unwrap().seal();
+        // 3. Signal worker to stop and drain remaining segments
+        #[cfg(feature = "worker")]
+        {
+            if let Some(ref stop) = self.worker_stop {
+                stop.store(true, Ordering::Release);
+            }
+            if let Some(t) = self.worker_thread.take() {
+                let _ = t.join();
+            }
+        }
     }
 }
 
@@ -280,6 +295,8 @@ pub struct TracedRuntimeBuilder {
     sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
     #[cfg(feature = "cpu-profiling")]
     inline_callframe_symbols: bool,
+    #[cfg(feature = "worker")]
+    worker_config: Option<crate::worker::WorkerConfig>,
 }
 
 impl TracedRuntimeBuilder {
@@ -309,6 +326,14 @@ impl TracedRuntimeBuilder {
     #[cfg(feature = "cpu-profiling")]
     pub fn with_inline_callframe_symbols(mut self, enabled: bool) -> Self {
         self.inline_callframe_symbols = enabled;
+        self
+    }
+
+    /// Configure an in-process worker that watches for sealed segments
+    /// and uploads them to S3.
+    #[cfg(feature = "worker")]
+    pub fn in_process_worker(mut self, config: crate::worker::WorkerConfig) -> Self {
+        self.worker_config = Some(config);
         self
     }
 
@@ -398,6 +423,22 @@ impl TracedRuntimeBuilder {
         };
 
         let guard_shared = recorder.lock().unwrap().shared.clone();
+
+        #[cfg(feature = "worker")]
+        let (worker_stop, worker_thread) = if let Some(config) = self.worker_config {
+            let ws = Arc::new(AtomicBool::new(false));
+            let ws_clone = ws.clone();
+            let wt = std::thread::Builder::new()
+                .name("dial9-worker".into())
+                .spawn(move || {
+                    crate::worker::run_worker(config, ws_clone);
+                })
+                .expect("failed to spawn dial9-worker thread");
+            (Some(ws), Some(wt))
+        } else {
+            (None, None)
+        };
+
         let guard = TelemetryGuard {
             handle: TelemetryHandle {
                 shared: guard_shared,
@@ -405,6 +446,10 @@ impl TracedRuntimeBuilder {
             },
             stop,
             thread: Some(thread),
+            #[cfg(feature = "worker")]
+            worker_stop,
+            #[cfg(feature = "worker")]
+            worker_thread,
         };
 
         Ok((runtime, guard))
@@ -438,6 +483,8 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
+            #[cfg(feature = "worker")]
+            worker_config: None,
         }
     }
 
@@ -456,6 +503,8 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
+            #[cfg(feature = "worker")]
+            worker_config: None,
         }
         .build(builder, writer)
     }
@@ -476,6 +525,8 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
+            #[cfg(feature = "worker")]
+            worker_config: None,
         }
         .build_and_start(builder, writer)
     }
