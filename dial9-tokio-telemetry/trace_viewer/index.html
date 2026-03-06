@@ -2874,6 +2874,12 @@
                 const mx = e.clientX - rect.left - LABEL_W;
                 qcDragStartNs = viewStart + (Math.max(0, mx) / chartW) * (viewEnd - viewStart);
                 qcDragEndNs = qcDragStartNs;
+                // Show selection overlay on main area
+                const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                selOverlay.style.top = "0px";
+                selOverlay.style.height = mainRect.height + "px";
+                selOverlay.style.display = "block";
+                updateSelOverlay(e.clientX);
                 document.body.style.cursor = "crosshair";
                 e.stopPropagation();
             });
@@ -2886,6 +2892,10 @@
                 const chartW = rect.width - LABEL_W - scrollbarW;
                 const mx = e.clientX - rect.left - LABEL_W;
                 qcDragEndNs = viewStart + (Math.max(0, Math.min(chartW, mx)) / chartW) * (viewEnd - viewStart);
+                // Update main-area selection overlay
+                regionStartNs = qcDragStartNs;
+                regionEndNs = qcDragEndNs;
+                updateSelOverlay(e.clientX);
                 // Draw selection highlight on queue chart
                 renderQueueChart(rect.width - LABEL_W, scrollbarW);
                 const c = queueCanvas;
@@ -2908,6 +2918,7 @@
             window.addEventListener("mouseup", (e) => {
                 if (!qcDragging) return;
                 qcDragging = false;
+                selOverlay.style.display = "none";
                 document.body.style.cursor = "";
                 if (qcDragMoved) {
                     const selStart = Math.min(qcDragStartNs, qcDragEndNs);
