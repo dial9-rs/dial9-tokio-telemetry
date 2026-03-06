@@ -22,8 +22,8 @@
         off += 4;
         if (magic !== "TOKIOTRC")
             throw new Error("Not a TOKIOTRC file (got: " + magic + ")");
-        if (version < 8 || version > 15) {
-            console.warn(`Expected version 8-15, got ${version}. Some data may be missing.`);
+        if (version < 8 || version > 16) {
+            console.warn(`Expected version 8-16, got ${version}. Some data may be missing.`);
         }
         const hasCpuTime = version >= 5;
         const hasSchedWait = version >= 6;
@@ -144,7 +144,7 @@
                 continue;
             }
 
-            if (wireCode === 11) {
+            if (wireCode === 172) {
                 // TaskTerminate: timestamp_us(4) + task_id(4)
                 if (off + 8 > buffer.byteLength) break;
                 const timestampUs = view.getUint32(off, true); off += 4;
@@ -153,7 +153,7 @@
                 continue;
             }
 
-            if (wireCode > 11) break; // unknown code
+            if (wireCode > 10 && wireCode !== 172) break; // unknown code
 
             // All regular codes have a 4-byte timestamp next
             if (off + 4 > buffer.byteLength) break;

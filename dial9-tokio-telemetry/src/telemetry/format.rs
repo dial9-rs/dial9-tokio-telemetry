@@ -1,4 +1,4 @@
-//! Binary trace wire format (v15).
+//! Binary trace wire format (v16).
 //!
 //! ## File layout
 //! ```text
@@ -16,7 +16,7 @@
 //!   8: CallframeDef                 → code(u8) + address(u64) + string_len(u16) + string_bytes(N)                                      = 11 + N bytes
 //!   9: WakeEvent                    → code(u8) + timestamp_us(u32) + waker_task_id(u32) + woken_task_id(u32) + target_worker(u8)        = 14 bytes
 //!  10: ThreadNameDef                → code(u8) + tid(u32) + string_len(u16) + string_bytes(N)                                          = 7 + N bytes
-//!  11: TaskTerminate                → code(u8) + timestamp_us(u32) + task_id(u32)                                                       = 9 bytes
+//! 172: TaskTerminate                → code(u8) + timestamp_us(u32) + task_id(u32)                                                       = 9 bytes
 //! ```
 //!
 //! Timestamps are microseconds since trace start. u32 micros supports traces up to ~71 minutes.
@@ -28,10 +28,10 @@
 //! - Added WakeEvent (code 9): emitted by `Traced<F>` waker wrapper, records who woke a task
 //!
 //! ### v13 → v14 changes
-//! - Added TaskTerminate (code 11): emitted when a task completes or is dropped
+//! - Added TaskTerminate (code 172): emitted when a task completes or is dropped
 //!
 //! ### v14 → v15 changes
-//! - Added timestamp_us(u32) to TaskSpawn (code 6) and TaskTerminate (code 11)
+//! - Added timestamp_us(u32) to TaskSpawn (code 6) and TaskTerminate (code 172)
 //!
 //! ### v12 → v13 changes
 //! - Added tid(u32) field to CpuSample (code 8) for thread identification
@@ -42,7 +42,7 @@ use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::io::{Read, Result, Write};
 
 pub const MAGIC: &[u8; 8] = b"TOKIOTRC";
-pub const VERSION: u32 = 15;
+pub const VERSION: u32 = 16;
 pub const HEADER_SIZE: usize = 12; // 8 magic + 4 version
 
 // Wire codes
@@ -57,7 +57,7 @@ const WIRE_WAKE_EVENT: u8 = 7;
 const WIRE_CPU_SAMPLE: u8 = 8;
 const WIRE_CALLFRAME_DEF: u8 = 9;
 const WIRE_THREAD_NAME_DEF: u8 = 10;
-const WIRE_TASK_TERMINATE: u8 = 11;
+const WIRE_TASK_TERMINATE: u8 = 172;
 
 /// Returns the wire size of an event.
 pub fn wire_event_size(event: &TelemetryEvent) -> usize {

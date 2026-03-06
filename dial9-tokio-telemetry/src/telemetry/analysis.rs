@@ -86,9 +86,6 @@ impl TraceReader {
                 Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
                     self.thread_names.insert(tid, name);
                 }
-                Some(TelemetryEvent::TaskTerminate { .. }) => {
-                    // metadata record — skip
-                }
                 Some(e) => return Ok(Some(e)),
             }
         }
