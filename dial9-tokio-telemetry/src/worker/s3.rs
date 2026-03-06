@@ -17,6 +17,7 @@ mod inner {
         prefix: String,
         service_name: String,
         instance_path: String,
+        boot_id: String,
     }
 
     impl S3Config {
@@ -47,6 +48,7 @@ mod inner {
         prefix: Option<String>,
         service_name: Option<String>,
         instance_path: Option<String>,
+        boot_id: Option<String>,
     }
 
     impl S3ConfigBuilder {
@@ -70,12 +72,18 @@ mod inner {
             self
         }
 
+        pub fn boot_id(mut self, boot_id: impl Into<String>) -> Self {
+            self.boot_id = Some(boot_id.into());
+            self
+        }
+
         pub fn build(self) -> Result<S3Config, &'static str> {
             Ok(S3Config {
                 bucket: self.bucket.ok_or("bucket is required")?,
                 prefix: self.prefix.unwrap_or_default(),
                 service_name: self.service_name.ok_or("service_name is required")?,
                 instance_path: self.instance_path.ok_or("instance_path is required")?,
+                boot_id: self.boot_id.ok_or("boot_id is required")?,
             })
         }
     }
@@ -116,6 +124,11 @@ mod inner {
                     .key(&key)
                     .content_encoding("gzip")
                     .content_type("application/octet-stream")
+                    .metadata("service", &self.config.service_name)
+                    .metadata("boot-id", &self.config.boot_id)
+                    .metadata("segment-index", segment.index.to_string())
+                    .metadata("start-time", timestamp)
+                    .metadata("host", &self.config.instance_path)
                     .body(compressed.into())
                     .initiate_with(&self.client)?;
 
@@ -146,6 +159,7 @@ mod tests {
             .prefix("traces")
             .service_name("checkout-api")
             .instance_path("us-east-1/i-0abc123")
+            .boot_id("test-boot-id")
             .build()
             .unwrap()
     }
@@ -224,6 +238,7 @@ mod tests {
             .bucket("my-traces")
             .service_name("checkout-api")
             .instance_path("us-east-1/i-0abc123")
+            .boot_id("test-boot-id")
             .build()
             .unwrap();
         let segment = make_segment("/tmp/trace.0.bin", 0);
@@ -264,6 +279,7 @@ mod tests {
         let result = S3Config::builder()
             .service_name("svc")
             .instance_path("path")
+            .boot_id("bid")
             .build();
         assert!(result.is_err());
     }
@@ -273,6 +289,7 @@ mod tests {
         let result = S3Config::builder()
             .bucket("bucket")
             .instance_path("path")
+            .boot_id("bid")
             .build();
         assert!(result.is_err());
     }
@@ -282,6 +299,17 @@ mod tests {
         let result = S3Config::builder()
             .bucket("bucket")
             .service_name("svc")
+            .boot_id("bid")
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn builder_requires_boot_id() {
+        let result = S3Config::builder()
+            .bucket("bucket")
+            .service_name("svc")
+            .instance_path("path")
             .build();
         assert!(result.is_err());
     }
@@ -292,6 +320,7 @@ mod tests {
             .bucket("bucket")
             .service_name("svc")
             .instance_path("path")
+            .boot_id("bid")
             .build()
             .unwrap();
         let segment = make_segment("/tmp/trace.0.bin", 0);
@@ -371,6 +400,54 @@ mod tests {
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
         assert_eq!(decompressed, original_data);
+    }
+
+    #[tokio::test]
+    async fn upload_sets_s3_object_metadata_headers() {
+        let s3_root = tempfile::tempdir().unwrap();
+        let local_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        let client = fake_s3_client(s3_root.path());
+        let raw_s3_client = fake_raw_s3_client(s3_root.path());
+
+        let config = S3Config::builder()
+            .bucket("test-bucket")
+            .prefix("traces")
+            .service_name("checkout-api")
+            .instance_path("us-east-1/i-0abc123")
+            .boot_id("a3f7c2d1-dead-beef-1234-567890abcdef")
+            .build()
+            .unwrap();
+        let uploader = S3Uploader::new(client, config);
+
+        let segment_path = local_dir.path().join("trace.3.bin");
+        std::fs::write(&segment_path, b"trace data").unwrap();
+        let segment = make_segment(&segment_path, 3);
+
+        let key = uploader
+            .upload_and_delete(&segment, "2026-03-05T19-30-00Z")
+            .await
+            .unwrap();
+
+        // HeadObject to read back metadata
+        let head = raw_s3_client
+            .head_object()
+            .bucket("test-bucket")
+            .key(&key)
+            .send()
+            .await
+            .unwrap();
+
+        let meta = head.metadata().unwrap();
+        assert_eq!(meta.get("service").unwrap(), "checkout-api");
+        assert_eq!(
+            meta.get("boot-id").unwrap(),
+            "a3f7c2d1-dead-beef-1234-567890abcdef"
+        );
+        assert_eq!(meta.get("segment-index").unwrap(), "3");
+        assert_eq!(meta.get("start-time").unwrap(), "2026-03-05T19-30-00Z");
+        assert_eq!(meta.get("host").unwrap(), "us-east-1/i-0abc123");
     }
 
     #[tokio::test]
