@@ -1015,6 +1015,32 @@ mod tests {
     }
 
     #[test]
+    fn test_task_terminate_roundtrip() {
+        let event = TelemetryEvent::TaskTerminate {
+            timestamp_nanos: 5_000_000,
+            task_id: TaskId::from_u32(42),
+        };
+
+        let mut buf = Vec::new();
+        write_event(&mut buf, &event).unwrap();
+        assert_eq!(buf.len(), wire_event_size(&event));
+        assert_eq!(buf[0], WIRE_TASK_TERMINATE);
+
+        let mut cursor = Cursor::new(buf);
+        let decoded = read_event(&mut cursor).unwrap().unwrap();
+        match decoded {
+            TelemetryEvent::TaskTerminate {
+                timestamp_nanos,
+                task_id,
+            } => {
+                assert_eq!(timestamp_nanos, 5_000_000);
+                assert_eq!(task_id.to_u32(), 42);
+            }
+            _ => panic!("expected TaskTerminate"),
+        }
+    }
+
+    #[test]
     fn test_mixed_stream_with_metadata_records() {
         // Write a stream that includes SpawnLocationDef and TaskSpawn interleaved with
         // runtime events, then read it back verifying order is preserved.

@@ -104,3 +104,47 @@ fn task_spawn_events_from_main_thread_are_captured() {
         "expected {N} TaskSpawn events from main thread, got {task_spawn_count}"
     );
 }
+
+#[test]
+fn task_terminate_events_are_captured() {
+    let (writer, events) = common::CapturingWriter::new();
+
+    const N: usize = 10;
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .build_and_start(builder, Box::new(writer))
+        .unwrap();
+
+    runtime.block_on(async {
+        let mut handles = Vec::new();
+        for _ in 0..N {
+            handles.push(tokio::spawn(async {}));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    let events = events.lock().unwrap();
+    let terminate_count = events
+        .iter()
+        .filter(|e| matches!(e, TelemetryEvent::TaskTerminate { .. }))
+        .count();
+
+    // Tokio treats worker threads as tasks, so we get N + num_workers terminate
+    // events. This is arguably a Tokio bug — workers shouldn't emit task lifecycle
+    // events — but we assert the exact count to catch regressions.
+    let num_workers = 2;
+    let expected = N + num_workers;
+    assert_eq!(
+        terminate_count, expected,
+        "expected {expected} TaskTerminate events (N={N} tasks + {num_workers} workers), got {terminate_count}"
+    );
+}
