@@ -971,6 +971,7 @@ dependencies = [
  "smallvec",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -26,3 +26,7 @@ The demo trace is used for:
 - Testing the viewer with real data
 
 Failing to update it will cause the viewer to fail when loading the demo.
+
+## Meta
+
+- Never declare done after pushing or opening a PR until CI is green. Check CI status and fix any failures before moving on.

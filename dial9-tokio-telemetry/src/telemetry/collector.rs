@@ -25,6 +25,14 @@ impl CentralCollector {
     pub fn drain(&self) -> Vec<Vec<RawEvent>> {
         std::mem::take(&mut *self.buffers.lock().unwrap())
     }
+
+    pub fn len(&self) -> usize {
+        self.buffers.lock().unwrap().iter().map(|b| b.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 #[cfg(test)]

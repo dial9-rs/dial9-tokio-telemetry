@@ -8,6 +8,7 @@ use arc_swap::ArcSwap;
 use std::cell::Cell;
 #[cfg(feature = "cpu-profiling")]
 use std::collections::HashMap;
+use std::sync::Arc;
 #[cfg(feature = "cpu-profiling")]
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,7 +83,7 @@ pub(crate) fn current_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> u8
 /// Shared state accessed lock-free by callbacks on the hot path.
 pub(crate) struct SharedState {
     pub(crate) enabled: AtomicBool,
-    pub(crate) collector: CentralCollector,
+    pub(crate) collector: Arc<CentralCollector>,
     pub(crate) start_time: Instant,
     pub(crate) metrics: ArcSwap<Option<RuntimeMetrics>>,
     /// Maps OS tid → thread role so that CPU samples returned from perf can be
@@ -98,7 +99,7 @@ impl SharedState {
     pub(super) fn new(start_time: Instant) -> Self {
         Self {
             enabled: AtomicBool::new(false),
-            collector: CentralCollector::new(),
+            collector: Arc::new(CentralCollector::new()),
             start_time,
             metrics: ArcSwap::from_pointee(None),
             #[cfg(feature = "cpu-profiling")]
@@ -141,6 +142,7 @@ impl SharedState {
         }
         BUFFER.with(|buf| {
             let mut buf = buf.borrow_mut();
+            buf.set_collector(&self.collector);
             buf.record_event(event);
             let should_flush = buf.should_flush() || matches!(event, RawEvent::WorkerPark { .. });
             if should_flush {

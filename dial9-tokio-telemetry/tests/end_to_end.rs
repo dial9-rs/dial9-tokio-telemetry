@@ -1,5 +1,7 @@
+mod common;
 mod validation;
 
+use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
 use dial9_tokio_telemetry::telemetry::{
     SimpleBinaryWriter, TraceReader, TracedRuntime, analyze_trace,
 };
@@ -57,4 +59,48 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     let analysis = analyze_trace(&events);
 
     validation::validate_trace_matches_metrics(&analysis, &events, &tokio_metrics);
+}
+
+/// Regression test: TaskSpawn events emitted on the main thread (inside block_on)
+/// must appear in the trace. Before the fix, the main thread's buffer was never
+/// flushed (no WorkerPark fires on main), so all these events were silently dropped.
+#[test]
+fn task_spawn_events_from_main_thread_are_captured() {
+    let (writer, events) = common::CapturingWriter::new();
+
+    const N: usize = 10;
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .build_and_start(builder, Box::new(writer))
+        .unwrap();
+
+    // All tokio::spawn calls here fire on the main (block_on) thread,
+    // so their TaskSpawn events land in the main thread's buffer.
+    runtime.block_on(async {
+        let mut handles = Vec::new();
+        for _ in 0..N {
+            handles.push(tokio::spawn(async {}));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    let events = events.lock().unwrap();
+    let task_spawn_count = events
+        .iter()
+        .filter(|e| matches!(e, TelemetryEvent::TaskSpawn { .. }))
+        .count();
+
+    assert_eq!(
+        task_spawn_count, N,
+        "expected {N} TaskSpawn events from main thread, got {task_spawn_count}"
+    );
 }
