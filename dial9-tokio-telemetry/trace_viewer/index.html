@@ -650,7 +650,7 @@
                     openUnpark = {}; // track {timestamp, cpuTime} at unpark
                 const openPollMeta = {}; // track {taskId, spawnLocId} at PollStart
                 for (const w of workerIds) {
-                    workerSpans[w] = { polls: [], parks: [], actives: [] };
+                    workerSpans[w] = { polls: [], parks: [], actives: [], cpuSampleTimes: [] };
                 }
 
                 // Group events by worker and sort per-worker by timestamp
@@ -744,6 +744,7 @@
                     for (const sample of trace.cpuSamples) {
                         const spans = workerSpans[sample.workerId];
                         if (!spans) { sample.spawnLoc = null; continue; }
+                        if (sample.source !== 1) spans.cpuSampleTimes.push(sample.timestamp);
                         let found = false;
                         for (const poll of spans.polls) {
                             if (sample.timestamp >= poll.start && sample.timestamp <= poll.end) {
@@ -1288,14 +1289,12 @@
                     }
                 }
 
-                // Mark polls that have CPU samples with an orange top stripe
-                ctx.fillStyle = "#ff8c00";
-                for (const s of spans.polls) {
-                    if (!s.cpuSamples || s.end < viewStart || s.start > viewEnd) continue;
-                    const x1 = Math.max(0, nsToX(s.start, pw));
-                    const x2 = Math.min(pw, nsToX(s.end, pw));
-                    const w = Math.max(x2 - x1, 3);
-                    ctx.fillRect(x1, bandTop, w, 3);
+                // Mark CPU sample positions with ticks below the poll band
+                ctx.fillStyle = "#ce93d8";
+                for (const t of spans.cpuSampleTimes) {
+                    if (t < viewStart || t > viewEnd) continue;
+                    const x = nsToX(t, pw);
+                    ctx.fillRect(x, bandTop + bandH, 3, 4);
                 }
 
                 // Mark polls that have sched events with red triangles below the poll band
@@ -2665,7 +2664,7 @@
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff4444;display:inline-block;border-radius:2px"></span>&gt;1ms</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a1520;border-top:3px solid #cc5533;display:inline-block;border-radius:2px"></span>Parked</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff0000;display:inline-block;border-radius:2px"></span>Kernel Sched Delay</span>
-    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:3px;background:#ff8c00;display:inline-block"></span>CPU Sampled</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:4px;background:#ce93d8;display:inline-block"></span>CPU Sampled</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#ff2222;font-size:10px">▲</span>Sched (blocking)</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#66bb6a;font-size:10px">▼</span>Wake</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
