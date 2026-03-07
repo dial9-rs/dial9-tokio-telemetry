@@ -218,7 +218,7 @@ fn end_to_end_trace_to_s3_roundtrip() {
         let resp = raw_client
             .list_objects_v2()
             .bucket("test-bucket")
-            .prefix("traces/test-svc/")
+            .prefix("traces/")
             .send()
             .await
             .unwrap();

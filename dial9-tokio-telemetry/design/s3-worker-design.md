@@ -19,9 +19,9 @@ Application Process              Worker Thread
 └─────────────────┘             └──────────────────────┘
                                            │
                                            ▼
-                        S3: {bucket}/{prefix}/{service}/
-                            {date-hour}/{instance}/
-                            {timestamp}-{index}.bin.gz
+                        S3: {bucket}/{prefix}/{date-hour}/
+                            {service}/{instance}/
+                            {epoch_secs}-{index}.bin.gz
 ```
 
 ## Key Design Decisions
@@ -39,24 +39,34 @@ Sealed:   trace.3.bin          (atomic rename)
 
 **Why not inotify/fswatch?** Adds complexity and platform-specific code. Polling every 1s is simple and sufficient.
 
-### 2. Time-bucketed S3 keys
+### 2. Time-first S3 key layout
 
-**Problem:** Finding traces for a specific time range requires listing all objects.
+**Problem:** The primary access pattern is incident correlation — "what was happening across all services at time T?" This means time should be the first index in the key hierarchy.
 
-**Solution:** Include date-hour in the key path:
+**Decision:** Time (date-hour) is the first component after the optional prefix:
 
 ```
-{prefix}/{service}/{date-hour}/{instance}/{timestamp}-{index}.bin.gz
+{prefix}/{date-hour}/{service}/{instance}/{epoch_secs}-{index}.bin.gz
 ```
 
-Example: `traces/checkout-api/2026-03-07/20/i-0abc123/2026-03-07T20-35-42Z-3.bin.gz`
+Example: `traces/2026-03-07/20/checkout-api/us-east-1/i-0abc123/1741384542-3.bin.gz`
+
+**Why time-first instead of service-first?**
+
+| Layout | Incident query ("what happened at 8pm?") | Single-service query |
+|--------|------------------------------------------|---------------------|
+| `{time}/{service}/...` | `ListObjects(prefix=traces/2026-03-07/20/)` — one call, all services | `ListObjects(prefix=traces/2026-03-07/20/checkout-api/)` — still one call |
+| `{service}/{time}/...` | N calls, one per service — must know all service names upfront | `ListObjects(prefix=traces/checkout-api/2026-03-07/20/)` — one call |
+
+Time-first is strictly better for incident correlation and no worse for single-service queries. The only case where service-first wins is "list all time ranges for one service" — but that's a rare access pattern compared to "what happened during this incident."
 
 **Benefits:**
-- Time-range queries: `aws s3 ls s3://bucket/traces/my-service/2026-03-07/20/`
-- Natural Athena partitioning if we add Parquet output later
-- Efficient S3 lifecycle policies per time bucket
+- Time-range queries across all services with a single `ListObjectsV2` prefix
+- Natural Athena partitioning by date-hour if we add Parquet output later
+- Efficient S3 lifecycle policies (delete everything older than N days)
+- Date-hour bucketing keeps individual prefixes manageable
 
-**Tradeoff:** Requires clock sync, but we already need that for trace timestamps.
+**Tradeoff:** Requires reasonable clock sync, but we already need that for trace timestamps.
 
 ### 3. Gzip compression
 
@@ -192,12 +202,13 @@ loop {
 ## S3 Object Layout
 
 ```
-s3://{bucket}/{prefix}/{service}/{date-hour}/{instance}/{timestamp}-{index}.bin.gz
+s3://{bucket}/{prefix}/{date-hour}/{service}/{instance}/{epoch_secs}-{index}.bin.gz
 ```
 
-- `{date-hour}`: `2026-03-07/20` (enables time-range queries)
+- `{date-hour}`: `2026-03-07/20` (enables time-range queries across all services)
+- `{service}`: user-provided service name
 - `{instance}`: `us-east-1/i-0abc123` or `dc-west/rack4-host7` (opaque string)
-- `{timestamp}`: `2026-03-07T20-35-42Z` (ISO 8601, colons → dashes)
+- `{epoch_secs}`: Unix epoch seconds
 - `{index}`: segment index from RotatingWriter
 
 **Metadata headers:**

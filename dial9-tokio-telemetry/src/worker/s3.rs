@@ -27,19 +27,46 @@ mod inner {
     impl S3Config {
         /// Build the S3 object key for a sealed segment.
         ///
-        /// Format: `{prefix}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz`
-        /// If prefix is empty: `{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz`
-        pub fn object_key(&self, segment: &SealedSegment, epoch_secs: &str) -> String {
-            let base = if self.prefix.is_empty() {
-                format!("{}/{}", self.service_name, self.instance_path)
+        /// Format: `{prefix}/{date-hour}/{service}/{instance}/{epoch_secs}-{index}.bin.gz`
+        /// Time-first layout enables incident correlation across all services with a
+        /// single `ListObjectsV2` prefix query.
+        pub fn object_key(&self, segment: &SealedSegment, epoch_secs: u64) -> String {
+            let date_hour = date_hour_from_epoch(epoch_secs);
+            let ts = epoch_secs.to_string();
+            if self.prefix.is_empty() {
+                format!(
+                    "{}/{}/{}/{}-{}.bin.gz",
+                    date_hour, self.service_name, self.instance_path, ts, segment.index
+                )
             } else {
                 format!(
-                    "{}/{}/{}",
-                    self.prefix, self.service_name, self.instance_path
+                    "{}/{}/{}/{}/{}-{}.bin.gz",
+                    self.prefix, date_hour, self.service_name, self.instance_path, ts, segment.index
                 )
-            };
-            format!("{}/{}-{}.bin.gz", base, epoch_secs, segment.index)
+            }
         }
+    }
+
+    /// Convert epoch seconds to `YYYY-MM-DD/HH` string for S3 key bucketing.
+    /// Uses the Hinnant civil_from_days algorithm (no datetime library needed).
+    fn date_hour_from_epoch(epoch_secs: u64) -> String {
+        let secs = epoch_secs as i64;
+        let hour = ((secs % 86400) / 3600) as u32;
+        let days = (secs / 86400) as i64;
+
+        // Hinnant algorithm: days since 1970-01-01 → (year, month, day)
+        let z = days + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z.rem_euclid(146097) as u32;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+
+        format!("{:04}-{:02}-{:02}/{:02}", y, m, d, hour)
     }
 
     /// Gzip-compress a byte slice.
@@ -66,11 +93,12 @@ mod inner {
         pub async fn upload_and_delete(
             &self,
             segment: &SealedSegment,
-            timestamp: &str,
+            epoch_secs: u64,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             let data = std::fs::read(&segment.path)?;
             let compressed = gzip_compress(&data)?;
-            let key = self.config.object_key(segment, timestamp);
+            let key = self.config.object_key(segment, epoch_secs);
+            let ts_str = epoch_secs.to_string();
 
             let handle =
                 aws_sdk_s3_transfer_manager::operation::upload::UploadInput::builder()
@@ -81,7 +109,7 @@ mod inner {
                     .metadata("service", &self.config.service_name)
                     .metadata("boot-id", &self.config.boot_id)
                     .metadata("segment-index", segment.index.to_string())
-                    .metadata("start-time", timestamp)
+                    .metadata("start-time", &ts_str)
                     .metadata("host", &self.config.instance_path)
                     .body(compressed.into())
                     .initiate_with(&self.client)?;
@@ -178,10 +206,10 @@ mod tests {
     fn object_key_includes_all_components() {
         let config = make_config();
         let segment = make_segment("/tmp/trace.3.bin", 3);
-        let key = config.object_key(&segment, "1741209000");
+        let key = config.object_key(&segment, 1741209000);
         assert_eq!(
             key,
-            "traces/checkout-api/us-east-1/i-0abc123/1741209000-3.bin.gz"
+            "traces/2025-03-05/19/checkout-api/us-east-1/i-0abc123/1741209000-3.bin.gz"
         );
     }
 
@@ -194,10 +222,10 @@ mod tests {
             .boot_id("test-boot-id")
             .build();
         let segment = make_segment("/tmp/trace.0.bin", 0);
-        let key = config.object_key(&segment, "1741209000");
+        let key = config.object_key(&segment, 1741209000);
         assert_eq!(
             key,
-            "checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz"
+            "2025-03-05/19/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz"
         );
     }
 
@@ -235,8 +263,9 @@ mod tests {
             .boot_id("bid")
             .build();
         let segment = make_segment("/tmp/trace.0.bin", 0);
-        let key = config.object_key(&segment, "123");
-        assert!(key.starts_with("svc/"));
+        let key = config.object_key(&segment, 1741209000);
+        // No prefix → date-hour is first component
+        assert!(key.starts_with("2025-03-05/"));
     }
 
     // --- S3 integration tests via s3s-fs ---
@@ -260,13 +289,13 @@ mod tests {
 
         // Upload and delete
         let key = uploader
-            .upload_and_delete(&segment, "1741209000")
+            .upload_and_delete(&segment, 1741209000)
             .await
             .unwrap();
 
         assert_eq!(
             key,
-            "traces/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz"
+            "traces/2025-03-05/19/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz"
         );
 
         // Local file should be deleted
@@ -291,7 +320,7 @@ mod tests {
         let segment = make_segment(&segment_path, 5);
 
         let key = uploader
-            .upload_and_delete(&segment, "1741209000")
+            .upload_and_delete(&segment, 1741209000)
             .await
             .unwrap();
 
@@ -336,7 +365,7 @@ mod tests {
         let segment = make_segment(&segment_path, 3);
 
         let key = uploader
-            .upload_and_delete(&segment, "1741209000")
+            .upload_and_delete(&segment, 1741209000)
             .await
             .unwrap();
 
@@ -381,7 +410,7 @@ mod tests {
         let bad_segment = make_segment(local_dir.path().join("nonexistent.bin"), 0);
 
         let result = uploader
-            .upload_and_delete(&bad_segment, "1741209000")
+            .upload_and_delete(&bad_segment, 1741209000)
             .await;
 
         assert!(result.is_err(), "expected upload to fail for missing file");

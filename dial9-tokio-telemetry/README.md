@@ -244,9 +244,9 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-Objects land at `s3://{bucket}/{prefix}/{service_name}/{date-hour}/{instance_path}/{timestamp}-{index}.bin.gz` with metadata headers (`x-amz-meta-service`, `x-amz-meta-boot-id`, etc.) for quick inspection via `HeadObject`.
+Objects land at `s3://{bucket}/{prefix}/{date-hour}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz` with metadata headers (`x-amz-meta-service`, `x-amz-meta-boot-id`, etc.) for quick inspection via `HeadObject`.
 
-The `{date-hour}` bucket (e.g. `2026-03-07/20`) enables efficient time-range queries: `aws s3 ls s3://bucket/traces/my-service/2026-03-07/20/` lists all traces from that hour.
+The `{date-hour}` bucket (e.g. `2026-03-07/20`) is the first key component after the prefix, enabling efficient incident correlation: `aws s3 ls s3://bucket/traces/2026-03-07/20/` lists all traces from all services during that hour.
 
 The worker uses exponential backoff if S3 is unreachable — it never crashes or affects the application. Symbolized files stay on disk in degraded mode and can be uploaded later.
 

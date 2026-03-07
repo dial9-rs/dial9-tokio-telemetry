@@ -251,8 +251,7 @@ impl WorkerDeps for RealWorkerDeps {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let timestamp = epoch_secs.to_string();
-        match self.uploader.upload_and_delete(segment, &timestamp).await {
+        match self.uploader.upload_and_delete(segment, epoch_secs).await {
             Ok(key) => {
                 self.connection.on_success();
                 tracing::info!(target: "dial9_worker", "uploaded {key}");
