@@ -91,8 +91,8 @@ fn main() {
     let sym1 = enc.intern_string("my_app::handle_request");
     let sym2 = enc.intern_string("tokio::runtime::poll");
     enc.write_symbol_table(&[
-        SymbolEntry { base_addr: 0x5555_5555_0000, size: 0x0900, symbol_id: sym2.pool_id() },
-        SymbolEntry { base_addr: 0x5555_5555_0900, size: 0x1000, symbol_id: sym1.pool_id() },
+        SymbolEntry { base_addr: 0x5555_5555_0000, size: 0x0900, symbol_id: sym2.0 },
+        SymbolEntry { base_addr: 0x5555_5555_0900, size: 0x1000, symbol_id: sym1.0 },
     ]);
 
     let data = enc.finish();
@@ -138,7 +138,6 @@ fn format_value(val: &FieldValue) -> String {
         FieldValue::Bool(v) => v.to_string(),
         FieldValue::String(v) => format!("{:?}", String::from_utf8_lossy(v)),
         FieldValue::Bytes(v) => format!("{} bytes", v.len()),
-        FieldValue::U64Array(v) => format!("{v:?}"),
         FieldValue::PooledString(id) => format!("pool#{id}"),
         FieldValue::StackFrames(addrs) => {
             let hex: Vec<_> = addrs.iter().map(|a| format!("0x{a:x}")).collect();
@@ -150,5 +149,6 @@ fn format_value(val: &FieldValue) -> String {
             }).collect();
             format!("{{{}}}", kvs.join(", "))
         }
+        _ => format!("{val:?}"),
     }
 }

@@ -150,12 +150,14 @@ fn decode_event_frame<'s>(data: &[u8], schema_lookup: &dyn Fn(u16) -> Option<&'s
     pos += 2;
     let field_types = schema_lookup(type_id)?;
     let mut values = Vec::with_capacity(field_types.len());
+    let mut remaining = &data[pos..];
     for ft in field_types {
-        let (val, consumed) = FieldValue::decode(*ft, data, pos)?;
+        let (val, rest) = FieldValue::decode(*ft, remaining)?;
         values.push(val);
-        pos += consumed;
+        remaining = rest;
     }
-    Some((Frame::Event { type_id, values }, pos))
+    let consumed = data.len() - remaining.len();
+    Some((Frame::Event { type_id, values }, consumed))
 }
 
 fn decode_string_pool_frame(data: &[u8]) -> Option<(Frame, usize)> {

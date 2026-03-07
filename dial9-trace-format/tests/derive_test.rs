@@ -63,14 +63,13 @@ struct AllSupportedTypes {
     d: bool,
     e: String,
     f: Vec<u8>,
-    g: Vec<u64>,
 }
 
 #[test]
 fn derive_all_types_round_trip() {
     let ev = AllSupportedTypes {
         a: 1, b: -2, c: 3.14, d: true,
-        e: "hello".to_string(), f: vec![0xAB], g: vec![10, 20],
+        e: "hello".to_string(), f: vec![0xAB],
     };
 
     let mut enc = Encoder::new();
@@ -81,7 +80,7 @@ fn derive_all_types_round_trip() {
     let frames = dec.decode_all();
     let event = frames.iter().find(|f| matches!(f, DecodedFrame::Event { .. })).unwrap();
     if let DecodedFrame::Event { values, .. } = event {
-        assert_eq!(values.len(), 7);
+        assert_eq!(values.len(), 6);
     } else {
         panic!("expected event");
     }
@@ -194,9 +193,9 @@ fn derive_with_interned_string() {
     // schema + string_pool + event = 3
     assert_eq!(frames.len(), 3);
     if let DecodedFrame::Event { values, .. } = &frames[2] {
-        assert_eq!(values[1], FieldValue::PooledString(src.pool_id()));
+        assert_eq!(values[1], FieldValue::PooledString(src.0));
     } else {
         panic!("expected event");
     }
-    assert_eq!(dec.string_pool.get(&src.pool_id()), Some(&"main".to_string()));
+    assert_eq!(dec.string_pool.get(&src.0), Some(&"main".to_string()));
 }

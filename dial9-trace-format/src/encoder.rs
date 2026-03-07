@@ -18,7 +18,11 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new() -> Self {
-        let mut buf = Vec::with_capacity(1024 * 1024);
+        Self::with_capacity(1024 * 1024)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut buf = Vec::with_capacity(capacity);
         codec::encode_header(&mut buf);
         Self {
             buf, registry: SchemaRegistry::new(),

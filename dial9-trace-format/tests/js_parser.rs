@@ -36,7 +36,6 @@ fn js_decodes_all_field_types() {
         FieldDef { name: "d_bool".into(), field_type: FieldType::Bool },
         FieldDef { name: "e_string".into(), field_type: FieldType::String },
         FieldDef { name: "f_bytes".into(), field_type: FieldType::Bytes },
-        FieldDef { name: "g_u64arr".into(), field_type: FieldType::U64Array },
         FieldDef { name: "h_pooled".into(), field_type: FieldType::PooledString },
         FieldDef { name: "i_stack".into(), field_type: FieldType::StackFrames },
         FieldDef { name: "j_varint".into(), field_type: FieldType::Varint },
@@ -50,8 +49,7 @@ fn js_decodes_all_field_types() {
         FieldValue::Bool(true),
         FieldValue::String(b"world".to_vec()),
         FieldValue::Bytes(vec![0xDE, 0xAD]),
-        FieldValue::U64Array(vec![10, 20]),
-        FieldValue::PooledString(pool_id.pool_id()),
+        FieldValue::PooledString(pool_id.0),
         FieldValue::StackFrames(vec![0x1000, 0x0F00, 0x0E00]),
         FieldValue::Varint(999),
     ]);
@@ -59,7 +57,7 @@ fn js_decodes_all_field_types() {
     enc.write_symbol_table(&[SymbolEntry {
         base_addr: 0x1000,
         size: 256,
-        symbol_id: pool_id.pool_id(),
+        symbol_id: pool_id.0,
     }]);
 
     let data = enc.finish();
@@ -73,7 +71,7 @@ fn js_decodes_all_field_types() {
 
     assert_eq!(frames[0]["type"], "schema");
     assert_eq!(frames[0]["name"], "AllTypes");
-    assert_eq!(frames[0]["fields"].as_array().unwrap().len(), 10);
+    assert_eq!(frames[0]["fields"].as_array().unwrap().len(), 9);
 
     let vals = &frames[2]["values"];
     assert_eq!(vals["a_u64"], "42");
@@ -82,17 +80,16 @@ fn js_decodes_all_field_types() {
     assert_eq!(vals["d_bool"], true);
     assert_eq!(vals["e_string"], "world");
     assert_eq!(vals["f_bytes"], serde_json::json!([0xDE, 0xAD]));
-    assert_eq!(vals["g_u64arr"], serde_json::json!(["10", "20"]));
-    assert_eq!(vals["h_pooled"], pool_id.pool_id());
+    assert_eq!(vals["h_pooled"], pool_id.0);
     assert_eq!(vals["i_stack"], serde_json::json!(["4096", "3840", "3584"]));
     assert_eq!(vals["j_varint"], "999");
 
-    assert_eq!(json["stringPool"][pool_id.pool_id().to_string()], "hello");
+    assert_eq!(json["stringPool"][pool_id.0.to_string()], "hello");
 
     let sym = &frames[3]["entries"][0];
     assert_eq!(sym["baseAddr"], "4096");
     assert_eq!(sym["size"], 256);
-    assert_eq!(sym["symbolId"], pool_id.pool_id());
+    assert_eq!(sym["symbolId"], pool_id.0);
 }
 
 #[test]

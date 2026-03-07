@@ -123,7 +123,6 @@ Each **SymbolEntry**:
 | 3 | Bool | 1 byte (`0x00` = false, nonzero = true) | 1 |
 | 4 | String | u32 length prefix + UTF-8 bytes | 4 + len |
 | 5 | Bytes | u32 length prefix + raw bytes | 4 + len |
-| 6 | U64Array | u32 count + count × 8-byte LE u64 | 4 + count×8 |
 | 7 | PooledString | u32 pool ID | 4 |
 | 8 | StackFrames | u32 count + count × signed LEB128 deltas | variable |
 | 9 | Varint | Unsigned LEB128 | 1–10 |
@@ -160,7 +159,6 @@ A string map carries an ordered list of key-value pairs (both UTF-8 strings):
 | field_count per schema | 0–65535 | u16 |
 | field/event name length | 0–65535 bytes | u16 length prefix |
 | string/bytes field length | 0–4,294,967,295 bytes | u32 length prefix |
-| U64Array count | 0–4,294,967,295 | u32 count |
 | StackFrames count | 0–4,294,967,295 | u32 count |
 | string pool entry count | 0–4,294,967,295 per frame | u32 count |
 | symbol table entry count | 0–4,294,967,295 per frame | u32 count |

@@ -225,7 +225,7 @@ mod tests {
 
         let mut dec = Decoder::new(&data).unwrap();
         dec.decode_all();
-        assert_eq!(dec.string_pool.get(&id.pool_id()), Some(&"hello".to_string()));
+        assert_eq!(dec.string_pool.get(&id.0), Some(&"hello".to_string()));
     }
 
     #[test]

@@ -10,7 +10,6 @@ pub enum FieldType {
     Bool = 3,
     String = 4,
     Bytes = 5,
-    U64Array = 6,
     PooledString = 7,
     StackFrames = 8,
     Varint = 9,
@@ -24,13 +23,9 @@ pub struct StackFrames(pub Vec<u64>);
 /// An interned string reference (pool ID). Created by [`Encoder::intern_string`].
 /// On the wire this is a `PooledString` (u32 LE).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InternedString(pub(crate) u32);
-
-impl InternedString {
-    /// Returns the raw pool ID for wire encoding.
-    pub fn pool_id(self) -> u32 { self.0 }
-}
+pub struct InternedString(pub u32);
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum FieldValue {
     U64(u64),
     I64(i64),
@@ -38,7 +33,6 @@ pub enum FieldValue {
     Bool(bool),
     String(Vec<u8>),
     Bytes(Vec<u8>),
-    U64Array(Vec<u64>),
     PooledString(u32),
     StackFrames(Vec<u64>),
     Varint(u64),
@@ -54,7 +48,6 @@ impl FieldType {
             3 => Some(FieldType::Bool),
             4 => Some(FieldType::String),
             5 => Some(FieldType::Bytes),
-            6 => Some(FieldType::U64Array),
             7 => Some(FieldType::PooledString),
             8 => Some(FieldType::StackFrames),
             9 => Some(FieldType::Varint),
@@ -75,12 +68,6 @@ impl FieldValue {
             FieldValue::String(v) | FieldValue::Bytes(v) => {
                 buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
                 buf.extend_from_slice(v);
-            }
-            FieldValue::U64Array(v) => {
-                buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
-                for val in v {
-                    buf.extend_from_slice(&val.to_le_bytes());
-                }
             }
             FieldValue::PooledString(id) => buf.extend_from_slice(&id.to_le_bytes()),
             FieldValue::Varint(v) => crate::leb128::encode_unsigned(*v, buf),
@@ -106,82 +93,71 @@ impl FieldValue {
         }
     }
 
-    /// Decode a value of the given type from the buffer at offset. Returns (value, bytes_consumed).
-    pub fn decode(field_type: FieldType, data: &[u8], offset: usize) -> Option<(FieldValue, usize)> {
-        let d = &data[offset..];
+    /// Decode a value of the given type from the buffer. Returns (value, remaining_slice).
+    pub fn decode(field_type: FieldType, data: &[u8]) -> Option<(FieldValue, &[u8])> {
         match field_type {
             FieldType::U64 => {
-                let v = u64::from_le_bytes(d.get(..8)?.try_into().ok()?);
-                Some((FieldValue::U64(v), 8))
+                let v = u64::from_le_bytes(data.get(..8)?.try_into().ok()?);
+                Some((FieldValue::U64(v), &data[8..]))
             }
             FieldType::I64 => {
-                let v = i64::from_le_bytes(d.get(..8)?.try_into().ok()?);
-                Some((FieldValue::I64(v), 8))
+                let v = i64::from_le_bytes(data.get(..8)?.try_into().ok()?);
+                Some((FieldValue::I64(v), &data[8..]))
             }
             FieldType::F64 => {
-                let v = f64::from_le_bytes(d.get(..8)?.try_into().ok()?);
-                Some((FieldValue::F64(v), 8))
+                let v = f64::from_le_bytes(data.get(..8)?.try_into().ok()?);
+                Some((FieldValue::F64(v), &data[8..]))
             }
             FieldType::Bool => {
-                Some((FieldValue::Bool(*d.first()? != 0), 1))
+                Some((FieldValue::Bool(*data.first()? != 0), &data[1..]))
             }
             FieldType::String | FieldType::Bytes => {
-                let len = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
-                let bytes = d.get(4..4 + len)?.to_vec();
+                let len = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
+                let bytes = data.get(4..4 + len)?.to_vec();
                 let val = if field_type == FieldType::String {
                     FieldValue::String(bytes)
                 } else {
                     FieldValue::Bytes(bytes)
                 };
-                Some((val, 4 + len))
-            }
-            FieldType::U64Array => {
-                let count = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
-                let mut vals = Vec::with_capacity(count.min(d.len() / 8));
-                for i in 0..count {
-                    let start = 4 + i * 8;
-                    let v = u64::from_le_bytes(d.get(start..start + 8)?.try_into().ok()?);
-                    vals.push(v);
-                }
-                Some((FieldValue::U64Array(vals), 4 + count * 8))
+                Some((val, &data[4 + len..]))
             }
             FieldType::PooledString => {
-                let id = u32::from_le_bytes(d.get(..4)?.try_into().ok()?);
-                Some((FieldValue::PooledString(id), 4))
+                let id = u32::from_le_bytes(data.get(..4)?.try_into().ok()?);
+                Some((FieldValue::PooledString(id), &data[4..]))
             }
             FieldType::Varint => {
-                let (v, consumed) = crate::leb128::decode_unsigned(d)?;
-                Some((FieldValue::Varint(v), consumed))
+                let (v, consumed) = crate::leb128::decode_unsigned(data)?;
+                Some((FieldValue::Varint(v), &data[consumed..]))
             }
             FieldType::StackFrames => {
-                let count = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
+                let count = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
                 let mut pos = 4;
-                let mut addrs = Vec::with_capacity(count.min(d.len()));
+                let mut addrs = Vec::with_capacity(count.min(data.len()));
                 let mut prev = 0i64;
                 for _ in 0..count {
-                    let (delta, consumed) = crate::leb128::decode_signed(&d[pos..])?;
+                    let (delta, consumed) = crate::leb128::decode_signed(&data[pos..])?;
                     prev = prev.wrapping_add(delta);
                     addrs.push(prev as u64);
                     pos += consumed;
                 }
-                Some((FieldValue::StackFrames(addrs), pos))
+                Some((FieldValue::StackFrames(addrs), &data[pos..]))
             }
             FieldType::StringMap => {
-                let count = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
+                let count = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
                 let mut pos = 4;
-                let mut pairs = Vec::with_capacity(count.min(d.len() / 8));
+                let mut pairs = Vec::with_capacity(count.min(data.len() / 8));
                 for _ in 0..count {
-                    let klen = u32::from_le_bytes(d.get(pos..pos + 4)?.try_into().ok()?) as usize;
+                    let klen = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
                     pos += 4;
-                    let k = d.get(pos..pos + klen)?.to_vec();
+                    let k = data.get(pos..pos + klen)?.to_vec();
                     pos += klen;
-                    let vlen = u32::from_le_bytes(d.get(pos..pos + 4)?.try_into().ok()?) as usize;
+                    let vlen = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
                     pos += 4;
-                    let v = d.get(pos..pos + vlen)?.to_vec();
+                    let v = data.get(pos..pos + vlen)?.to_vec();
                     pos += vlen;
                     pairs.push((k, v));
                 }
-                Some((FieldValue::StringMap(pairs), pos))
+                Some((FieldValue::StringMap(pairs), &data[pos..]))
             }
         }
     }
@@ -194,14 +170,43 @@ pub enum FieldValueRef<'a> {
     I64(i64),
     F64(f64),
     Bool(bool),
-    String(&'a [u8]),
+    String(&'a str),
     Bytes(&'a [u8]),
-    U64Array(&'a [u8]),
-    PooledString(u32),
-    /// Raw delta-encoded stack frame bytes. Use [`StackFrameIter`] to decode.
-    StackFrames(&'a [u8], u32),
+    PooledString(InternedString),
+    /// Raw delta-encoded stack frame bytes. Use [`StackFramesRef::iter`] to decode.
+    StackFrames(StackFramesRef<'a>),
     Varint(u64),
-    StringMap(&'a [u8], u32),
+    StringMap(StringMapRef<'a>),
+}
+
+/// Zero-copy wrapper for delta-encoded stack frame data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackFramesRef<'a> {
+    data: &'a [u8],
+    count: u32,
+}
+
+impl<'a> StackFramesRef<'a> {
+    pub fn iter(&self) -> StackFrameIter<'a> {
+        StackFrameIter::new(self.data, self.count)
+    }
+
+    pub fn count(&self) -> u32 { self.count }
+}
+
+/// Zero-copy wrapper for string map data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StringMapRef<'a> {
+    data: &'a [u8],
+    count: u32,
+}
+
+impl<'a> StringMapRef<'a> {
+    pub fn iter(&self) -> StringMapIter<'a> {
+        StringMapIter::new(self.data, self.count)
+    }
+
+    pub fn count(&self) -> u32 { self.count }
 }
 
 impl<'a> FieldValueRef<'a> {
@@ -225,25 +230,20 @@ impl<'a> FieldValueRef<'a> {
             FieldType::Bool => {
                 Some((FieldValueRef::Bool(*d.first()? != 0), 1))
             }
-            FieldType::String | FieldType::Bytes => {
+            FieldType::String => {
                 let len = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
                 let bytes = d.get(4..4 + len)?;
-                let val = if field_type == FieldType::String {
-                    FieldValueRef::String(bytes)
-                } else {
-                    FieldValueRef::Bytes(bytes)
-                };
-                Some((val, 4 + len))
+                let s = std::str::from_utf8(bytes).ok()?;
+                Some((FieldValueRef::String(s), 4 + len))
             }
-            FieldType::U64Array => {
-                let count = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
-                let byte_len = 4 + count * 8;
-                let _ = d.get(..byte_len)?;
-                Some((FieldValueRef::U64Array(&d[..byte_len]), byte_len))
+            FieldType::Bytes => {
+                let len = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
+                let bytes = d.get(4..4 + len)?;
+                Some((FieldValueRef::Bytes(bytes), 4 + len))
             }
             FieldType::PooledString => {
                 let id = u32::from_le_bytes(d.get(..4)?.try_into().ok()?);
-                Some((FieldValueRef::PooledString(id), 4))
+                Some((FieldValueRef::PooledString(InternedString(id)), 4))
             }
             FieldType::Varint => {
                 let (v, consumed) = crate::leb128::decode_unsigned(d)?;
@@ -256,7 +256,7 @@ impl<'a> FieldValueRef<'a> {
                     let (_, consumed) = crate::leb128::decode_signed(&d[pos..])?;
                     pos += consumed;
                 }
-                Some((FieldValueRef::StackFrames(&d[4..pos], count as u32), pos))
+                Some((FieldValueRef::StackFrames(StackFramesRef { data: &d[4..pos], count: count as u32 }), pos))
             }
             FieldType::StringMap => {
                 let count = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
@@ -267,7 +267,7 @@ impl<'a> FieldValueRef<'a> {
                     let vlen = u32::from_le_bytes(d.get(pos..pos + 4)?.try_into().ok()?) as usize;
                     pos += 4 + vlen;
                 }
-                Some((FieldValueRef::StringMap(&d[4..pos], count as u32), pos))
+                Some((FieldValueRef::StringMap(StringMapRef { data: &d[4..pos], count: count as u32 }), pos))
             }
         }
     }
@@ -342,71 +342,105 @@ impl ExactSizeIterator for StringMapIter<'_> {}
 /// Trait for types that can be encoded as a trace field.
 /// Implement this to add new field types without modifying the derive macro.
 pub trait TraceField {
+    /// The zero-copy decoded form of this field.
+    type Ref<'a>;
+
     fn field_type() -> FieldType;
     fn encode_field(&self, buf: &mut Vec<u8>);
+    /// Extract this field's value from a zero-copy FieldValueRef.
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>>;
 }
 
 impl TraceField for u8 {
+    type Ref<'a> = u8;
     fn field_type() -> FieldType { FieldType::Varint }
     fn encode_field(&self, buf: &mut Vec<u8>) { crate::leb128::encode_unsigned(*self as u64, buf); }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::Varint(v) => Some(*v as u8), _ => None }
+    }
 }
 
 impl TraceField for u16 {
+    type Ref<'a> = u16;
     fn field_type() -> FieldType { FieldType::Varint }
     fn encode_field(&self, buf: &mut Vec<u8>) { crate::leb128::encode_unsigned(*self as u64, buf); }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::Varint(v) => Some(*v as u16), _ => None }
+    }
 }
 
 impl TraceField for u32 {
+    type Ref<'a> = u32;
     fn field_type() -> FieldType { FieldType::Varint }
     fn encode_field(&self, buf: &mut Vec<u8>) { crate::leb128::encode_unsigned(*self as u64, buf); }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::Varint(v) => Some(*v as u32), _ => None }
+    }
 }
 
 impl TraceField for u64 {
+    type Ref<'a> = u64;
     fn field_type() -> FieldType { FieldType::Varint }
     fn encode_field(&self, buf: &mut Vec<u8>) { crate::leb128::encode_unsigned(*self, buf); }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::Varint(v) => Some(*v), _ => None }
+    }
 }
 
 impl TraceField for i64 {
+    type Ref<'a> = i64;
     fn field_type() -> FieldType { FieldType::I64 }
     fn encode_field(&self, buf: &mut Vec<u8>) { buf.extend_from_slice(&self.to_le_bytes()); }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::I64(v) => Some(*v), _ => None }
+    }
 }
 
 impl TraceField for f64 {
+    type Ref<'a> = f64;
     fn field_type() -> FieldType { FieldType::F64 }
     fn encode_field(&self, buf: &mut Vec<u8>) { buf.extend_from_slice(&self.to_le_bytes()); }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::F64(v) => Some(*v), _ => None }
+    }
 }
 
 impl TraceField for bool {
+    type Ref<'a> = bool;
     fn field_type() -> FieldType { FieldType::Bool }
     fn encode_field(&self, buf: &mut Vec<u8>) { buf.push(if *self { 1 } else { 0 }); }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::Bool(v) => Some(*v), _ => None }
+    }
 }
 
 impl TraceField for String {
+    type Ref<'a> = &'a str;
     fn field_type() -> FieldType { FieldType::String }
     fn encode_field(&self, buf: &mut Vec<u8>) {
         let bytes = self.as_bytes();
         buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(bytes);
     }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::String(s) => Some(s), _ => None }
+    }
 }
 
 impl TraceField for Vec<u8> {
+    type Ref<'a> = &'a [u8];
     fn field_type() -> FieldType { FieldType::Bytes }
     fn encode_field(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&(self.len() as u32).to_le_bytes());
         buf.extend_from_slice(self);
     }
-}
-
-impl TraceField for Vec<u64> {
-    fn field_type() -> FieldType { FieldType::U64Array }
-    fn encode_field(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&(self.len() as u32).to_le_bytes());
-        for val in self { buf.extend_from_slice(&val.to_le_bytes()); }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::Bytes(b) => Some(b), _ => None }
     }
 }
 
 impl TraceField for StackFrames {
+    type Ref<'a> = StackFramesRef<'a>;
     fn field_type() -> FieldType { FieldType::StackFrames }
     fn encode_field(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&(self.0.len() as u32).to_le_bytes());
@@ -418,14 +452,22 @@ impl TraceField for StackFrames {
             prev = signed;
         }
     }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::StackFrames(r) => Some(r.clone()), _ => None }
+    }
 }
 
 impl TraceField for InternedString {
+    type Ref<'a> = InternedString;
     fn field_type() -> FieldType { FieldType::PooledString }
     fn encode_field(&self, buf: &mut Vec<u8>) { buf.extend_from_slice(&self.0.to_le_bytes()); }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::PooledString(id) => Some(*id), _ => None }
+    }
 }
 
 impl TraceField for Vec<(String, String)> {
+    type Ref<'a> = StringMapRef<'a>;
     fn field_type() -> FieldType { FieldType::StringMap }
     fn encode_field(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&(self.len() as u32).to_le_bytes());
@@ -438,6 +480,9 @@ impl TraceField for Vec<(String, String)> {
             buf.extend_from_slice(vb);
         }
     }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val { FieldValueRef::StringMap(r) => Some(r.clone()), _ => None }
+    }
 }
 
 #[cfg(test)]
@@ -446,10 +491,11 @@ mod tests {
 
     #[test]
     fn field_type_round_trip() {
-        for tag in 0..=10u8 {
+        for tag in [0, 1, 2, 3, 4, 5, 7, 8, 9, 10u8] {
             let ft = FieldType::from_tag(tag).unwrap();
             assert_eq!(ft as u8, tag);
         }
+        assert!(FieldType::from_tag(6).is_none());
         assert!(FieldType::from_tag(11).is_none());
     }
 
@@ -460,8 +506,8 @@ mod tests {
         let mut buf = Vec::new();
         val.encode(&mut buf);
         assert_eq!(buf.len(), 8);
-        let (decoded, consumed) = FieldValue::decode(FieldType::U64, &buf, 0).unwrap();
-        assert_eq!(consumed, 8);
+        let (decoded, rest) = FieldValue::decode(FieldType::U64, &buf).unwrap();
+        assert!(rest.is_empty());
         assert_eq!(decoded, val);
     }
 
@@ -470,7 +516,7 @@ mod tests {
         let val = FieldValue::I64(-123456789);
         let mut buf = Vec::new();
         val.encode(&mut buf);
-        let (decoded, _) = FieldValue::decode(FieldType::I64, &buf, 0).unwrap();
+        let (decoded, _) = FieldValue::decode(FieldType::I64, &buf).unwrap();
         assert_eq!(decoded, val);
     }
 
@@ -479,7 +525,7 @@ mod tests {
         let val = FieldValue::F64(std::f64::consts::PI);
         let mut buf = Vec::new();
         val.encode(&mut buf);
-        let (decoded, _) = FieldValue::decode(FieldType::F64, &buf, 0).unwrap();
+        let (decoded, _) = FieldValue::decode(FieldType::F64, &buf).unwrap();
         assert_eq!(decoded, val);
     }
 
@@ -490,8 +536,8 @@ mod tests {
             let mut buf = Vec::new();
             val.encode(&mut buf);
             assert_eq!(buf.len(), 1);
-            let (decoded, consumed) = FieldValue::decode(FieldType::Bool, &buf, 0).unwrap();
-            assert_eq!(consumed, 1);
+            let (decoded, rest) = FieldValue::decode(FieldType::Bool, &buf).unwrap();
+            assert!(rest.is_empty());
             assert_eq!(decoded, val);
         }
     }
@@ -502,8 +548,8 @@ mod tests {
         let mut buf = Vec::new();
         val.encode(&mut buf);
         assert_eq!(buf.len(), 4 + 11);
-        let (decoded, consumed) = FieldValue::decode(FieldType::String, &buf, 0).unwrap();
-        assert_eq!(consumed, 15);
+        let (decoded, rest) = FieldValue::decode(FieldType::String, &buf).unwrap();
+        assert!(rest.is_empty());
         assert_eq!(decoded, val);
     }
 
@@ -512,17 +558,7 @@ mod tests {
         let val = FieldValue::Bytes(vec![0xff, 0x00, 0xab]);
         let mut buf = Vec::new();
         val.encode(&mut buf);
-        let (decoded, _) = FieldValue::decode(FieldType::Bytes, &buf, 0).unwrap();
-        assert_eq!(decoded, val);
-    }
-
-    #[test]
-    fn encode_decode_u64_array() {
-        let val = FieldValue::U64Array(vec![1, 2, 3, u64::MAX]);
-        let mut buf = Vec::new();
-        val.encode(&mut buf);
-        assert_eq!(buf.len(), 4 + 4 * 8);
-        let (decoded, _) = FieldValue::decode(FieldType::U64Array, &buf, 0).unwrap();
+        let (decoded, _) = FieldValue::decode(FieldType::Bytes, &buf).unwrap();
         assert_eq!(decoded, val);
     }
 
@@ -532,7 +568,7 @@ mod tests {
         let mut buf = Vec::new();
         val.encode(&mut buf);
         assert_eq!(buf.len(), 4);
-        let (decoded, _) = FieldValue::decode(FieldType::PooledString, &buf, 0).unwrap();
+        let (decoded, _) = FieldValue::decode(FieldType::PooledString, &buf).unwrap();
         assert_eq!(decoded, val);
     }
 
@@ -542,9 +578,8 @@ mod tests {
         let val = FieldValue::StackFrames(addrs.clone());
         let mut buf = Vec::new();
         val.encode(&mut buf);
-        // Should be much smaller than 4 + 4*8 = 36 bytes
-        assert!(buf.len() < 36, "stack frames should be compact, got {} bytes", buf.len());
-        let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf, 0).unwrap();
+        assert_eq!(buf.len(), 17);
+        let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf).unwrap();
         assert_eq!(decoded, val);
     }
 
@@ -553,7 +588,7 @@ mod tests {
         let mut buf = vec![0xAA, 0xBB]; // garbage prefix
         let val = FieldValue::U64(999);
         val.encode(&mut buf);
-        let (decoded, _) = FieldValue::decode(FieldType::U64, &buf, 2).unwrap();
+        let (decoded, _) = FieldValue::decode(FieldType::U64, &buf[2..]).unwrap();
         assert_eq!(decoded, val);
     }
 
@@ -563,8 +598,8 @@ mod tests {
         let mut buf = Vec::new();
         val.encode(&mut buf);
         assert_eq!(buf.len(), 1);
-        let (decoded, consumed) = FieldValue::decode(FieldType::Varint, &buf, 0).unwrap();
-        assert_eq!(consumed, 1);
+        let (decoded, rest) = FieldValue::decode(FieldType::Varint, &buf).unwrap();
+        assert!(rest.is_empty());
         assert_eq!(decoded, val);
     }
 
@@ -574,8 +609,8 @@ mod tests {
         let mut buf = Vec::new();
         val.encode(&mut buf);
         assert_eq!(buf.len(), 10); // u64::MAX needs 10 LEB128 bytes
-        let (decoded, consumed) = FieldValue::decode(FieldType::Varint, &buf, 0).unwrap();
-        assert_eq!(consumed, 10);
+        let (decoded, rest) = FieldValue::decode(FieldType::Varint, &buf).unwrap();
+        assert!(rest.is_empty());
         assert_eq!(decoded, val);
     }
 

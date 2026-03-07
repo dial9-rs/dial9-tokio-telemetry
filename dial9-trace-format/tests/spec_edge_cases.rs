@@ -4,9 +4,7 @@ use dial9_trace_format::codec::{self, Frame, PoolEntry, SymbolEntry, HEADER_SIZE
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::schema::{FieldDef, SchemaEntry};
-use dial9_trace_format::types::{FieldType, FieldValue};
-
-// --- Header edge cases ---
+use dial9_trace_format::types::{FieldType, FieldValue};// --- Header edge cases ---
 
 #[test]
 fn header_is_exactly_5_bytes() {
@@ -81,7 +79,7 @@ fn u64_boundary_values() {
         let v = FieldValue::U64(val);
         let mut buf = Vec::new();
         v.encode(&mut buf);
-        let (decoded, _) = FieldValue::decode(FieldType::U64, &buf, 0).unwrap();
+        let (decoded, _) = FieldValue::decode(FieldType::U64, &buf).unwrap();
         assert_eq!(decoded, v);
     }
 }
@@ -92,7 +90,7 @@ fn i64_boundary_values() {
         let v = FieldValue::I64(val);
         let mut buf = Vec::new();
         v.encode(&mut buf);
-        let (decoded, _) = FieldValue::decode(FieldType::I64, &buf, 0).unwrap();
+        let (decoded, _) = FieldValue::decode(FieldType::I64, &buf).unwrap();
         assert_eq!(decoded, v);
     }
 }
@@ -103,13 +101,13 @@ fn f64_special_values() {
         let v = FieldValue::F64(val);
         let mut buf = Vec::new();
         v.encode(&mut buf);
-        let (decoded, _) = FieldValue::decode(FieldType::F64, &buf, 0).unwrap();
+        let (decoded, _) = FieldValue::decode(FieldType::F64, &buf).unwrap();
         assert_eq!(decoded, v);
     }
     let v = FieldValue::F64(f64::NAN);
     let mut buf = Vec::new();
     v.encode(&mut buf);
-    let (decoded, _) = FieldValue::decode(FieldType::F64, &buf, 0).unwrap();
+    let (decoded, _) = FieldValue::decode(FieldType::F64, &buf).unwrap();
     if let FieldValue::F64(d) = decoded {
         assert!(d.is_nan());
     }
@@ -121,8 +119,8 @@ fn empty_string_field() {
     let mut buf = Vec::new();
     v.encode(&mut buf);
     assert_eq!(buf.len(), 4);
-    let (decoded, consumed) = FieldValue::decode(FieldType::String, &buf, 0).unwrap();
-    assert_eq!(consumed, 4);
+    let (decoded, rest) = FieldValue::decode(FieldType::String, &buf).unwrap();
+    assert!(rest.is_empty());
     assert_eq!(decoded, v);
 }
 
@@ -131,17 +129,7 @@ fn empty_bytes_field() {
     let v = FieldValue::Bytes(vec![]);
     let mut buf = Vec::new();
     v.encode(&mut buf);
-    let (decoded, _) = FieldValue::decode(FieldType::Bytes, &buf, 0).unwrap();
-    assert_eq!(decoded, v);
-}
-
-#[test]
-fn empty_u64_array() {
-    let v = FieldValue::U64Array(vec![]);
-    let mut buf = Vec::new();
-    v.encode(&mut buf);
-    assert_eq!(buf.len(), 4);
-    let (decoded, _) = FieldValue::decode(FieldType::U64Array, &buf, 0).unwrap();
+    let (decoded, _) = FieldValue::decode(FieldType::Bytes, &buf).unwrap();
     assert_eq!(decoded, v);
 }
 
@@ -151,7 +139,7 @@ fn empty_stack_frames() {
     let mut buf = Vec::new();
     v.encode(&mut buf);
     assert_eq!(buf.len(), 4);
-    let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf, 0).unwrap();
+    let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf).unwrap();
     assert_eq!(decoded, v);
 }
 
@@ -162,8 +150,8 @@ fn varint_zero() {
     v.encode(&mut buf);
     assert_eq!(buf.len(), 1);
     assert_eq!(buf[0], 0x00);
-    let (decoded, consumed) = FieldValue::decode(FieldType::Varint, &buf, 0).unwrap();
-    assert_eq!(consumed, 1);
+    let (decoded, rest) = FieldValue::decode(FieldType::Varint, &buf).unwrap();
+    assert!(rest.is_empty());
     assert_eq!(decoded, v);
 }
 
@@ -173,8 +161,8 @@ fn varint_max() {
     let mut buf = Vec::new();
     v.encode(&mut buf);
     assert_eq!(buf.len(), 10);
-    let (decoded, consumed) = FieldValue::decode(FieldType::Varint, &buf, 0).unwrap();
-    assert_eq!(consumed, 10);
+    let (decoded, rest) = FieldValue::decode(FieldType::Varint, &buf).unwrap();
+    assert!(rest.is_empty());
     assert_eq!(decoded, v);
 }
 
@@ -186,7 +174,7 @@ fn varint_leb128_boundary_values() {
         let mut buf = Vec::new();
         v.encode(&mut buf);
         assert_eq!(buf.len(), expected_bytes, "Varint({val}) should be {expected_bytes} bytes");
-        let (decoded, _) = FieldValue::decode(FieldType::Varint, &buf, 0).unwrap();
+        let (decoded, _) = FieldValue::decode(FieldType::Varint, &buf).unwrap();
         assert_eq!(decoded, v);
     }
 }
@@ -198,7 +186,7 @@ fn stack_frames_single_address() {
     let v = FieldValue::StackFrames(vec![0x7fff_ffff_ffff]);
     let mut buf = Vec::new();
     v.encode(&mut buf);
-    let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf, 0).unwrap();
+    let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf).unwrap();
     assert_eq!(decoded, v);
 }
 
@@ -209,7 +197,7 @@ fn stack_frames_identical_addresses() {
     let mut buf = Vec::new();
     v.encode(&mut buf);
     assert!(buf.len() <= 10);
-    let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf, 0).unwrap();
+    let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf).unwrap();
     assert_eq!(decoded, v);
 }
 
@@ -219,7 +207,7 @@ fn stack_frames_descending_addresses() {
     let v = FieldValue::StackFrames(addrs);
     let mut buf = Vec::new();
     v.encode(&mut buf);
-    let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf, 0).unwrap();
+    let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf).unwrap();
     assert_eq!(decoded, v);
 }
 
@@ -296,25 +284,30 @@ fn interleaved_pool_and_events() {
         FieldDef { name: "s".into(), field_type: FieldType::PooledString },
     ]);
     let id0 = enc.intern_string("first");
-    enc.write_event_for::<PoolEv>(&[FieldValue::PooledString(id0.pool_id())]);
+    enc.write_event_for::<PoolEv>(&[FieldValue::PooledString(id0.0)]);
     let id1 = enc.intern_string("second");
-    enc.write_event_for::<PoolEv>(&[FieldValue::PooledString(id1.pool_id())]);
+    enc.write_event_for::<PoolEv>(&[FieldValue::PooledString(id1.0)]);
     let data = enc.finish();
 
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all();
     assert_eq!(frames.len(), 5);
-    assert_eq!(dec.string_pool.get(&id0.pool_id()), Some(&"first".to_string()));
-    assert_eq!(dec.string_pool.get(&id1.pool_id()), Some(&"second".to_string()));
+    assert_eq!(dec.string_pool.get(&id0.0), Some(&"first".to_string()));
+    assert_eq!(dec.string_pool.get(&id1.0), Some(&"second".to_string()));
 }
 
 // --- Field type tag exhaustiveness ---
 
 #[test]
 fn all_field_type_tags_valid() {
-    for tag in 0u8..=10 {
+    for tag in [0, 1, 2, 3, 4, 5, 7, 8, 9, 10u8] {
         assert!(FieldType::from_tag(tag).is_some(), "tag {tag} should be valid");
     }
+}
+
+#[test]
+fn field_type_tag_6_invalid() {
+    assert!(FieldType::from_tag(6).is_none());
 }
 
 #[test]

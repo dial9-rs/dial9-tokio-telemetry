@@ -27,8 +27,11 @@ impl SchemaRegistry {
     }
 
     pub fn register(&mut self, entry: SchemaEntry) -> Result<(), String> {
-        if self.schemas.contains_key(&entry.type_id) {
-            return Err(format!("type_id {} already registered", entry.type_id));
+        if let Some(existing) = self.schemas.get(&entry.type_id) {
+            if *existing == entry {
+                return Ok(());
+            }
+            return Err(format!("type_id {} already registered with different schema", entry.type_id));
         }
         self.schemas.insert(entry.type_id, entry);
         Ok(())
@@ -93,11 +96,18 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_type_id_rejected() {
+    fn duplicate_type_id_same_schema_ok() {
         let mut reg = SchemaRegistry::new();
         let entry = SchemaEntry { type_id: 1, name: "A".into(), fields: vec![] };
         reg.register(entry.clone()).unwrap();
-        assert!(reg.register(entry).is_err());
+        reg.register(entry).unwrap();
+    }
+
+    #[test]
+    fn duplicate_type_id_different_schema_rejected() {
+        let mut reg = SchemaRegistry::new();
+        reg.register(SchemaEntry { type_id: 1, name: "A".into(), fields: vec![] }).unwrap();
+        assert!(reg.register(SchemaEntry { type_id: 1, name: "B".into(), fields: vec![] }).is_err());
     }
 
     #[test]

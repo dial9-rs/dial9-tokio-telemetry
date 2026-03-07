@@ -129,8 +129,9 @@ node js/decode.js trace.bin
 | `String` | String | u32 length + UTF-8 |
 | `Vec<u8>` | Bytes | u32 length + raw |
 | `StackFrames` | StackFrames | Delta-encoded signed LEB128 |
+| `Vec<(String, String)>` | StringMap | u32 count + key/value pairs |
 
-`PooledString` (u32 pool ID) and `U64Array` (u32 count + 8 bytes each) are available via manual schema registration.
+`PooledString` (u32 pool ID) is available via manual schema registration.
 
 ## Planned: metrique distribution support
 
