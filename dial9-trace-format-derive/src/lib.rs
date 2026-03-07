@@ -46,10 +46,22 @@ pub fn derive_trace_event(input: TokenStream) -> TokenStream {
         });
     }
 
+    let phantom_field = if fields.is_empty() {
+        quote! { _marker: ::std::marker::PhantomData<&'a ()>, }
+    } else {
+        quote! {}
+    };
+    let phantom_init = if fields.is_empty() {
+        quote! { _marker: ::std::marker::PhantomData, }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #[derive(Debug, Clone)]
         pub struct #ref_name<'a> {
-            #(#ref_fields),*
+            #(#ref_fields,)*
+            #phantom_field
         }
 
         impl ::dial9_trace_format::TraceEvent for #name {
@@ -64,7 +76,8 @@ pub fn derive_trace_event(input: TokenStream) -> TokenStream {
             }
             fn decode<'a>(fields: &[::dial9_trace_format::types::FieldValueRef<'a>]) -> Option<Self::Ref<'a>> {
                 Some(#ref_name {
-                    #(#decode_tokens),*
+                    #(#decode_tokens,)*
+                    #phantom_init
                 })
             }
         }

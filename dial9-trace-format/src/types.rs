@@ -22,8 +22,14 @@ pub struct StackFrames(pub Vec<u64>);
 
 /// An interned string reference (pool ID). Created by [`Encoder::intern_string`].
 /// On the wire this is a `PooledString` (u32 LE).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct InternedString(pub u32);
+
+impl std::fmt::Debug for InternedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pool#{}", self.0)
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum FieldValue {
@@ -180,10 +186,22 @@ pub enum FieldValueRef<'a> {
 }
 
 /// Zero-copy wrapper for delta-encoded stack frame data.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct StackFramesRef<'a> {
     data: &'a [u8],
     count: u32,
+}
+
+impl std::fmt::Debug for StackFramesRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let addrs: Vec<u64> = self.iter().collect();
+        write!(f, "[")?;
+        for (i, a) in addrs.iter().enumerate() {
+            if i > 0 { write!(f, ", ")?; }
+            write!(f, "0x{a:x}")?;
+        }
+        write!(f, "]")
+    }
 }
 
 impl<'a> StackFramesRef<'a> {

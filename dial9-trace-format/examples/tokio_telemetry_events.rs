@@ -5,7 +5,6 @@
 use dial9_trace_format::codec::SymbolEntry;
 use dial9_trace_format::decoder::{DecodedFrameRef, Decoder};
 use dial9_trace_format::encoder::Encoder;
-use dial9_trace_format::types::StackFramesRef;
 use dial9_trace_format::{InternedString, StackFrames, TraceEvent};
 
 #[derive(TraceEvent)]
@@ -58,11 +57,6 @@ struct CpuSample {
     frames: StackFrames,
 }
 
-fn format_frames(frames: &StackFramesRef<'_>) -> String {
-    let hex: Vec<_> = frames.iter().map(|a| format!("0x{a:x}")).collect();
-    format!("[{}]", hex.join(", "))
-}
-
 fn main() {
     // --- Encode using derive macro types ---
     let mut enc = Encoder::new();
@@ -111,36 +105,12 @@ fn main() {
             DecodedFrameRef::Event { type_id, values } => {
                 let name = dec.registry().get(*type_id).map(|s| s.name.as_str()).unwrap_or("?");
                 match name {
-                    "PollStart" => {
-                        let ev = PollStart::decode(values).unwrap();
-                        println!("  PollStart {{ ts={}, worker={}, queue={}, task={}, spawn_loc={} }}",
-                            ev.timestamp_ns, ev.worker_id, ev.local_queue_depth, ev.task_id, ev.spawn_loc_id);
-                    }
-                    "PollEnd" => {
-                        let ev = PollEnd::decode(values).unwrap();
-                        println!("  PollEnd {{ ts={}, worker={} }}", ev.timestamp_ns, ev.worker_id);
-                    }
-                    "WorkerPark" => {
-                        let ev = WorkerPark::decode(values).unwrap();
-                        println!("  WorkerPark {{ ts={}, worker={}, queue={}, cpu_ns={} }}",
-                            ev.timestamp_ns, ev.worker_id, ev.local_queue_depth, ev.cpu_time_ns);
-                    }
-                    "WorkerUnpark" => {
-                        let ev = WorkerUnpark::decode(values).unwrap();
-                        println!("  WorkerUnpark {{ ts={}, worker={}, queue={}, cpu_ns={}, sched_wait={} }}",
-                            ev.timestamp_ns, ev.worker_id, ev.local_queue_depth, ev.cpu_time_ns, ev.sched_wait_ns);
-                    }
-                    "WakeEvent" => {
-                        let ev = WakeEvent::decode(values).unwrap();
-                        println!("  WakeEvent {{ ts={}, waker={}, woken={}, target={} }}",
-                            ev.timestamp_ns, ev.waker_task_id, ev.woken_task_id, ev.target_worker);
-                    }
-                    "CpuSample" => {
-                        let ev = CpuSample::decode(values).unwrap();
-                        let pool_name = dec.string_pool.get(&ev.thread_name.0).map(|s| s.as_str()).unwrap_or("?");
-                        println!("  CpuSample {{ ts={}, worker={}, tid={}, source={}, thread={:?}, frames={} }}",
-                            ev.timestamp_ns, ev.worker_id, ev.tid, ev.source, pool_name, format_frames(&ev.frames));
-                    }
+                    "PollStart" => println!("  {:?}", PollStart::decode(values).unwrap()),
+                    "PollEnd" => println!("  {:?}", PollEnd::decode(values).unwrap()),
+                    "WorkerPark" => println!("  {:?}", WorkerPark::decode(values).unwrap()),
+                    "WorkerUnpark" => println!("  {:?}", WorkerUnpark::decode(values).unwrap()),
+                    "WakeEvent" => println!("  {:?}", WakeEvent::decode(values).unwrap()),
+                    "CpuSample" => println!("  {:?}", CpuSample::decode(values).unwrap()),
                     other => println!("  {other} (unknown)"),
                 }
             }
