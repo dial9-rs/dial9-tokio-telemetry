@@ -117,142 +117,217 @@ pub use worker_config::*;
 
 /// The worker loop function. Runs on a dedicated thread, polls for sealed
 /// segments and processes them (upload to S3 if configured).
+///
+/// Creates a current-thread tokio runtime and runs the async worker loop inside it.
 #[cfg(feature = "worker")]
 pub(crate) fn run_worker(
     #[cfg_attr(not(feature = "worker-s3"), allow(unused_mut))]
     mut config: WorkerConfig,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let dir = config.trace_dir().to_path_buf();
-    let stem = config.trace_stem().to_string();
-    let poll_interval = config.poll_interval();
-
-    #[cfg(feature = "worker-s3")]
-    let mut s3_state = s3_worker_state(&mut config);
-
-    loop {
-        if stop.load(std::sync::atomic::Ordering::Acquire) {
-            // Drain remaining sealed segments before exiting
-            if let Ok(segments) = sealed::find_sealed_segments(&dir, &stem) {
-                for segment in &segments {
-                    #[cfg(feature = "worker-s3")]
-                    process_segment(segment, &mut s3_state);
-                    let _ = segment; // suppress unused warning when worker-s3 is off
-                }
-            }
-            return;
-        }
-
-        match sealed::find_sealed_segments(&dir, &stem) {
-            Ok(segments) if segments.is_empty() => {}
-            Ok(segments) => {
-                for segment in &segments {
-                    if stop.load(std::sync::atomic::Ordering::Acquire) {
-                        // Still process this segment, then exit
-                        #[cfg(feature = "worker-s3")]
-                        process_segment(segment, &mut s3_state);
-                        let _ = segment;
-                        // Drain remaining
-                        continue;
-                    }
-                    #[cfg(feature = "worker-s3")]
-                    process_segment(segment, &mut s3_state);
-                    let _ = segment;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(target: "dial9_worker", "failed to scan for sealed segments: {e}");
-            }
-        }
-
-        std::thread::sleep(poll_interval);
-    }
-}
-
-#[cfg(feature = "worker-s3")]
-struct S3WorkerState {
-    uploader: s3::S3Uploader,
-    connection: connection::S3ConnectionState,
-    runtime: tokio::runtime::Runtime,
-}
-
-#[cfg(feature = "worker-s3")]
-fn s3_worker_state(config: &mut WorkerConfig) -> Option<S3WorkerState> {
-    let s3_config = config.s3()?.clone();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .ok()?;
-    let client = if let Some(client) = config.take_client() {
-        client
-    } else {
-        let sdk_config = rt.block_on(aws_config::load_defaults(aws_config::BehaviorVersion::latest()));
-        aws_sdk_s3_transfer_manager::Client::new(
-            aws_sdk_s3_transfer_manager::Config::builder()
-                .client(aws_sdk_s3::Client::new(&sdk_config))
-                .build(),
-        )
-    };
-    Some(S3WorkerState {
-        uploader: s3::S3Uploader::new(client, s3_config),
-        connection: connection::S3ConnectionState::healthy(),
-        runtime: rt,
-    })
-}
+        .expect("failed to create worker runtime");
 
-#[cfg(feature = "worker-s3")]
-fn process_segment(segment: &sealed::SealedSegment, state: &mut Option<S3WorkerState>) {
-    let Some(state) = state.as_mut() else { return };
-    if !state.connection.should_attempt_upload() {
-        return;
+    #[cfg(feature = "worker-s3")]
+    {
+        let deps = RealWorkerDeps::new(&mut config, &rt);
+        let worker = WorkerLoop::new(config, stop, deps);
+        rt.block_on(worker.run());
     }
-    let timestamp = chrono_free_timestamp();
-    match state.runtime.block_on(state.uploader.upload_and_delete(segment, &timestamp)) {
-        Ok(key) => {
-            state.connection.on_success();
-            tracing::info!(target: "dial9_worker", "uploaded {key}");
-        }
-        Err(e) => {
-            state.connection.on_failure();
-            tracing::warn!(target: "dial9_worker", "upload failed: {e}");
-        }
+
+    #[cfg(not(feature = "worker-s3"))]
+    {
+        let deps = NoOpDeps;
+        let worker = WorkerLoop::new(config, stop, deps);
+        rt.block_on(worker.run());
     }
 }
 
-/// Generate a timestamp string without chrono dependency.
-/// Format: YYYY-MM-DDTHH-MM-SSZ (colons replaced with dashes per design doc §5).
-#[cfg(feature = "worker-s3")]
-fn chrono_free_timestamp() -> String {
-    use std::time::SystemTime;
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
+// ---------------------------------------------------------------------------
+// WorkerDeps trait — injectable for testing
+// ---------------------------------------------------------------------------
 
-    let (year, month, day) = days_to_ymd(days);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}-{:02}-{:02}Z",
-        year, month, day, hours, minutes, seconds
-    )
+/// Abstraction over the worker's external dependencies: finding segments,
+/// uploading them, generating timestamps, and sleeping between polls.
+#[cfg(feature = "worker")]
+pub(crate) trait WorkerDeps {
+    fn find_sealed_segments(
+        &self,
+        dir: &std::path::Path,
+        stem: &str,
+    ) -> std::io::Result<Vec<sealed::SealedSegment>>;
+
+    /// Upload a segment. Returns the S3 key on success.
+    fn upload(
+        &mut self,
+        segment: &sealed::SealedSegment,
+    ) -> impl std::future::Future<Output = ()>;
+
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> impl std::future::Future<Output = ()>;
+}
+
+// ---------------------------------------------------------------------------
+// WorkerLoop — the async state machine
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "worker")]
+pub(crate) struct WorkerLoop<D> {
+    dir: std::path::PathBuf,
+    stem: String,
+    poll_interval: std::time::Duration,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    deps: D,
+}
+
+#[cfg(feature = "worker")]
+impl<D: WorkerDeps> WorkerLoop<D> {
+    pub(crate) fn new(
+        config: WorkerConfig,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        deps: D,
+    ) -> Self {
+        Self {
+            dir: config.trace_dir().to_path_buf(),
+            stem: config.trace_stem().to_string(),
+            poll_interval: config.poll_interval(),
+            stop,
+            deps,
+        }
+    }
+
+    pub(crate) async fn run(mut self) {
+        loop {
+            if self.stop.load(std::sync::atomic::Ordering::Acquire) {
+                self.drain().await;
+                return;
+            }
+
+            self.poll_once().await;
+            self.deps.sleep(self.poll_interval).await;
+        }
+    }
+
+    async fn poll_once(&mut self) {
+        let segments = match self.deps.find_sealed_segments(&self.dir, &self.stem) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(target: "dial9_worker", "failed to scan for sealed segments: {e}");
+                return;
+            }
+        };
+        for segment in &segments {
+            self.deps.upload(segment).await;
+        }
+    }
+
+    async fn drain(&mut self) {
+        if let Ok(segments) = self.deps.find_sealed_segments(&self.dir, &self.stem) {
+            for segment in &segments {
+                self.deps.upload(segment).await;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NoOpDeps — used when worker-s3 is disabled
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "worker")]
+#[cfg(not(feature = "worker-s3"))]
+struct NoOpDeps;
+
+#[cfg(feature = "worker")]
+#[cfg(not(feature = "worker-s3"))]
+impl WorkerDeps for NoOpDeps {
+    fn find_sealed_segments(
+        &self,
+        dir: &std::path::Path,
+        stem: &str,
+    ) -> std::io::Result<Vec<sealed::SealedSegment>> {
+        sealed::find_sealed_segments(dir, stem)
+    }
+
+    async fn upload(&mut self, _segment: &sealed::SealedSegment) {}
+
+    async fn sleep(&self, duration: std::time::Duration) {
+        tokio::time::sleep(duration).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RealWorkerDeps — production impl with S3 + jiff
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "worker-s3")]
+pub(crate) struct RealWorkerDeps {
+    uploader: s3::S3Uploader,
+    connection: connection::S3ConnectionState,
 }
 
 #[cfg(feature = "worker-s3")]
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+impl RealWorkerDeps {
+    fn new(config: &mut WorkerConfig, rt: &tokio::runtime::Runtime) -> Self {
+        let s3_config = config.s3().cloned();
+        let Some(s3_config) = s3_config else {
+            // No S3 config — return a dummy that will never upload.
+            // This path shouldn't normally be hit when worker-s3 is enabled,
+            // but we handle it gracefully.
+            panic!("worker-s3 feature enabled but no S3 config provided");
+        };
+
+        let client = if let Some(client) = config.take_client() {
+            client
+        } else {
+            let sdk_config =
+                rt.block_on(aws_config::load_defaults(aws_config::BehaviorVersion::latest()));
+            aws_sdk_s3_transfer_manager::Client::new(
+                aws_sdk_s3_transfer_manager::Config::builder()
+                    .client(aws_sdk_s3::Client::new(&sdk_config))
+                    .build(),
+            )
+        };
+
+        Self {
+            uploader: s3::S3Uploader::new(client, s3_config),
+            connection: connection::S3ConnectionState::healthy(),
+        }
+    }
+}
+
+#[cfg(feature = "worker-s3")]
+impl WorkerDeps for RealWorkerDeps {
+    fn find_sealed_segments(
+        &self,
+        dir: &std::path::Path,
+        stem: &str,
+    ) -> std::io::Result<Vec<sealed::SealedSegment>> {
+        sealed::find_sealed_segments(dir, stem)
+    }
+
+    async fn upload(&mut self, segment: &sealed::SealedSegment) {
+        if !self.connection.should_attempt_upload() {
+            return;
+        }
+        let timestamp = jiff::Zoned::now().strftime("%Y-%m-%dT%H-%M-%SZ").to_string();
+        match self.uploader.upload_and_delete(segment, &timestamp).await {
+            Ok(key) => {
+                self.connection.on_success();
+                tracing::info!(target: "dial9_worker", "uploaded {key}");
+            }
+            Err(e) => {
+                self.connection.on_failure();
+                tracing::warn!(target: "dial9_worker", "upload failed: {e}");
+            }
+        }
+    }
+
+    async fn sleep(&self, duration: std::time::Duration) {
+        tokio::time::sleep(duration).await;
+    }
 }
