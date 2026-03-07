@@ -28,15 +28,24 @@ mod inner {
 
         /// Build the S3 object key for a sealed segment.
         ///
-        /// Format: `{prefix}/{service_name}/{instance_path}/{timestamp}-{index}.bin.gz`
-        /// If prefix is empty: `{service_name}/{instance_path}/{timestamp}-{index}.bin.gz`
+        /// Format: `{prefix}/{service_name}/{date-hour}/{instance_path}/{timestamp}-{index}.bin.gz`
+        /// If prefix is empty: `{service_name}/{date-hour}/{instance_path}/{timestamp}-{index}.bin.gz`
+        ///
+        /// The date-hour bucket (e.g. "2026-03-07/20") enables efficient time-range queries.
         pub fn object_key(&self, segment: &SealedSegment, timestamp: &str) -> String {
+            // Extract date-hour from timestamp: "2026-03-07T20-35-42Z" -> "2026-03-07/20"
+            let date_hour = if timestamp.len() >= 13 {
+                format!("{}/{}", &timestamp[..10], &timestamp[11..13])
+            } else {
+                "unknown".to_string()
+            };
+
             let base = if self.prefix.is_empty() {
-                format!("{}/{}", self.service_name, self.instance_path)
+                format!("{}/{}/{}", self.service_name, date_hour, self.instance_path)
             } else {
                 format!(
-                    "{}/{}/{}",
-                    self.prefix, self.service_name, self.instance_path
+                    "{}/{}/{}/{}",
+                    self.prefix, self.service_name, date_hour, self.instance_path
                 )
             };
             format!("{}/{}-{}.bin.gz", base, timestamp, segment.index)
@@ -229,7 +238,7 @@ mod tests {
         let key = config.object_key(&segment, "2026-03-05T19-30-00Z");
         assert_eq!(
             key,
-            "traces/checkout-api/us-east-1/i-0abc123/2026-03-05T19-30-00Z-3.bin.gz"
+            "traces/checkout-api/2026-03-05/19/us-east-1/i-0abc123/2026-03-05T19-30-00Z-3.bin.gz"
         );
     }
 
@@ -246,7 +255,7 @@ mod tests {
         let key = config.object_key(&segment, "2026-03-05T19-30-00Z");
         assert_eq!(
             key,
-            "checkout-api/us-east-1/i-0abc123/2026-03-05T19-30-00Z-0.bin.gz"
+            "checkout-api/2026-03-05/19/us-east-1/i-0abc123/2026-03-05T19-30-00Z-0.bin.gz"
         );
     }
 
@@ -356,7 +365,7 @@ mod tests {
 
         assert_eq!(
             key,
-            "traces/checkout-api/us-east-1/i-0abc123/2026-03-05T19-30-00Z-0.bin.gz"
+            "traces/checkout-api/2026-03-05/19/us-east-1/i-0abc123/2026-03-05T19-30-00Z-0.bin.gz"
         );
 
         // Local file should be deleted
