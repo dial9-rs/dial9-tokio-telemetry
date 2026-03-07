@@ -1,13 +1,11 @@
 //! Demonstrates encoding dial9-tokio-telemetry-style events using the new
-//! self-describing trace format, then decoding and printing them.
-//!
-//! All event types — including CpuSample with stack frames — use
-//! `#[derive(TraceEvent)]` and the `enc.write(&event)` API.
+//! self-describing trace format, then decoding them back into typed structs
+//! via the macro-generated `decode()` method.
 
 use dial9_trace_format::codec::SymbolEntry;
-use dial9_trace_format::decoder::{DecodedFrame, Decoder};
+use dial9_trace_format::decoder::{DecodedFrameRef, Decoder};
 use dial9_trace_format::encoder::Encoder;
-use dial9_trace_format::types::FieldValue;
+use dial9_trace_format::types::StackFramesRef;
 use dial9_trace_format::{InternedString, StackFrames, TraceEvent};
 
 #[derive(TraceEvent)]
@@ -60,7 +58,13 @@ struct CpuSample {
     frames: StackFrames,
 }
 
+fn format_frames(frames: &StackFramesRef<'_>) -> String {
+    let hex: Vec<_> = frames.iter().map(|a| format!("0x{a:x}")).collect();
+    format!("[{}]", hex.join(", "))
+}
+
 fn main() {
+    // --- Encode using derive macro types ---
     let mut enc = Encoder::new();
 
     enc.write(&PollStart {
@@ -87,7 +91,6 @@ fn main() {
         target_worker: 1,
     });
 
-    // Offline symbolization
     let sym1 = enc.intern_string("my_app::handle_request");
     let sym2 = enc.intern_string("tokio::runtime::poll");
     enc.write_symbol_table(&[
@@ -98,28 +101,55 @@ fn main() {
     let data = enc.finish();
     println!("Encoded trace: {} bytes\n", data.len());
 
-    // Decode and print
+    // --- Decode back into typed structs via macro-generated decode() ---
     let mut dec = Decoder::new(&data).unwrap();
-    for frame in dec.decode_all() {
+    for frame in dec.decode_all_ref() {
         match &frame {
-            DecodedFrame::Schema(s) => {
-                let fields: Vec<_> = s.fields.iter()
-                    .map(|f| format!("{}: {:?}", f.name, f.field_type)).collect();
-                println!("Schema[{}] \"{}\" {{ {} }}", s.type_id, s.name, fields.join(", "));
+            DecodedFrameRef::Schema(s) => {
+                println!("Schema[{}] \"{}\"", s.type_id, s.name);
             }
-            DecodedFrame::Event { type_id, values } => {
-                let schema = dec.registry().get(*type_id).unwrap();
-                let fields: Vec<_> = schema.fields.iter().zip(values)
-                    .map(|(def, val)| format!("{}={}", def.name, format_value(val)))
-                    .collect();
-                println!("  {} {{ {} }}", schema.name, fields.join(", "));
-            }
-            DecodedFrame::StringPool(entries) => {
-                for e in entries {
-                    println!("Pool[{}] = {:?}", e.pool_id, String::from_utf8_lossy(&e.data));
+            DecodedFrameRef::Event { type_id, values } => {
+                let name = dec.registry().get(*type_id).map(|s| s.name.as_str()).unwrap_or("?");
+                match name {
+                    "PollStart" => {
+                        let ev = PollStart::decode(values).unwrap();
+                        println!("  PollStart {{ ts={}, worker={}, queue={}, task={}, spawn_loc={} }}",
+                            ev.timestamp_ns, ev.worker_id, ev.local_queue_depth, ev.task_id, ev.spawn_loc_id);
+                    }
+                    "PollEnd" => {
+                        let ev = PollEnd::decode(values).unwrap();
+                        println!("  PollEnd {{ ts={}, worker={} }}", ev.timestamp_ns, ev.worker_id);
+                    }
+                    "WorkerPark" => {
+                        let ev = WorkerPark::decode(values).unwrap();
+                        println!("  WorkerPark {{ ts={}, worker={}, queue={}, cpu_ns={} }}",
+                            ev.timestamp_ns, ev.worker_id, ev.local_queue_depth, ev.cpu_time_ns);
+                    }
+                    "WorkerUnpark" => {
+                        let ev = WorkerUnpark::decode(values).unwrap();
+                        println!("  WorkerUnpark {{ ts={}, worker={}, queue={}, cpu_ns={}, sched_wait={} }}",
+                            ev.timestamp_ns, ev.worker_id, ev.local_queue_depth, ev.cpu_time_ns, ev.sched_wait_ns);
+                    }
+                    "WakeEvent" => {
+                        let ev = WakeEvent::decode(values).unwrap();
+                        println!("  WakeEvent {{ ts={}, waker={}, woken={}, target={} }}",
+                            ev.timestamp_ns, ev.waker_task_id, ev.woken_task_id, ev.target_worker);
+                    }
+                    "CpuSample" => {
+                        let ev = CpuSample::decode(values).unwrap();
+                        let pool_name = dec.string_pool.get(&ev.thread_name.0).map(|s| s.as_str()).unwrap_or("?");
+                        println!("  CpuSample {{ ts={}, worker={}, tid={}, source={}, thread={:?}, frames={} }}",
+                            ev.timestamp_ns, ev.worker_id, ev.tid, ev.source, pool_name, format_frames(&ev.frames));
+                    }
+                    other => println!("  {other} (unknown)"),
                 }
             }
-            DecodedFrame::SymbolTable(entries) => {
+            DecodedFrameRef::StringPool(entries) => {
+                for e in entries {
+                    println!("Pool[{}] = {:?}", e.pool_id, std::str::from_utf8(e.data).unwrap_or("?"));
+                }
+            }
+            DecodedFrameRef::SymbolTable(entries) => {
                 for e in entries {
                     let name = dec.string_pool.get(&e.symbol_id)
                         .map(|s| s.as_str()).unwrap_or("???");
@@ -127,28 +157,5 @@ fn main() {
                 }
             }
         }
-    }
-}
-
-fn format_value(val: &FieldValue) -> String {
-    match val {
-        FieldValue::U64(v) | FieldValue::Varint(v) => v.to_string(),
-        FieldValue::I64(v) => v.to_string(),
-        FieldValue::F64(v) => v.to_string(),
-        FieldValue::Bool(v) => v.to_string(),
-        FieldValue::String(v) => format!("{:?}", String::from_utf8_lossy(v)),
-        FieldValue::Bytes(v) => format!("{} bytes", v.len()),
-        FieldValue::PooledString(id) => format!("pool#{id}"),
-        FieldValue::StackFrames(addrs) => {
-            let hex: Vec<_> = addrs.iter().map(|a| format!("0x{a:x}")).collect();
-            format!("[{}]", hex.join(", "))
-        }
-        FieldValue::StringMap(pairs) => {
-            let kvs: Vec<_> = pairs.iter().map(|(k, v)| {
-                format!("{}={}", String::from_utf8_lossy(k), String::from_utf8_lossy(v))
-            }).collect();
-            format!("{{{}}}", kvs.join(", "))
-        }
-        _ => format!("{val:?}"),
     }
 }
