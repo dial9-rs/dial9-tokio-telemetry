@@ -12,89 +12,33 @@ mod inner {
     use std::io::Write;
 
     /// Configuration for S3 uploads.
-    #[derive(Clone)]
+    #[derive(Clone, bon::Builder)]
+    #[builder(on(String, into))]
     pub struct S3Config {
         bucket: String,
-        prefix: String,
         service_name: String,
         instance_path: String,
         boot_id: String,
+        /// Optional key prefix. Defaults to empty (no prefix).
+        #[builder(default)]
+        prefix: String,
     }
 
     impl S3Config {
-        pub fn builder() -> S3ConfigBuilder {
-            S3ConfigBuilder::default()
-        }
-
         /// Build the S3 object key for a sealed segment.
         ///
-        /// Format: `{prefix}/{service_name}/{date-hour}/{instance_path}/{timestamp}-{index}.bin.gz`
-        /// If prefix is empty: `{service_name}/{date-hour}/{instance_path}/{timestamp}-{index}.bin.gz`
-        ///
-        /// The date-hour bucket (e.g. "2026-03-07/20") enables efficient time-range queries.
-        pub fn object_key(&self, segment: &SealedSegment, timestamp: &str) -> String {
-            // Extract date-hour from timestamp: "2026-03-07T20-35-42Z" -> "2026-03-07/20"
-            let date_hour = if timestamp.len() >= 13 {
-                format!("{}/{}", &timestamp[..10], &timestamp[11..13])
-            } else {
-                "unknown".to_string()
-            };
-
+        /// Format: `{prefix}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz`
+        /// If prefix is empty: `{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz`
+        pub fn object_key(&self, segment: &SealedSegment, epoch_secs: &str) -> String {
             let base = if self.prefix.is_empty() {
-                format!("{}/{}/{}", self.service_name, date_hour, self.instance_path)
+                format!("{}/{}", self.service_name, self.instance_path)
             } else {
                 format!(
-                    "{}/{}/{}/{}",
-                    self.prefix, self.service_name, date_hour, self.instance_path
+                    "{}/{}/{}",
+                    self.prefix, self.service_name, self.instance_path
                 )
             };
-            format!("{}/{}-{}.bin.gz", base, timestamp, segment.index)
-        }
-    }
-
-    #[derive(Default)]
-    pub struct S3ConfigBuilder {
-        bucket: Option<String>,
-        prefix: Option<String>,
-        service_name: Option<String>,
-        instance_path: Option<String>,
-        boot_id: Option<String>,
-    }
-
-    impl S3ConfigBuilder {
-        pub fn bucket(mut self, bucket: impl Into<String>) -> Self {
-            self.bucket = Some(bucket.into());
-            self
-        }
-
-        pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
-            self.prefix = Some(prefix.into());
-            self
-        }
-
-        pub fn service_name(mut self, service_name: impl Into<String>) -> Self {
-            self.service_name = Some(service_name.into());
-            self
-        }
-
-        pub fn instance_path(mut self, instance_path: impl Into<String>) -> Self {
-            self.instance_path = Some(instance_path.into());
-            self
-        }
-
-        pub fn boot_id(mut self, boot_id: impl Into<String>) -> Self {
-            self.boot_id = Some(boot_id.into());
-            self
-        }
-
-        pub fn build(self) -> Result<S3Config, &'static str> {
-            Ok(S3Config {
-                bucket: self.bucket.ok_or("bucket is required")?,
-                prefix: self.prefix.unwrap_or_default(),
-                service_name: self.service_name.ok_or("service_name is required")?,
-                instance_path: self.instance_path.ok_or("instance_path is required")?,
-                boot_id: self.boot_id.ok_or("boot_id is required")?,
-            })
+            format!("{}/{}-{}.bin.gz", base, epoch_secs, segment.index)
         }
     }
 
@@ -171,7 +115,6 @@ mod tests {
             .instance_path("us-east-1/i-0abc123")
             .boot_id("test-boot-id")
             .build()
-            .unwrap()
     }
 
     fn make_segment(path: impl Into<PathBuf>, index: u32) -> SealedSegment {
@@ -235,10 +178,10 @@ mod tests {
     fn object_key_includes_all_components() {
         let config = make_config();
         let segment = make_segment("/tmp/trace.3.bin", 3);
-        let key = config.object_key(&segment, "2026-03-05T19-30-00Z");
+        let key = config.object_key(&segment, "1741209000");
         assert_eq!(
             key,
-            "traces/checkout-api/2026-03-05/19/us-east-1/i-0abc123/2026-03-05T19-30-00Z-3.bin.gz"
+            "traces/checkout-api/us-east-1/i-0abc123/1741209000-3.bin.gz"
         );
     }
 
@@ -249,13 +192,12 @@ mod tests {
             .service_name("checkout-api")
             .instance_path("us-east-1/i-0abc123")
             .boot_id("test-boot-id")
-            .build()
-            .unwrap();
+            .build();
         let segment = make_segment("/tmp/trace.0.bin", 0);
-        let key = config.object_key(&segment, "2026-03-05T19-30-00Z");
+        let key = config.object_key(&segment, "1741209000");
         assert_eq!(
             key,
-            "checkout-api/2026-03-05/19/us-east-1/i-0abc123/2026-03-05T19-30-00Z-0.bin.gz"
+            "checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz"
         );
     }
 
@@ -282,47 +224,7 @@ mod tests {
         assert!(decompressed.is_empty());
     }
 
-    // --- Builder validation tests ---
-
-    #[test]
-    fn builder_requires_bucket() {
-        let result = S3Config::builder()
-            .service_name("svc")
-            .instance_path("path")
-            .boot_id("bid")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn builder_requires_service_name() {
-        let result = S3Config::builder()
-            .bucket("bucket")
-            .instance_path("path")
-            .boot_id("bid")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn builder_requires_instance_path() {
-        let result = S3Config::builder()
-            .bucket("bucket")
-            .service_name("svc")
-            .boot_id("bid")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn builder_requires_boot_id() {
-        let result = S3Config::builder()
-            .bucket("bucket")
-            .service_name("svc")
-            .instance_path("path")
-            .build();
-        assert!(result.is_err());
-    }
+    // --- Builder tests ---
 
     #[test]
     fn builder_prefix_defaults_to_empty() {
@@ -331,10 +233,9 @@ mod tests {
             .service_name("svc")
             .instance_path("path")
             .boot_id("bid")
-            .build()
-            .unwrap();
+            .build();
         let segment = make_segment("/tmp/trace.0.bin", 0);
-        let key = config.object_key(&segment, "ts");
+        let key = config.object_key(&segment, "123");
         assert!(key.starts_with("svc/"));
     }
 
@@ -359,13 +260,13 @@ mod tests {
 
         // Upload and delete
         let key = uploader
-            .upload_and_delete(&segment, "2026-03-05T19-30-00Z")
+            .upload_and_delete(&segment, "1741209000")
             .await
             .unwrap();
 
         assert_eq!(
             key,
-            "traces/checkout-api/2026-03-05/19/us-east-1/i-0abc123/2026-03-05T19-30-00Z-0.bin.gz"
+            "traces/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz"
         );
 
         // Local file should be deleted
@@ -390,7 +291,7 @@ mod tests {
         let segment = make_segment(&segment_path, 5);
 
         let key = uploader
-            .upload_and_delete(&segment, "2026-03-05T19-30-00Z")
+            .upload_and_delete(&segment, "1741209000")
             .await
             .unwrap();
 
@@ -427,8 +328,7 @@ mod tests {
             .service_name("checkout-api")
             .instance_path("us-east-1/i-0abc123")
             .boot_id("a3f7c2d1-dead-beef-1234-567890abcdef")
-            .build()
-            .unwrap();
+            .build();
         let uploader = S3Uploader::new(client, config);
 
         let segment_path = local_dir.path().join("trace.3.bin");
@@ -436,7 +336,7 @@ mod tests {
         let segment = make_segment(&segment_path, 3);
 
         let key = uploader
-            .upload_and_delete(&segment, "2026-03-05T19-30-00Z")
+            .upload_and_delete(&segment, "1741209000")
             .await
             .unwrap();
 
@@ -456,7 +356,7 @@ mod tests {
             "a3f7c2d1-dead-beef-1234-567890abcdef"
         );
         assert_eq!(meta.get("segment-index").unwrap(), "3");
-        assert_eq!(meta.get("start-time").unwrap(), "2026-03-05T19-30-00Z");
+        assert_eq!(meta.get("start-time").unwrap(), "1741209000");
         assert_eq!(meta.get("host").unwrap(), "us-east-1/i-0abc123");
     }
 
@@ -481,7 +381,7 @@ mod tests {
         let bad_segment = make_segment(local_dir.path().join("nonexistent.bin"), 0);
 
         let result = uploader
-            .upload_and_delete(&bad_segment, "2026-03-05T19-30-00Z")
+            .upload_and_delete(&bad_segment, "1741209000")
             .await;
 
         assert!(result.is_err(), "expected upload to fail for missing file");

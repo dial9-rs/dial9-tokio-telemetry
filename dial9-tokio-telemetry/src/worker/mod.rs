@@ -1,125 +1,69 @@
 pub mod sealed;
-#[cfg(feature = "worker")]
 pub mod identity;
 #[cfg(feature = "worker-s3")]
 pub mod connection;
 #[cfg(feature = "worker-s3")]
 pub mod s3;
 
-#[cfg(feature = "worker")]
-mod worker_config {
-    use std::path::{Path, PathBuf};
-    use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-    const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-    /// Configuration for the in-process worker pipeline.
-    pub struct WorkerConfig {
-        poll_interval: Duration,
-        trace_path: PathBuf,
-        #[cfg(feature = "worker-s3")]
-        s3: Option<super::s3::S3Config>,
-        #[cfg(feature = "worker-s3")]
-        client: Option<aws_sdk_s3_transfer_manager::Client>,
-    }
-
-    impl WorkerConfig {
-        pub fn builder() -> WorkerConfigBuilder {
-            WorkerConfigBuilder::default()
-        }
-
-        /// How often the worker checks for sealed segments.
-        pub fn poll_interval(&self) -> Duration {
-            self.poll_interval
-        }
-
-        /// Directory containing trace segments.
-        pub fn trace_dir(&self) -> &Path {
-            self.trace_path.parent().unwrap_or(Path::new("."))
-        }
-
-        /// File stem used for segment matching (e.g. "trace" for "trace.0.bin").
-        pub fn trace_stem(&self) -> &str {
-            self.trace_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("trace")
-        }
-
-        /// S3 upload configuration, if any.
-        #[cfg(feature = "worker-s3")]
-        pub fn s3(&self) -> Option<&super::s3::S3Config> {
-            self.s3.as_ref()
-        }
-
-        /// Pre-built S3 transfer manager client, if any.
-        #[cfg(feature = "worker-s3")]
-        pub(crate) fn take_client(&mut self) -> Option<aws_sdk_s3_transfer_manager::Client> {
-            self.client.take()
-        }
-    }
-
-    #[derive(Default)]
-    pub struct WorkerConfigBuilder {
-        poll_interval: Option<Duration>,
-        trace_path: Option<PathBuf>,
-        #[cfg(feature = "worker-s3")]
-        s3: Option<super::s3::S3Config>,
-        #[cfg(feature = "worker-s3")]
-        client: Option<aws_sdk_s3_transfer_manager::Client>,
-    }
-
-    impl WorkerConfigBuilder {
-        /// Set the poll interval for checking sealed segments.
-        /// Defaults to 1 second.
-        pub fn poll_interval(mut self, interval: Duration) -> Self {
-            self.poll_interval = Some(interval);
-            self
-        }
-
-        /// Set the trace base path (same path passed to `RotatingWriter::new`).
-        pub fn trace_path(mut self, path: impl Into<PathBuf>) -> Self {
-            self.trace_path = Some(path.into());
-            self
-        }
-
-        /// Set S3 upload configuration.
-        #[cfg(feature = "worker-s3")]
-        pub fn s3(mut self, config: super::s3::S3Config) -> Self {
-            self.s3 = Some(config);
-            self
-        }
-
-        /// Set a pre-built S3 transfer manager client.
-        /// When provided, the worker uses this client directly instead of
-        /// building one from `aws_config::load_defaults`.
-        #[cfg(feature = "worker-s3")]
-        pub fn client(mut self, client: aws_sdk_s3_transfer_manager::Client) -> Self {
-            self.client = Some(client);
-            self
-        }
-
-        pub fn build(self) -> Result<WorkerConfig, &'static str> {
-            Ok(WorkerConfig {
-                poll_interval: self.poll_interval.unwrap_or(DEFAULT_POLL_INTERVAL),
-                trace_path: self.trace_path.ok_or("trace_path is required")?,
-                #[cfg(feature = "worker-s3")]
-                s3: self.s3,
-                #[cfg(feature = "worker-s3")]
-                client: self.client,
-            })
-        }
-    }
+/// Configuration for the in-process worker pipeline.
+#[derive(bon::Builder)]
+#[builder(on(String, into))]
+pub struct WorkerConfig {
+    /// The trace base path (same path passed to `RotatingWriter::new`).
+    trace_path: PathBuf,
+    /// How often the worker checks for sealed segments. Defaults to 1 second.
+    #[builder(default = DEFAULT_POLL_INTERVAL)]
+    poll_interval: Duration,
+    /// S3 upload configuration.
+    #[cfg(feature = "worker-s3")]
+    s3: s3::S3Config,
+    /// Pre-built S3 transfer manager client. When provided, the worker uses
+    /// this client directly instead of building one from `aws_config::load_defaults`.
+    #[cfg(feature = "worker-s3")]
+    client: Option<aws_sdk_s3_transfer_manager::Client>,
 }
 
-#[cfg(feature = "worker")]
-pub use worker_config::*;
+impl WorkerConfig {
+    /// How often the worker checks for sealed segments.
+    pub fn poll_interval(&self) -> Duration {
+        self.poll_interval
+    }
+
+    /// Directory containing trace segments.
+    pub fn trace_dir(&self) -> &Path {
+        self.trace_path.parent().unwrap_or(Path::new("."))
+    }
+
+    /// File stem used for segment matching (e.g. "trace" for "trace.0.bin").
+    pub fn trace_stem(&self) -> &str {
+        self.trace_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("trace")
+    }
+
+    /// S3 upload configuration.
+    #[cfg(feature = "worker-s3")]
+    pub fn s3(&self) -> &s3::S3Config {
+        &self.s3
+    }
+
+    /// Take the pre-built S3 transfer manager client, if any.
+    #[cfg(feature = "worker-s3")]
+    pub(crate) fn take_client(&mut self) -> Option<aws_sdk_s3_transfer_manager::Client> {
+        self.client.take()
+    }
+}
 
 /// The worker loop function. Runs on a dedicated thread, polls for sealed
 /// segments and processes them (upload to S3 if configured).
 ///
 /// Creates a current-thread tokio runtime and runs the async worker loop inside it.
-#[cfg(feature = "worker")]
 pub(crate) fn run_worker(
     #[cfg_attr(not(feature = "worker-s3"), allow(unused_mut))]
     mut config: WorkerConfig,
@@ -151,15 +95,14 @@ pub(crate) fn run_worker(
 
 /// Abstraction over the worker's external dependencies: finding segments,
 /// uploading them, generating timestamps, and sleeping between polls.
-#[cfg(feature = "worker")]
 pub(crate) trait WorkerDeps {
     fn find_sealed_segments(
         &self,
-        dir: &std::path::Path,
+        dir: &Path,
         stem: &str,
     ) -> std::io::Result<Vec<sealed::SealedSegment>>;
 
-    /// Upload a segment. Returns the S3 key on success.
+    /// Process a segment (e.g. upload to S3).
     fn upload(
         &mut self,
         segment: &sealed::SealedSegment,
@@ -167,7 +110,7 @@ pub(crate) trait WorkerDeps {
 
     fn sleep(
         &self,
-        duration: std::time::Duration,
+        duration: Duration,
     ) -> impl std::future::Future<Output = ()>;
 }
 
@@ -175,16 +118,14 @@ pub(crate) trait WorkerDeps {
 // WorkerLoop — the async state machine
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "worker")]
 pub(crate) struct WorkerLoop<D> {
-    dir: std::path::PathBuf,
+    dir: PathBuf,
     stem: String,
-    poll_interval: std::time::Duration,
+    poll_interval: Duration,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     deps: D,
 }
 
-#[cfg(feature = "worker")]
 impl<D: WorkerDeps> WorkerLoop<D> {
     pub(crate) fn new(
         config: WorkerConfig,
@@ -238,16 +179,14 @@ impl<D: WorkerDeps> WorkerLoop<D> {
 // NoOpDeps — used when worker-s3 is disabled
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "worker")]
 #[cfg(not(feature = "worker-s3"))]
 struct NoOpDeps;
 
-#[cfg(feature = "worker")]
 #[cfg(not(feature = "worker-s3"))]
 impl WorkerDeps for NoOpDeps {
     fn find_sealed_segments(
         &self,
-        dir: &std::path::Path,
+        dir: &Path,
         stem: &str,
     ) -> std::io::Result<Vec<sealed::SealedSegment>> {
         sealed::find_sealed_segments(dir, stem)
@@ -255,13 +194,13 @@ impl WorkerDeps for NoOpDeps {
 
     async fn upload(&mut self, _segment: &sealed::SealedSegment) {}
 
-    async fn sleep(&self, duration: std::time::Duration) {
+    async fn sleep(&self, duration: Duration) {
         tokio::time::sleep(duration).await;
     }
 }
 
 // ---------------------------------------------------------------------------
-// RealWorkerDeps — production impl with S3 + jiff
+// RealWorkerDeps — production impl with S3
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "worker-s3")]
@@ -273,13 +212,7 @@ pub(crate) struct RealWorkerDeps {
 #[cfg(feature = "worker-s3")]
 impl RealWorkerDeps {
     fn new(config: &mut WorkerConfig, rt: &tokio::runtime::Runtime) -> Self {
-        let s3_config = config.s3().cloned();
-        let Some(s3_config) = s3_config else {
-            // No S3 config — return a dummy that will never upload.
-            // This path shouldn't normally be hit when worker-s3 is enabled,
-            // but we handle it gracefully.
-            panic!("worker-s3 feature enabled but no S3 config provided");
-        };
+        let s3_config = config.s3().clone();
 
         let client = if let Some(client) = config.take_client() {
             client
@@ -304,7 +237,7 @@ impl RealWorkerDeps {
 impl WorkerDeps for RealWorkerDeps {
     fn find_sealed_segments(
         &self,
-        dir: &std::path::Path,
+        dir: &Path,
         stem: &str,
     ) -> std::io::Result<Vec<sealed::SealedSegment>> {
         sealed::find_sealed_segments(dir, stem)
@@ -314,7 +247,11 @@ impl WorkerDeps for RealWorkerDeps {
         if !self.connection.should_attempt_upload() {
             return;
         }
-        let timestamp = jiff::Zoned::now().strftime("%Y-%m-%dT%H-%M-%SZ").to_string();
+        let epoch_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let timestamp = epoch_secs.to_string();
         match self.uploader.upload_and_delete(segment, &timestamp).await {
             Ok(key) => {
                 self.connection.on_success();
@@ -327,7 +264,7 @@ impl WorkerDeps for RealWorkerDeps {
         }
     }
 
-    async fn sleep(&self, duration: std::time::Duration) {
+    async fn sleep(&self, duration: Duration) {
         tokio::time::sleep(duration).await;
     }
 }

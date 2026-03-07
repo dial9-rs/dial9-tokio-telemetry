@@ -18,6 +18,10 @@
 //!  10: ThreadNameDef                → code(u8) + tid(u32) + string_len(u16) + string_bytes(N)                                          = 7 + N bytes
 //!  11: SegmentMetadata              → code(u8) + num_entries(u16) + (key_len(u16) + key_bytes(K) + val_len(u16) + val_bytes(V))*        = 3 + Σ(4+K+V) bytes
 //! 172: TaskTerminate                → code(u8) + timestamp_us(u32) + task_id(u32)                                                       = 9 bytes
+//!
+//! Wire code 172 is intentionally non-sequential to avoid conflicts with future
+//! codes in the 12-170 range. New event types should use the next sequential code
+//! after 11 (i.e. 12, 13, ...) unless there's a specific reason not to.
 //! ```
 //!
 //! Timestamps are microseconds since trace start. u32 micros supports traces up to ~71 minutes.

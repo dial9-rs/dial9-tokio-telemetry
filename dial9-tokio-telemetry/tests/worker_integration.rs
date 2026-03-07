@@ -8,6 +8,11 @@ use flate2::read::GzDecoder;
 use std::io::Read;
 
 /// Create a transfer manager Client backed by s3s-fs.
+///
+/// NOTE: These helpers are duplicated in src/worker/s3.rs unit tests.
+/// Rust's test compilation model prevents sharing between unit tests (compiled
+/// with #[cfg(test)] in src/) and integration tests (compiled from tests/).
+/// A shared test-support crate would fix this but is overkill for now.
 fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3_transfer_manager::Client {
     let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
     let mut builder = s3s::service::S3ServiceBuilder::new(fs);
@@ -55,18 +60,35 @@ fn fake_raw_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::from_conf(s3_config)
 }
 
+/// Create a dummy S3 config + client for tests that need a WorkerConfig
+/// but don't actually upload anything.
+fn dummy_worker_s3(
+    trace_path: &std::path::Path,
+    s3_root: &std::path::Path,
+) -> WorkerConfig {
+    std::fs::create_dir_all(s3_root.join("dummy-bucket")).unwrap();
+    let s3_config = S3Config::builder()
+        .bucket("dummy-bucket")
+        .service_name("test")
+        .instance_path("test")
+        .boot_id("test")
+        .build();
+    WorkerConfig::builder()
+        .trace_path(trace_path)
+        .poll_interval(std::time::Duration::from_millis(50))
+        .s3(s3_config)
+        .client(fake_s3_client(s3_root))
+        .build()
+}
+
 #[test]
 fn worker_thread_starts_and_stops_cleanly() {
     let trace_dir = tempfile::tempdir().unwrap();
+    let s3_root = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().join("trace.bin");
 
     let writer = RotatingWriter::new(&trace_path, 1024, 10 * 1024).unwrap();
-
-    let worker_config = WorkerConfig::builder()
-        .trace_path(&trace_path)
-        .poll_interval(std::time::Duration::from_millis(50))
-        .build()
-        .unwrap();
+    let worker_config = dummy_worker_s3(&trace_path, s3_root.path());
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -87,15 +109,11 @@ fn worker_thread_starts_and_stops_cleanly() {
 #[tokio::test]
 async fn graceful_shutdown_writes_sentinel_and_seals() {
     let trace_dir = tempfile::tempdir().unwrap();
+    let s3_root = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().join("trace.bin");
 
     let writer = RotatingWriter::new(&trace_path, 1024, 10 * 1024).unwrap();
-
-    let worker_config = WorkerConfig::builder()
-        .trace_path(&trace_path)
-        .poll_interval(std::time::Duration::from_millis(50))
-        .build()
-        .unwrap();
+    let worker_config = dummy_worker_s3(&trace_path, s3_root.path());
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -154,16 +172,14 @@ fn end_to_end_trace_to_s3_roundtrip() {
         .service_name("test-svc")
         .instance_path("us-east-1/test-host")
         .boot_id("test-boot-id")
-        .build()
-        .unwrap();
+        .build();
 
     let worker_config = WorkerConfig::builder()
         .trace_path(&trace_path)
         .poll_interval(std::time::Duration::from_millis(50))
         .s3(s3_config)
         .client(tm_client)
-        .build()
-        .unwrap();
+        .build();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();

@@ -220,14 +220,12 @@ fn main() -> std::io::Result<()> {
         .service_name("my-service")
         .instance_path("us-east-1/i-0abc123")
         .boot_id("unique-boot-id")
-        .build()
-        .expect("valid S3 config");
+        .build();
 
     let worker_config = WorkerConfig::builder()
         .trace_path("/tmp/my_traces/trace.bin")
         .s3(s3_config)
-        .build()
-        .expect("valid worker config");
+        .build();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();

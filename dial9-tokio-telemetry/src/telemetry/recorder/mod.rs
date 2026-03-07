@@ -244,11 +244,8 @@ pub struct TelemetryGuard {
     handle: TelemetryHandle,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
-    #[cfg(feature = "worker")]
     worker_stop: Option<Arc<AtomicBool>>,
-    #[cfg(feature = "worker")]
     worker_thread: Option<std::thread::JoinHandle<()>>,
-    #[cfg(feature = "worker")]
     trace_dir: Option<std::path::PathBuf>,
 }
 
@@ -274,7 +271,6 @@ impl TelemetryGuard {
     /// worker finishes within the timeout, `Err` if it times out.
     ///
     /// Consumes the guard so `Drop` becomes a no-op.
-    #[cfg(feature = "worker")]
     pub async fn graceful_shutdown(
         mut self,
         timeout: Duration,
@@ -334,14 +330,11 @@ impl Drop for TelemetryGuard {
         // 2. Seal the final segment (.active → .bin)
         self.handle.recorder.lock().unwrap().seal();
         // 3. Signal worker to stop and drain remaining segments
-        #[cfg(feature = "worker")]
-        {
-            if let Some(ref stop) = self.worker_stop {
-                stop.store(true, Ordering::Release);
-            }
-            if let Some(t) = self.worker_thread.take() {
-                let _ = t.join();
-            }
+        if let Some(ref stop) = self.worker_stop {
+            stop.store(true, Ordering::Release);
+        }
+        if let Some(t) = self.worker_thread.take() {
+            let _ = t.join();
         }
     }
 }
@@ -354,7 +347,6 @@ pub struct TracedRuntimeBuilder {
     sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
     #[cfg(feature = "cpu-profiling")]
     inline_callframe_symbols: bool,
-    #[cfg(feature = "worker")]
     worker_config: Option<crate::worker::WorkerConfig>,
 }
 
@@ -390,7 +382,6 @@ impl TracedRuntimeBuilder {
 
     /// Configure an in-process worker that watches for sealed segments
     /// and uploads them to S3.
-    #[cfg(feature = "worker")]
     pub fn in_process_worker(mut self, config: crate::worker::WorkerConfig) -> Self {
         self.worker_config = Some(config);
         self
@@ -483,9 +474,10 @@ impl TracedRuntimeBuilder {
 
         let guard_shared = recorder.lock().unwrap().shared.clone();
 
-        #[cfg(feature = "worker")]
-        let (worker_stop, worker_thread, trace_dir) = if let Some(config) = self.worker_config {
-            let td = Some(config.trace_dir().to_path_buf());
+        #[allow(unused_mut)]
+        let (mut worker_stop, mut worker_thread, mut trace_dir) = (None, None, None);
+        if let Some(config) = self.worker_config {
+            trace_dir = Some(config.trace_dir().to_path_buf());
             let ws = Arc::new(AtomicBool::new(false));
             let ws_clone = ws.clone();
             let wt = std::thread::Builder::new()
@@ -494,10 +486,9 @@ impl TracedRuntimeBuilder {
                     crate::worker::run_worker(config, ws_clone);
                 })
                 .expect("failed to spawn dial9-worker thread");
-            (Some(ws), Some(wt), td)
-        } else {
-            (None, None, None)
-        };
+            worker_stop = Some(ws);
+            worker_thread = Some(wt);
+        }
 
         let guard = TelemetryGuard {
             handle: TelemetryHandle {
@@ -506,11 +497,8 @@ impl TracedRuntimeBuilder {
             },
             stop,
             thread: Some(thread),
-            #[cfg(feature = "worker")]
             worker_stop,
-            #[cfg(feature = "worker")]
             worker_thread,
-            #[cfg(feature = "worker")]
             trace_dir,
         };
 
@@ -545,8 +533,7 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
-            #[cfg(feature = "worker")]
-            worker_config: None,
+                        worker_config: None,
         }
     }
 
@@ -565,8 +552,7 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
-            #[cfg(feature = "worker")]
-            worker_config: None,
+                        worker_config: None,
         }
         .build(builder, writer)
     }
@@ -587,8 +573,7 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
-            #[cfg(feature = "worker")]
-            worker_config: None,
+                        worker_config: None,
         }
         .build_and_start(builder, writer)
     }
