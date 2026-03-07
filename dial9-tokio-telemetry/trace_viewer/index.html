@@ -570,7 +570,7 @@
                 .getElementById("btn-reset")
                 .addEventListener("click", () => {
                     viewer.style.display = "none";
-                    dropZone.style.display = "flex";
+                    resetDropZone();
                 });
 
             function loadFile(file) {
@@ -590,17 +590,55 @@
                 reader.readAsArrayBuffer(blob);
             }
 
+            let loadAbortController = null;
+
+            function showLoadingState(label) {
+                loadAbortController = new AbortController();
+                dropZone.innerHTML = '';
+                const wrap = document.createElement("div");
+                wrap.style.textAlign = "center";
+                wrap.innerHTML = `<div style="margin-bottom:12px">${esc(label)}</div>`;
+                const btn = document.createElement("button");
+                btn.textContent = "← Back";
+                btn.style.cssText = "background:#2a2a4a;border:1px solid #444;color:#ccc;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:0.9em";
+                btn.addEventListener("click", cancelLoad);
+                wrap.appendChild(btn);
+                wrap.insertAdjacentHTML("beforeend", '<div style="margin-top:8px;font-size:0.8em;color:#666">or press Escape</div>');
+                dropZone.appendChild(wrap);
+            }
+
+            function cancelLoad() {
+                if (loadAbortController) { loadAbortController.abort(); loadAbortController = null; }
+                resetDropZone();
+            }
+
+            function resetDropZone() {
+                dropZone.innerHTML = `
+                    <div>
+                        <div style="font-size: 2em; margin-bottom: 12px">📊</div>
+                        <div>Drop a <code>.bin</code> trace file here or click to open</div>
+                        <div style="font-size: 0.8em; margin-top: 8px; color: #666">Expects TOKIOTRC binary format</div>
+                        <div style="margin-top: 12px">
+                            <a href="#" id="load-demo" style="color: #6c63ff; font-size: 0.9em">or load demo trace</a>
+                        </div>
+                    </div>`;
+                dropZone.style.display = "flex";
+                document.getElementById("load-demo")?.addEventListener("click", onLoadDemo);
+            }
+
             async function loadTraceFromUrl(url) {
                 try {
-                    const response = await fetch(url);
+                    const response = await fetch(url, { signal: loadAbortController?.signal });
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const arrayBuffer = await response.arrayBuffer();
+                    loadAbortController = null;
                     trace = parseTrace(arrayBuffer);
                     processTrace();
                     showViewer(url.split('/').pop() || 'trace.bin');
                 } catch (err) {
+                    if (err.name === 'AbortError') return;
                     alert("Error loading trace from URL: " + err.message);
-                    dropZone.style.display = "flex";
+                    resetDropZone();
                 }
             }
 
@@ -608,16 +646,17 @@
             const urlParams = new URLSearchParams(window.location.search);
             const traceUrl = urlParams.get('trace');
             if (traceUrl) {
-                dropZone.innerHTML = 'Loading trace…';
+                showLoadingState('Loading trace…');
                 loadTraceFromUrl(traceUrl);
             }
 
-            document.getElementById("load-demo")?.addEventListener("click", (e) => {
+            function onLoadDemo(e) {
                 e.stopPropagation();
                 e.preventDefault();
-                dropZone.innerHTML = 'Loading demo trace…';
+                showLoadingState('Loading demo trace…');
                 loadTraceFromUrl("demo-trace.bin");
-            });
+            }
+            document.getElementById("load-demo")?.addEventListener("click", onLoadDemo);
 
             function processTrace() {
                 const evts = trace.events;
@@ -1990,18 +2029,20 @@
             let regionSelecting = false,
                 regionStartNs = 0,
                 regionEndNs = 0;
+            let altZooming = false;
             const selOverlay = document.getElementById("selection-overlay");
 
             document
                 .getElementById("main-area")
                 .addEventListener("mousedown", (e) => {
-                    if (e.shiftKey && trace && trace.cpuSamples.length === 0) {
+                    if (e.shiftKey && !e.altKey && trace && trace.cpuSamples.length === 0) {
                         showToast("no-cpu-samples", "No CPU samples in trace — enable cpu-profiling for flamegraphs", "error", 4000);
                         return;
                     }
-                    if (e.shiftKey && trace) {
-                        // Shift+drag: region select
+                    if ((e.shiftKey || e.altKey) && trace) {
+                        // Shift+drag: region select; Alt/Option+drag: zoom to region
                         regionSelecting = true;
+                        altZooming = e.altKey && !e.shiftKey;
                         dragMoved = false;
                         dragStartX = e.clientX;
                         const rect = lanesContainer.getBoundingClientRect();
@@ -2077,23 +2118,33 @@
                         clearToasts();
                         const selStart = Math.min(regionStartNs, regionEndNs);
                         const selEnd = Math.max(regionStartNs, regionEndNs);
-                        const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
-                        const hasCpu = trace.cpuSamples.some(s =>
-                            s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
-                        );
-                        if (hasSched && !hasCpu) {
+                        if (altZooming) {
+                            // Alt/Option+drag: zoom to selected region
                             selOverlay.style.display = "none";
-                            showSchedPanel(selStart, selEnd);
-                        } else if (hasSched) {
-                            // Keep overlay visible while picker is shown
-                            showSelectionPicker(selStart, selEnd);
+                            viewStart = Math.max(minTs, selStart);
+                            viewEnd = Math.min(maxTs, selEnd);
+                            renderAll();
                         } else {
-                            selOverlay.style.display = "none";
-                            showFlamegraph(selStart, selEnd);
+                            // Shift+drag: flamegraph / sched panel
+                            const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
+                            const hasCpu = trace.cpuSamples.some(s =>
+                                s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
+                            );
+                            if (hasSched && !hasCpu) {
+                                selOverlay.style.display = "none";
+                                showSchedPanel(selStart, selEnd);
+                            } else if (hasSched) {
+                                // Keep overlay visible while picker is shown
+                                showSelectionPicker(selStart, selEnd);
+                            } else {
+                                selOverlay.style.display = "none";
+                                showFlamegraph(selStart, selEnd);
+                            }
                         }
                     } else {
                         selOverlay.style.display = "none";
                     }
+                    altZooming = false;
                     return;
                 }
                 dragging = false;
@@ -2406,6 +2457,11 @@
 
             // ── Keyboard navigation ──
             window.addEventListener("keydown", (e) => {
+                if (e.key === "Escape" && loadAbortController) {
+                    e.preventDefault();
+                    cancelLoad();
+                    return;
+                }
                 if (!trace) return;
                 const viewDur = viewEnd - viewStart;
                 switch (e.key) {
