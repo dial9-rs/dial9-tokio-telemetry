@@ -144,6 +144,23 @@
                 continue;
             }
 
+            if (wireCode === 11) {
+                // SegmentMetadata: num_entries(2) + (key_len(2) + key + val_len(2) + val)*
+                if (off + 2 > buffer.byteLength) break;
+                const numEntries = view.getUint16(off, true); off += 2;
+                for (let i = 0; i < numEntries; i++) {
+                    if (off + 2 > buffer.byteLength) break;
+                    const kLen = view.getUint16(off, true); off += 2;
+                    if (off + kLen > buffer.byteLength) break;
+                    off += kLen; // skip key
+                    if (off + 2 > buffer.byteLength) break;
+                    const vLen = view.getUint16(off, true); off += 2;
+                    if (off + vLen > buffer.byteLength) break;
+                    off += vLen; // skip value
+                }
+                continue;
+            }
+
             if (wireCode === 172) {
                 // TaskTerminate: timestamp_us(4) + task_id(4)
                 if (off + 8 > buffer.byteLength) break;
@@ -153,7 +170,7 @@
                 continue;
             }
 
-            if (wireCode > 10 && wireCode !== 172) break; // unknown code
+            if (wireCode > 11 && wireCode !== 172) break; // unknown code
 
             // All regular codes have a 4-byte timestamp next
             if (off + 4 > buffer.byteLength) break;

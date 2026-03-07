@@ -16,7 +16,12 @@
 //!   8: CallframeDef                 → code(u8) + address(u64) + string_len(u16) + string_bytes(N)                                      = 11 + N bytes
 //!   9: WakeEvent                    → code(u8) + timestamp_us(u32) + waker_task_id(u32) + woken_task_id(u32) + target_worker(u8)        = 14 bytes
 //!  10: ThreadNameDef                → code(u8) + tid(u32) + string_len(u16) + string_bytes(N)                                          = 7 + N bytes
+//!  11: SegmentMetadata              → code(u8) + num_entries(u16) + (key_len(u16) + key_bytes(K) + val_len(u16) + val_bytes(V))*        = 3 + Σ(4+K+V) bytes
 //! 172: TaskTerminate                → code(u8) + timestamp_us(u32) + task_id(u32)                                                       = 9 bytes
+//!
+//! Wire code 172 is intentionally non-sequential to avoid conflicts with future
+//! codes in the 12-170 range. New event types should use the next sequential code
+//! after 11 (i.e. 12, 13, ...) unless there's a specific reason not to.
 //! ```
 //!
 //! Timestamps are microseconds since trace start. u32 micros supports traces up to ~71 minutes.
@@ -36,6 +41,9 @@
 //! ### v12 → v13 changes
 //! - Added tid(u32) field to CpuSample (code 8) for thread identification
 //! - Added ThreadNameDef (code 10): maps OS tid to thread name for non-worker grouping
+//!
+//! ### v13 → v14 changes
+//! - Added SegmentMetadata (code 11): key-value metadata at start of each segment
 
 use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
@@ -57,6 +65,7 @@ const WIRE_WAKE_EVENT: u8 = 7;
 const WIRE_CPU_SAMPLE: u8 = 8;
 const WIRE_CALLFRAME_DEF: u8 = 9;
 const WIRE_THREAD_NAME_DEF: u8 = 10;
+const WIRE_SEGMENT_METADATA: u8 = 11;
 const WIRE_TASK_TERMINATE: u8 = 172;
 
 /// Returns the wire size of an event.
@@ -76,6 +85,10 @@ pub fn wire_event_size(event: &TelemetryEvent) -> usize {
         } => 1 + 8 + 2 + symbol.len() + 2 + location.as_ref().map_or(0, |l| l.len()),
         TelemetryEvent::ThreadNameDef { name, .. } => 1 + 4 + 2 + name.len(),
         TelemetryEvent::WakeEvent { .. } => 14,
+        TelemetryEvent::SegmentMetadata { entries } => {
+            // code(u8) + num_entries(u16) + for each: key_len(u16) + key + val_len(u16) + val
+            1 + 2 + entries.iter().map(|(k, v)| 2 + k.len() + 2 + v.len()).sum::<usize>()
+        }
     }
 }
 
@@ -239,6 +252,19 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
             w.write_all(&woken_task_id.to_u32().to_le_bytes())?;
             w.write_all(&[*target_worker])?;
         }
+        TelemetryEvent::SegmentMetadata { entries } => {
+            w.write_all(&[WIRE_SEGMENT_METADATA])?;
+            let num = entries.len() as u16;
+            w.write_all(&num.to_le_bytes())?;
+            for (key, val) in entries {
+                let klen = key.len() as u16;
+                w.write_all(&klen.to_le_bytes())?;
+                w.write_all(key.as_bytes())?;
+                let vlen = val.len() as u16;
+                w.write_all(&vlen.to_le_bytes())?;
+                w.write_all(val.as_bytes())?;
+            }
+        }
     }
     Ok(())
 }
@@ -354,6 +380,32 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8"))?;
 
         return Ok(Some(TelemetryEvent::ThreadNameDef { tid, name }));
+    }
+    if tag[0] == WIRE_SEGMENT_METADATA {
+        let mut num_bytes = [0u8; 2];
+        r.read_exact(&mut num_bytes)?;
+        let num = u16::from_le_bytes(num_bytes) as usize;
+        let mut entries = Vec::with_capacity(num);
+        for _ in 0..num {
+            let mut klen_bytes = [0u8; 2];
+            r.read_exact(&mut klen_bytes)?;
+            let klen = u16::from_le_bytes(klen_bytes) as usize;
+            let mut key_bytes = vec![0u8; klen];
+            r.read_exact(&mut key_bytes)?;
+            let key = String::from_utf8(key_bytes)
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8"))?;
+
+            let mut vlen_bytes = [0u8; 2];
+            r.read_exact(&mut vlen_bytes)?;
+            let vlen = u16::from_le_bytes(vlen_bytes) as usize;
+            let mut val_bytes = vec![0u8; vlen];
+            r.read_exact(&mut val_bytes)?;
+            let val = String::from_utf8(val_bytes)
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8"))?;
+
+            entries.push((key, val));
+        }
+        return Ok(Some(TelemetryEvent::SegmentMetadata { entries }));
     }
     let mut ts = [0u8; 4];
     r.read_exact(&mut ts)?;
@@ -1151,5 +1203,24 @@ mod tests {
             }
             _ => panic!("expected WakeEvent"),
         }
+    }
+
+    #[test]
+    fn test_segment_metadata_roundtrip() {
+        let event = TelemetryEvent::SegmentMetadata {
+            entries: vec![
+                ("service".into(), "checkout-api".into()),
+                ("host".into(), "i-0abc123".into()),
+            ],
+        };
+        let decoded = roundtrip(&event);
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn test_segment_metadata_empty_roundtrip() {
+        let event = TelemetryEvent::SegmentMetadata { entries: vec![] };
+        let decoded = roundtrip(&event);
+        assert_eq!(decoded, event);
     }
 }

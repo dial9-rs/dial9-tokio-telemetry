@@ -19,7 +19,7 @@ fn main() -> std::io::Result<()> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let (runtime, _guard) = TracedRuntime::build_and_start(builder, Box::new(writer))?;
+    let (runtime, _guard) = TracedRuntime::build_and_start(builder, writer)?;
 
     runtime.block_on(async {
         // your async code here
@@ -70,7 +70,7 @@ Use `handle.spawn()` instead of `tokio::spawn()`:
 # fn main() -> std::io::Result<()> {
 # let writer = RotatingWriter::new("/tmp/t.bin", 1024, 4096)?;
 # let builder = tokio::runtime::Builder::new_multi_thread();
-let (runtime, guard) = TracedRuntime::build_and_start(builder, Box::new(writer))?;
+let (runtime, guard) = TracedRuntime::build_and_start(builder, writer)?;
 let handle = guard.handle();
 
 runtime.block_on(async {
@@ -117,7 +117,7 @@ let (runtime, guard) = TracedRuntime::builder()
     .with_cpu_profiling(CpuProfilingConfig::default())
     .with_sched_events(SchedEventConfig { include_kernel: true })
     .with_inline_callframe_symbols(true)
-    .build_and_start(builder, Box::new(writer))?;
+    .build(builder, writer)?;
 # Ok(())
 # }
 # #[cfg(not(feature = "cpu-profiling"))]
@@ -161,7 +161,7 @@ Because CPU samples are tagged with the worker thread they were collected on, an
 # let builder = tokio::runtime::Builder::new_multi_thread();
 let (runtime, guard) = TracedRuntime::builder()
     .with_task_tracking(true)
-    .build(builder, Box::new(writer))?;
+    .build(builder, writer)?;
 
 // start disabled, enable later
 guard.enable();
@@ -175,7 +175,7 @@ handle.disable();
 
 ### Writers
 
-`RotatingWriter` rotates files and evicts old ones to stay within a total size budget. `SimpleBinaryWriter` writes a single file with no size management, useful for quick experiments.
+`RotatingWriter` rotates files and evicts old ones to stay within a total size budget. For quick experiments, `RotatingWriter::single_file(path)` writes a single file with no rotation.
 
 ### Analyzing traces
 
@@ -195,6 +195,73 @@ See [TRACE_ANALYSIS_GUIDE.md](/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) fo
 
 - **`cpu-profiling`** — Linux only. Enables `perf_event_open`-based CPU sampling and scheduler event capture via `dial9-perf-self-profile`.
 - **`task-dump`** — Enables Tokio's `taskdump` feature for async stack traces. Required for the `long_sleep`, `completing_task`, `cancelled_task`, and `debug_timing` examples.
+- **`worker`** — Enables the in-process worker pipeline (sealed-file detection, machine identity). No AWS dependencies.
+- **`worker-s3`** — Enables S3 upload support. Implies `worker`. Adds `aws-sdk-s3`, `aws-sdk-s3-transfer-manager`, `aws-config`, and `flate2`.
+
+## S3 upload
+
+With the `worker-s3` feature, sealed trace segments are automatically gzip-compressed and uploaded to S3 by a background worker thread. The application process is unaffected — uploads happen asynchronously after segments are sealed.
+
+```rust,no_run
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::worker::WorkerConfig;
+use dial9_tokio_telemetry::worker::s3::S3Config;
+
+fn main() -> std::io::Result<()> {
+    let writer = RotatingWriter::new(
+        "/tmp/my_traces/trace.bin",
+        1024 * 1024,      // rotate after 1 MiB per file
+        5 * 1024 * 1024,  // keep at most 5 MiB on disk
+    )?;
+
+    let s3_config = S3Config::builder()
+        .bucket("my-trace-bucket")
+        .prefix("traces")
+        .service_name("my-service")
+        .instance_path("us-east-1/i-0abc123")
+        .boot_id("unique-boot-id")
+        .build();
+
+    let worker_config = WorkerConfig::builder()
+        .trace_path("/tmp/my_traces/trace.bin")
+        .s3(s3_config)
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(4).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .in_process_worker(worker_config)
+        .build_and_start(builder, writer)?;
+
+    runtime.block_on(async {
+        // your async code here
+    });
+
+    // guard drop: flushes, seals final segment, worker drains remaining to S3
+    Ok(())
+}
+```
+
+Objects land at `s3://{bucket}/{prefix}/{date-hour}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz` with metadata headers (`x-amz-meta-service`, `x-amz-meta-boot-id`, etc.) for quick inspection via `HeadObject`.
+
+The `{date-hour}` bucket (e.g. `2026-03-07/20`) is the first key component after the prefix, enabling efficient incident correlation: `aws s3 ls s3://bucket/traces/2026-03-07/20/` lists all traces from all services during that hour.
+
+The worker uses exponential backoff if S3 is unreachable — it never crashes or affects the application. Symbolized files stay on disk in degraded mode and can be uploaded later.
+
+For explicit shutdown control with a timeout:
+
+```rust,no_run
+# use std::time::Duration;
+# use dial9_tokio_telemetry::telemetry::TracedRuntime;
+# fn example(guard: dial9_tokio_telemetry::telemetry::TelemetryGuard) {
+# let rt = tokio::runtime::Runtime::new().unwrap();
+# rt.block_on(async {
+guard.graceful_shutdown(Duration::from_secs(30)).await.expect("worker drained");
+# });
+# }
+```
 
 ## Examples
 
@@ -231,7 +298,6 @@ This repo is a Cargo workspace with three members:
 
 ## Future work
 
-- **S3 writer** — upload traces directly to S3 instead of relying on log shipping
 - **Parquet output** — write traces as Parquet for efficient querying with Athena, DuckDB, etc.
 - **Tokio task dumps** — capture async stack traces of all in-flight tasks
 - **Retroactive sampling** — trace data lives in a ring buffer; when your application detects anomalous behavior, it triggers persistence of the last N seconds of data rather than recording everything continuously

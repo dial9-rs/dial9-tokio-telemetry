@@ -159,4 +159,8 @@ impl EventWriter {
     pub(crate) fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
     }
+
+    pub(crate) fn seal(&mut self) -> std::io::Result<()> {
+        self.writer.seal()
+    }
 }
