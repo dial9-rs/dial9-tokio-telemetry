@@ -2,8 +2,13 @@
 resolver = "3"
 members = [
     "dial9-tokio-telemetry",
+    "dial9-trace-format",
+    "dial9-trace-format-derive",
     "perf-self-profile",
     "examples/metrics-service",
+]
+exclude = [
+    "dial9-trace-format/fuzz",
 ]
 
 [workspace.package]
