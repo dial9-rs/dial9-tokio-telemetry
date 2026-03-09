@@ -2583,7 +2583,7 @@
                     if (!kbSelecting) {
                         kbSelecting = true;
                         kbSelMode = mode;
-                        kbCursorNs = kbSelStartNs = (viewStart + viewEnd) / 2;
+                        kbCursorNs = kbSelStartNs = (mouseNs !== null && mouseNs >= viewStart && mouseNs <= viewEnd) ? mouseNs : (viewStart + viewEnd) / 2;
                         updateKbSelOverlay();
                         renderCrosshair();
                         announce(mode === "shift" ? "Selection started — use ← → to extend, Shift to confirm" : "Zoom selection started — use ← → to extend, Alt to confirm");
