@@ -254,6 +254,12 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
         }
         TelemetryEvent::SegmentMetadata { entries } => {
             w.write_all(&[WIRE_SEGMENT_METADATA])?;
+            if entries.len() > u16::MAX as usize {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "SegmentMetadata: too many entries",
+                ));
+            }
             let num = entries.len() as u16;
             w.write_all(&num.to_le_bytes())?;
             for (key, val) in entries {
@@ -385,7 +391,13 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
         let mut num_bytes = [0u8; 2];
         r.read_exact(&mut num_bytes)?;
         let num = u16::from_le_bytes(num_bytes) as usize;
-        let mut entries = Vec::with_capacity(num.min(1024));
+        if num > 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "SegmentMetadata: too many entries",
+            ));
+        }
+        let mut entries = Vec::with_capacity(num);
         for _ in 0..num {
             let mut klen_bytes = [0u8; 2];
             r.read_exact(&mut klen_bytes)?;

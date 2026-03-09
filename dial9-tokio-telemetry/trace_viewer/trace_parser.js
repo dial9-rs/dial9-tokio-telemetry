@@ -160,7 +160,7 @@
                     off += vLen; // skip value
                 }
                 if (truncated) break; // break outer loop
-                // TODO: Store metadata entries for display in the viewer (service name, host, etc.)
+                // TODO(#68): Store metadata entries for display in the viewer (service name, host, etc.)
                 continue;
             }
 
