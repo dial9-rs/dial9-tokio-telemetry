@@ -1,7 +1,7 @@
 mod common;
 mod validation;
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TraceReader, TracedRuntime, analyze_trace};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryEvent, TraceReader, TracedRuntime, analyze_trace};
 use std::time::Duration;
 
 /// Run a known workload under TracedRuntime, read the trace back, and verify
@@ -72,7 +72,7 @@ fn task_spawn_events_from_main_thread_are_captured() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .build_and_start(builder, Box::new(writer))
+        .build_and_start(builder, writer)
         .unwrap();
 
     // All tokio::spawn calls here fire on the main (block_on) thread,
@@ -113,7 +113,7 @@ fn task_terminate_events_are_captured() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .build_and_start(builder, Box::new(writer))
+        .build_and_start(builder, writer)
         .unwrap();
 
     runtime.block_on(async {

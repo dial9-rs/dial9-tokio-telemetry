@@ -130,6 +130,15 @@ impl RotatingWriter {
 
     /// Create a writer that writes to a single file with no rotation or eviction.
     /// The file is created at exactly the given path.
+    ///
+    /// This must not be used with rotation — the `u64::MAX` size limits prevent
+    /// rotation in practice, but if it were triggered, `file_path()` would produce
+    /// indexed names (e.g. `trace.0.bin`) derived from the stem, which would be
+    /// surprising for a "single file" writer.
+    ///
+    /// Note: this intentionally duplicates setup from `new()` rather than delegating
+    /// to it, because `new()` writes to an indexed path (`base.0.bin`) while
+    /// `single_file()` writes to the exact path given.
     pub fn single_file(path: impl Into<PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
         if let Some(parent) = path.parent() {

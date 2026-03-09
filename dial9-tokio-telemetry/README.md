@@ -117,7 +117,7 @@ let (runtime, guard) = TracedRuntime::builder()
     .with_cpu_profiling(CpuProfilingConfig::default())
     .with_sched_events(SchedEventConfig { include_kernel: true })
     .with_inline_callframe_symbols(true)
-    .build(builder, writer)?;
+    .build_and_start(builder, writer)?;
 # Ok(())
 # }
 # #[cfg(not(feature = "cpu-profiling"))]

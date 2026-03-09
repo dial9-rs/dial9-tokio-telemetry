@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
-        let _recorder = TelemetryRecorder::new(Box::new(NullWriter));
+        let _recorder = TelemetryRecorder::new(NullWriter);
     }
 
     #[test]
