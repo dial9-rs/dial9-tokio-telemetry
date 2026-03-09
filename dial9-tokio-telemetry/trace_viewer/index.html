@@ -446,6 +446,30 @@
             <div id="stack-popup-body" style="font-family:monospace;font-size:0.9em"></div>
         </div>
 
+        <div id="help-overlay" role="dialog" aria-label="Keyboard and mouse shortcuts">
+            <div id="help-content">
+                <h3>🖱 Mouse</h3>
+                <table>
+                    <tr><td>Scroll wheel</td><td>Zoom in/out (centered on cursor)</td></tr>
+                    <tr><td>Drag</td><td>Pan left/right</td></tr>
+                    <tr><td>Click poll</td><td>Select task &amp; show wake timeline</td></tr>
+                    <tr><td>⇧ Shift+drag</td><td>Select region → flamegraph / blocking calls</td></tr>
+                    <tr><td>⌥ Option+drag</td><td>Select region → zoom to fit</td></tr>
+                </table>
+                <h3>⌨ Keyboard</h3>
+                <table>
+                    <tr><td>Tab</td><td>Navigate between UI regions</td></tr>
+                    <tr><td>↑ / ↓</td><td>Zoom in / out</td></tr>
+                    <tr><td>← / →</td><td>Pan left / right</td></tr>
+                    <tr><td>Shift</td><td>Toggle region selection (analysis). Press once to start, ← → to extend, press again or Enter to confirm</td></tr>
+                    <tr><td>Option / Alt</td><td>Toggle region selection (zoom). Press once to start, ← → to extend, press again or Enter to confirm</td></tr>
+                    <tr><td>Esc</td><td>Cancel selection / close panels</td></tr>
+                </table>
+                <div class="close-hint">Press Esc or click outside to close</div>
+            </div>
+        </div>
+        <div id="aria-live" aria-live="polite" style="position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden"></div>
+
         <script src="trace_parser.js"></script>
         <script>
             // Use the external parser
@@ -2586,7 +2610,7 @@
                         kbCursorNs = kbSelStartNs = (mouseNs !== null && mouseNs >= viewStart && mouseNs <= viewEnd) ? mouseNs : (viewStart + viewEnd) / 2;
                         updateKbSelOverlay();
                         renderCrosshair();
-                        announce(mode === "shift" ? "Selection started — use ← → to extend, Shift to confirm" : "Zoom selection started — use ← → to extend, Alt to confirm");
+                        announce(mode === "shift" ? "Selection started — use ← → to extend, Shift or Enter to confirm" : "Zoom selection started — use ← → to extend, Alt or Enter to confirm");
                         if (mode === "shift") hideToast("shift-drag-hint");
                         else hideToast("option-drag-hint");
                     } else if (kbSelMode === mode) {
@@ -2595,23 +2619,28 @@
                     return;
                 }
 
-                // During keyboard selection, arrow keys move the cursor
-                if (kbSelecting && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
-                    e.preventDefault();
-                    const step = viewDur * 0.05;
-                    kbCursorNs += e.key === "ArrowLeft" ? -step : step;
-                    kbCursorNs = Math.max(minTs, Math.min(maxTs, kbCursorNs));
-                    updateKbSelOverlay();
-                    renderCrosshair();
-                    return;
-                }
-
-                // Escape cancels keyboard selection
-                if (kbSelecting && e.key === "Escape") {
-                    e.preventDefault();
-                    cancelKbSelection();
-                    announce("Selection cancelled");
-                    return;
+                // During keyboard selection: Enter confirms, Escape cancels, arrows move cursor
+                if (kbSelecting) {
+                    if (e.key === "Enter") {
+                        e.preventDefault();
+                        completeKbSelection();
+                        return;
+                    }
+                    if (e.key === "Escape") {
+                        e.preventDefault();
+                        cancelKbSelection();
+                        announce("Selection cancelled");
+                        return;
+                    }
+                    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                        e.preventDefault();
+                        const step = viewDur * 0.05;
+                        kbCursorNs += e.key === "ArrowLeft" ? -step : step;
+                        kbCursorNs = Math.max(minTs, Math.min(maxTs, kbCursorNs));
+                        updateKbSelOverlay();
+                        renderCrosshair();
+                        return;
+                    }
                 }
 
                 switch (e.key) {
@@ -3300,28 +3329,5 @@
                 }
             });
         </script>
-        <div id="help-overlay" role="dialog" aria-label="Keyboard and mouse shortcuts">
-            <div id="help-content">
-                <h3>🖱 Mouse</h3>
-                <table>
-                    <tr><td>Scroll wheel</td><td>Zoom in/out (centered on cursor)</td></tr>
-                    <tr><td>Drag</td><td>Pan left/right</td></tr>
-                    <tr><td>Click poll</td><td>Select task &amp; show wake timeline</td></tr>
-                    <tr><td>⇧ Shift+drag</td><td>Select region → flamegraph / blocking calls</td></tr>
-                    <tr><td>⌥ Option+drag</td><td>Select region → zoom to fit</td></tr>
-                </table>
-                <h3>⌨ Keyboard</h3>
-                <table>
-                    <tr><td>Tab</td><td>Navigate between UI regions</td></tr>
-                    <tr><td>↑ / ↓</td><td>Zoom in / out</td></tr>
-                    <tr><td>← / →</td><td>Pan left / right</td></tr>
-                    <tr><td>Shift</td><td>Toggle region selection (analysis). Press once to start at view center, ← → to extend, press again to open flamegraph / blocking calls</td></tr>
-                    <tr><td>Option / Alt</td><td>Toggle region selection (zoom). Press once to start, ← → to extend, press again to zoom to region</td></tr>
-                    <tr><td>Esc</td><td>Cancel selection / close panels</td></tr>
-                </table>
-                <div class="close-hint">Press Esc or click outside to close</div>
-            </div>
-        </div>
-        <div id="aria-live" aria-live="polite" style="position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden"></div>
     </body>
 </html>
