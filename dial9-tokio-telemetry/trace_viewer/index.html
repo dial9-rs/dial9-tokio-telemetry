@@ -223,8 +223,8 @@
 
             #selection-overlay {
                 position: absolute;
-                background: rgba(108, 99, 255, 0.15);
-                border: 1px solid rgba(108, 99, 255, 0.6);
+                background: rgba(66, 133, 244, 0.15);
+                border: 1px solid rgba(66, 133, 244, 0.6);
                 pointer-events: none;
                 z-index: 9;
                 display: none;
@@ -2105,6 +2105,15 @@
             let altZooming = false;
             let kbSelecting = false, kbSelMode = null, kbSelStartNs = null, kbCursorNs = null;
             const selOverlay = document.getElementById("selection-overlay");
+            const SEL_COLORS = {
+                shift: { bg: "rgba(66, 133, 244, 0.15)", border: "rgba(66, 133, 244, 0.6)" },
+                alt:   { bg: "rgba(0, 188, 180, 0.15)",  border: "rgba(0, 188, 180, 0.6)" },
+            };
+            function setSelOverlayColor(mode) {
+                const c = SEL_COLORS[mode] || SEL_COLORS.shift;
+                selOverlay.style.background = c.bg;
+                selOverlay.style.borderColor = c.border;
+            }
 
             document
                 .getElementById("main-area")
@@ -2118,6 +2127,7 @@
                         // Shift+drag: region select; Alt/Option+drag: zoom to region
                         regionSelecting = true;
                         altZooming = e.altKey && !e.shiftKey;
+                        setSelOverlayColor(altZooming ? "alt" : "shift");
                         dragMoved = false;
                         dragStartX = e.clientX;
                         const rect = lanesContainer.getBoundingClientRect();
@@ -2154,6 +2164,7 @@
             }
 
             function updateKbSelOverlay() {
+                setSelOverlayColor(kbSelMode);
                 const rect = lanesContainer.getBoundingClientRect();
                 const drawW = rect.width - LABEL_W;
                 const mainRect = document.getElementById("main-area").getBoundingClientRect();
