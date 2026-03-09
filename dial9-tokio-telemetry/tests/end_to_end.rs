@@ -1,7 +1,9 @@
 mod common;
 mod validation;
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryEvent, TraceReader, TracedRuntime, analyze_trace};
+use dial9_tokio_telemetry::telemetry::{
+    RotatingWriter, TelemetryEvent, TraceReader, TracedRuntime, analyze_trace,
+};
 use std::time::Duration;
 
 /// Run a known workload under TracedRuntime, read the trace back, and verify
