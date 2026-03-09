@@ -2131,6 +2131,8 @@
                         regionSelecting = true;
                         altZooming = e.altKey && !e.shiftKey;
                         setSelOverlayColor(altZooming ? "alt" : "shift");
+                        if (altZooming) hideToast("option-drag-hint");
+                        else hideToast("shift-drag-hint");
                         dragMoved = false;
                         dragStartX = e.clientX;
                         const rect = lanesContainer.getBoundingClientRect();
