@@ -151,6 +151,9 @@ pub enum TelemetryEvent {
         woken_task_id: TaskId,
         target_worker: u8,
     },
+    /// Key-value metadata written at the start of each segment.
+    /// Makes trace files self-describing (host, region, service, boot_id, etc.).
+    SegmentMetadata { entries: Vec<(String, String)> },
 }
 
 impl TelemetryEvent {
@@ -188,7 +191,8 @@ impl TelemetryEvent {
             } => Some(*timestamp_nanos),
             TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::CallframeDef { .. }
-            | TelemetryEvent::ThreadNameDef { .. } => None,
+            | TelemetryEvent::ThreadNameDef { .. }
+            | TelemetryEvent::SegmentMetadata { .. } => None,
         }
     }
 
@@ -206,7 +210,8 @@ impl TelemetryEvent {
             | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. }
-            | TelemetryEvent::WakeEvent { .. } => None,
+            | TelemetryEvent::WakeEvent { .. }
+            | TelemetryEvent::SegmentMetadata { .. } => None,
         }
     }
 

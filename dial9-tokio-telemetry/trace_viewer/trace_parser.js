@@ -22,8 +22,8 @@
         off += 4;
         if (magic !== "TOKIOTRC")
             throw new Error("Not a TOKIOTRC file (got: " + magic + ")");
-        if (version < 8 || version > 16) {
-            console.warn(`Expected version 8-16, got ${version}. Some data may be missing.`);
+        if (version < 8 || version > 17) {
+            console.warn(`Expected version 8-17, got ${version}. Some data may be missing.`);
         }
         const hasCpuTime = version >= 5;
         const hasSchedWait = version >= 6;
@@ -144,6 +144,26 @@
                 continue;
             }
 
+            if (wireCode === 11) {
+                // SegmentMetadata: num_entries(2) + (key_len(2) + key + val_len(2) + val)*
+                if (off + 2 > buffer.byteLength) break;
+                const numEntries = view.getUint16(off, true); off += 2;
+                let truncated = false;
+                for (let i = 0; i < numEntries; i++) {
+                    if (off + 2 > buffer.byteLength) { truncated = true; break; }
+                    const kLen = view.getUint16(off, true); off += 2;
+                    if (off + kLen > buffer.byteLength) { truncated = true; break; }
+                    off += kLen; // skip key
+                    if (off + 2 > buffer.byteLength) { truncated = true; break; }
+                    const vLen = view.getUint16(off, true); off += 2;
+                    if (off + vLen > buffer.byteLength) { truncated = true; break; }
+                    off += vLen; // skip value
+                }
+                if (truncated) break; // break outer loop
+                // TODO: Store metadata entries for display in the viewer (service name, host, etc.)
+                continue;
+            }
+
             if (wireCode === 172) {
                 // TaskTerminate: timestamp_us(4) + task_id(4)
                 if (off + 8 > buffer.byteLength) break;
@@ -153,7 +173,7 @@
                 continue;
             }
 
-            if (wireCode > 10 && wireCode !== 172) break; // unknown code
+            if (wireCode > 11 && wireCode !== 172) break; // unknown code
 
             // All regular codes have a 4-byte timestamp next
             if (off + 4 > buffer.byteLength) break;

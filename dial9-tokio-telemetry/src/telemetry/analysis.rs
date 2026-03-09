@@ -15,6 +15,8 @@ pub struct TraceReader {
     pub callframe_symbols: HashMap<u64, String>,
     /// OS tid → thread name mapping built from ThreadNameDef events.
     pub thread_names: HashMap<u32, String>,
+    /// Key-value metadata from the most recent SegmentMetadata event.
+    pub segment_metadata: Vec<(String, String)>,
 }
 
 impl TraceReader {
@@ -26,6 +28,7 @@ impl TraceReader {
             task_spawn_locs: HashMap::new(),
             callframe_symbols: HashMap::new(),
             thread_names: HashMap::new(),
+            segment_metadata: Vec::new(),
         })
     }
 
@@ -57,6 +60,9 @@ impl TraceReader {
             Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
                 self.thread_names.insert(*tid, name.clone());
             }
+            Some(TelemetryEvent::SegmentMetadata { entries }) => {
+                self.segment_metadata = entries.clone();
+            }
             _ => {}
         }
         Ok(event)
@@ -85,6 +91,9 @@ impl TraceReader {
                 }
                 Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
                     self.thread_names.insert(tid, name);
+                }
+                Some(TelemetryEvent::SegmentMetadata { entries }) => {
+                    self.segment_metadata = entries;
                 }
                 Some(e) => return Ok(Some(e)),
             }
@@ -241,7 +250,8 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
             | TelemetryEvent::CpuSample { .. }
             | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. }
-            | TelemetryEvent::WakeEvent { .. } => {}
+            | TelemetryEvent::WakeEvent { .. }
+            | TelemetryEvent::SegmentMetadata { .. } => {}
         }
     }
 
