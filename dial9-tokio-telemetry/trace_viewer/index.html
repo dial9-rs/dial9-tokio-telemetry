@@ -180,6 +180,19 @@
                 z-index: 2;
             }
 
+            #info-panel {
+                position: absolute;
+                top: 4px;
+                right: 12px;
+                font-size: 0.75em;
+                color: #ccc;
+                z-index: 2;
+                text-align: right;
+                line-height: 1.6;
+            }
+            #info-panel .ip-label { color: #888; }
+            #info-panel .ip-value { color: #fff; font-weight: 600; }
+
             .lane {
                 height: 60px;
                 border-bottom: 1px solid #222;
@@ -324,6 +337,7 @@
                     <span class="chart-label"
                         >Queue Depth (global=blue, local max=orange)</span
                     >
+                    <div id="info-panel"></div>
                     <canvas id="queue-canvas"></canvas>
                 </div>
                 <div id="flamegraph-panel">
@@ -437,6 +451,10 @@
             let currentPoiIndex = -1;
             // Task selection state
             let selectedTaskId = null;
+            // Active task count timeline: [{t, count}]
+            let activeTaskSamples = [];
+            // First poll time per task: taskId → timestamp (ns)
+            let taskFirstPoll = new Map();
             // Hovered waker task in task detail panel
             let hoveredWakerTaskId = null;
             // Stored wake hit regions for task detail mouseover: [{x1, x2, y1, y2, wakerTaskId}]
@@ -701,6 +719,28 @@
                             if (e.localQueue > maxLocalQueue)
                                 maxLocalQueue = e.localQueue;
                         }
+                    }
+                }
+
+                // Build active task count timeline from TaskSpawn/TaskTerminate
+                activeTaskSamples = [];
+                taskFirstPoll = new Map();
+                if (trace.taskSpawnTimes && trace.taskSpawnTimes.size > 0) {
+                    const taskEvents = []; // [{t, delta: +1 or -1}]
+                    // Use real spawn timestamps
+                    for (const [taskId, t] of trace.taskSpawnTimes) {
+                        taskFirstPoll.set(taskId, t);
+                        taskEvents.push({ t, delta: 1 });
+                    }
+                    // Use real terminate timestamps
+                    for (const [, t] of trace.taskTerminateTimes) {
+                        taskEvents.push({ t, delta: -1 });
+                    }
+                    taskEvents.sort((a, b) => a.t - b.t);
+                    let count = 0;
+                    for (const te of taskEvents) {
+                        count += te.delta;
+                        activeTaskSamples.push({ t: te.t, count: Math.max(0, count) });
                     }
                 }
 
@@ -1332,8 +1372,17 @@
                 panel.style.display = "block";
                 const loc = trace.spawnLocations.get(polls[0].spawnLocId);
                 const wakeCount = wakes.length;
+                const terminateTs = trace.taskTerminateTimes?.get(selectedTaskId);
+                const hasTerminate = terminateTs != null;
+                const spawnTs = trace.taskSpawnTimes?.get(selectedTaskId);
+                let lifecycleStr = "";
+                if (hasTerminate && spawnTs != null) {
+                    const dur = terminateTs - spawnTs;
+                    const durMs = dur / 1e6;
+                    lifecycleStr = ` · lifetime ${durMs < 1 ? (durMs * 1000).toFixed(1) + "µs" : durMs.toFixed(2) + "ms"}`;
+                }
                 document.getElementById("task-detail-label").textContent =
-                    `Task 0x${selectedTaskId.toString(16)}${loc ? " — " + loc : ""} · ${polls.length} polls · ${wakeCount} wakes`;
+                    `Task 0x${selectedTaskId.toString(16)}${loc ? " — " + loc : ""} · ${polls.length} polls · ${wakeCount} wakes${lifecycleStr}${hasTerminate ? " ✓" : ""}`;
 
                 const parent = c.parentElement;
                 const dpr = devicePixelRatio || 1;
@@ -1471,6 +1520,38 @@
                     }
                 }
 
+                // Draw task lifespan bar (spawn → terminate) if it fits in view
+                if (hasTerminate && spawnTs != null) {
+                    const lifeStart = spawnTs;
+                    const lifeEnd = terminateTs;
+                    if (lifeStart < viewEnd && lifeEnd > viewStart) {
+                        const lx1 = LABEL_W + Math.max(0, nsToX(lifeStart, drawW));
+                        const lx2 = LABEL_W + Math.min(drawW, nsToX(lifeEnd, drawW));
+                        ctx.fillStyle = "rgba(129,199,132,0.08)";
+                        ctx.fillRect(lx1, bandTop - 2, lx2 - lx1, bandH + 4);
+                        ctx.strokeStyle = "rgba(129,199,132,0.3)";
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([]);
+                        ctx.beginPath();
+                        ctx.moveTo(lx1, bandTop - 2); ctx.lineTo(lx2, bandTop - 2);
+                        ctx.moveTo(lx1, bandTop + bandH + 2); ctx.lineTo(lx2, bandTop + bandH + 2);
+                        ctx.stroke();
+                        if (lifeStart >= viewStart) {
+                            ctx.strokeStyle = "#81c784";
+                            ctx.beginPath(); ctx.moveTo(lx1, bandTop - 6); ctx.lineTo(lx1, bandTop + bandH + 6); ctx.stroke();
+                            ctx.fillStyle = "#81c784"; ctx.font = "8px monospace"; ctx.textAlign = "left";
+                            ctx.fillText("spawn▸", lx1 + 2, bandTop - 8);
+                        }
+                        if (lifeEnd <= viewEnd) {
+                            ctx.strokeStyle = "#81c784";
+                            ctx.beginPath(); ctx.moveTo(lx2, bandTop - 6); ctx.lineTo(lx2, bandTop + bandH + 6); ctx.stroke();
+                            ctx.fillStyle = "#81c784"; ctx.font = "8px monospace"; ctx.textAlign = "right";
+                            ctx.fillText("◂done", lx2 - 2, bandTop - 8);
+                        }
+                        ctx.font = "9px monospace";
+                    }
+                }
+
                 // Draw poll spans
                 for (const s of polls) {
                     if (s.end < viewStart || s.start > viewEnd) continue;
@@ -1550,7 +1631,7 @@
                 ctx.fillStyle = "#16213e";
                 ctx.fillRect(0, 0, pw, ph);
 
-                if (!queueSamples.length) return;
+                if (!queueSamples.length && !activeTaskSamples.length) return;
 
                 const chartLeft = LABEL_W,
                     chartW = pw - LABEL_W - (scrollbarW || 0);
@@ -1668,6 +1749,83 @@
                 ctx.strokeStyle = "#ff8a65";
                 ctx.lineWidth = 1;
                 ctx.stroke();
+
+                // Draw active task count as step line (green, separate Y-axis)
+                if (activeTaskSamples.length > 0) {
+                    let maxTasks = 1;
+                    for (const s of activeTaskSamples) {
+                        if (s.t >= viewStart && s.t <= viewEnd && s.count > maxTasks) maxTasks = s.count;
+                    }
+                    let countAtViewStart = 0;
+                    for (const s of activeTaskSamples) {
+                        if (s.t > viewStart) break;
+                        countAtViewStart = s.count;
+                    }
+                    if (countAtViewStart > maxTasks) maxTasks = countAtViewStart;
+
+                    ctx.fillStyle = "#81c784";
+                    ctx.font = "10px monospace";
+                    ctx.textAlign = "left";
+                    ctx.fillText("tasks:" + maxTasks, chartLeft + chartW + 4, chartTop + 10);
+
+                    ctx.beginPath();
+                    let ty = chartTop + chartH - (countAtViewStart / maxTasks) * chartH;
+                    ctx.moveTo(chartLeft, ty);
+                    for (const s of activeTaskSamples) {
+                        if (s.t < viewStart) continue;
+                        if (s.t > viewEnd) break;
+                        const x = chartLeft + ((s.t - viewStart) / viewDur) * chartW;
+                        ctx.lineTo(x, ty);
+                        ty = chartTop + chartH - (s.count / maxTasks) * chartH;
+                        ctx.lineTo(x, ty);
+                    }
+                    ctx.lineTo(chartLeft + chartW, ty);
+                    ctx.strokeStyle = "#81c784";
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
+            }
+
+            function updateInfoPanel() {
+                const panel = document.getElementById("info-panel");
+                if (mouseNs === null || mouseNs < viewStart || mouseNs > viewEnd) {
+                    panel.innerHTML = "";
+                    return;
+                }
+                const ns = mouseNs;
+                // Find nearest global queue sample
+                let globalQ = "-";
+                let bestDist = Infinity;
+                for (const s of queueSamples) {
+                    const d = Math.abs(s.t - ns);
+                    if (d < bestDist) { bestDist = d; globalQ = s.global; }
+                }
+                // Find max local queue across workers at this time
+                let maxLocal = 0;
+                for (const w of workerIds) {
+                    const samples = workerQueueSamples[w] || [];
+                    let best = 0;
+                    let bd = Infinity;
+                    for (const s of samples) {
+                        const d = Math.abs(s.t - ns);
+                        if (d < bd) { bd = d; best = s.local; }
+                    }
+                    if (best > maxLocal) maxLocal = best;
+                }
+                // Active task count
+                let taskCount = 0;
+                if (activeTaskSamples.length > 0) {
+                    for (const s of activeTaskSamples) {
+                        if (s.t > ns) break;
+                        taskCount = s.count;
+                    }
+                }
+                let html = `<span class="ip-label">Global Q:</span> <span class="ip-value">${globalQ}</span>`;
+                html += ` · <span class="ip-label">Local max:</span> <span class="ip-value">${maxLocal}</span>`;
+                if (activeTaskSamples.length > 0) {
+                    html += ` · <span class="ip-label">Active tasks:</span> <span class="ip-value">${taskCount}</span>`;
+                }
+                panel.innerHTML = html;
             }
 
             function renderCrosshair() {
@@ -1682,6 +1840,9 @@
                 const ctx = overlay.getContext("2d");
                 ctx.scale(dpr, dpr);
                 ctx.clearRect(0, 0, w, h);
+
+                updateInfoPanel();
+
                 if (mouseNs === null || mouseNs < viewStart || mouseNs > viewEnd) return;
 
                 // Compute x position aligned with the lanes (lanes start after LABEL_W within lanes-container)
@@ -2340,12 +2501,23 @@
                     const totalEst = (nearestGlobal != null ? nearestGlobal.global : 0) + (nearest != null ? nearest.local : 0);
                     qInfo = `<span class="label">Global Q:</span> <span class="value">${globalStr}</span> · <span class="label">Local Q:</span> <span class="value">${localStr}</span> · <span class="label">Est. Total:</span> <span class="value">${totalEst}</span>`;
 
+                    let taskCountInfo = "";
+                    if (activeTaskSamples.length > 0) {
+                        let taskCount = 0;
+                        for (const s of activeTaskSamples) {
+                            if (s.t > ns) break;
+                            taskCount = s.count;
+                        }
+                        taskCountInfo = `<br><span class="label">Active Tasks:</span> <span class="value">${taskCount}</span>`;
+                    }
+
                     tooltip.innerHTML =
                         `<span class="label">Worker</span> <span class="value">${w}</span> · <span class="label">Time</span> <span class="value">${relMs.toFixed(3)}ms</span><br>` +
                         `<span class="label">State:</span> ${state}${stateDetail}<br>` +
                         schedInfo +
                         pollInfo +
-                        qInfo;
+                        qInfo +
+                        taskCountInfo;
                     tooltip.style.display = "block";
                     tooltip.style.left =
                         Math.min(e.clientX + 12, window.innerWidth - 340) +
@@ -2421,6 +2593,7 @@
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#ff2222;font-size:10px">▲</span>Sched (blocking)</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#66bb6a;font-size:10px">▼</span>Wake</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#81c784;display:inline-block"></span>Active Tasks</span>
     <span style="color:#666;margin-left:8px">│ ↑↓ zoom · ←→ pan · click poll for task + wake timeline · shift+drag for flamegraph · esc close</span>
   `;
                 tb.insertBefore(leg, document.getElementById("btn-zoom-in"));
@@ -2686,6 +2859,132 @@
                 document.getElementById("flamegraph-panel").style.display = "none";
                 document.getElementById("fg-tooltip").style.display = "none";
             });
+
+            // ── Queue chart drag-select: show tasks spawned in time range ──
+            let qcDragging = false, qcDragStartX = 0, qcDragStartNs = 0, qcDragEndNs = 0, qcDragMoved = false;
+
+            document.getElementById("queue-chart").addEventListener("mousedown", (e) => {
+                if (!trace || !activeTaskSamples.length) return;
+                qcDragging = true;
+                qcDragMoved = false;
+                qcDragStartX = e.clientX;
+                const rect = queueCanvas.getBoundingClientRect();
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const chartW = rect.width - LABEL_W - scrollbarW;
+                const mx = e.clientX - rect.left - LABEL_W;
+                qcDragStartNs = viewStart + (Math.max(0, mx) / chartW) * (viewEnd - viewStart);
+                qcDragEndNs = qcDragStartNs;
+                // Show selection overlay on main area
+                const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                selOverlay.style.top = "0px";
+                selOverlay.style.height = mainRect.height + "px";
+                selOverlay.style.display = "block";
+                updateSelOverlay(e.clientX);
+                document.body.style.cursor = "crosshair";
+                e.stopPropagation();
+            });
+
+            window.addEventListener("mousemove", (e) => {
+                if (!qcDragging) return;
+                if (Math.abs(e.clientX - qcDragStartX) > 3) qcDragMoved = true;
+                const rect = queueCanvas.getBoundingClientRect();
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const chartW = rect.width - LABEL_W - scrollbarW;
+                const mx = e.clientX - rect.left - LABEL_W;
+                qcDragEndNs = viewStart + (Math.max(0, Math.min(chartW, mx)) / chartW) * (viewEnd - viewStart);
+                // Update main-area selection overlay
+                regionStartNs = qcDragStartNs;
+                regionEndNs = qcDragEndNs;
+                updateSelOverlay(e.clientX);
+                // Draw selection highlight on queue chart
+                renderQueueChart(rect.width - LABEL_W, scrollbarW);
+                const c = queueCanvas;
+                const ctx = c.getContext("2d");
+                const dpr = devicePixelRatio || 1;
+                ctx.save();
+                ctx.scale(dpr, dpr);
+                const selStart = Math.min(qcDragStartNs, qcDragEndNs);
+                const selEnd = Math.max(qcDragStartNs, qcDragEndNs);
+                const x1 = LABEL_W + nsToX(selStart, chartW);
+                const x2 = LABEL_W + nsToX(selEnd, chartW);
+                ctx.fillStyle = "rgba(129,199,132,0.2)";
+                ctx.fillRect(x1, 0, x2 - x1, c.height / dpr);
+                ctx.strokeStyle = "rgba(129,199,132,0.6)";
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x1, 0, x2 - x1, c.height / dpr);
+                ctx.restore();
+            });
+
+            window.addEventListener("mouseup", (e) => {
+                if (!qcDragging) return;
+                qcDragging = false;
+                selOverlay.style.display = "none";
+                document.body.style.cursor = "";
+                if (qcDragMoved) {
+                    const selStart = Math.min(qcDragStartNs, qcDragEndNs);
+                    const selEnd = Math.max(qcDragStartNs, qcDragEndNs);
+                    showSpawnedTasks(selStart, selEnd);
+                }
+                renderAll();
+            });
+
+            function showSpawnedTasks(selStart, selEnd) {
+                // Find tasks whose first poll falls in [selStart, selEnd]
+                const tasks = [];
+                for (const [taskId, t] of taskFirstPoll) {
+                    if (t >= selStart && t <= selEnd) {
+                        const locId = trace.taskSpawnLocs.get(taskId);
+                        const loc = locId != null ? (trace.spawnLocations.get(locId) || null) : null;
+                        tasks.push({ taskId, firstPoll: t, loc });
+                    }
+                }
+                if (!tasks.length) return;
+
+                // Group by spawn location
+                const groups = new Map();
+                for (const t of tasks) {
+                    const key = t.loc || "(unknown)";
+                    if (!groups.has(key)) groups.set(key, []);
+                    groups.get(key).push(t);
+                }
+                const sorted = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+
+                const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
+                const popup = document.getElementById("stack-popup");
+                const title = document.getElementById("stack-popup-title");
+                const body = document.getElementById("stack-popup-body");
+                title.textContent = `${tasks.length} tasks spawned in ${durMs}ms`;
+
+                let html = "";
+                for (const [loc, taskList] of sorted) {
+                    const short = loc.replace(/.*\//, '');
+                    html += `<div style="margin-bottom:10px;border-left:3px solid #81c784;padding-left:8px">`;
+                    html += `<div style="color:#81c784;font-weight:600">${taskList.length}× <span style="color:#fff">${esc(short)}</span></div>`;
+                    if (short !== loc) html += `<div style="color:#666;font-size:0.85em">${esc(loc)}</div>`;
+                    // Show first few tasks as clickable links
+                    const show = taskList.slice(0, 5);
+                    for (const t of show) {
+                        const tMs = ((t.firstPoll - minTs) / 1e6).toFixed(3);
+                        html += `<div style="margin-left:8px"><span class="spawned-task-link" style="color:#6c63ff;cursor:pointer;text-decoration:underline" data-task-id="${t.taskId}">0x${t.taskId.toString(16)}</span> <span style="color:#888">@ ${tMs}ms</span></div>`;
+                    }
+                    if (taskList.length > 5) html += `<div style="color:#888;margin-left:8px;font-size:0.9em">… ${taskList.length - 5} more</div>`;
+                    html += `</div>`;
+                }
+                body.innerHTML = html;
+                popup.style.display = "block";
+                popup.style.left = (window.innerWidth / 2 - 200) + "px";
+                popup.style.top = (window.innerHeight / 2 - 150) + "px";
+
+                // Wire up task links to select and focus
+                body.querySelectorAll('.spawned-task-link').forEach(el => {
+                    el.addEventListener('click', () => {
+                        const tid = parseInt(el.dataset.taskId);
+                        selectedTaskId = tid;
+                        hideStackPopup();
+                        renderAll();
+                    });
+                });
+            }
 
             // Re-render flamegraph on resize
             window.addEventListener("resize", () => {

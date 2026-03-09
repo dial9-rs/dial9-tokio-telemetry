@@ -1,4 +1,4 @@
-//! Binary trace wire format (v11).
+//! Binary trace wire format (v16).
 //!
 //! ## File layout
 //! ```text
@@ -11,11 +11,12 @@
 //!   3: WorkerUnpark                 → code(u8) + timestamp_us(u32) + worker_id(u8) + local_queue(u8) + cpu_us(u32) + sched_wait_us(u32) = 15 bytes
 //!   4: QueueSample                  → code(u8) + timestamp_us(u32) + global_queue(u8)                                                   = 6 bytes
 //!   5: SpawnLocationDef             → code(u8) + spawn_loc_id(u16) + string_len(u16) + string_bytes(N)                                 = 5 + N bytes
-//!   6: TaskSpawn                    → code(u8) + task_id(u32) + spawn_loc_id(u16)                                                       = 7 bytes
+//!   6: TaskSpawn                    → code(u8) + timestamp_us(u32) + task_id(u32) + spawn_loc_id(u16)                                   = 11 bytes
 //!   7: CpuSample                    → code(u8) + timestamp_us(u32) + worker_id(u8) + tid(u32) + source(u8) + num_frames(u8) + frames(N * u64)  = 12 + 8N bytes
 //!   8: CallframeDef                 → code(u8) + address(u64) + string_len(u16) + string_bytes(N)                                      = 11 + N bytes
 //!   9: WakeEvent                    → code(u8) + timestamp_us(u32) + waker_task_id(u32) + woken_task_id(u32) + target_worker(u8)        = 14 bytes
 //!  10: ThreadNameDef                → code(u8) + tid(u32) + string_len(u16) + string_bytes(N)                                          = 7 + N bytes
+//! 172: TaskTerminate                → code(u8) + timestamp_us(u32) + task_id(u32)                                                       = 9 bytes
 //! ```
 //!
 //! Timestamps are microseconds since trace start. u32 micros supports traces up to ~71 minutes.
@@ -26,6 +27,12 @@
 //! ### v10 → v11 changes
 //! - Added WakeEvent (code 9): emitted by `Traced<F>` waker wrapper, records who woke a task
 //!
+//! ### v13 → v14 changes
+//! - Added TaskTerminate (code 172): emitted when a task completes or is dropped
+//!
+//! ### v14 → v15 changes
+//! - Added timestamp_us(u32) to TaskSpawn (code 6) and TaskTerminate (code 172)
+//!
 //! ### v12 → v13 changes
 //! - Added tid(u32) field to CpuSample (code 8) for thread identification
 //! - Added ThreadNameDef (code 10): maps OS tid to thread name for non-worker grouping
@@ -35,7 +42,7 @@ use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::io::{Read, Result, Write};
 
 pub const MAGIC: &[u8; 8] = b"TOKIOTRC";
-pub const VERSION: u32 = 13;
+pub const VERSION: u32 = 16;
 pub const HEADER_SIZE: usize = 12; // 8 magic + 4 version
 
 // Wire codes
@@ -50,6 +57,7 @@ const WIRE_WAKE_EVENT: u8 = 7;
 const WIRE_CPU_SAMPLE: u8 = 8;
 const WIRE_CALLFRAME_DEF: u8 = 9;
 const WIRE_THREAD_NAME_DEF: u8 = 10;
+const WIRE_TASK_TERMINATE: u8 = 172;
 
 /// Returns the wire size of an event.
 pub fn wire_event_size(event: &TelemetryEvent) -> usize {
@@ -60,7 +68,8 @@ pub fn wire_event_size(event: &TelemetryEvent) -> usize {
         TelemetryEvent::WorkerPark { .. } => 11,
         TelemetryEvent::WorkerUnpark { .. } => 15,
         TelemetryEvent::SpawnLocationDef { location, .. } => 1 + 2 + 2 + location.len(),
-        TelemetryEvent::TaskSpawn { .. } => 7,
+        TelemetryEvent::TaskSpawn { .. } => 11,
+        TelemetryEvent::TaskTerminate { .. } => 9,
         TelemetryEvent::CpuSample { callchain, .. } => 12 + 8 * callchain.len(),
         TelemetryEvent::CallframeDef {
             symbol, location, ..
@@ -150,12 +159,24 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
             w.write_all(location.as_bytes())?;
         }
         TelemetryEvent::TaskSpawn {
+            timestamp_nanos,
             task_id,
             spawn_loc_id,
         } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
             w.write_all(&[WIRE_TASK_SPAWN])?;
+            w.write_all(&timestamp_us.to_le_bytes())?;
             w.write_all(&task_id.to_u32().to_le_bytes())?;
             w.write_all(&spawn_loc_id.as_u16().to_le_bytes())?;
+        }
+        TelemetryEvent::TaskTerminate {
+            timestamp_nanos,
+            task_id,
+        } => {
+            let timestamp_us = (*timestamp_nanos / 1000) as u32;
+            w.write_all(&[WIRE_TASK_TERMINATE])?;
+            w.write_all(&timestamp_us.to_le_bytes())?;
+            w.write_all(&task_id.to_u32().to_le_bytes())?;
         }
         TelemetryEvent::CpuSample {
             timestamp_nanos,
@@ -235,7 +256,7 @@ pub fn read_header(r: &mut impl Read) -> Result<(String, u32)> {
 
 /// Read one event from the wire. Returns `Ok(None)` at EOF.
 ///
-/// All event types are returned, including `SpawnLocationDef` and `TaskSpawn`.
+/// All event types are returned, including `SpawnLocationDef`.
 /// Callers that want to filter metadata records can check
 /// [`TelemetryEvent::is_runtime_event()`].
 pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
@@ -244,7 +265,7 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
         return Ok(None);
     }
 
-    // SpawnLocationDef and TaskSpawn have no timestamp — handle before reading ts
+    // SpawnLocationDef has no timestamp — handle before reading ts
     if tag[0] == WIRE_SPAWN_LOCATION_DEF {
         let mut spawn_loc_id_bytes = [0u8; 2];
         r.read_exact(&mut spawn_loc_id_bytes)?;
@@ -262,13 +283,26 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
         return Ok(Some(TelemetryEvent::SpawnLocationDef { id, location }));
     }
     if tag[0] == WIRE_TASK_SPAWN {
+        let mut ts = [0u8; 4];
         let mut task_id_bytes = [0u8; 4];
         let mut spawn_loc_id_bytes = [0u8; 2];
+        r.read_exact(&mut ts)?;
         r.read_exact(&mut task_id_bytes)?;
         r.read_exact(&mut spawn_loc_id_bytes)?;
         return Ok(Some(TelemetryEvent::TaskSpawn {
+            timestamp_nanos: u32::from_le_bytes(ts) as u64 * 1000,
             task_id: TaskId::from_u32(u32::from_le_bytes(task_id_bytes)),
             spawn_loc_id: SpawnLocationId::from_u16(u16::from_le_bytes(spawn_loc_id_bytes)),
+        }));
+    }
+    if tag[0] == WIRE_TASK_TERMINATE {
+        let mut ts = [0u8; 4];
+        let mut task_id_bytes = [0u8; 4];
+        r.read_exact(&mut ts)?;
+        r.read_exact(&mut task_id_bytes)?;
+        return Ok(Some(TelemetryEvent::TaskTerminate {
+            timestamp_nanos: u32::from_le_bytes(ts) as u64 * 1000,
+            task_id: TaskId::from_u32(u32::from_le_bytes(task_id_bytes)),
         }));
     }
     if tag[0] == WIRE_CALLFRAME_DEF {
@@ -720,12 +754,13 @@ mod tests {
         };
         assert_eq!(wire_event_size(&qs), 6);
 
-        // TaskSpawn always 7 bytes
+        // TaskSpawn always 11 bytes
         let ts = TelemetryEvent::TaskSpawn {
+            timestamp_nanos: 1000,
             task_id: TaskId::from_u32(1),
             spawn_loc_id: SpawnLocationId::from_u16(1),
         };
-        assert_eq!(wire_event_size(&ts), 7);
+        assert_eq!(wire_event_size(&ts), 11);
 
         // SpawnLocationDef is 5 + N bytes
         let def = TelemetryEvent::SpawnLocationDef {
@@ -887,6 +922,7 @@ mod tests {
 
         buf.clear();
         let task_spawn = TelemetryEvent::TaskSpawn {
+            timestamp_nanos: 5_000_000,
             task_id: TaskId::from_u32(1),
             spawn_loc_id: SpawnLocationId::from_u16(1),
         };
@@ -952,6 +988,7 @@ mod tests {
     #[test]
     fn test_task_spawn_roundtrip() {
         let event = TelemetryEvent::TaskSpawn {
+            timestamp_nanos: 5_000_000,
             task_id: TaskId::from_u32(99),
             spawn_loc_id: SpawnLocationId::from_u16(7),
         };
@@ -965,13 +1002,41 @@ mod tests {
         let decoded = read_event(&mut cursor).unwrap().unwrap();
         match decoded {
             TelemetryEvent::TaskSpawn {
+                timestamp_nanos,
                 task_id,
                 spawn_loc_id,
             } => {
+                assert_eq!(timestamp_nanos, 5_000_000);
                 assert_eq!(task_id.to_u32(), 99);
                 assert_eq!(spawn_loc_id.as_u16(), 7);
             }
             _ => panic!("expected TaskSpawn"),
+        }
+    }
+
+    #[test]
+    fn test_task_terminate_roundtrip() {
+        let event = TelemetryEvent::TaskTerminate {
+            timestamp_nanos: 5_000_000,
+            task_id: TaskId::from_u32(42),
+        };
+
+        let mut buf = Vec::new();
+        write_event(&mut buf, &event).unwrap();
+        assert_eq!(buf.len(), wire_event_size(&event));
+        assert_eq!(buf[0], WIRE_TASK_TERMINATE);
+
+        let mut cursor = Cursor::new(buf);
+        let decoded = read_event(&mut cursor).unwrap().unwrap();
+        match decoded {
+            TelemetryEvent::TaskTerminate {
+                timestamp_nanos,
+                task_id,
+            } => {
+                assert_eq!(timestamp_nanos, 5_000_000);
+                assert_eq!(task_id.to_u32(), 42);
+            }
+            _ => panic!("expected TaskTerminate"),
         }
     }
 
@@ -985,6 +1050,7 @@ mod tests {
                 location: "src/main.rs:10:1".to_string(),
             },
             TelemetryEvent::TaskSpawn {
+                timestamp_nanos: 500_000,
                 task_id: TaskId::from_u32(100),
                 spawn_loc_id: SpawnLocationId::from_u16(1),
             },
@@ -1030,12 +1096,16 @@ mod tests {
         while let Some(e) = read_runtime_event(&mut cursor2).unwrap() {
             runtime_events.push(e);
         }
-        assert_eq!(runtime_events.len(), 2);
+        assert_eq!(runtime_events.len(), 3);
         assert!(matches!(
             runtime_events[0],
+            TelemetryEvent::TaskSpawn { .. }
+        ));
+        assert!(matches!(
+            runtime_events[1],
             TelemetryEvent::PollStart { .. }
         ));
-        assert!(matches!(runtime_events[1], TelemetryEvent::PollEnd { .. }));
+        assert!(matches!(runtime_events[2], TelemetryEvent::PollEnd { .. }));
     }
 
     #[test]

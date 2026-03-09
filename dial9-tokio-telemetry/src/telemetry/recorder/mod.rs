@@ -94,7 +94,19 @@ impl TelemetryRecorder {
             builder.on_task_spawn(move |meta| {
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
-                s5.record_event(RawEvent::TaskSpawn { task_id, location });
+                s5.record_event(RawEvent::TaskSpawn {
+                    timestamp_nanos: s5.start_time.elapsed().as_nanos() as u64,
+                    task_id,
+                    location,
+                });
+            });
+            let s6 = shared.clone();
+            builder.on_task_terminate(move |meta| {
+                let task_id = TaskId::from(meta.id());
+                s6.record_event(RawEvent::TaskTerminate {
+                    timestamp_nanos: s6.start_time.elapsed().as_nanos() as u64,
+                    task_id,
+                });
             });
         }
 
@@ -543,6 +555,7 @@ mod tests {
         for (i, loc) in locations.iter().enumerate() {
             let task_id = crate::telemetry::task_metadata::TaskId::from_u32(i as u32);
             ew.write_raw_event(RawEvent::TaskSpawn {
+                timestamp_nanos: (i as u64 + 1) * 1000,
                 task_id,
                 location: loc,
             })

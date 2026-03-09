@@ -22,8 +22,8 @@
         off += 4;
         if (magic !== "TOKIOTRC")
             throw new Error("Not a TOKIOTRC file (got: " + magic + ")");
-        if (version < 8 || version > 13) {
-            console.warn(`Expected version 8-13, got ${version}. Some data may be missing.`);
+        if (version < 8 || version > 16) {
+            console.warn(`Expected version 8-16, got ${version}. Some data may be missing.`);
         }
         const hasCpuTime = version >= 5;
         const hasSchedWait = version >= 6;
@@ -32,6 +32,8 @@
         const events = [];
         const spawnLocations = new Map(); // SpawnLocationId (number) → string
         const taskSpawnLocs = new Map();  // taskId (number) → SpawnLocationId (number)
+        const taskSpawnTimes = new Map(); // taskId (number) → timestamp (nanoseconds)
+        const taskTerminateTimes = new Map(); // taskId (number) → timestamp (nanoseconds)
         const callframeSymbols = new Map(); // address (bigint as string) → symbol name
         const cpuSamples = []; // {timestamp, workerId, tid, source, callchain: [addr strings]}
         const threadNames = new Map(); // tid (number) → thread name (string)
@@ -53,10 +55,13 @@
                 continue;
             }
             if (wireCode === 6) {
-                if (off + 6 > buffer.byteLength) break;
+                // TaskSpawn: timestamp_us(4) + task_id(4) + spawn_loc_id(2)
+                if (off + 10 > buffer.byteLength) break;
+                const timestampUs = view.getUint32(off, true); off += 4;
                 const taskId = view.getUint32(off, true); off += 4;
                 const spawnLocId = view.getUint16(off, true); off += 2;
                 taskSpawnLocs.set(taskId, spawnLocId);
+                taskSpawnTimes.set(taskId, timestampUs * 1000);
                 continue;
             }
             if (wireCode === 7) {
@@ -139,7 +144,16 @@
                 continue;
             }
 
-            if (wireCode > 10) break; // unknown code
+            if (wireCode === 172) {
+                // TaskTerminate: timestamp_us(4) + task_id(4)
+                if (off + 8 > buffer.byteLength) break;
+                const timestampUs = view.getUint32(off, true); off += 4;
+                const taskId = view.getUint32(off, true); off += 4;
+                taskTerminateTimes.set(taskId, timestampUs * 1000);
+                continue;
+            }
+
+            if (wireCode > 10 && wireCode !== 172) break; // unknown code
 
             // All regular codes have a 4-byte timestamp next
             if (off + 4 > buffer.byteLength) break;
@@ -228,9 +242,11 @@
             hasTaskTracking, 
             spawnLocations, 
             taskSpawnLocs, 
+            taskSpawnTimes,
             cpuSamples, 
             callframeSymbols,
-            threadNames
+            threadNames,
+            taskTerminateTimes
         };
     }
 

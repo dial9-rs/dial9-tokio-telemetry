@@ -45,6 +45,7 @@ impl TraceReader {
             Some(TelemetryEvent::TaskSpawn {
                 task_id,
                 spawn_loc_id,
+                ..
             }) => {
                 self.task_spawn_locs.insert(*task_id, *spawn_loc_id);
             }
@@ -73,6 +74,7 @@ impl TraceReader {
                 Some(TelemetryEvent::TaskSpawn {
                     task_id,
                     spawn_loc_id,
+                    ..
                 }) => {
                     self.task_spawn_locs.insert(task_id, spawn_loc_id);
                 }
@@ -235,6 +237,7 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
             }
             TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::CpuSample { .. }
             | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. }
