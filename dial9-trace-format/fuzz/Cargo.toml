@@ -1,0 +1,38 @@
+[package]
+name = "dial9-trace-format-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.dial9-trace-format]
+path = ".."
+
+[[bin]]
+name = "fuzz_decode"
+path = "fuzz_targets/fuzz_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_round_trip"
+path = "fuzz_targets/fuzz_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_structured_round_trip"
+path = "fuzz_targets/fuzz_structured_round_trip.rs"
+test = false
+doc = false
+bench = false

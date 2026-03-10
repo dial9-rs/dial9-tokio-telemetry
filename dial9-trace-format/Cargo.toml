@@ -1,0 +1,20 @@
+[package]
+name = "dial9-trace-format"
+version.workspace = true
+edition = "2024"
+description = "Self-describing binary trace format with schema registry"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+dial9-trace-format-derive = { version = "0.1.1", path = "../dial9-trace-format-derive" }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+flate2 = "1"
+
+[[bench]]
+name = "codec"
+harness = false

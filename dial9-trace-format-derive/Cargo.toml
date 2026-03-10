@@ -1,0 +1,19 @@
+[package]
+name = "dial9-trace-format-derive"
+version.workspace = true
+edition = "2024"
+description = "Derive macro for dial9-trace-format TraceEvent trait"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[dev-dependencies]
+insta = "1"
+prettyplease = "0.2"
