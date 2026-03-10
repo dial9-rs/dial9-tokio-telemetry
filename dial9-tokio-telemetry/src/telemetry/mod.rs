@@ -5,7 +5,6 @@ pub mod collector;
 pub mod cpu_profile;
 pub mod events;
 pub mod format;
-pub mod new_format;
 pub mod recorder;
 pub mod task_metadata;
 pub mod writer;

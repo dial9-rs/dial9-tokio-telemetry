@@ -431,14 +431,20 @@ impl<W: Write> EncodeState<W> {
 
     /// Compute the timestamp delta, emitting a TimestampReset frame if needed
     /// (delta overflow or backwards timestamp).
+    ///
+    /// The base advances to `ts_ns` after every event so that consecutive
+    /// inter-event deltas stay small — critical for gzip compressibility.
     pub(crate) fn encode_timestamp_delta(&mut self, ts_ns: u64) -> io::Result<u32> {
-        if ts_ns < self.timestamp_base_ns || ts_ns - self.timestamp_base_ns > MAX_TIMESTAMP_DELTA_NS {
+        if ts_ns < self.timestamp_base_ns || ts_ns - self.timestamp_base_ns > MAX_TIMESTAMP_DELTA_NS
+        {
             self.writer.write_all(&[TAG_TIMESTAMP_RESET])?;
             self.writer.write_all(&ts_ns.to_le_bytes())?;
             self.timestamp_base_ns = ts_ns;
             Ok(0)
         } else {
-            Ok((ts_ns - self.timestamp_base_ns) as u32)
+            let delta = (ts_ns - self.timestamp_base_ns) as u32;
+            self.timestamp_base_ns = ts_ns;
+            Ok(delta)
         }
     }
 }
@@ -485,12 +491,16 @@ impl<'a, W: Write> EventEncoder<'a, W> {
 
     pub fn write_string(&mut self, v: &str) -> io::Result<()> {
         let bytes = v.as_bytes();
-        self.state.writer.write_all(&(bytes.len() as u32).to_le_bytes())?;
+        self.state
+            .writer
+            .write_all(&(bytes.len() as u32).to_le_bytes())?;
         self.state.writer.write_all(bytes)
     }
 
     pub fn write_bytes(&mut self, v: &[u8]) -> io::Result<()> {
-        self.state.writer.write_all(&(v.len() as u32).to_le_bytes())?;
+        self.state
+            .writer
+            .write_all(&(v.len() as u32).to_le_bytes())?;
         self.state.writer.write_all(v)
     }
 
@@ -499,7 +509,9 @@ impl<'a, W: Write> EventEncoder<'a, W> {
     }
 
     pub fn write_stack_frames(&mut self, v: &StackFrames) -> io::Result<()> {
-        self.state.writer.write_all(&(v.0.len() as u32).to_le_bytes())?;
+        self.state
+            .writer
+            .write_all(&(v.0.len() as u32).to_le_bytes())?;
         for &addr in &v.0 {
             self.state.writer.write_all(&addr.to_le_bytes())?;
         }
@@ -507,13 +519,19 @@ impl<'a, W: Write> EventEncoder<'a, W> {
     }
 
     pub fn write_string_map(&mut self, v: &[(String, String)]) -> io::Result<()> {
-        self.state.writer.write_all(&(v.len() as u32).to_le_bytes())?;
+        self.state
+            .writer
+            .write_all(&(v.len() as u32).to_le_bytes())?;
         for (k, val) in v {
             let kb = k.as_bytes();
-            self.state.writer.write_all(&(kb.len() as u32).to_le_bytes())?;
+            self.state
+                .writer
+                .write_all(&(kb.len() as u32).to_le_bytes())?;
             self.state.writer.write_all(kb)?;
             let vb = val.as_bytes();
-            self.state.writer.write_all(&(vb.len() as u32).to_le_bytes())?;
+            self.state
+                .writer
+                .write_all(&(vb.len() as u32).to_le_bytes())?;
             self.state.writer.write_all(vb)?;
         }
         Ok(())
@@ -541,109 +559,193 @@ pub trait TraceField {
 
 impl TraceField for u8 {
     type Ref<'a> = u8;
-    fn field_type() -> FieldType { FieldType::U8 }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_u8(*self) }
+    fn field_type() -> FieldType {
+        FieldType::U8
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_u8(*self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::Varint(v) => Some(*v as u8), _ => None }
+        match val {
+            FieldValueRef::Varint(v) => Some(*v as u8),
+            _ => None,
+        }
     }
 }
 
 impl TraceField for u16 {
     type Ref<'a> = u16;
-    fn field_type() -> FieldType { FieldType::U16 }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_u16(*self) }
+    fn field_type() -> FieldType {
+        FieldType::U16
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_u16(*self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::Varint(v) => Some(*v as u16), _ => None }
+        match val {
+            FieldValueRef::Varint(v) => Some(*v as u16),
+            _ => None,
+        }
     }
 }
 
 impl TraceField for u32 {
     type Ref<'a> = u32;
-    fn field_type() -> FieldType { FieldType::U32 }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_u32(*self) }
+    fn field_type() -> FieldType {
+        FieldType::U32
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_u32(*self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::Varint(v) => Some(*v as u32), _ => None }
+        match val {
+            FieldValueRef::Varint(v) => Some(*v as u32),
+            _ => None,
+        }
     }
 }
 
 impl TraceField for u64 {
     type Ref<'a> = u64;
-    fn field_type() -> FieldType { FieldType::Varint }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_u64(*self) }
+    fn field_type() -> FieldType {
+        FieldType::Varint
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_u64(*self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::Varint(v) => Some(*v), _ => None }
+        match val {
+            FieldValueRef::Varint(v) => Some(*v),
+            _ => None,
+        }
     }
 }
 
 impl TraceField for i64 {
     type Ref<'a> = i64;
-    fn field_type() -> FieldType { FieldType::I64 }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_i64(*self) }
+    fn field_type() -> FieldType {
+        FieldType::I64
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_i64(*self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::I64(v) => Some(*v), _ => None }
+        match val {
+            FieldValueRef::I64(v) => Some(*v),
+            _ => None,
+        }
     }
 }
 
 impl TraceField for f64 {
     type Ref<'a> = f64;
-    fn field_type() -> FieldType { FieldType::F64 }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_f64(*self) }
+    fn field_type() -> FieldType {
+        FieldType::F64
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_f64(*self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::F64(v) => Some(*v), _ => None }
+        match val {
+            FieldValueRef::F64(v) => Some(*v),
+            _ => None,
+        }
     }
 }
 
 impl TraceField for bool {
     type Ref<'a> = bool;
-    fn field_type() -> FieldType { FieldType::Bool }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_bool(*self) }
+    fn field_type() -> FieldType {
+        FieldType::Bool
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_bool(*self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::Bool(v) => Some(*v), _ => None }
+        match val {
+            FieldValueRef::Bool(v) => Some(*v),
+            _ => None,
+        }
     }
 }
 
 impl TraceField for String {
     type Ref<'a> = &'a str;
-    fn field_type() -> FieldType { FieldType::String }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_string(self) }
+    fn field_type() -> FieldType {
+        FieldType::String
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_string(self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::String(s) => Some(s), _ => None }
+        match val {
+            FieldValueRef::String(s) => Some(s),
+            _ => None,
+        }
     }
 }
 
 impl TraceField for Vec<u8> {
     type Ref<'a> = &'a [u8];
-    fn field_type() -> FieldType { FieldType::Bytes }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_bytes(self) }
+    fn field_type() -> FieldType {
+        FieldType::Bytes
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_bytes(self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::Bytes(b) => Some(b), _ => None }
+        match val {
+            FieldValueRef::Bytes(b) => Some(b),
+            _ => None,
+        }
     }
 }
 
 impl TraceField for StackFrames {
     type Ref<'a> = StackFramesRef<'a>;
-    fn field_type() -> FieldType { FieldType::StackFrames }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_stack_frames(self) }
+    fn field_type() -> FieldType {
+        FieldType::StackFrames
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_stack_frames(self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::StackFrames(r) => Some(r.clone()), _ => None }
+        match val {
+            FieldValueRef::StackFrames(r) => Some(r.clone()),
+            _ => None,
+        }
     }
 }
 
 impl TraceField for InternedString {
     type Ref<'a> = InternedString;
-    fn field_type() -> FieldType { FieldType::PooledString }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_interned(*self) }
+    fn field_type() -> FieldType {
+        FieldType::PooledString
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_interned(*self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::PooledString(id) => Some(*id), _ => None }
+        match val {
+            FieldValueRef::PooledString(id) => Some(*id),
+            _ => None,
+        }
     }
 }
 
 impl TraceField for Vec<(String, String)> {
     type Ref<'a> = StringMapRef<'a>;
-    fn field_type() -> FieldType { FieldType::StringMap }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> { enc.write_string_map(self) }
+    fn field_type() -> FieldType {
+        FieldType::StringMap
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_string_map(self)
+    }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val { FieldValueRef::StringMap(r) => Some(r.clone()), _ => None }
+        match val {
+            FieldValueRef::StringMap(r) => Some(r.clone()),
+            _ => None,
+        }
     }
 }
 

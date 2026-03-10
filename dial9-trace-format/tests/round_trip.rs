@@ -11,36 +11,42 @@ struct CpuSample;
 fn full_round_trip() {
     let mut enc = Encoder::new();
 
-    enc.register_schema_for::<PollStart>("PollStart",
-    vec![
-        FieldDef {
-            name: "timestamp_ns".into(),
-            field_type: FieldType::Varint,
-        },
-        FieldDef {
-            name: "worker".into(),
-            field_type: FieldType::Varint,
-        },
-        FieldDef {
-            name: "task_id".into(),
-            field_type: FieldType::Varint,
-        },
-    ],).unwrap();
-    enc.register_schema_for::<CpuSample>("CpuSample",
-    vec![
-        FieldDef {
-            name: "timestamp_ns".into(),
-            field_type: FieldType::Varint,
-        },
-        FieldDef {
-            name: "thread_name".into(),
-            field_type: FieldType::PooledString,
-        },
-        FieldDef {
-            name: "frames".into(),
-            field_type: FieldType::StackFrames,
-        },
-    ],).unwrap();
+    enc.register_schema_for::<PollStart>(
+        "PollStart",
+        vec![
+            FieldDef {
+                name: "timestamp_ns".into(),
+                field_type: FieldType::Varint,
+            },
+            FieldDef {
+                name: "worker".into(),
+                field_type: FieldType::Varint,
+            },
+            FieldDef {
+                name: "task_id".into(),
+                field_type: FieldType::Varint,
+            },
+        ],
+    )
+    .unwrap();
+    enc.register_schema_for::<CpuSample>(
+        "CpuSample",
+        vec![
+            FieldDef {
+                name: "timestamp_ns".into(),
+                field_type: FieldType::Varint,
+            },
+            FieldDef {
+                name: "thread_name".into(),
+                field_type: FieldType::PooledString,
+            },
+            FieldDef {
+                name: "frames".into(),
+                field_type: FieldType::StackFrames,
+            },
+        ],
+    )
+    .unwrap();
 
     let thread_id = enc.intern_string("worker-0").unwrap();
 
@@ -48,21 +54,24 @@ fn full_round_trip() {
         FieldValue::Varint(1_000_000),
         FieldValue::Varint(0),
         FieldValue::Varint(42),
-    ]).unwrap();
+    ])
+    .unwrap();
 
     let frames = vec![0x5555_5555_1234u64, 0x5555_5555_0a00, 0x5555_5555_0800];
     enc.write_event_for::<CpuSample>(&[
         FieldValue::Varint(1_000_100),
         FieldValue::PooledString(thread_id.0),
         FieldValue::StackFrames(frames.clone()),
-    ]).unwrap();
+    ])
+    .unwrap();
 
     let sym_name_id = enc.intern_string("my_function").unwrap();
     enc.write_symbol_table(&[SymbolEntry {
         base_addr: 0x5555_5555_0000,
         size: 0x2000,
         symbol_id: sym_name_id.0,
-    }]).unwrap();
+    }])
+    .unwrap();
 
     let data = enc.finish();
 
@@ -124,41 +133,44 @@ struct AllTypes;
 #[test]
 fn round_trip_all_field_types() {
     let mut enc = Encoder::new();
-    enc.register_schema_for::<AllTypes>("AllTypes",
-    vec![
-        FieldDef {
-            name: "a".into(),
-            field_type: FieldType::Varint,
-        },
-        FieldDef {
-            name: "b".into(),
-            field_type: FieldType::I64,
-        },
-        FieldDef {
-            name: "c".into(),
-            field_type: FieldType::F64,
-        },
-        FieldDef {
-            name: "d".into(),
-            field_type: FieldType::Bool,
-        },
-        FieldDef {
-            name: "e".into(),
-            field_type: FieldType::String,
-        },
-        FieldDef {
-            name: "f".into(),
-            field_type: FieldType::Bytes,
-        },
-        FieldDef {
-            name: "h".into(),
-            field_type: FieldType::PooledString,
-        },
-        FieldDef {
-            name: "i".into(),
-            field_type: FieldType::StackFrames,
-        },
-    ],).unwrap();
+    enc.register_schema_for::<AllTypes>(
+        "AllTypes",
+        vec![
+            FieldDef {
+                name: "a".into(),
+                field_type: FieldType::Varint,
+            },
+            FieldDef {
+                name: "b".into(),
+                field_type: FieldType::I64,
+            },
+            FieldDef {
+                name: "c".into(),
+                field_type: FieldType::F64,
+            },
+            FieldDef {
+                name: "d".into(),
+                field_type: FieldType::Bool,
+            },
+            FieldDef {
+                name: "e".into(),
+                field_type: FieldType::String,
+            },
+            FieldDef {
+                name: "f".into(),
+                field_type: FieldType::Bytes,
+            },
+            FieldDef {
+                name: "h".into(),
+                field_type: FieldType::PooledString,
+            },
+            FieldDef {
+                name: "i".into(),
+                field_type: FieldType::StackFrames,
+            },
+        ],
+    )
+    .unwrap();
 
     let pool_id = enc.intern_string("test").unwrap();
     let values = vec![

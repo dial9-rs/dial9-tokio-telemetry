@@ -104,6 +104,7 @@ struct FuzzInput {
 
 #[derive(Arbitrary, Debug)]
 struct FuzzSchema {
+    has_timestamp: bool,
     fields: Vec<FuzzFieldType>,
 }
 
@@ -158,11 +159,11 @@ fuzz_target!(|data: &[u8]| {
     // --- Encode ---
     let mut enc = Encoder::new();
 
-    let register_fns: [fn(&mut Encoder, Vec<FieldDef>); 4] = [
-        |e, f| { e.register_schema_for::<S0>("S0", f).unwrap(); },
-        |e, f| { e.register_schema_for::<S1>("S1", f).unwrap(); },
-        |e, f| { e.register_schema_for::<S2>("S2", f).unwrap(); },
-        |e, f| { e.register_schema_for::<S3>("S3", f).unwrap(); },
+    let register_fns: [fn(&mut Encoder, &str, bool, Vec<FieldDef>); 4] = [
+        |e, n, ts, f| { e.register_schema_for_with_timestamp::<S0>(n, ts, f).unwrap(); },
+        |e, n, ts, f| { e.register_schema_for_with_timestamp::<S1>(n, ts, f).unwrap(); },
+        |e, n, ts, f| { e.register_schema_for_with_timestamp::<S2>(n, ts, f).unwrap(); },
+        |e, n, ts, f| { e.register_schema_for_with_timestamp::<S3>(n, ts, f).unwrap(); },
     ];
     let write_fns: [fn(&mut Encoder, &[FieldValue]); 4] = [
         |e, v| { e.write_event_for::<S0>(v).unwrap(); },
@@ -172,6 +173,7 @@ fuzz_target!(|data: &[u8]| {
     ];
 
     // Register all schemas upfront (encoder requires this before events)
+    let mut schema_has_ts = Vec::new();
     for (i, schema) in schemas.iter().enumerate() {
         let fields: Vec<FieldDef> = schema
             .fields
@@ -182,11 +184,13 @@ fuzz_target!(|data: &[u8]| {
                 field_type: ft.to_field_type(),
             })
             .collect();
-        register_fns[i](&mut enc, fields);
+        let names = ["S0", "S1", "S2", "S3"];
+        schema_has_ts.push(schema.has_timestamp);
+        register_fns[i](&mut enc, names[i], schema.has_timestamp, fields);
     }
 
     // Execute actions in fuzz-determined interleaved order
-    let mut expected_events: Vec<(usize, Vec<FieldValue>)> = Vec::new();
+    let mut expected_events: Vec<(usize, Option<u64>, Vec<FieldValue>)> = Vec::new();
     for action in &actions {
         match action {
             FuzzAction::Event { schema_idx } => {
@@ -201,8 +205,22 @@ fuzz_target!(|data: &[u8]| {
                     Ok(v) => v,
                     Err(_) => return,
                 };
-                write_fns[idx](&mut enc, &values);
-                expected_events.push((idx, values));
+                if schema_has_ts[idx] {
+                    // Generate a timestamp and prepend it
+                    let ts: u64 = match u.arbitrary() {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
+                    // Clamp to reasonable range to avoid overflow in delta math
+                    let ts = ts % (1u64 << 48);
+                    let mut all_values = vec![FieldValue::Varint(ts)];
+                    all_values.extend(values.clone());
+                    write_fns[idx](&mut enc, &all_values);
+                    expected_events.push((idx, Some(ts), values));
+                } else {
+                    write_fns[idx](&mut enc, &values);
+                    expected_events.push((idx, None, values));
+                }
             }
             FuzzAction::PoolString(ps) => {
                 let len = (ps.len % 8) as usize;
@@ -228,7 +246,9 @@ fuzz_target!(|data: &[u8]| {
     let decoded_events: Vec<_> = frames
         .iter()
         .filter_map(|f| match f {
-            DecodedFrame::Event { type_id, values, .. } => Some((*type_id, values.clone())),
+            DecodedFrame::Event { type_id, timestamp_ns, values, .. } => {
+                Some((*type_id, *timestamp_ns, values.clone()))
+            }
             _ => None,
         })
         .collect();
@@ -239,11 +259,13 @@ fuzz_target!(|data: &[u8]| {
         "event count mismatch"
     );
 
-    for (i, ((schema_idx, expected_vals), (_type_id, decoded_vals))) in expected_events
-        .iter()
-        .zip(decoded_events.iter())
-        .enumerate()
+    for (i, ((schema_idx, expected_ts, expected_vals), (_type_id, decoded_ts, decoded_vals))) in
+        expected_events.iter().zip(decoded_events.iter()).enumerate()
     {
+        assert_eq!(
+            *expected_ts, *decoded_ts,
+            "timestamp mismatch in event {i} (schema {schema_idx})"
+        );
         assert_eq!(
             expected_vals.len(),
             decoded_vals.len(),

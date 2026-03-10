@@ -106,7 +106,11 @@ pub fn encode_header(w: &mut impl Write) -> io::Result<()> {
     w.write_all(&[VERSION])
 }
 
-pub fn encode_schema(type_id: WireTypeId, entry: &SchemaEntry, w: &mut impl Write) -> io::Result<()> {
+pub fn encode_schema(
+    type_id: WireTypeId,
+    entry: &SchemaEntry,
+    w: &mut impl Write,
+) -> io::Result<()> {
     w.write_all(&[TAG_SCHEMA])?;
     w.write_all(&type_id.0.to_le_bytes())?;
     let name_bytes = entry.name.as_bytes();

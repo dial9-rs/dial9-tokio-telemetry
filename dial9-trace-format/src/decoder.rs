@@ -121,31 +121,36 @@ impl<'a> Decoder<'a> {
         }
         let remaining = &self.data[self.pos..];
         let base = self.timestamp_base_ns;
-        let (frame, consumed) = match
-            codec::decode_frame(remaining, |type_id| self.schema_info(type_id), base)
-        {
-            Some(r) => r,
-            None => return Ok(None),
-        };
+        let (frame, consumed) =
+            match codec::decode_frame(remaining, |type_id| self.schema_info(type_id), base) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
         self.pos += consumed;
         match frame {
             Frame::Schema { type_id, entry } => {
                 let result = DecodedFrame::Schema(entry.clone());
-                self.register_schema(type_id, entry).map_err(|msg| DecodeError {
-                    pos: self.pos,
-                    message: msg,
-                })?;
+                self.register_schema(type_id, entry)
+                    .map_err(|msg| DecodeError {
+                        pos: self.pos,
+                        message: msg,
+                    })?;
                 Ok(Some(result))
             }
             Frame::Event {
                 type_id,
                 timestamp_ns,
                 values,
-            } => Ok(Some(DecodedFrame::Event {
-                type_id,
-                timestamp_ns,
-                values,
-            })),
+            } => {
+                if let Some(ts) = timestamp_ns {
+                    self.timestamp_base_ns = ts;
+                }
+                Ok(Some(DecodedFrame::Event {
+                    type_id,
+                    timestamp_ns,
+                    values,
+                }))
+            }
             Frame::StringPool(entries) => {
                 for e in &entries {
                     if let Ok(s) = String::from_utf8(e.data.clone()) {
@@ -179,31 +184,36 @@ impl<'a> Decoder<'a> {
         }
         let remaining = &self.data[self.pos..];
         let base = self.timestamp_base_ns;
-        let (frame, consumed) = match
-            codec::decode_frame_ref(remaining, |type_id| self.schema_info(type_id), base)
-        {
-            Some(r) => r,
-            None => return Ok(None),
-        };
+        let (frame, consumed) =
+            match codec::decode_frame_ref(remaining, |type_id| self.schema_info(type_id), base) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
         self.pos += consumed;
         match frame {
             FrameRef::Schema { type_id, entry } => {
                 let result = DecodedFrameRef::Schema(entry.clone());
-                self.register_schema(type_id, entry).map_err(|msg| DecodeError {
-                    pos: self.pos,
-                    message: msg,
-                })?;
+                self.register_schema(type_id, entry)
+                    .map_err(|msg| DecodeError {
+                        pos: self.pos,
+                        message: msg,
+                    })?;
                 Ok(Some(result))
             }
             FrameRef::Event {
                 type_id,
                 timestamp_ns,
                 values,
-            } => Ok(Some(DecodedFrameRef::Event {
-                type_id,
-                timestamp_ns,
-                values,
-            })),
+            } => {
+                if let Some(ts) = timestamp_ns {
+                    self.timestamp_base_ns = ts;
+                }
+                Ok(Some(DecodedFrameRef::Event {
+                    type_id,
+                    timestamp_ns,
+                    values,
+                }))
+            }
             FrameRef::StringPool(entries) => {
                 for e in &entries {
                     if let Ok(s) = std::str::from_utf8(e.data) {
@@ -308,6 +318,9 @@ impl<'a> Decoder<'a> {
                         }
                     }
                     self.pos += pos;
+                    if let Some(ts) = timestamp_ns {
+                        self.timestamp_base_ns = ts;
+                    }
                     f(type_id, timestamp_ns, &values_buf);
                 }
                 _ => {
@@ -356,7 +369,8 @@ mod tests {
                 name: "v".into(),
                 field_type: FieldType::Varint,
             }],
-        ).unwrap();
+        )
+        .unwrap();
         let data = enc.finish();
         let mut dec = Decoder::new(&data).unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
@@ -372,8 +386,10 @@ mod tests {
                 name: "v".into(),
                 field_type: FieldType::Varint,
             }],
-        ).unwrap();
-        enc.write_event_for::<Ev>(&[FieldValue::Varint(42)]).unwrap();
+        )
+        .unwrap();
+        enc.write_event_for::<Ev>(&[FieldValue::Varint(42)])
+            .unwrap();
         let data = enc.finish();
 
         let mut dec = Decoder::new(&data).unwrap();
@@ -406,7 +422,8 @@ mod tests {
                 name: "v".into(),
                 field_type: FieldType::Varint,
             }],
-        ).unwrap();
+        )
+        .unwrap();
         for i in 0..10u64 {
             enc.write_event_for::<Ev>(&[FieldValue::Varint(i)]).unwrap();
         }

@@ -85,7 +85,8 @@ fn encode_events(enc: &mut Encoder, n: u64) {
                     0x5555_5555_2000,
                 ]),
             }),
-        }.unwrap()
+        }
+        .unwrap()
     }
 }
 

@@ -217,7 +217,8 @@ fn interleaved_event_types() {
         enc.write(&TwoStrings {
             a: format!("a{i}"),
             b: format!("b{i}"),
-        }).unwrap();
+        })
+        .unwrap();
     }
     let data = enc.finish();
 
@@ -262,21 +263,24 @@ fn interleaved_string_pools() {
         x: id_a,
         y: id_a,
         z: id_a,
-    }).unwrap();
+    })
+    .unwrap();
 
     let id_b = enc.intern_string("beta").unwrap();
     enc.write(&MultiPool {
         x: id_a,
         y: id_b,
         z: id_a,
-    }).unwrap();
+    })
+    .unwrap();
 
     let id_c = enc.intern_string("gamma").unwrap();
     enc.write(&MultiPool {
         x: id_c,
         y: id_b,
         z: id_a,
-    }).unwrap();
+    })
+    .unwrap();
 
     let data = enc.finish();
 
@@ -326,7 +330,8 @@ fn string_pool_deduplication() {
         x: id1,
         y: id2,
         z: id3,
-    }).unwrap();
+    })
+    .unwrap();
     let data = enc.finish();
 
     let mut dec = Decoder::new(&data).unwrap();
@@ -365,7 +370,8 @@ fn stack_frames_edge_cases() {
         let mut enc = Encoder::new();
         enc.write(&FrameEvent {
             frames: StackFrames(addrs.clone()),
-        }).unwrap();
+        })
+        .unwrap();
         let data = enc.finish();
 
         let mut dec = Decoder::new(&data).unwrap();
@@ -400,7 +406,8 @@ fn f64_special_values_round_trip() {
         b: f64::NEG_INFINITY,
         c: -0.0,
         d: f64::MIN_POSITIVE,
-    }).unwrap();
+    })
+    .unwrap();
     let data = enc.finish();
 
     let mut dec = Decoder::new(&data).unwrap();
@@ -451,7 +458,8 @@ fn unicode_string_round_trip() {
     enc.write(&TwoStrings {
         a: "日本語テスト 🎌".to_string(),
         b: "émojis: 🦀🔥💯 and ñ".to_string(),
-    }).unwrap();
+    })
+    .unwrap();
     let data = enc.finish();
 
     let mut dec = Decoder::new(&data).unwrap();
@@ -513,19 +521,22 @@ fn varint_boundary_values() {
         b: 128,
         c: 16383,
         d: 16384,
-    }).unwrap();
+    })
+    .unwrap();
     enc.write(&Boundaries {
         a: u8::MAX,
         b: u16::MAX,
         c: u32::MAX,
         d: u64::MAX,
-    }).unwrap();
+    })
+    .unwrap();
     enc.write(&Boundaries {
         a: 0,
         b: 0,
         c: 0,
         d: 0,
-    }).unwrap();
+    })
+    .unwrap();
     let data = enc.finish();
 
     let (_, events) = decode_events(&data);
@@ -568,13 +579,15 @@ fn string_map_round_trip() {
             ("region".into(), "us-east-1".into()),
             ("service".into(), "api-gateway".into()),
         ],
-    }).unwrap();
+    })
+    .unwrap();
     // Empty map
     enc.write(&MapEvent { tags: vec![] }).unwrap();
     // Unicode keys/values
     enc.write(&MapEvent {
         tags: vec![("名前".into(), "テスト".into())],
-    }).unwrap();
+    })
+    .unwrap();
     let data = enc.finish();
 
     let (_, events) = decode_events(&data);
@@ -621,18 +634,24 @@ fn many_events_many_types_stress() {
     let n = 500;
     for i in 0..n {
         match i % 3 {
-            0 => enc.write(&TypeA {
-                ts: i as u64 * 1000,
-                val: i as u32,
-            }).unwrap(),
-            1 => enc.write(&TypeB {
-                name: format!("ev{i}"),
-                flag: i % 2 == 0,
-            }).unwrap(),
-            2 => enc.write(&TypeC {
-                x: i as f64 * 0.1,
-                y: -(i as f64),
-            }).unwrap(),
+            0 => enc
+                .write(&TypeA {
+                    ts: i as u64 * 1000,
+                    val: i as u32,
+                })
+                .unwrap(),
+            1 => enc
+                .write(&TypeB {
+                    name: format!("ev{i}"),
+                    flag: i % 2 == 0,
+                })
+                .unwrap(),
+            2 => enc
+                .write(&TypeC {
+                    x: i as f64 * 0.1,
+                    y: -(i as f64),
+                })
+                .unwrap(),
             _ => unreachable!(),
         }
     }
@@ -693,21 +712,41 @@ fn timestamp_backwards_via_derive_write() {
 
     let mut enc = Encoder::new();
     // First event at 20ms — forces a reset (delta from base 0 > 16.7ms)
-    enc.write(&Ev { timestamp_ns: 20_000_000, v: 1 }).unwrap();
+    enc.write(&Ev {
+        timestamp_ns: 20_000_000,
+        v: 1,
+    })
+    .unwrap();
     // Second event goes backwards to 19ms — base is now 20_000_000,
     // saturating_sub gives 0, so without the fix this decodes as 20_000_000
-    enc.write(&Ev { timestamp_ns: 19_000_000, v: 2 }).unwrap();
+    enc.write(&Ev {
+        timestamp_ns: 19_000_000,
+        v: 2,
+    })
+    .unwrap();
     let bytes = enc.finish();
 
     let mut dec = Decoder::new(&bytes).unwrap();
-    let events: Vec<_> = dec.decode_all().into_iter().filter_map(|f| match f {
-        DecodedFrame::Event { timestamp_ns, values, .. } => Some((timestamp_ns, values)),
-        _ => None,
-    }).collect();
+    let events: Vec<_> = dec
+        .decode_all()
+        .into_iter()
+        .filter_map(|f| match f {
+            DecodedFrame::Event {
+                timestamp_ns,
+                values,
+                ..
+            } => Some((timestamp_ns, values)),
+            _ => None,
+        })
+        .collect();
 
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].0, Some(20_000_000));
-    assert_eq!(events[1].0, Some(19_000_000), "backwards timestamp must be preserved via reset, not clamped to base");
+    assert_eq!(
+        events[1].0,
+        Some(19_000_000),
+        "backwards timestamp must be preserved via reset, not clamped to base"
+    );
 }
 
 #[test]
@@ -733,18 +772,38 @@ fn derive_timestamp_round_trip() {
     }
 
     let mut enc = Encoder::new();
-    let timestamps = [0u64, 1_000, 5_000, 20_000_000, 20_001_000, 100_000_000, 50_000_000, 50_001_000];
+    let timestamps = [
+        0u64,
+        1_000,
+        5_000,
+        20_000_000,
+        20_001_000,
+        100_000_000,
+        50_000_000,
+        50_001_000,
+    ];
     for (i, &ts) in timestamps.iter().enumerate() {
-        enc.write(&Ev { timestamp_ns: ts, v: i as u64 }).unwrap();
+        enc.write(&Ev {
+            timestamp_ns: ts,
+            v: i as u64,
+        })
+        .unwrap();
     }
     let bytes = enc.finish();
 
     let mut dec = Decoder::new(&bytes).unwrap();
     let frames = dec.decode_all_ref();
-    let events: Vec<_> = frames.iter().filter_map(|f| match f {
-        DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
-        _ => None,
-    }).collect();
+    let events: Vec<_> = frames
+        .iter()
+        .filter_map(|f| match f {
+            DecodedFrameRef::Event {
+                timestamp_ns,
+                values,
+                ..
+            } => Some((*timestamp_ns, values)),
+            _ => None,
+        })
+        .collect();
 
     assert_eq!(events.len(), timestamps.len());
     for (i, (ts, vals)) in events.iter().enumerate() {
@@ -765,8 +824,18 @@ fn for_each_event_with_derive_types() {
     }
 
     let mut enc = Encoder::new();
-    enc.write(&Ev { timestamp_ns: 1_000, worker_id: 0, name: "a".into() }).unwrap();
-    enc.write(&Ev { timestamp_ns: 2_000, worker_id: 1, name: "b".into() }).unwrap();
+    enc.write(&Ev {
+        timestamp_ns: 1_000,
+        worker_id: 0,
+        name: "a".into(),
+    })
+    .unwrap();
+    enc.write(&Ev {
+        timestamp_ns: 2_000,
+        worker_id: 1,
+        name: "b".into(),
+    })
+    .unwrap();
     let bytes = enc.finish();
 
     let mut dec = Decoder::new(&bytes).unwrap();
@@ -774,7 +843,8 @@ fn for_each_event_with_derive_types() {
     dec.for_each_event(|_type_id, ts, fields| {
         let decoded = Ev::decode(fields).unwrap();
         results.push((ts, decoded.worker_id, decoded.name.to_string()));
-    }).unwrap();
+    })
+    .unwrap();
 
     assert_eq!(results.len(), 2);
     assert_eq!(results[0], (Some(1_000), 0, "a".to_string()));

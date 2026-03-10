@@ -88,9 +88,9 @@ Carries one event whose layout is defined by a previously-registered schema.
 | timestamp_delta_ns | u24 | Nanosecond delta from the current timestamp base (3 bytes LE) |
 | values | ... | Field values, encoded in schema field order |
 
-The `timestamp_delta_ns` is a 24-bit unsigned integer (0–16,777,215) representing nanoseconds elapsed since the most recent Timestamp Reset frame (or 0 if none has been seen). This gives ~16.7 ms of range per reset. The encoder **must** emit a Timestamp Reset frame before any event whose delta would exceed 16,777,215 ns.
+The `timestamp_delta_ns` is a 24-bit unsigned integer (0–16,777,215) representing nanoseconds elapsed since the current timestamp base. This gives ~16.7 ms of range per reset. The encoder **must** emit a Timestamp Reset frame before any event whose delta would exceed 16,777,215 ns or whose timestamp is earlier than the current base.
 
-Each event's absolute timestamp is computed as `base + delta_ns`, where `base` is the value from the most recent Timestamp Reset frame.
+Each event's absolute timestamp is computed as `base + delta_ns`. After decoding a timestamped event, the decoder **must** set `timestamp_base_ns = base + delta_ns` (i.e., advance the base to the event's absolute timestamp). This keeps inter-event deltas small, which is critical for compression.
 
 The decoder **must** know the schema for `type_id` to determine how many fields to read and their types. If the schema is unknown, decoding **must** fail.
 
@@ -134,7 +134,7 @@ Each **SymbolEntry**:
 
 ### Timestamp Reset Frame (`0x05`)
 
-Resets the running timestamp base used for packed event timestamps. The encoder emits this frame when the nanosecond delta between the current base and the next event's timestamp exceeds what a u24 can represent (16,777,215 ns ≈ 16.7 ms).
+Resets the running timestamp base used for packed event timestamps. The encoder emits this frame when the nanosecond delta between the current base and the next event's timestamp exceeds what a u24 can represent (16,777,215 ns ≈ 16.7 ms), or when the next event's timestamp is earlier than the current base.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -170,9 +170,12 @@ Events with timestamps use the packed header encoding:
 2. The encoder maintains a `timestamp_base_ns` (initially 0).
 3. For each event with a timestamp:
    a. Compute `delta_ns = timestamp_ns - timestamp_base_ns`.
-   b. If `delta_ns > 16_777_215` (u24 max), emit a **Timestamp Reset** frame with `timestamp_ns`, set `timestamp_base_ns = timestamp_ns`, and set `delta_ns = 0`.
+   b. If `delta_ns > 16_777_215` (u24 max) or `timestamp_ns < timestamp_base_ns`, emit a **Timestamp Reset** frame with `timestamp_ns`, set `timestamp_base_ns = timestamp_ns`, and set `delta_ns = 0`.
    c. Write the 3-byte `delta_ns` as u24 LE in the event frame header.
-4. Decoding: `timestamp_ns = timestamp_base_ns + delta_ns`.
+   d. Set `timestamp_base_ns = timestamp_ns` (advance the base to this event's timestamp).
+4. Decoding: `timestamp_ns = timestamp_base_ns + delta_ns`, then set `timestamp_base_ns = timestamp_ns`.
+
+The base advances after every timestamped event so that deltas represent inter-event gaps rather than offsets from a distant base. This keeps deltas small and repetitive, which compresses well.
 
 ### StackFrames Encoding
 

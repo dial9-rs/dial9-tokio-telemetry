@@ -29,45 +29,48 @@ struct AllTypes;
 #[test]
 fn js_decodes_all_field_types() {
     let mut enc = Encoder::new();
-    enc.register_schema_for::<AllTypes>("AllTypes",
-    vec![
-        FieldDef {
-            name: "a_u64".into(),
-            field_type: FieldType::Varint,
-        },
-        FieldDef {
-            name: "b_i64".into(),
-            field_type: FieldType::I64,
-        },
-        FieldDef {
-            name: "c_f64".into(),
-            field_type: FieldType::F64,
-        },
-        FieldDef {
-            name: "d_bool".into(),
-            field_type: FieldType::Bool,
-        },
-        FieldDef {
-            name: "e_string".into(),
-            field_type: FieldType::String,
-        },
-        FieldDef {
-            name: "f_bytes".into(),
-            field_type: FieldType::Bytes,
-        },
-        FieldDef {
-            name: "h_pooled".into(),
-            field_type: FieldType::PooledString,
-        },
-        FieldDef {
-            name: "i_stack".into(),
-            field_type: FieldType::StackFrames,
-        },
-        FieldDef {
-            name: "j_varint".into(),
-            field_type: FieldType::Varint,
-        },
-    ],).unwrap();
+    enc.register_schema_for::<AllTypes>(
+        "AllTypes",
+        vec![
+            FieldDef {
+                name: "a_u64".into(),
+                field_type: FieldType::Varint,
+            },
+            FieldDef {
+                name: "b_i64".into(),
+                field_type: FieldType::I64,
+            },
+            FieldDef {
+                name: "c_f64".into(),
+                field_type: FieldType::F64,
+            },
+            FieldDef {
+                name: "d_bool".into(),
+                field_type: FieldType::Bool,
+            },
+            FieldDef {
+                name: "e_string".into(),
+                field_type: FieldType::String,
+            },
+            FieldDef {
+                name: "f_bytes".into(),
+                field_type: FieldType::Bytes,
+            },
+            FieldDef {
+                name: "h_pooled".into(),
+                field_type: FieldType::PooledString,
+            },
+            FieldDef {
+                name: "i_stack".into(),
+                field_type: FieldType::StackFrames,
+            },
+            FieldDef {
+                name: "j_varint".into(),
+                field_type: FieldType::Varint,
+            },
+        ],
+    )
+    .unwrap();
 
     let pool_id = enc.intern_string("hello").unwrap();
     enc.write_event_for::<AllTypes>(&[
@@ -80,13 +83,15 @@ fn js_decodes_all_field_types() {
         FieldValue::PooledString(pool_id.0),
         FieldValue::StackFrames(vec![0x1000, 0x0F00, 0x0E00]),
         FieldValue::Varint(999),
-    ]).unwrap();
+    ])
+    .unwrap();
 
     enc.write_symbol_table(&[SymbolEntry {
         base_addr: 0x1000,
         size: 256,
         symbol_id: pool_id.0,
-    }]).unwrap();
+    }])
+    .unwrap();
 
     let data = enc.finish();
     let json = js_decode(&data);
@@ -133,13 +138,17 @@ struct Tick;
 #[test]
 fn js_decodes_multiple_events() {
     let mut enc = Encoder::new();
-    enc.register_schema_for::<Tick>("Tick",
-    vec![FieldDef {
-        name: "ts".into(),
-        field_type: FieldType::Varint,
-    }],).unwrap();
+    enc.register_schema_for::<Tick>(
+        "Tick",
+        vec![FieldDef {
+            name: "ts".into(),
+            field_type: FieldType::Varint,
+        }],
+    )
+    .unwrap();
     for i in 0..5u64 {
-        enc.write_event_for::<Tick>(&[FieldValue::Varint(i * 1000)]).unwrap();
+        enc.write_event_for::<Tick>(&[FieldValue::Varint(i * 1000)])
+            .unwrap();
     }
     let data = enc.finish();
     let json = js_decode(&data);

@@ -34,7 +34,10 @@ pub trait TraceEvent {
         None
     }
     /// Encode this event's non-timestamp fields into the encoder.
-    fn encode_fields<W: std::io::Write>(&self, enc: &mut types::EventEncoder<'_, W>) -> std::io::Result<()>;
+    fn encode_fields<W: std::io::Write>(
+        &self,
+        enc: &mut types::EventEncoder<'_, W>,
+    ) -> std::io::Result<()>;
     /// Decode from a slice of zero-copy field values (does not include timestamp).
     fn decode<'a>(fields: &[FieldValueRef<'a>]) -> Option<Self::Ref<'a>>;
 

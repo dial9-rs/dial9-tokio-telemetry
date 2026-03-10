@@ -163,6 +163,7 @@ class TraceDecoder {
       const deltaNs = b0 | (b1 << 8) | (b2 << 16);
       this._pos += 3;
       timestampNs = (this._timestampBaseNs + BigInt(deltaNs)).toString();
+      this._timestampBaseNs = this._timestampBaseNs + BigInt(deltaNs);
     }
 
     const values = {};

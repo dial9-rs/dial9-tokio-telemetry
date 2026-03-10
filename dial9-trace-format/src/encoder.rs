@@ -138,7 +138,10 @@ impl<W: Write> Encoder<W> {
     /// For schemas with `has_timestamp`, pass the timestamp as the first element
     /// of `values` as `FieldValue::Varint(ns)` — it will be extracted and
     /// encoded in the header.
-    pub fn write_event_for<T: 'static>(&mut self, values: &[crate::types::FieldValue]) -> io::Result<()> {
+    pub fn write_event_for<T: 'static>(
+        &mut self,
+        values: &[crate::types::FieldValue],
+    ) -> io::Result<()> {
         use crate::types::FieldValue;
 
         let rust_id = TypeId::of::<T>();
@@ -240,8 +243,10 @@ mod tests {
                 name: "v".into(),
                 field_type: FieldType::Varint,
             }],
-        ).unwrap();
-        enc.write_event_for::<TestEvent>(&[crate::types::FieldValue::Varint(42)]).unwrap();
+        )
+        .unwrap();
+        enc.write_event_for::<TestEvent>(&[crate::types::FieldValue::Varint(42)])
+            .unwrap();
         let data = enc.finish();
         assert!(data.len() > 5);
     }
@@ -272,7 +277,8 @@ mod tests {
             base_addr: 0x1000,
             size: 64,
             symbol_id: 0,
-        }]).unwrap();
+        }])
+        .unwrap();
         let data = enc.finish();
         assert!(data.len() > 5);
     }
@@ -291,17 +297,22 @@ mod tests {
                 name: "v".into(),
                 field_type: FieldType::Varint,
             }],
-        ).unwrap();
+        )
+        .unwrap();
 
         let ts1 = 100_000u64;
         let ts2 = 50_000u64; // backwards — but base is still 0, so no reset needed
         let ts3 = 200_000_000u64; // big jump — triggers reset
-        enc.write_event_for::<TS>(&[FieldValue::Varint(ts1), FieldValue::Varint(1)]).unwrap();
-        enc.write_event_for::<TS>(&[FieldValue::Varint(ts2), FieldValue::Varint(2)]).unwrap();
-        enc.write_event_for::<TS>(&[FieldValue::Varint(ts3), FieldValue::Varint(3)]).unwrap();
+        enc.write_event_for::<TS>(&[FieldValue::Varint(ts1), FieldValue::Varint(1)])
+            .unwrap();
+        enc.write_event_for::<TS>(&[FieldValue::Varint(ts2), FieldValue::Varint(2)])
+            .unwrap();
+        enc.write_event_for::<TS>(&[FieldValue::Varint(ts3), FieldValue::Varint(3)])
+            .unwrap();
         // Now go backwards from ts3's reset base
         let ts4 = 100_000_000u64;
-        enc.write_event_for::<TS>(&[FieldValue::Varint(ts4), FieldValue::Varint(4)]).unwrap();
+        enc.write_event_for::<TS>(&[FieldValue::Varint(ts4), FieldValue::Varint(4)])
+            .unwrap();
 
         let bytes = enc.finish();
         let mut dec = Decoder::new(&bytes).unwrap();
@@ -325,7 +336,11 @@ mod tests {
         assert_eq!(events[1].1, vec![FieldValue::Varint(2)]);
         assert_eq!(events[2].0, Some(ts3));
         assert_eq!(events[2].1, vec![FieldValue::Varint(3)]);
-        assert_eq!(events[3].0, Some(ts4), "backwards from reset base must be preserved");
+        assert_eq!(
+            events[3].0,
+            Some(ts4),
+            "backwards from reset base must be preserved"
+        );
         assert_eq!(events[3].1, vec![FieldValue::Varint(4)]);
     }
 
@@ -337,5 +352,60 @@ mod tests {
         // Should at least have the header
         assert!(buf.len() >= 5);
         assert_eq!(&buf[..5], &[0x54, 0x52, 0x43, 0x00, 1]);
+    }
+
+    /// Verify that the encoder advances the timestamp base after each event,
+    /// producing inter-event deltas rather than base-relative deltas.
+    /// This is critical for compression: without it, backwards timestamps
+    /// trigger reset frames that destroy gzip patterns.
+    #[test]
+    fn timestamp_base_advances_per_event() {
+        use crate::decoder::{DecodedFrame, Decoder};
+        use crate::types::FieldValue;
+
+        struct Ev;
+        let mut enc = Encoder::new();
+        enc.register_schema_for_with_timestamp::<Ev>(
+            "Ev",
+            true,
+            vec![FieldDef {
+                name: "v".into(),
+                field_type: FieldType::Varint,
+            }],
+        )
+        .unwrap();
+
+        // Two events 12ms apart. Both fit in u24 from base=0.
+        // But if the base advances after event 1, event 2's delta is only 12ms.
+        // If the base doesn't advance, event 2's delta is 24ms > 16.7ms → unnecessary reset.
+        let ts1 = 12_000_000u64; // 12ms
+        let ts2 = 24_000_000u64; // 24ms (12ms after ts1)
+        enc.write_event_for::<Ev>(&[FieldValue::Varint(ts1), FieldValue::Varint(1)])
+            .unwrap();
+        enc.write_event_for::<Ev>(&[FieldValue::Varint(ts2), FieldValue::Varint(2)])
+            .unwrap();
+
+        let bytes = enc.finish();
+
+        // Count TimestampReset frames (tag 0x05) in the raw bytes.
+        // With base-advancing: 0 resets (both deltas fit in u24).
+        // Without base-advancing: 1 reset (ts2's delta from base=0 is 24ms > 16.7ms).
+        let reset_count = bytes.iter().filter(|&&b| b == 0x05).count();
+        assert_eq!(
+            reset_count, 0,
+            "base should advance per event, avoiding unnecessary resets"
+        );
+
+        // Also verify timestamps decode correctly
+        let mut dec = Decoder::new(&bytes).unwrap();
+        let events: Vec<_> = dec
+            .decode_all()
+            .into_iter()
+            .filter_map(|f| match f {
+                DecodedFrame::Event { timestamp_ns, .. } => timestamp_ns,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events, vec![ts1, ts2]);
     }
 }
