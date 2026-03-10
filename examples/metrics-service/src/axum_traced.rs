@@ -8,11 +8,7 @@ use axum_core::{body::Body, extract::Request, response::Response};
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 use futures_util::FutureExt as _;
 use hyper::body::Incoming;
-use hyper_util::{
-    rt::TokioIo,
-    server::conn::auto::Builder,
-    service::TowerToHyperService,
-};
+use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
 use tokio::sync::watch;
 use tower::ServiceExt as _;
 use tower_service::Service;
@@ -148,7 +144,9 @@ where
                 let traced_handle = handle.clone();
 
                 handle.spawn(async move {
-                    let builder = Builder::new(TracedExecutor { handle: traced_handle });
+                    let builder = Builder::new(TracedExecutor {
+                        handle: traced_handle,
+                    });
                     let conn = builder.serve_connection_with_upgrades(io, hyper_service);
                     let mut conn = pin!(conn);
                     let mut signal_closed = pin!(signal_tx.closed().fuse());
