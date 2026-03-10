@@ -8,14 +8,27 @@ use axum_core::{body::Body, extract::Request, response::Response};
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 use futures_util::FutureExt as _;
 use hyper::body::Incoming;
-use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
-    server::conn::auto::Builder,
-    service::TowerToHyperService,
-};
+use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
 use tokio::sync::watch;
 use tower::ServiceExt as _;
 use tower_service::Service;
+
+/// A hyper executor that routes spawns through dial9's TelemetryHandle
+/// so HTTP/2 internal tasks get wake event tracking.
+#[derive(Clone)]
+struct TracedExecutor {
+    handle: TelemetryHandle,
+}
+
+impl<Fut> hyper::rt::Executor<Fut> for TracedExecutor
+where
+    Fut: Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    fn execute(&self, fut: Fut) {
+        self.handle.spawn(fut);
+    }
+}
 
 /// Our own `IncomingStream`, mirroring `axum::serve::IncomingStream`.
 /// We need this because axum's version has private fields and can only be
@@ -128,8 +141,12 @@ where
                 let signal_tx = signal_tx.clone();
                 let close_rx = close_rx.clone();
 
+                let traced_handle = handle.clone();
+
                 handle.spawn(async move {
-                    let builder = Builder::new(TokioExecutor::new());
+                    let builder = Builder::new(TracedExecutor {
+                        handle: traced_handle,
+                    });
                     let conn = builder.serve_connection_with_upgrades(io, hyper_service);
                     let mut conn = pin!(conn);
                     let mut signal_closed = pin!(signal_tx.closed().fuse());
