@@ -62,6 +62,15 @@ struct Args {
 
     #[arg(long, help = "Demo mode: shorter run with smaller trace (<2MB)")]
     demo: bool,
+
+    #[arg(
+        long,
+        help = "S3 bucket for trace upload (enables background S3 uploader)"
+    )]
+    s3_bucket: Option<String>,
+
+    #[arg(long, help = "AWS region for S3 uploads (defaults to SDK default)")]
+    s3_region: Option<String>,
 }
 
 #[derive(Clone)]
@@ -74,6 +83,13 @@ pub struct AppState {
 }
 
 fn main() -> std::io::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,dial9_worker=debug".parse().unwrap()),
+        )
+        .init();
+
     let mut args = Args::parse();
 
     if args.demo {
@@ -101,6 +117,31 @@ fn main() -> std::io::Result<()> {
             .with_sched_events(SchedEventConfig {
                 include_kernel: true,
             });
+    }
+    if let Some(bucket) = &args.s3_bucket {
+        use dial9_tokio_telemetry::background_task::BackgroundTaskConfig;
+        use dial9_tokio_telemetry::background_task::s3::S3Config;
+
+        let s3_config = S3Config::builder()
+            .bucket(bucket)
+            .prefix("traces")
+            .service_name("metrics-service")
+            .instance_path(
+                hostname::get()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+            )
+            .boot_id(uuid::Uuid::new_v4().to_string())
+            .maybe_region(args.s3_region.as_ref())
+            .build();
+
+        let uploader_config = BackgroundTaskConfig::builder()
+            .trace_path(&args.trace_path)
+            .s3(s3_config)
+            .build();
+
+        traced_builder = traced_builder.with_s3_uploader(uploader_config);
     }
     let (runtime, guard) = traced_builder.build(builder, Box::new(writer))?;
     guard.enable();
@@ -180,6 +221,8 @@ fn main() -> std::io::Result<()> {
             .with_graceful_shutdown(async move { shutdown.cancelled().await })
             .await
             .unwrap();
+        let shutdown = guard.graceful_shutdown(Duration::from_secs(5)).await;
+        tracing::info!("dial9 shutdown: {shutdown:?}");
     });
 
     Ok(())

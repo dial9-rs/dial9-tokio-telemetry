@@ -153,7 +153,10 @@ pub enum TelemetryEvent {
     },
     /// Key-value metadata written at the start of each segment.
     /// Makes trace files self-describing (host, region, service, boot_id, etc.).
-    SegmentMetadata { entries: Vec<(String, String)> },
+    SegmentMetadata {
+        timestamp_nanos: u64,
+        entries: Vec<(String, String)>,
+    },
 }
 
 impl TelemetryEvent {
@@ -191,8 +194,10 @@ impl TelemetryEvent {
             } => Some(*timestamp_nanos),
             TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::CallframeDef { .. }
-            | TelemetryEvent::ThreadNameDef { .. }
-            | TelemetryEvent::SegmentMetadata { .. } => None,
+            | TelemetryEvent::ThreadNameDef { .. } => None,
+            TelemetryEvent::SegmentMetadata {
+                timestamp_nanos, ..
+            } => Some(*timestamp_nanos),
         }
     }
 

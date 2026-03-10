@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+pub mod background_task;
 pub mod telemetry;
 pub mod traced;
 
