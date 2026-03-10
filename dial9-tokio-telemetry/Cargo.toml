@@ -24,9 +24,9 @@ dial9-perf-self-profile = { workspace = true, optional = true }
 tracing = "0.1.44"
 hostname = "0.4"
 bon = "3"
-aws-sdk-s3-transfer-manager = { version = "0.1.3", optional = true }
-aws-sdk-s3 = { version = "1", optional = true }
-aws-config = { version = "1", optional = true }
+aws-sdk-s3-transfer-manager = { version = "0.1.3", optional = true, default-features = false }
+aws-sdk-s3 = { version = "1", default-features = false, optional = true, features = ["behavior-version-latest", "sigv4a", "rt-tokio", "default-https-client"] }
+aws-config = { version = "1", optional = true, default-features = false }
 flate2 = { version = "1", optional = true }
 time = { version = "0.3", features = ["formatting", "macros"], optional = true }
 
