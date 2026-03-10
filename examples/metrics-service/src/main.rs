@@ -79,8 +79,8 @@ fn main() -> std::io::Result<()> {
     if args.demo {
         args.run_duration = 4;
         args.worker_threads = 2;
-        args.trace_max_file_size = 2_000_000;
-        args.trace_max_total_size = 2_000_000;
+        args.trace_max_file_size = 5_000_000;
+        args.trace_max_total_size = 5_000_000;
     }
 
     let writer = RotatingWriter::new(

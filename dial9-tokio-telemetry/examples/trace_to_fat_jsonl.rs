@@ -175,7 +175,9 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
         }),
         TelemetryEvent::SpawnLocationDef { .. }
         | TelemetryEvent::TaskSpawn { .. }
+        | TelemetryEvent::TaskTerminate { .. }
         | TelemetryEvent::CallframeDef { .. }
-        | TelemetryEvent::ThreadNameDef { .. } => None,
+        | TelemetryEvent::ThreadNameDef { .. }
+        | TelemetryEvent::SegmentMetadata { .. } => None,
     }
 }

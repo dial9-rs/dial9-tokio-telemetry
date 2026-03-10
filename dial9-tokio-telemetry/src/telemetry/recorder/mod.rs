@@ -10,6 +10,7 @@ use event_writer::EventWriter;
 #[cfg(feature = "cpu-profiling")]
 use cpu_flush_state::CpuFlushState;
 
+use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::writer::{TraceWriter, WriteAtomicResult};
@@ -24,10 +25,10 @@ pub struct TelemetryRecorder {
 }
 
 impl TelemetryRecorder {
-    pub fn new(writer: Box<dyn TraceWriter>) -> Self {
+    pub fn new(writer: impl TraceWriter + 'static) -> Self {
         Self {
             shared: Arc::new(SharedState::new(Instant::now())),
-            event_writer: EventWriter::new(writer),
+            event_writer: EventWriter::new(Box::new(writer)),
         }
     }
 
@@ -93,7 +94,19 @@ impl TelemetryRecorder {
             builder.on_task_spawn(move |meta| {
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
-                s5.record_event(RawEvent::TaskSpawn { task_id, location });
+                s5.record_event(RawEvent::TaskSpawn {
+                    timestamp_nanos: s5.start_time.elapsed().as_nanos() as u64,
+                    task_id,
+                    location,
+                });
+            });
+            let s6 = shared.clone();
+            builder.on_task_terminate(move |meta| {
+                let task_id = TaskId::from(meta.id());
+                s6.record_event(RawEvent::TaskTerminate {
+                    timestamp_nanos: s6.start_time.elapsed().as_nanos() as u64,
+                    task_id,
+                });
             });
         }
 
@@ -103,6 +116,21 @@ impl TelemetryRecorder {
             let s_stop = shared.clone();
             builder
                 .on_thread_start(move || {
+                    // Register as Blocking initially; worker threads will
+                    // overwrite this to Worker(i) in resolve_worker_id.
+                    // Note: there is a brief window between thread start and the
+                    // first poll event where worker threads appear as Blocking.
+                    // This is benign — resolve_worker_id corrects it on first poll.
+                    // We use insert (not or_insert) so that a recycled OS tid always
+                    // starts fresh rather than inheriting a stale Worker entry.
+                    {
+                        let tid = crate::telemetry::events::current_tid();
+                        s_start
+                            .thread_roles
+                            .lock()
+                            .unwrap()
+                            .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
+                    }
                     if let Ok(mut prof) = s_start.sched_profiler.lock()
                         && let Some(ref mut p) = *prof
                     {
@@ -110,6 +138,10 @@ impl TelemetryRecorder {
                     }
                 })
                 .on_thread_stop(move || {
+                    {
+                        let tid = crate::telemetry::events::current_tid();
+                        s_stop.thread_roles.lock().unwrap().remove(&tid);
+                    }
                     if let Ok(mut prof) = s_stop.sched_profiler.lock()
                         && let Some(ref mut p) = *prof
                     {
@@ -229,6 +261,15 @@ impl Drop for TelemetryGuard {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+        // Flush the current thread's buffer (e.g. main thread in block_on)
+        // which may contain TaskSpawn events that were never flushed.
+        BUFFER.with(|buf| {
+            let mut buf = buf.borrow_mut();
+            let events = buf.flush();
+            if !events.is_empty() {
+                self.handle.shared.collector.accept_flush(events);
+            }
+        });
         self.handle.recorder.lock().unwrap().flush();
     }
 }
@@ -273,10 +314,13 @@ impl TracedRuntimeBuilder {
         self
     }
 
+    /// Build the traced runtime. Recording starts **disabled** — call
+    /// [`TelemetryGuard::enable`] to begin, or use
+    /// [`build_and_start`](Self::build_and_start).
     pub fn build(
         self,
         mut builder: tokio::runtime::Builder,
-        writer: Box<dyn TraceWriter>,
+        writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         let start_instant = Instant::now();
         #[cfg(feature = "cpu-profiling")]
@@ -294,7 +338,7 @@ impl TracedRuntimeBuilder {
 
         let recorder = TelemetryRecorder::install(
             &mut builder,
-            writer,
+            Box::new(writer),
             self.task_tracking_enabled,
             start_instant,
         );
@@ -368,10 +412,14 @@ impl TracedRuntimeBuilder {
         Ok((runtime, guard))
     }
 
+    /// Build the traced runtime and immediately enable recording.
+    ///
+    /// Equivalent to calling [`build`](Self::build) followed by
+    /// [`TelemetryGuard::enable`].
     pub fn build_and_start(
         self,
         builder: tokio::runtime::Builder,
-        writer: Box<dyn TraceWriter>,
+        writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         let (runtime, guard) = self.build(builder, writer)?;
         guard.enable();
@@ -395,9 +443,12 @@ impl TracedRuntime {
         }
     }
 
+    /// Build the traced runtime. Recording starts **disabled** — call
+    /// [`TelemetryGuard::enable`] to begin, or use
+    /// [`TracedRuntime::build_and_start`].
     pub fn build(
         builder: tokio::runtime::Builder,
-        writer: Box<dyn TraceWriter>,
+        writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
             task_tracking_enabled: false,
@@ -411,12 +462,16 @@ impl TracedRuntime {
         .build(builder, writer)
     }
 
+    /// Build the traced runtime and immediately enable recording.
+    ///
+    /// Equivalent to calling [`build`](Self::build) followed by
+    /// [`TelemetryGuard::enable`].
     pub fn build_and_start(
         builder: tokio::runtime::Builder,
-        writer: Box<dyn TraceWriter>,
+        writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
-            task_tracking_enabled: true,
+            task_tracking_enabled: false,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
             #[cfg(feature = "cpu-profiling")]
@@ -438,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
-        let _recorder = TelemetryRecorder::new(Box::new(NullWriter));
+        let _recorder = TelemetryRecorder::new(NullWriter);
     }
 
     #[test]
@@ -500,6 +555,7 @@ mod tests {
         for (i, loc) in locations.iter().enumerate() {
             let task_id = crate::telemetry::task_metadata::TaskId::from_u32(i as u32);
             ew.write_raw_event(RawEvent::TaskSpawn {
+                timestamp_nanos: (i as u64 + 1) * 1000,
                 task_id,
                 location: loc,
             })

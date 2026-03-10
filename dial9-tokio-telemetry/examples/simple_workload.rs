@@ -1,4 +1,4 @@
-use dial9_tokio_telemetry::telemetry::{SimpleBinaryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::time::Duration;
 
 async fn cpu_work(iterations: u64) -> u64 {
@@ -29,7 +29,7 @@ fn main() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let writer = Box::new(SimpleBinaryWriter::new("workload_trace.bin").unwrap());
+    let writer = RotatingWriter::single_file("workload_trace.bin").unwrap();
     let (runtime, _guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .build_and_start(builder, writer)

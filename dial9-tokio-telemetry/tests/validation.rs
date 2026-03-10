@@ -158,12 +158,14 @@ pub fn validate_trace_matches_metrics(
         park_mismatches
     );
 
-    // 6. Park/unpark balance: unparks == parks or parks - 1
+    // 6. Park/unpark balance: unparks ≈ parks (within 1)
+    // With flush-on-drop, we may capture an extra unpark at shutdown.
     let park_unpark_violations: Vec<_> = active_workers
         .iter()
         .filter_map(|&w| {
             analysis.worker_stats.get(&w).and_then(|s| {
-                if s.unpark_count == s.park_count || s.unpark_count + 1 == s.park_count {
+                let diff = (s.park_count as i64 - s.unpark_count as i64).abs();
+                if diff <= 1 {
                     None
                 } else {
                     Some((w, s.park_count, s.unpark_count))

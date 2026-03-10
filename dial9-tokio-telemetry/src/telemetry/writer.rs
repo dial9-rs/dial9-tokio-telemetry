@@ -38,33 +38,21 @@ pub trait TraceWriter: Send {
     }
 }
 
-pub struct SimpleBinaryWriter {
-    writer: BufWriter<File>,
-}
-
-impl SimpleBinaryWriter {
-    pub fn new(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
-        format::write_header(&mut writer)?;
-        Ok(Self { writer })
-    }
-}
-
-impl TraceWriter for SimpleBinaryWriter {
+impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     fn write_event(&mut self, event: &TelemetryEvent) -> std::io::Result<()> {
-        format::write_event(&mut self.writer, event)
+        (**self).write_event(event)
     }
-
     fn write_batch(&mut self, events: &[TelemetryEvent]) -> std::io::Result<()> {
-        for event in events {
-            format::write_event(&mut self.writer, event)?;
-        }
-        Ok(())
+        (**self).write_batch(events)
     }
-
     fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
+        (**self).flush()
+    }
+    fn take_rotated(&mut self) -> bool {
+        (**self).take_rotated()
+    }
+    fn write_atomic(&mut self, events: &[TelemetryEvent]) -> std::io::Result<WriteAtomicResult> {
+        (**self).write_atomic(events)
     }
 }
 
@@ -130,6 +118,44 @@ impl RotatingWriter {
             base_path,
             max_file_size,
             max_total_size,
+            files,
+            total_size: header_size,
+            current_writer: writer,
+            current_size: header_size,
+            next_index: 1,
+            stopped: false,
+            rotated: false,
+        })
+    }
+
+    /// Create a writer that writes to a single file with no rotation or eviction.
+    /// The file is created at exactly the given path.
+    ///
+    /// This must not be used with rotation — the `u64::MAX` size limits prevent
+    /// rotation in practice, but if it were triggered, `file_path()` would produce
+    /// indexed names (e.g. `trace.0.bin`) derived from the stem, which would be
+    /// surprising for a "single file" writer.
+    ///
+    /// Note: this intentionally duplicates setup from `new()` rather than delegating
+    /// to it, because `new()` writes to an indexed path (`base.0.bin`) while
+    /// `single_file()` writes to the exact path given.
+    pub fn single_file(path: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let path = path.into();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = File::create(&path)?;
+        let mut writer = BufWriter::new(file);
+        format::write_header(&mut writer)?;
+        let header_size = format::HEADER_SIZE as u64;
+
+        let mut files = VecDeque::new();
+        files.push_back((path.clone(), header_size));
+
+        Ok(Self {
+            base_path: path,
+            max_file_size: u64::MAX,
+            max_total_size: u64::MAX,
             files,
             total_size: header_size,
             current_writer: writer,
@@ -315,7 +341,7 @@ mod tests {
     fn test_writer_creation() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test_trace_v2.bin");
-        let writer = SimpleBinaryWriter::new(&path);
+        let writer = RotatingWriter::single_file(&path);
         assert!(writer.is_ok());
     }
 
@@ -323,7 +349,7 @@ mod tests {
     fn test_write_event() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test_event_v2.bin");
-        let mut writer = SimpleBinaryWriter::new(&path).unwrap();
+        let mut writer = RotatingWriter::single_file(&path).unwrap();
 
         let event = park_event();
         assert!(writer.write_event(&event).is_ok());
@@ -338,7 +364,7 @@ mod tests {
     fn test_write_batch_sizes() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test_batch_v2.bin");
-        let mut writer = SimpleBinaryWriter::new(&path).unwrap();
+        let mut writer = RotatingWriter::single_file(&path).unwrap();
 
         let events = vec![
             TelemetryEvent::PollStart {
@@ -367,7 +393,7 @@ mod tests {
     fn test_binary_format_header() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test_format_v2.bin");
-        let writer = SimpleBinaryWriter::new(&path).unwrap();
+        let writer = RotatingWriter::single_file(&path).unwrap();
         drop(writer);
 
         let mut file = std::fs::File::open(&path).unwrap();

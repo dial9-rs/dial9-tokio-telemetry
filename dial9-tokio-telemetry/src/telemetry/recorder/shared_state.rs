@@ -1,11 +1,14 @@
 use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::collector::CentralCollector;
+#[cfg(feature = "cpu-profiling")]
+use crate::telemetry::events::ThreadRole;
 use crate::telemetry::events::{RawEvent, SchedStat, UNKNOWN_WORKER};
 use crate::telemetry::task_metadata::TaskId;
 use arc_swap::ArcSwap;
 use std::cell::Cell;
 #[cfg(feature = "cpu-profiling")]
 use std::collections::HashMap;
+use std::sync::Arc;
 #[cfg(feature = "cpu-profiling")]
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,7 +55,11 @@ pub(super) fn resolve_worker_id(
                             if !emitted.get() {
                                 emitted.set(true);
                                 let os_tid = crate::telemetry::events::current_tid();
-                                shared.worker_tids.lock().unwrap().insert(os_tid, i);
+                                shared
+                                    .thread_roles
+                                    .lock()
+                                    .unwrap()
+                                    .insert(os_tid, ThreadRole::Worker(i));
                             }
                         });
                     }
@@ -76,11 +83,14 @@ pub(crate) fn current_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> u8
 /// Shared state accessed lock-free by callbacks on the hot path.
 pub(crate) struct SharedState {
     pub(crate) enabled: AtomicBool,
-    pub(crate) collector: CentralCollector,
+    pub(crate) collector: Arc<CentralCollector>,
     pub(crate) start_time: Instant,
     pub(crate) metrics: ArcSwap<Option<RuntimeMetrics>>,
+    /// Maps OS tid → thread role so that CPU samples returned from perf can be
+    /// attributed to the correct worker or blocking-pool bucket at flush time.
+    /// Entries are inserted in `on_thread_start` and removed in `on_thread_stop`.
     #[cfg(feature = "cpu-profiling")]
-    pub(crate) worker_tids: Mutex<HashMap<u32, usize>>,
+    pub(crate) thread_roles: Mutex<HashMap<u32, ThreadRole>>,
     #[cfg(feature = "cpu-profiling")]
     pub(crate) sched_profiler: Mutex<Option<crate::telemetry::cpu_profile::SchedProfiler>>,
 }
@@ -89,11 +99,11 @@ impl SharedState {
     pub(super) fn new(start_time: Instant) -> Self {
         Self {
             enabled: AtomicBool::new(false),
-            collector: CentralCollector::new(),
+            collector: Arc::new(CentralCollector::new()),
             start_time,
             metrics: ArcSwap::from_pointee(None),
             #[cfg(feature = "cpu-profiling")]
-            worker_tids: Mutex::new(HashMap::new()),
+            thread_roles: Mutex::new(HashMap::new()),
             #[cfg(feature = "cpu-profiling")]
             sched_profiler: Mutex::new(None),
         }
@@ -132,6 +142,7 @@ impl SharedState {
         }
         BUFFER.with(|buf| {
             let mut buf = buf.borrow_mut();
+            buf.set_collector(&self.collector);
             buf.record_event(event);
             let should_flush = buf.should_flush() || matches!(event, RawEvent::WorkerPark { .. });
             if should_flush {

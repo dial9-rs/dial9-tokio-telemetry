@@ -2,7 +2,27 @@ use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use serde::Serialize;
 
 /// Sentinel worker_id for events from non-worker threads (encoded as u8 on the wire).
+///
+/// Collides with a real worker index if the runtime has 255 worker threads.
+/// In practice this only affects very large machines; a future wire-format change
+/// (e.g. u16 worker index) would remove the limitation.
 pub const UNKNOWN_WORKER: usize = 255;
+
+/// Sentinel worker_id for events from tokio's blocking thread pool (encoded as u8 on the wire).
+///
+/// Same collision caveat as [`UNKNOWN_WORKER`]: collides with worker index 254 on machines
+/// with ≥254 runtime worker threads.
+pub const BLOCKING_WORKER: usize = 254;
+
+/// Role of a thread known to the telemetry system.
+#[cfg(feature = "cpu-profiling")]
+#[derive(Debug, Clone, Copy)]
+pub enum ThreadRole {
+    /// A tokio worker thread with the given index.
+    Worker(usize),
+    /// A thread in tokio's blocking pool.
+    Blocking,
+}
 
 /// What triggered a [`TelemetryEvent::CpuSample`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -86,8 +106,15 @@ pub enum TelemetryEvent {
         location: String,
     },
     TaskSpawn {
+        #[serde(rename = "timestamp_ns")]
+        timestamp_nanos: u64,
         task_id: TaskId,
         spawn_loc_id: SpawnLocationId,
+    },
+    TaskTerminate {
+        #[serde(rename = "timestamp_ns")]
+        timestamp_nanos: u64,
+        task_id: TaskId,
     },
     /// A CPU stack trace sample from perf_event, attributed to a worker thread.
     CpuSample {
@@ -124,12 +151,15 @@ pub enum TelemetryEvent {
         woken_task_id: TaskId,
         target_worker: u8,
     },
+    /// Key-value metadata written at the start of each segment.
+    /// Makes trace files self-describing (host, region, service, boot_id, etc.).
+    SegmentMetadata { entries: Vec<(String, String)> },
 }
 
 impl TelemetryEvent {
     /// Returns the timestamp in nanoseconds, if this event type carries one.
     ///
-    /// `SpawnLocationDef` and `TaskSpawn` are metadata records without timestamps.
+    /// `SpawnLocationDef` and other definition records don't have timestamps.
     pub fn timestamp_nanos(&self) -> Option<u64> {
         match self {
             TelemetryEvent::PollStart {
@@ -152,11 +182,17 @@ impl TelemetryEvent {
             }
             | TelemetryEvent::WakeEvent {
                 timestamp_nanos, ..
+            }
+            | TelemetryEvent::TaskSpawn {
+                timestamp_nanos, ..
+            }
+            | TelemetryEvent::TaskTerminate {
+                timestamp_nanos, ..
             } => Some(*timestamp_nanos),
             TelemetryEvent::SpawnLocationDef { .. }
-            | TelemetryEvent::TaskSpawn { .. }
             | TelemetryEvent::CallframeDef { .. }
-            | TelemetryEvent::ThreadNameDef { .. } => None,
+            | TelemetryEvent::ThreadNameDef { .. }
+            | TelemetryEvent::SegmentMetadata { .. } => None,
         }
     }
 
@@ -171,14 +207,16 @@ impl TelemetryEvent {
             TelemetryEvent::QueueSample { .. }
             | TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
+            | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. }
-            | TelemetryEvent::WakeEvent { .. } => None,
+            | TelemetryEvent::WakeEvent { .. }
+            | TelemetryEvent::SegmentMetadata { .. } => None,
         }
     }
 
     /// Returns true if this is a runtime event (has a timestamp), as opposed to
-    /// a metadata record (SpawnLocationDef, TaskSpawn).
+    /// a metadata record (SpawnLocationDef).
     pub fn is_runtime_event(&self) -> bool {
         self.timestamp_nanos().is_some()
     }
@@ -218,8 +256,13 @@ pub enum RawEvent {
         global_queue_depth: usize,
     },
     TaskSpawn {
+        timestamp_nanos: u64,
         task_id: crate::telemetry::task_metadata::TaskId,
         location: &'static std::panic::Location<'static>,
+    },
+    TaskTerminate {
+        timestamp_nanos: u64,
+        task_id: crate::telemetry::task_metadata::TaskId,
     },
     WakeEvent {
         timestamp_nanos: u64,
@@ -381,10 +424,11 @@ mod tests {
         assert_eq!(spawn_def.timestamp_nanos(), None);
 
         let task_spawn = TelemetryEvent::TaskSpawn {
+            timestamp_nanos: 5_000_000,
             task_id: TaskId::from_u32(1),
             spawn_loc_id: SpawnLocationId::from_u16(1),
         };
-        assert_eq!(task_spawn.timestamp_nanos(), None);
+        assert_eq!(task_spawn.timestamp_nanos(), Some(5_000_000));
     }
 
     #[test]
@@ -429,10 +473,11 @@ mod tests {
         assert!(!spawn_def.is_runtime_event());
 
         let task_spawn = TelemetryEvent::TaskSpawn {
+            timestamp_nanos: 5_000_000,
             task_id: TaskId::from_u32(1),
             spawn_loc_id: SpawnLocationId::from_u16(1),
         };
-        assert!(!task_spawn.is_runtime_event());
+        assert!(task_spawn.is_runtime_event());
     }
 
     #[test]

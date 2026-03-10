@@ -1,4 +1,4 @@
-use dial9_tokio_telemetry::telemetry::{SimpleBinaryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -83,7 +83,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(30u64);
 
-    let writer = Box::new(SimpleBinaryWriter::new("long_trace.bin").unwrap());
+    let writer = RotatingWriter::single_file("long_trace.bin").unwrap();
     let (runtime, _guard) = TracedRuntime::builder()
         .build_and_start(builder, writer)
         .unwrap();

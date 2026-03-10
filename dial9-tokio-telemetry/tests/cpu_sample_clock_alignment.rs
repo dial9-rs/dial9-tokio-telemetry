@@ -33,7 +33,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
             frequency_hz: 999,
             ..Default::default()
         })
-        .build_and_start(builder, Box::new(writer))
+        .build_and_start(builder, writer)
         .unwrap();
 
     // Use the guard's start_time so we're in the same clock domain as trace timestamps.
@@ -259,7 +259,9 @@ fn burn_cpu(duration: std::time::Duration) {
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn thread_name_attribution_for_external_and_blocking_threads() {
-    use dial9_tokio_telemetry::telemetry::events::{TelemetryEvent, UNKNOWN_WORKER};
+    use dial9_tokio_telemetry::telemetry::events::{
+        BLOCKING_WORKER, TelemetryEvent, UNKNOWN_WORKER,
+    };
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
     use std::time::Duration;
 
@@ -273,7 +275,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
             frequency_hz: 999,
             ..Default::default()
         })
-        .build_and_start(builder, Box::new(writer))
+        .build_and_start(builder, writer)
         .unwrap();
 
     // ── std::thread with a known name — exits before flush ───────────────
@@ -358,7 +360,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
 
     let blocking_samples: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::CpuSample { tid, worker_id, .. } if *tid == blocking_tid && *worker_id == UNKNOWN_WORKER))
+        .filter(|e| matches!(e, TelemetryEvent::CpuSample { tid, worker_id, .. } if *tid == blocking_tid && *worker_id == BLOCKING_WORKER))
         .collect();
     eprintln!(
         "CPU samples for blocking thread (tid={blocking_tid}): {}",

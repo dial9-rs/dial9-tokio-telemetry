@@ -167,7 +167,7 @@ Simple wrapper combining event type with metrics snapshot.
 - `Send` bound for thread safety
 - Batch write method for efficiency
 - Explicit flush control
-- Implementations: `SimpleBinaryWriter`, `RotatingWriter`, `NullWriter` (for benchmarking)
+- Implementations: `RotatingWriter`, `NullWriter` (for benchmarking)
 
 **Binary Format (v5):**
 Variable-size records optimize for the common case:
@@ -238,7 +238,7 @@ Variable-size records optimize for the common case:
 **Usage Pattern:**
 ```rust
 let writer = RotatingWriter::new("trace.bin", 1_MB, 5_MB)?;
-let (runtime, guard) = TracedRuntime::build(builder, Box::new(writer))?;
+let (runtime, guard) = TracedRuntime::build(builder, writer)?;
 
 // Use runtime normally
 runtime.block_on(async { /* ... */ });
@@ -387,7 +387,7 @@ src/
     ├── events.rs             # EventType, MetricsSnapshot, TelemetryEvent, CPU time helpers
     ├── buffer.rs             # ThreadLocalBuffer
     ├── collector.rs          # CentralCollector (Mutex-based)
-    ├── writer.rs             # TraceWriter trait, SimpleBinaryWriter, RotatingWriter, NullWriter
+    ├── writer.rs             # TraceWriter trait, RotatingWriter, NullWriter
     ├── recorder.rs           # TelemetryRecorder, TracedRuntime, TelemetryGuard
     ├── format.rs             # Binary format v5 (variable-size records)
     └── analysis.rs           # TraceReader, analyze_trace, detect_idle_workers, compute_active_periods

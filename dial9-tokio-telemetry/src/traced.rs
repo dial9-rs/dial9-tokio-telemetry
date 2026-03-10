@@ -102,7 +102,7 @@ mod tests {
     use crate::telemetry::events::TelemetryEvent;
     use crate::telemetry::recorder::TracedRuntime;
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
-    use crate::telemetry::writer::SimpleBinaryWriter;
+    use crate::telemetry::writer::RotatingWriter;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -110,7 +110,7 @@ mod tests {
     /// matches the spawned task when a `Notify` wakes it.
     ///
     /// This is an integration test: events are written to a real file via
-    /// `SimpleBinaryWriter` and then read back with `TraceReader`.
+    /// `RotatingWriter` and then read back with `TraceReader`.
     #[test]
     fn traced_emits_wake_events() {
         let dir = TempDir::new().unwrap();
@@ -120,7 +120,7 @@ mod tests {
         // BUFFER accesses — share a single thread with the test itself.
         let (runtime, guard) = TracedRuntime::build_and_start(
             tokio::runtime::Builder::new_current_thread(),
-            Box::new(SimpleBinaryWriter::new(&trace_path).unwrap()),
+            RotatingWriter::single_file(&trace_path).unwrap(),
         )
         .unwrap();
 
@@ -164,7 +164,7 @@ mod tests {
         });
 
         // Dropping the guard stops the background flush thread, joins it, then
-        // performs a final flush: collector → SimpleBinaryWriter → trace file.
+        // performs a final flush: collector → RotatingWriter → trace file.
         drop(guard);
 
         // Parse the trace file and collect all WakeEvents.

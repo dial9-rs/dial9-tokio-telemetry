@@ -50,6 +50,7 @@
                 display: none;
                 flex-direction: column;
                 height: 100vh;
+                overflow: hidden;
             }
 
             #toolbar {
@@ -61,6 +62,8 @@
                 border-bottom: 1px solid #333;
                 flex-shrink: 0;
                 min-height: 44px;
+                overflow-x: auto;
+                overflow-y: hidden;
             }
             #toolbar .filename {
                 font-weight: 600;
@@ -180,6 +183,19 @@
                 z-index: 2;
             }
 
+            #info-panel {
+                position: absolute;
+                top: 4px;
+                right: 12px;
+                font-size: 0.75em;
+                color: #ccc;
+                z-index: 2;
+                text-align: right;
+                line-height: 1.6;
+            }
+            #info-panel .ip-label { color: #888; }
+            #info-panel .ip-value { color: #fff; font-weight: 600; }
+
             .lane {
                 height: 60px;
                 border-bottom: 1px solid #222;
@@ -210,8 +226,8 @@
 
             #selection-overlay {
                 position: absolute;
-                background: rgba(108, 99, 255, 0.15);
-                border: 1px solid rgba(108, 99, 255, 0.6);
+                background: rgba(66, 133, 244, 0.15);
+                border: 1px solid rgba(66, 133, 244, 0.6);
                 pointer-events: none;
                 z-index: 9;
                 display: none;
@@ -264,6 +280,71 @@
                 white-space: nowrap;
                 color: #e0e0e0;
             }
+            @keyframes toast-in {
+                from { opacity: 0; transform: translateY(-8px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            @keyframes toast-wiggle {
+                0%, 100% { transform: translateX(0); }
+                20% { transform: translateX(-4px); }
+                40% { transform: translateX(4px); }
+                60% { transform: translateX(-3px); }
+                80% { transform: translateX(2px); }
+            }
+            .toast {
+                z-index: 60;
+                padding: 4px 12px;
+                border-radius: 6px;
+                font-size: 0.78em;
+                pointer-events: auto;
+                animation: toast-in 0.2s ease-out;
+                white-space: nowrap;
+            }
+            .toast-info {
+                background: #1e2050;
+                border: 1px solid rgba(108, 99, 255, 0.7);
+                color: #d0ccff;
+            }
+            .toast-warn {
+                background: #2a1e00;
+                border: 1px solid rgba(255, 152, 0, 0.7);
+                color: #ffd180;
+            }
+            .toast-error {
+                background: #2a0a0a;
+                border: 1px solid rgba(255, 68, 68, 0.7);
+                color: #ff8a8a;
+            }
+            #help-overlay {
+                display: none;
+                position: fixed;
+                top: 0; left: 0; right: 0; bottom: 0;
+                z-index: 200;
+                background: rgba(0,0,0,0.6);
+                justify-content: center;
+                align-items: center;
+            }
+            #help-overlay.visible { display: flex; }
+            #help-content {
+                background: #1a1a2e;
+                border: 1px solid #444;
+                border-radius: 8px;
+                padding: 24px 32px;
+                max-width: 520px;
+                color: #ccc;
+                font-size: 0.9em;
+                line-height: 1.6;
+            }
+            #help-content h3 { color: #eee; margin: 16px 0 8px; font-size: 1em; }
+            #help-content h3:first-child { margin-top: 0; }
+            #help-content table { border-collapse: collapse; width: 100%; }
+            #help-content td { padding: 3px 8px; vertical-align: top; }
+            #help-content td:first-child { white-space: nowrap; color: #a0a0ff; font-family: monospace; }
+            #help-content .close-hint { text-align: center; color: #666; font-size: 0.85em; margin-top: 12px; }
+            #main-area:focus-visible, #queue-chart:focus-visible, #btn-info:focus-visible {
+                outline: 2px solid #6c63ff;
+                outline-offset: -2px;
+            }
         </style>
     </head>
     <body>
@@ -308,11 +389,12 @@
                 <button id="btn-fit">Fit All</button>
                 <button id="btn-reset">New File</button>
             </div>
-            <div id="main-area">
+            <div id="main-area" tabindex="0" role="application" aria-label="Trace timeline">
                 <div id="selection-overlay"></div>
                 <canvas id="crosshair-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10"></canvas>
                 <div id="timeline-header">
                     <canvas id="timeline-canvas"></canvas>
+                    <div id="toast-container" style="position:absolute;top:0;bottom:0;left:0;display:flex;align-items:center;gap:8px;z-index:60;pointer-events:none"></div>
                 </div>
                 <div id="lanes-container" id="lanes"></div>
                 <div id="task-detail">
@@ -320,10 +402,11 @@
                     <span id="task-detail-status" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2"></span>
                     <canvas id="task-detail-canvas"></canvas>
                 </div>
-                <div id="queue-chart">
+                <div id="queue-chart" tabindex="0" aria-label="Queue depth chart">
                     <span class="chart-label"
                         >Queue Depth (global=blue, local max=orange)</span
                     >
+                    <div id="info-panel"></div>
                     <canvas id="queue-canvas"></canvas>
                 </div>
                 <div id="flamegraph-panel">
@@ -331,7 +414,7 @@
                         <span class="fg-title" id="fg-title">Flamegraph</span>
                         <span class="fg-stats" id="fg-stats"></span>
                         <select id="fg-spawn-filter" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em;max-width:350px"></select>
-                        <span class="fg-close" id="fg-close">✕ Close (Esc)</span>
+                        <span class="fg-close" id="fg-close" tabindex="0" role="button">✕ Close (Esc)</span>
                     </div>
                     <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column">
                         <div class="fg-section-label" id="fg-worker-label">Worker threads</div>
@@ -349,7 +432,7 @@
                             <option value="full">Group by full stack</option>
                         </select>
                         <span style="flex:1"></span>
-                        <span id="sched-panel-close" style="cursor:pointer;color:#888;padding:0 4px">✕ Close (Esc)</span>
+                        <span id="sched-panel-close" style="cursor:pointer;color:#888;padding:0 4px" tabindex="0" role="button">✕ Close (Esc)</span>
                     </div>
                     <div id="sched-panel-body" style="flex:1;overflow-y:auto;padding:8px 12px;font-family:monospace;font-size:0.82em;line-height:1.5"></div>
                 </div>
@@ -366,6 +449,30 @@
             <div id="stack-popup-body" style="font-family:monospace;font-size:0.9em"></div>
         </div>
 
+        <div id="help-overlay" role="dialog" aria-label="Keyboard and mouse shortcuts">
+            <div id="help-content">
+                <h3>🖱 Mouse</h3>
+                <table>
+                    <tr><td>Scroll wheel</td><td>Zoom in/out (centered on cursor)</td></tr>
+                    <tr><td>Drag</td><td>Pan left/right</td></tr>
+                    <tr><td>Click poll</td><td>Select task &amp; show wake timeline</td></tr>
+                    <tr><td>⇧ Shift+drag</td><td>Select region → flamegraph / blocking calls</td></tr>
+                    <tr><td>⌥ Option+drag</td><td>Select region → zoom to fit</td></tr>
+                </table>
+                <h3>⌨ Keyboard</h3>
+                <table>
+                    <tr><td>Tab</td><td>Navigate between UI regions</td></tr>
+                    <tr><td>↑ / ↓</td><td>Zoom in / out</td></tr>
+                    <tr><td>← / →</td><td>Pan left / right</td></tr>
+                    <tr><td>Shift</td><td>Toggle region selection (analysis). Press once to start, ← → to extend, press again or Enter to confirm</td></tr>
+                    <tr><td>Option / Alt</td><td>Toggle region selection (zoom). Press once to start, ← → to extend, press again or Enter to confirm</td></tr>
+                    <tr><td>Esc</td><td>Cancel selection / close panels</td></tr>
+                </table>
+                <div class="close-hint">Press Esc or click outside to close</div>
+            </div>
+        </div>
+        <div id="aria-live" aria-live="polite" style="position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden"></div>
+
         <script src="trace_parser.js"></script>
         <script>
             // Use the external parser
@@ -381,6 +488,44 @@
                 if (f.docsUrl) return `<a href="${esc(f.docsUrl)}" target="_blank" style="color:inherit;text-decoration:underline dotted">${esc(f.text)}</a>`;
                 return esc(f.text);
             }
+            // ── Toast notifications ──
+            const _toasts = {};  // id → element
+            const _toastTimers = {};  // id → timeout
+            const _persistentToasts = new Set();  // ids that survive clearToasts
+            function showToast(id, msg, type = "info", autoHideMs = 0, persistent = false) {
+                const container = document.getElementById("toast-container");
+                let el = _toasts[id];
+                if (el) {
+                    el.style.animation = "none";
+                    el.offsetHeight;
+                    el.style.animation = "toast-wiggle 0.4s ease";
+                    return;
+                }
+                el = document.createElement("div");
+                el.className = `toast toast-${type}`;
+                el.textContent = msg;
+                container.appendChild(el);
+                _toasts[id] = el;
+                if (persistent) _persistentToasts.add(id);
+                if (autoHideMs > 0) {
+                    _toastTimers[id] = setTimeout(() => hideToast(id), autoHideMs);
+                }
+            }
+            function hideToast(id) {
+                const el = _toasts[id];
+                if (!el) return;
+                el.remove();
+                delete _toasts[id];
+                _persistentToasts.delete(id);
+                clearTimeout(_toastTimers[id]);
+                delete _toastTimers[id];
+            }
+            function clearToasts() {
+                for (const id of Object.keys(_toasts)) {
+                    if (!_persistentToasts.has(id)) hideToast(id);
+                }
+            }
+
             // ── Event type helpers ──
             const ET = {
                 PollStart: 0,
@@ -437,6 +582,10 @@
             let currentPoiIndex = -1;
             // Task selection state
             let selectedTaskId = null;
+            // Active task count timeline: [{t, count}]
+            let activeTaskSamples = [];
+            // First poll time per task: taskId → timestamp (ns)
+            let taskFirstPoll = new Map();
             // Hovered waker task in task detail panel
             let hoveredWakerTaskId = null;
             // Stored wake hit regions for task detail mouseover: [{x1, x2, y1, y2, wakerTaskId}]
@@ -483,7 +632,7 @@
                 .getElementById("btn-reset")
                 .addEventListener("click", () => {
                     viewer.style.display = "none";
-                    dropZone.style.display = "flex";
+                    resetDropZone();
                 });
 
             function loadFile(file) {
@@ -503,17 +652,55 @@
                 reader.readAsArrayBuffer(blob);
             }
 
+            let loadAbortController = null;
+
+            function showLoadingState(label) {
+                loadAbortController = new AbortController();
+                dropZone.innerHTML = '';
+                const wrap = document.createElement("div");
+                wrap.style.textAlign = "center";
+                wrap.innerHTML = `<div style="margin-bottom:12px">${esc(label)}</div>`;
+                const btn = document.createElement("button");
+                btn.textContent = "← Back";
+                btn.style.cssText = "background:#2a2a4a;border:1px solid #444;color:#ccc;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:0.9em";
+                btn.addEventListener("click", cancelLoad);
+                wrap.appendChild(btn);
+                wrap.insertAdjacentHTML("beforeend", '<div style="margin-top:8px;font-size:0.8em;color:#666">or press Escape</div>');
+                dropZone.appendChild(wrap);
+            }
+
+            function cancelLoad() {
+                if (loadAbortController) { loadAbortController.abort(); loadAbortController = null; }
+                resetDropZone();
+            }
+
+            function resetDropZone() {
+                dropZone.innerHTML = `
+                    <div>
+                        <div style="font-size: 2em; margin-bottom: 12px">📊</div>
+                        <div>Drop a <code>.bin</code> trace file here or click to open</div>
+                        <div style="font-size: 0.8em; margin-top: 8px; color: #666">Expects TOKIOTRC binary format</div>
+                        <div style="margin-top: 12px">
+                            <a href="#" id="load-demo" style="color: #6c63ff; font-size: 0.9em">or load demo trace</a>
+                        </div>
+                    </div>`;
+                dropZone.style.display = "flex";
+                document.getElementById("load-demo")?.addEventListener("click", onLoadDemo);
+            }
+
             async function loadTraceFromUrl(url) {
                 try {
-                    const response = await fetch(url);
+                    const response = await fetch(url, { signal: loadAbortController?.signal });
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const arrayBuffer = await response.arrayBuffer();
+                    loadAbortController = null;
                     trace = parseTrace(arrayBuffer);
                     processTrace();
                     showViewer(url.split('/').pop() || 'trace.bin');
                 } catch (err) {
+                    if (err.name === 'AbortError') return;
                     alert("Error loading trace from URL: " + err.message);
-                    dropZone.style.display = "flex";
+                    resetDropZone();
                 }
             }
 
@@ -521,16 +708,17 @@
             const urlParams = new URLSearchParams(window.location.search);
             const traceUrl = urlParams.get('trace');
             if (traceUrl) {
-                dropZone.innerHTML = 'Loading trace…';
+                showLoadingState('Loading trace…');
                 loadTraceFromUrl(traceUrl);
             }
 
-            document.getElementById("load-demo")?.addEventListener("click", (e) => {
+            function onLoadDemo(e) {
                 e.stopPropagation();
                 e.preventDefault();
-                dropZone.innerHTML = 'Loading demo trace…';
+                showLoadingState('Loading demo trace…');
                 loadTraceFromUrl("demo-trace.bin");
-            });
+            }
+            document.getElementById("load-demo")?.addEventListener("click", onLoadDemo);
 
             function processTrace() {
                 const evts = trace.events;
@@ -563,7 +751,7 @@
                     openUnpark = {}; // track {timestamp, cpuTime} at unpark
                 const openPollMeta = {}; // track {taskId, spawnLocId} at PollStart
                 for (const w of workerIds) {
-                    workerSpans[w] = { polls: [], parks: [], actives: [] };
+                    workerSpans[w] = { polls: [], parks: [], actives: [], cpuSampleTimes: [] };
                 }
 
                 // Group events by worker and sort per-worker by timestamp
@@ -657,6 +845,7 @@
                     for (const sample of trace.cpuSamples) {
                         const spans = workerSpans[sample.workerId];
                         if (!spans) { sample.spawnLoc = null; continue; }
+                        if (sample.source !== 1) spans.cpuSampleTimes.push(sample.timestamp);
                         let found = false;
                         for (const poll of spans.polls) {
                             if (sample.timestamp >= poll.start && sample.timestamp <= poll.end) {
@@ -701,6 +890,28 @@
                             if (e.localQueue > maxLocalQueue)
                                 maxLocalQueue = e.localQueue;
                         }
+                    }
+                }
+
+                // Build active task count timeline from TaskSpawn/TaskTerminate
+                activeTaskSamples = [];
+                taskFirstPoll = new Map();
+                if (trace.taskSpawnTimes && trace.taskSpawnTimes.size > 0) {
+                    const taskEvents = []; // [{t, delta: +1 or -1}]
+                    // Use real spawn timestamps
+                    for (const [taskId, t] of trace.taskSpawnTimes) {
+                        taskFirstPoll.set(taskId, t);
+                        taskEvents.push({ t, delta: 1 });
+                    }
+                    // Use real terminate timestamps
+                    for (const [, t] of trace.taskTerminateTimes) {
+                        taskEvents.push({ t, delta: -1 });
+                    }
+                    taskEvents.sort((a, b) => a.t - b.t);
+                    let count = 0;
+                    for (const te of taskEvents) {
+                        count += te.delta;
+                        activeTaskSamples.push({ t: te.t, count: Math.max(0, count) });
                     }
                 }
 
@@ -812,6 +1023,8 @@
                     if (hasSchedEvents) break;
                 }
                 document.getElementById("btn-sched-panel").style.display = hasSchedEvents ? "" : "none";
+                showToast("shift-drag-hint", "⇧ Shift+drag to select a region", "info", 0, true);
+                showToast("option-drag-hint", "⌥ Option+drag to zoom", "info", 0, true);
                 requestAnimationFrame(renderAll);
             }
 
@@ -1178,14 +1391,12 @@
                     }
                 }
 
-                // Mark polls that have CPU samples with an orange top stripe
-                ctx.fillStyle = "#ff8c00";
-                for (const s of spans.polls) {
-                    if (!s.cpuSamples || s.end < viewStart || s.start > viewEnd) continue;
-                    const x1 = Math.max(0, nsToX(s.start, pw));
-                    const x2 = Math.min(pw, nsToX(s.end, pw));
-                    const w = Math.max(x2 - x1, 3);
-                    ctx.fillRect(x1, bandTop, w, 3);
+                // Mark CPU sample positions with ticks below the poll band
+                ctx.fillStyle = "#ce93d8";
+                for (const t of spans.cpuSampleTimes) {
+                    if (t < viewStart || t > viewEnd) continue;
+                    const x = nsToX(t, pw);
+                    ctx.fillRect(x, bandTop + bandH, 3, 4);
                 }
 
                 // Mark polls that have sched events with red triangles below the poll band
@@ -1332,8 +1543,17 @@
                 panel.style.display = "block";
                 const loc = trace.spawnLocations.get(polls[0].spawnLocId);
                 const wakeCount = wakes.length;
+                const terminateTs = trace.taskTerminateTimes?.get(selectedTaskId);
+                const hasTerminate = terminateTs != null;
+                const spawnTs = trace.taskSpawnTimes?.get(selectedTaskId);
+                let lifecycleStr = "";
+                if (hasTerminate && spawnTs != null) {
+                    const dur = terminateTs - spawnTs;
+                    const durMs = dur / 1e6;
+                    lifecycleStr = ` · lifetime ${durMs < 1 ? (durMs * 1000).toFixed(1) + "µs" : durMs.toFixed(2) + "ms"}`;
+                }
                 document.getElementById("task-detail-label").textContent =
-                    `Task 0x${selectedTaskId.toString(16)}${loc ? " — " + loc : ""} · ${polls.length} polls · ${wakeCount} wakes`;
+                    `Task 0x${selectedTaskId.toString(16)}${loc ? " — " + loc : ""} · ${polls.length} polls · ${wakeCount} wakes${lifecycleStr}${hasTerminate ? " ✓" : ""}`;
 
                 const parent = c.parentElement;
                 const dpr = devicePixelRatio || 1;
@@ -1471,6 +1691,38 @@
                     }
                 }
 
+                // Draw task lifespan bar (spawn → terminate) if it fits in view
+                if (hasTerminate && spawnTs != null) {
+                    const lifeStart = spawnTs;
+                    const lifeEnd = terminateTs;
+                    if (lifeStart < viewEnd && lifeEnd > viewStart) {
+                        const lx1 = LABEL_W + Math.max(0, nsToX(lifeStart, drawW));
+                        const lx2 = LABEL_W + Math.min(drawW, nsToX(lifeEnd, drawW));
+                        ctx.fillStyle = "rgba(129,199,132,0.08)";
+                        ctx.fillRect(lx1, bandTop - 2, lx2 - lx1, bandH + 4);
+                        ctx.strokeStyle = "rgba(129,199,132,0.3)";
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([]);
+                        ctx.beginPath();
+                        ctx.moveTo(lx1, bandTop - 2); ctx.lineTo(lx2, bandTop - 2);
+                        ctx.moveTo(lx1, bandTop + bandH + 2); ctx.lineTo(lx2, bandTop + bandH + 2);
+                        ctx.stroke();
+                        if (lifeStart >= viewStart) {
+                            ctx.strokeStyle = "#81c784";
+                            ctx.beginPath(); ctx.moveTo(lx1, bandTop - 6); ctx.lineTo(lx1, bandTop + bandH + 6); ctx.stroke();
+                            ctx.fillStyle = "#81c784"; ctx.font = "8px monospace"; ctx.textAlign = "left";
+                            ctx.fillText("spawn▸", lx1 + 2, bandTop - 8);
+                        }
+                        if (lifeEnd <= viewEnd) {
+                            ctx.strokeStyle = "#81c784";
+                            ctx.beginPath(); ctx.moveTo(lx2, bandTop - 6); ctx.lineTo(lx2, bandTop + bandH + 6); ctx.stroke();
+                            ctx.fillStyle = "#81c784"; ctx.font = "8px monospace"; ctx.textAlign = "right";
+                            ctx.fillText("◂done", lx2 - 2, bandTop - 8);
+                        }
+                        ctx.font = "9px monospace";
+                    }
+                }
+
                 // Draw poll spans
                 for (const s of polls) {
                     if (s.end < viewStart || s.start > viewEnd) continue;
@@ -1550,7 +1802,7 @@
                 ctx.fillStyle = "#16213e";
                 ctx.fillRect(0, 0, pw, ph);
 
-                if (!queueSamples.length) return;
+                if (!queueSamples.length && !activeTaskSamples.length) return;
 
                 const chartLeft = LABEL_W,
                     chartW = pw - LABEL_W - (scrollbarW || 0);
@@ -1668,6 +1920,83 @@
                 ctx.strokeStyle = "#ff8a65";
                 ctx.lineWidth = 1;
                 ctx.stroke();
+
+                // Draw active task count as step line (green, separate Y-axis)
+                if (activeTaskSamples.length > 0) {
+                    let maxTasks = 1;
+                    for (const s of activeTaskSamples) {
+                        if (s.t >= viewStart && s.t <= viewEnd && s.count > maxTasks) maxTasks = s.count;
+                    }
+                    let countAtViewStart = 0;
+                    for (const s of activeTaskSamples) {
+                        if (s.t > viewStart) break;
+                        countAtViewStart = s.count;
+                    }
+                    if (countAtViewStart > maxTasks) maxTasks = countAtViewStart;
+
+                    ctx.fillStyle = "#81c784";
+                    ctx.font = "10px monospace";
+                    ctx.textAlign = "left";
+                    ctx.fillText("tasks:" + maxTasks, chartLeft + chartW + 4, chartTop + 10);
+
+                    ctx.beginPath();
+                    let ty = chartTop + chartH - (countAtViewStart / maxTasks) * chartH;
+                    ctx.moveTo(chartLeft, ty);
+                    for (const s of activeTaskSamples) {
+                        if (s.t < viewStart) continue;
+                        if (s.t > viewEnd) break;
+                        const x = chartLeft + ((s.t - viewStart) / viewDur) * chartW;
+                        ctx.lineTo(x, ty);
+                        ty = chartTop + chartH - (s.count / maxTasks) * chartH;
+                        ctx.lineTo(x, ty);
+                    }
+                    ctx.lineTo(chartLeft + chartW, ty);
+                    ctx.strokeStyle = "#81c784";
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
+            }
+
+            function updateInfoPanel() {
+                const panel = document.getElementById("info-panel");
+                if (mouseNs === null || mouseNs < viewStart || mouseNs > viewEnd) {
+                    panel.innerHTML = "";
+                    return;
+                }
+                const ns = mouseNs;
+                // Find nearest global queue sample
+                let globalQ = "-";
+                let bestDist = Infinity;
+                for (const s of queueSamples) {
+                    const d = Math.abs(s.t - ns);
+                    if (d < bestDist) { bestDist = d; globalQ = s.global; }
+                }
+                // Find max local queue across workers at this time
+                let maxLocal = 0;
+                for (const w of workerIds) {
+                    const samples = workerQueueSamples[w] || [];
+                    let best = 0;
+                    let bd = Infinity;
+                    for (const s of samples) {
+                        const d = Math.abs(s.t - ns);
+                        if (d < bd) { bd = d; best = s.local; }
+                    }
+                    if (best > maxLocal) maxLocal = best;
+                }
+                // Active task count
+                let taskCount = 0;
+                if (activeTaskSamples.length > 0) {
+                    for (const s of activeTaskSamples) {
+                        if (s.t > ns) break;
+                        taskCount = s.count;
+                    }
+                }
+                let html = `<span class="ip-label">Global Q:</span> <span class="ip-value">${globalQ}</span>`;
+                html += ` · <span class="ip-label">Local max:</span> <span class="ip-value">${maxLocal}</span>`;
+                if (activeTaskSamples.length > 0) {
+                    html += ` · <span class="ip-label">Active tasks:</span> <span class="ip-value">${taskCount}</span>`;
+                }
+                panel.innerHTML = html;
             }
 
             function renderCrosshair() {
@@ -1682,23 +2011,39 @@
                 const ctx = overlay.getContext("2d");
                 ctx.scale(dpr, dpr);
                 ctx.clearRect(0, 0, w, h);
-                if (mouseNs === null || mouseNs < viewStart || mouseNs > viewEnd) return;
 
-                // Compute x position aligned with the lanes (lanes start after LABEL_W within lanes-container)
+                updateInfoPanel();
+
+                // Compute shared layout values
                 const lanesRect = lanesContainer.getBoundingClientRect();
                 const mainRect = mainArea.getBoundingClientRect();
                 const laneDrawW = lanesRect.width - LABEL_W;
                 const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
-                const x = (lanesRect.left - mainRect.left) + LABEL_W + nsToX(mouseNs, laneDrawW - scrollbarW);
+                const effectiveDrawW = laneDrawW - scrollbarW;
 
-                ctx.strokeStyle = "rgba(255,255,255,0.3)";
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 4]);
-                ctx.beginPath();
-                ctx.moveTo(x, 0);
-                ctx.lineTo(x, h);
-                ctx.stroke();
-                ctx.setLineDash([]);
+                // Mouse crosshair (dashed)
+                if (mouseNs !== null && mouseNs >= viewStart && mouseNs <= viewEnd) {
+                    const x = (lanesRect.left - mainRect.left) + LABEL_W + nsToX(mouseNs, effectiveDrawW);
+                    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([4, 4]);
+                    ctx.beginPath();
+                    ctx.moveTo(x, 0);
+                    ctx.lineTo(x, h);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+
+                // Keyboard selection cursor (solid bright)
+                if (kbSelecting && kbCursorNs !== null && kbCursorNs >= viewStart && kbCursorNs <= viewEnd) {
+                    const kx = (lanesRect.left - mainRect.left) + LABEL_W + nsToX(kbCursorNs, effectiveDrawW);
+                    ctx.strokeStyle = "rgba(255,255,255,0.8)";
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    ctx.moveTo(kx, 0);
+                    ctx.lineTo(kx, h);
+                    ctx.stroke();
+                }
             }
 
             // ── Zoom & Pan ──
@@ -1726,6 +2071,7 @@
             });
 
             function zoom(factor, centerFrac = 0.5) {
+                clearToasts();
                 const viewDur = viewEnd - viewStart;
                 const center = viewStart + viewDur * centerFrac;
                 const newDur = Math.max(viewDur * factor, 100); // min 100ns
@@ -1759,14 +2105,34 @@
             let regionSelecting = false,
                 regionStartNs = 0,
                 regionEndNs = 0;
+            let altZooming = false;
+            let kbSelecting = false, kbSelMode = null, kbSelStartNs = null, kbCursorNs = null;
             const selOverlay = document.getElementById("selection-overlay");
+            const SEL_COLORS = {
+                shift: { bg: "rgba(66, 133, 244, 0.15)", border: "rgba(66, 133, 244, 0.6)" },
+                alt:   { bg: "rgba(0, 188, 180, 0.15)",  border: "rgba(0, 188, 180, 0.6)" },
+            };
+            function setSelOverlayColor(mode) {
+                const c = SEL_COLORS[mode] || SEL_COLORS.shift;
+                selOverlay.style.background = c.bg;
+                selOverlay.style.borderColor = c.border;
+            }
 
             document
                 .getElementById("main-area")
                 .addEventListener("mousedown", (e) => {
-                    if (e.shiftKey && trace && trace.cpuSamples.length > 0) {
-                        // Shift+drag: region select
+                    if (kbSelecting) cancelKbSelection();
+                    if (e.shiftKey && !e.altKey && trace && trace.cpuSamples.length === 0) {
+                        showToast("no-cpu-samples", "No CPU samples in trace — enable cpu-profiling for flamegraphs", "error", 4000);
+                        return;
+                    }
+                    if ((e.shiftKey || e.altKey) && trace) {
+                        // Shift+drag: region select; Alt/Option+drag: zoom to region
                         regionSelecting = true;
+                        altZooming = e.altKey && !e.shiftKey;
+                        setSelOverlayColor(altZooming ? "alt" : "shift");
+                        if (altZooming) hideToast("option-drag-hint");
+                        else hideToast("shift-drag-hint");
                         dragMoved = false;
                         dragStartX = e.clientX;
                         const rect = lanesContainer.getBoundingClientRect();
@@ -1800,6 +2166,65 @@
                 const x2 = lanesLeft + nsToX(Math.max(regionStartNs, regionEndNs), drawW);
                 selOverlay.style.left = x1 + "px";
                 selOverlay.style.width = Math.max(1, x2 - x1) + "px";
+            }
+
+            function updateKbSelOverlay() {
+                setSelOverlayColor(kbSelMode);
+                const rect = lanesContainer.getBoundingClientRect();
+                const drawW = rect.width - LABEL_W;
+                const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                const lanesLeft = rect.left - mainRect.left + LABEL_W;
+                const s = Math.min(kbSelStartNs, kbCursorNs);
+                const e = Math.max(kbSelStartNs, kbCursorNs);
+                const x1 = lanesLeft + nsToX(s, drawW);
+                const x2 = lanesLeft + nsToX(e, drawW);
+                selOverlay.style.left = x1 + "px";
+                selOverlay.style.width = Math.max(1, x2 - x1) + "px";
+                selOverlay.style.top = "0px";
+                selOverlay.style.height = mainRect.height + "px";
+                selOverlay.style.display = "block";
+            }
+
+            function announce(msg) {
+                document.getElementById("aria-live").textContent = msg;
+            }
+
+            function cancelKbSelection() {
+                kbSelecting = false;
+                kbSelMode = null;
+                kbCursorNs = null;
+                kbSelStartNs = null;
+                selOverlay.style.display = "none";
+                renderCrosshair();
+            }
+
+            function completeKbSelection() {
+                const selStart = Math.min(kbSelStartNs, kbCursorNs);
+                const selEnd = Math.max(kbSelStartNs, kbCursorNs);
+                const mode = kbSelMode;
+                cancelKbSelection();
+                if (selEnd - selStart < 100) return; // too small
+                if (mode === "alt") {
+                    hideToast("option-drag-hint");
+                    viewStart = Math.max(minTs, selStart);
+                    viewEnd = Math.min(maxTs, selEnd);
+                    renderAll();
+                    announce("Zoomed to selected region");
+                } else {
+                    hideToast("shift-drag-hint");
+                    const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
+                    const hasCpu = trace.cpuSamples.some(s =>
+                        s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
+                    );
+                    if (hasSched && !hasCpu) {
+                        showSchedPanel(selStart, selEnd);
+                    } else if (hasSched) {
+                        showSelectionPicker(selStart, selEnd);
+                    } else {
+                        showFlamegraph(selStart, selEnd);
+                    }
+                    announce("Selected region opened");
+                }
             }
 
             window.addEventListener("mousemove", (e) => {
@@ -1837,19 +2262,40 @@
             window.addEventListener("mouseup", () => {
                 if (regionSelecting) {
                     regionSelecting = false;
-                    selOverlay.style.display = "none";
                     document.body.style.cursor = "";
                     if (dragMoved) {
+                        clearToasts();
                         const selStart = Math.min(regionStartNs, regionEndNs);
                         const selEnd = Math.max(regionStartNs, regionEndNs);
-                        // Check if there are sched events in range
-                        const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
-                        if (hasSched) {
-                            showSelectionPicker(selStart, selEnd);
+                        if (altZooming) {
+                            // Alt/Option+drag: zoom to selected region
+                            hideToast("option-drag-hint");
+                            selOverlay.style.display = "none";
+                            viewStart = Math.max(minTs, selStart);
+                            viewEnd = Math.min(maxTs, selEnd);
+                            renderAll();
                         } else {
-                            showFlamegraph(selStart, selEnd);
+                            // Shift+drag: flamegraph / sched panel
+                            hideToast("shift-drag-hint");
+                            const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
+                            const hasCpu = trace.cpuSamples.some(s =>
+                                s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
+                            );
+                            if (hasSched && !hasCpu) {
+                                selOverlay.style.display = "none";
+                                showSchedPanel(selStart, selEnd);
+                            } else if (hasSched) {
+                                // Keep overlay visible while picker is shown
+                                showSelectionPicker(selStart, selEnd);
+                            } else {
+                                selOverlay.style.display = "none";
+                                showFlamegraph(selStart, selEnd);
+                            }
                         }
+                    } else {
+                        selOverlay.style.display = "none";
                     }
+                    altZooming = false;
                     return;
                 }
                 dragging = false;
@@ -1859,6 +2305,7 @@
             // Click on a poll to highlight all polls for the same task
             document.getElementById("main-area").addEventListener("click", (e) => {
                 if (dragMoved) return; // was a drag, not a click
+                clearToasts();
                 // Only handle clicks inside the lanes container
                 const lanesRect = lanesContainer.getBoundingClientRect();
                 if (e.clientY < lanesRect.top || e.clientY > lanesRect.bottom ||
@@ -1978,6 +2425,7 @@
 
             function hideStackPopup() {
                 document.getElementById("stack-popup").style.display = "none";
+                selOverlay.style.display = "none";
             }
 
             document.getElementById("stack-popup-close").addEventListener("click", hideStackPopup);
@@ -1997,11 +2445,13 @@
                 schedPanelTimeRange = (startNs != null && endNs != null) ? { start: startNs, end: endNs } : null;
                 const allSched = collectSchedSamples(schedPanelTimeRange);
                 if (!allSched.length) {
-                    alert("No scheduling events found" + (schedPanelTimeRange ? " in selected range." : " in this trace."));
+                    showToast("no-sched-events", "No scheduling events found" + (schedPanelTimeRange ? " in selected range" : " in trace"), "error", 4000);
                     return;
                 }
                 renderSchedPanel(allSched);
+                clearToasts();
                 document.getElementById("sched-panel").style.display = "flex";
+                document.getElementById("sched-panel-close").focus();
             }
 
             function collectSchedSamples(range) {
@@ -2157,13 +2607,75 @@
                 document.getElementById("sched-panel").style.display = "none";
             });
 
+            // Enter activates role="button" elements and toggles checkboxes
+            document.addEventListener("keydown", (e) => {
+                if (e.key !== "Enter") return;
+                const el = document.activeElement;
+                if (el && el.getAttribute("role") === "button") { e.preventDefault(); el.click(); }
+                if (el && el.type === "checkbox") { e.preventDefault(); el.click(); }
+            });
+
             // ── Keyboard navigation ──
             window.addEventListener("keydown", (e) => {
+                if (e.key === "Escape" && loadAbortController) {
+                    e.preventDefault();
+                    cancelLoad();
+                    return;
+                }
                 if (!trace) return;
                 const viewDur = viewEnd - viewStart;
+
+                // Keyboard selection: toggle start/complete with Shift or Alt
+                if (e.key === "Shift" || e.key === "Alt") {
+                    e.preventDefault();
+                    const mode = e.key === "Shift" ? "shift" : "alt";
+                    if (!kbSelecting) {
+                        kbSelecting = true;
+                        kbSelMode = mode;
+                        kbCursorNs = kbSelStartNs = (mouseNs !== null && mouseNs >= viewStart && mouseNs <= viewEnd) ? mouseNs : (viewStart + viewEnd) / 2;
+                        updateKbSelOverlay();
+                        renderCrosshair();
+                        announce(mode === "shift" ? "Selection started — use ← → to extend, Shift or Enter to confirm" : "Zoom selection started — use ← → to extend, Alt or Enter to confirm");
+                        if (mode === "shift") hideToast("shift-drag-hint");
+                        else hideToast("option-drag-hint");
+                    } else if (kbSelMode === mode) {
+                        completeKbSelection();
+                    }
+                    return;
+                }
+
+                // During keyboard selection: Enter confirms, Escape cancels, arrows move cursor
+                if (kbSelecting) {
+                    if (e.key === "Enter") {
+                        e.preventDefault();
+                        completeKbSelection();
+                        return;
+                    }
+                    if (e.key === "Escape") {
+                        e.preventDefault();
+                        cancelKbSelection();
+                        announce("Selection cancelled");
+                        return;
+                    }
+                    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                        e.preventDefault();
+                        const step = viewDur * 0.05;
+                        kbCursorNs += e.key === "ArrowLeft" ? -step : step;
+                        kbCursorNs = Math.max(minTs, Math.min(maxTs, kbCursorNs));
+                        updateKbSelOverlay();
+                        renderCrosshair();
+                        return;
+                    }
+                }
+
                 switch (e.key) {
                     case "Escape":
                         e.preventDefault();
+                        if (document.getElementById("help-overlay").classList.contains("visible")) {
+                            document.getElementById("help-overlay").classList.remove("visible");
+                            break;
+                        }
+                        clearToasts();
                         hideStackPopup();
                         if (document.getElementById("sched-panel").style.display === "flex") {
                             document.getElementById("sched-panel").style.display = "none";
@@ -2172,6 +2684,7 @@
                             document.getElementById("fg-tooltip").style.display = "none";
                         }
                         selectedTaskId = null;
+                        document.getElementById("main-area").focus();
                         renderAll();
                         break;
                     case "ArrowUp":
@@ -2336,12 +2849,23 @@
                     const totalEst = (nearestGlobal != null ? nearestGlobal.global : 0) + (nearest != null ? nearest.local : 0);
                     qInfo = `<span class="label">Global Q:</span> <span class="value">${globalStr}</span> · <span class="label">Local Q:</span> <span class="value">${localStr}</span> · <span class="label">Est. Total:</span> <span class="value">${totalEst}</span>`;
 
+                    let taskCountInfo = "";
+                    if (activeTaskSamples.length > 0) {
+                        let taskCount = 0;
+                        for (const s of activeTaskSamples) {
+                            if (s.t > ns) break;
+                            taskCount = s.count;
+                        }
+                        taskCountInfo = `<br><span class="label">Active Tasks:</span> <span class="value">${taskCount}</span>`;
+                    }
+
                     tooltip.innerHTML =
                         `<span class="label">Worker</span> <span class="value">${w}</span> · <span class="label">Time</span> <span class="value">${relMs.toFixed(3)}ms</span><br>` +
                         `<span class="label">State:</span> ${state}${stateDetail}<br>` +
                         schedInfo +
                         pollInfo +
-                        qInfo;
+                        qInfo +
+                        taskCountInfo;
                     tooltip.style.display = "block";
                     tooltip.style.left =
                         Math.min(e.clientX + 12, window.innerWidth - 340) +
@@ -2413,13 +2937,25 @@
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff4444;display:inline-block;border-radius:2px"></span>&gt;1ms</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a1520;border-top:3px solid #cc5533;display:inline-block;border-radius:2px"></span>Parked</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff0000;display:inline-block;border-radius:2px"></span>Kernel Sched Delay</span>
-    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:3px;background:#ff8c00;display:inline-block"></span>CPU Sampled</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:4px;background:#ce93d8;display:inline-block"></span>CPU Sampled</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#ff2222;font-size:10px">▲</span>Sched (blocking)</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#66bb6a;font-size:10px">▼</span>Wake</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
-    <span style="color:#666;margin-left:8px">│ ↑↓ zoom · ←→ pan · click poll for task + wake timeline · shift+drag for flamegraph · esc close</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#81c784;display:inline-block"></span>Active Tasks</span>
+    <button id="btn-info" aria-label="Help" style="margin-left:8px;background:none;border:1px solid #555;border-radius:4px;color:#aaa;cursor:pointer;font-size:1.4em;padding:4px 8px;line-height:1;display:flex;flex-direction:column;align-items:center;gap:1px"><span>ℹ️</span><span style="font-size:0.55em;color:#888">Help</span></button>
   `;
                 tb.insertBefore(leg, document.getElementById("btn-zoom-in"));
+            })();
+
+            // ── Help overlay toggle ──
+            (function initHelp() {
+                const overlay = document.getElementById("help-overlay");
+                document.getElementById("btn-info").addEventListener("click", () => {
+                    overlay.classList.toggle("visible");
+                });
+                overlay.addEventListener("click", (e) => {
+                    if (e.target === overlay) overlay.classList.remove("visible");
+                });
             })();
 
             // ── Flamegraph ──
@@ -2495,13 +3031,13 @@
                     <div style="display:flex;flex-direction:column;gap:8px;min-width:250px">
                         <div style="padding:8px 12px;background:#2a2a4a;border:1px solid #444;border-radius:6px;cursor:pointer;transition:background 0.15s"
                              onmouseover="this.style.background='#3a3a5a'" onmouseout="this.style.background='#2a2a4a'"
-                             id="pick-flamegraph">
+                             id="pick-flamegraph" tabindex="0" role="button">
                             <div style="color:#ff8c00;font-weight:600">🔥 CPU Flamegraph</div>
                             <div style="color:#888;font-size:0.9em">Profile where CPU time is spent</div>
                         </div>
                         <div style="padding:8px 12px;background:#2a2a4a;border:1px solid #444;border-radius:6px;cursor:pointer;transition:background 0.15s"
                              onmouseover="this.style.background='#3a3a5a'" onmouseout="this.style.background='#2a2a4a'"
-                             id="pick-sched">
+                             id="pick-sched" tabindex="0" role="button">
                             <div style="color:#ff4444;font-weight:600">⚠ Blocking Calls <span style="color:#888;font-weight:400">(${schedCount})</span></div>
                             <div style="color:#888;font-size:0.9em">Analyze what's blocking the runtime</div>
                         </div>
@@ -2512,6 +3048,7 @@
                 popup.style.top = (window.innerHeight / 2 - 80) + "px";
                 document.getElementById("pick-flamegraph").onclick = () => { hideStackPopup(); showFlamegraph(selStart, selEnd); };
                 document.getElementById("pick-sched").onclick = () => { hideStackPopup(); showSchedPanel(selStart, selEnd); };
+                document.getElementById("pick-flamegraph").focus();
             }
 
             function showFlamegraph(selStart, selEnd) {
@@ -2519,7 +3056,7 @@
                     s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
                 );
                 if (!allSamples.length) {
-                    alert("No CPU samples in selected region. CPU sampling must be active during this time range.");
+                    showToast("no-cpu-samples-region", "No CPU samples in selected region", "error", 4000);
                     return;
                 }
 
@@ -2548,7 +3085,9 @@
                     sel.appendChild(opt);
                 }
 
+                clearToasts();
                 document.getElementById("flamegraph-panel").style.display = "flex";
+                document.getElementById("fg-close").focus();
                 applyFgFilter();
             }
 
@@ -2682,6 +3221,133 @@
                 document.getElementById("flamegraph-panel").style.display = "none";
                 document.getElementById("fg-tooltip").style.display = "none";
             });
+
+            // ── Queue chart drag-select: show tasks spawned in time range ──
+            let qcDragging = false, qcDragStartX = 0, qcDragStartNs = 0, qcDragEndNs = 0, qcDragMoved = false;
+
+            document.getElementById("queue-chart").addEventListener("mousedown", (e) => {
+                if (!trace || !activeTaskSamples.length) return;
+                qcDragging = true;
+                qcDragMoved = false;
+                qcDragStartX = e.clientX;
+                const rect = queueCanvas.getBoundingClientRect();
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const chartW = rect.width - LABEL_W - scrollbarW;
+                const mx = e.clientX - rect.left - LABEL_W;
+                qcDragStartNs = viewStart + (Math.max(0, mx) / chartW) * (viewEnd - viewStart);
+                qcDragEndNs = qcDragStartNs;
+                // Show selection overlay on main area
+                const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                selOverlay.style.top = "0px";
+                selOverlay.style.height = mainRect.height + "px";
+                selOverlay.style.display = "block";
+                updateSelOverlay(e.clientX);
+                document.body.style.cursor = "crosshair";
+                e.stopPropagation();
+            });
+
+            window.addEventListener("mousemove", (e) => {
+                if (!qcDragging) return;
+                if (Math.abs(e.clientX - qcDragStartX) > 3) qcDragMoved = true;
+                const rect = queueCanvas.getBoundingClientRect();
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const chartW = rect.width - LABEL_W - scrollbarW;
+                const mx = e.clientX - rect.left - LABEL_W;
+                qcDragEndNs = viewStart + (Math.max(0, Math.min(chartW, mx)) / chartW) * (viewEnd - viewStart);
+                // Update main-area selection overlay
+                regionStartNs = qcDragStartNs;
+                regionEndNs = qcDragEndNs;
+                updateSelOverlay(e.clientX);
+                // Draw selection highlight on queue chart
+                renderQueueChart(rect.width - LABEL_W, scrollbarW);
+                const c = queueCanvas;
+                const ctx = c.getContext("2d");
+                const dpr = devicePixelRatio || 1;
+                ctx.save();
+                ctx.scale(dpr, dpr);
+                const selStart = Math.min(qcDragStartNs, qcDragEndNs);
+                const selEnd = Math.max(qcDragStartNs, qcDragEndNs);
+                const x1 = LABEL_W + nsToX(selStart, chartW);
+                const x2 = LABEL_W + nsToX(selEnd, chartW);
+                ctx.fillStyle = "rgba(129,199,132,0.2)";
+                ctx.fillRect(x1, 0, x2 - x1, c.height / dpr);
+                ctx.strokeStyle = "rgba(129,199,132,0.6)";
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x1, 0, x2 - x1, c.height / dpr);
+                ctx.restore();
+            });
+
+            window.addEventListener("mouseup", (e) => {
+                if (!qcDragging) return;
+                qcDragging = false;
+                selOverlay.style.display = "none";
+                document.body.style.cursor = "";
+                if (qcDragMoved) {
+                    clearToasts();
+                    const selStart = Math.min(qcDragStartNs, qcDragEndNs);
+                    const selEnd = Math.max(qcDragStartNs, qcDragEndNs);
+                    showSpawnedTasks(selStart, selEnd);
+                }
+                renderAll();
+            });
+
+            function showSpawnedTasks(selStart, selEnd) {
+                // Find tasks whose first poll falls in [selStart, selEnd]
+                const tasks = [];
+                for (const [taskId, t] of taskFirstPoll) {
+                    if (t >= selStart && t <= selEnd) {
+                        const locId = trace.taskSpawnLocs.get(taskId);
+                        const loc = locId != null ? (trace.spawnLocations.get(locId) || null) : null;
+                        tasks.push({ taskId, firstPoll: t, loc });
+                    }
+                }
+                if (!tasks.length) return;
+
+                // Group by spawn location
+                const groups = new Map();
+                for (const t of tasks) {
+                    const key = t.loc || "(unknown)";
+                    if (!groups.has(key)) groups.set(key, []);
+                    groups.get(key).push(t);
+                }
+                const sorted = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+
+                const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
+                const popup = document.getElementById("stack-popup");
+                const title = document.getElementById("stack-popup-title");
+                const body = document.getElementById("stack-popup-body");
+                title.textContent = `${tasks.length} tasks spawned in ${durMs}ms`;
+
+                let html = "";
+                for (const [loc, taskList] of sorted) {
+                    const short = loc.replace(/.*\//, '');
+                    html += `<div style="margin-bottom:10px;border-left:3px solid #81c784;padding-left:8px">`;
+                    html += `<div style="color:#81c784;font-weight:600">${taskList.length}× <span style="color:#fff">${esc(short)}</span></div>`;
+                    if (short !== loc) html += `<div style="color:#666;font-size:0.85em">${esc(loc)}</div>`;
+                    // Show first few tasks as clickable links
+                    const show = taskList.slice(0, 5);
+                    for (const t of show) {
+                        const tMs = ((t.firstPoll - minTs) / 1e6).toFixed(3);
+                        html += `<div style="margin-left:8px"><span class="spawned-task-link" style="color:#6c63ff;cursor:pointer;text-decoration:underline" data-task-id="${t.taskId}">0x${t.taskId.toString(16)}</span> <span style="color:#888">@ ${tMs}ms</span></div>`;
+                    }
+                    if (taskList.length > 5) html += `<div style="color:#888;margin-left:8px;font-size:0.9em">… ${taskList.length - 5} more</div>`;
+                    html += `</div>`;
+                }
+                body.innerHTML = html;
+                popup.style.display = "block";
+                popup.style.left = (window.innerWidth / 2 - 200) + "px";
+                popup.style.top = (window.innerHeight / 2 - 150) + "px";
+
+                // Wire up task links to select and focus
+                body.querySelectorAll('.spawned-task-link').forEach(el => {
+                    el.addEventListener('click', () => {
+                        const tid = parseInt(el.dataset.taskId);
+                        selectedTaskId = tid;
+                        hideStackPopup();
+                        renderAll();
+                    });
+                });
+            }
 
             // Re-render flamegraph on resize
             window.addEventListener("resize", () => {
