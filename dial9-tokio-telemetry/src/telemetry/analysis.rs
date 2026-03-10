@@ -723,7 +723,7 @@ pub fn detect_sampled_polls(events: &[TelemetryEvent]) -> Vec<SampledPoll> {
         }
     }
 
-    // Collect polls that had any samples, in timestamp order
+    // Collect polls that had any samples, grouped by worker
     polls
         .into_iter()
         .filter(|p| p.cpu_samples > 0 || p.sched_samples > 0)
