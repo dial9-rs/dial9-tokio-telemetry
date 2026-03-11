@@ -2645,6 +2645,7 @@ dependencies = [
  "metrique-core",
  "metrique-writer-core",
  "metrique-writer-macro",
+ "ordered-float",
  "rand",
  "smallvec",
  "tokio",
@@ -2662,6 +2663,7 @@ dependencies = [
  "itertools 0.14.0",
  "serde",
  "smallvec",
+ "tokio",
 ]
 
 [[package]]

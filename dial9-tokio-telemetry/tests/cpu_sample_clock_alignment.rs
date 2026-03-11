@@ -144,10 +144,8 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
             .map(|&t| {
                 if t < burn_start {
                     burn_start - t
-                } else if t > burn_end {
-                    t - burn_end
                 } else {
-                    0
+                    t.saturating_sub(burn_end)
                 }
             })
             .min()

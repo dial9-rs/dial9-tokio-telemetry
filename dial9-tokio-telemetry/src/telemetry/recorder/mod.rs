@@ -675,7 +675,7 @@ mod tests {
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().map_or(false, |ext| ext == "bin"))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
             .collect();
         files.sort();
         assert!(
@@ -840,7 +840,7 @@ mod tests {
                 .unwrap()
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| p.extension().map_or(false, |ext| ext == "bin"))
+                .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
                 .collect();
             files.sort();
 

@@ -11,15 +11,24 @@ use std::path::{Path, PathBuf};
 
 /// A sealed trace segment ready for processing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SealedSegment {
+pub struct SealedSegment {
     pub(crate) path: PathBuf,
     pub(crate) index: u32,
 }
 
 impl SealedSegment {
+    /// The file path of this sealed segment.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The segment index (e.g. 3 for `trace.3.bin`).
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
     /// Segment creation time as epoch seconds, parsed from SegmentMetadata header.
     /// Falls back to file mtime if header parsing fails, then current time if mtime is unavailable.
-    #[cfg(feature = "worker-s3")]
     pub(crate) fn creation_epoch_secs(&self) -> u64 {
         // First try to parse timestamp from SegmentMetadata header
         if let Ok(timestamp_nanos) = self.parse_segment_timestamp() {
@@ -156,7 +165,6 @@ mod tests {
         assert!(segments.is_empty());
     }
 
-    #[cfg(feature = "worker-s3")]
     #[test]
     fn test_parse_segment_timestamp() {
         use crate::telemetry::events::TelemetryEvent;
@@ -195,11 +203,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        let diff = if now_nanos > timestamp_nanos {
-            now_nanos - timestamp_nanos
-        } else {
-            timestamp_nanos - now_nanos
-        };
+        let diff = now_nanos.abs_diff(timestamp_nanos);
 
         // Should be within 1 minute (60 billion nanoseconds)
         assert!(
@@ -210,7 +214,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "worker-s3")]
     #[test]
     fn test_creation_epoch_secs_uses_parsed_timestamp() {
         use crate::telemetry::events::TelemetryEvent;
@@ -249,11 +252,7 @@ mod tests {
             .as_secs();
 
         // The epoch seconds should be reasonably recent (within last minute)
-        let diff = if expected_secs > epoch_secs {
-            expected_secs - epoch_secs
-        } else {
-            epoch_secs - expected_secs
-        };
+        let diff = expected_secs.abs_diff(epoch_secs);
 
         assert!(
             diff < 60,

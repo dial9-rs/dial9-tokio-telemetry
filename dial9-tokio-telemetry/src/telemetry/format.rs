@@ -569,8 +569,8 @@ mod tests {
         let mut buf = Vec::new();
         write_event(&mut buf, event).unwrap();
         assert_eq!(buf.len(), wire_event_size(event));
-        let decoded = read_event(&mut Cursor::new(buf)).unwrap().unwrap();
-        decoded
+
+        read_event(&mut Cursor::new(buf)).unwrap().unwrap()
     }
 
     /// Helper: read the next runtime event, skipping metadata records.
@@ -1157,7 +1157,7 @@ mod tests {
             write_event(&mut buf, e).unwrap();
         }
 
-        let expected_size: usize = events.iter().map(|e| wire_event_size(e)).sum();
+        let expected_size: usize = events.iter().map(wire_event_size).sum();
         assert_eq!(buf.len(), expected_size);
 
         // Read all events back (including metadata)

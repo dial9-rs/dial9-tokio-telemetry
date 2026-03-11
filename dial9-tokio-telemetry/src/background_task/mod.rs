@@ -1,6 +1,7 @@
 #[cfg(feature = "worker-s3")]
 pub mod connection;
 pub mod instance_metadata;
+pub(crate) mod pipeline_metrics;
 #[cfg(feature = "worker-s3")]
 pub mod s3;
 pub(crate) mod sealed;
@@ -10,8 +11,11 @@ use metrique::unit::Byte;
 use metrique::unit::Millisecond;
 use metrique::unit_of_work::metrics;
 use metrique_writer::BoxEntrySink;
+use pipeline_metrics::{PipelineMetrics, StageMetrics};
+use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::pin::Pin;
 use std::time::Duration;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -73,84 +77,172 @@ impl BackgroundTaskConfig {
     }
 }
 
-/// The worker loop function. Runs on a dedicated thread, polls for sealed
-/// segments and processes them (upload to S3 if configured).
+// ---------------------------------------------------------------------------
+// SegmentProcessor pipeline
+// ---------------------------------------------------------------------------
+
+/// Data flowing through the processor pipeline.
 ///
-/// Creates a multi-threaded tokio runtime (2 worker threads) to overlap
-/// compression and upload. The worker is a "good citizen": it will lose
-/// data rather than disrupt the application.
+/// The worker reads the sealed segment file into `bytes`, populates initial
+/// `metadata`, then passes this through each [`SegmentProcessor`] in order.
+/// Metrics are flushed automatically when the `SegmentData` is dropped.
+#[derive(Debug)]
+pub(crate) struct SegmentData {
+    /// Original sealed segment (path, index).
+    pub(crate) segment: sealed::SealedSegment,
+    /// The payload bytes (raw, symbolized, compressed, etc.).
+    pub(crate) bytes: Vec<u8>,
+    /// Metadata accumulated by processors. Keyed by convention.
+    pub(crate) metadata: HashMap<String, String>,
+    /// Metrics guard — processors can record metrics; flushed on drop.
+    pub(crate) metrics: SegmentProcessMetricsGuard,
+}
+
+/// Error returned by a [`SegmentProcessor`].
+///
+/// Carries the [`SegmentData`] back so the caller can still record metrics
+/// and pass the data to subsequent error-handling logic.
+#[derive(Debug)]
+pub(crate) struct ProcessError {
+    pub(crate) data: SegmentData,
+    pub(crate) kind: ProcessErrorKind,
+}
+
+#[derive(Debug)]
+pub(crate) enum ProcessErrorKind {
+    Io(std::io::Error),
+    #[cfg(feature = "worker-s3")]
+    Transfer(aws_sdk_s3_transfer_manager::error::Error),
+}
+
+impl std::fmt::Display for ProcessErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+            #[cfg(feature = "worker-s3")]
+            Self::Transfer(e) => write!(f, "S3 transfer error: {e}"),
+        }
+    }
+}
+
+impl std::fmt::Display for ProcessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.kind.fmt(f)
+    }
+}
+
+impl std::error::Error for ProcessError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            ProcessErrorKind::Io(e) => Some(e),
+            #[cfg(feature = "worker-s3")]
+            ProcessErrorKind::Transfer(e) => Some(e),
+        }
+    }
+}
+
+impl From<std::io::Error> for ProcessErrorKind {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+#[cfg(feature = "worker-s3")]
+impl From<aws_sdk_s3_transfer_manager::error::Error> for ProcessErrorKind {
+    fn from(e: aws_sdk_s3_transfer_manager::error::Error) -> Self {
+        Self::Transfer(e)
+    }
+}
+
+/// A single step in the segment processing pipeline.
+///
+/// Implementations handle one concern: compress, symbolize, upload, etc.
+/// The worker calls processors in sequence for each segment.
+pub(crate) trait SegmentProcessor: Send + Sync {
+    /// Human-readable name for this processor (used in metrics).
+    fn name(&self) -> &'static str;
+
+    /// Process a segment, transforming or consuming its data.
+    /// Returns the (possibly modified) data for the next processor,
+    /// or an error to skip this segment.
+    fn process(
+        &self,
+        data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>;
+}
+
+/// The worker loop function. Runs on a dedicated thread, polls for sealed
+/// segments and processes them through the configured pipeline.
+///
+/// Creates a single-threaded tokio runtime for async processors (e.g. S3 upload).
+/// The worker is a "good citizen": it will lose data rather than disrupt the application.
 pub(crate) fn run_background_task(
     #[cfg_attr(not(feature = "worker-s3"), allow(unused_mut))] mut config: BackgroundTaskConfig,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+    let rt = tokio::runtime::Builder::new_current_thread()
         .thread_name("dial9-worker-rt")
         .enable_all()
         .build()
         .expect("failed to create worker runtime");
 
     rt.block_on(async {
+        #[allow(unused_mut)]
+        let mut processors: Vec<Box<dyn SegmentProcessor>> = Vec::new();
+
         #[cfg(feature = "worker-s3")]
-        let uploader = Some(S3Uploader::new(&mut config).await);
+        {
+            let s3_uploader = S3PipelineUploader::new(&mut config).await;
+            processors.push(Box::new(GzipCompressor));
+            processors.push(Box::new(s3_uploader));
+        }
 
-        #[cfg(not(feature = "worker-s3"))]
-        let uploader: Option<NoUploader> = None;
-
-        tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), "worker started");
-        let worker = WorkerLoop::new(config, stop, uploader);
+        tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), "worker started");
+        let worker = WorkerLoop::new(config, stop, processors);
         worker.run().await;
         tracing::info!(target: "dial9_worker", "worker stopped");
     });
 }
 
 // ---------------------------------------------------------------------------
-// SegmentUploader trait — pluggable upload strategy
+// GzipCompressor — compresses segment bytes in-memory
 // ---------------------------------------------------------------------------
 
-/// Trait for uploading sealed trace segments to a remote store.
-///
-/// The worker loop always scans for segments and handles sleeping between
-/// polls. This trait controls only what happens to each discovered segment.
-pub(crate) trait SegmentUploader: Send {
-    /// Compress a segment, returning opaque compressed data.
-    /// This may be called from `spawn_blocking`.
-    fn compress(
-        &self,
-        segment: &sealed::SealedSegment,
-    ) -> impl std::future::Future<Output = Option<CompressedSegment>> + Send;
+#[cfg(feature = "worker-s3")]
+struct GzipCompressor;
 
-    /// Upload previously compressed data and delete the local file.
-    fn upload_compressed(
-        &self,
-        segment: &sealed::SealedSegment,
-        compressed: CompressedSegment,
-    ) -> impl std::future::Future<Output = ()> + Send;
-}
-
-/// Opaque compressed segment data ready for upload.
-pub(crate) struct CompressedSegment {
-    pub(crate) data: Vec<u8>,
-    pub(crate) epoch_secs: u64,
-}
-
-/// Uninhabited type used as the type parameter for `Option<T>` when no
-/// uploader feature is enabled. `Option<NoUploader>` is always `None`,
-/// and the compiler can optimize away the match arm.
-#[cfg(not(feature = "worker-s3"))]
-enum NoUploader {}
-
-#[cfg(not(feature = "worker-s3"))]
-impl SegmentUploader for NoUploader {
-    async fn compress(&self, _segment: &sealed::SealedSegment) -> Option<CompressedSegment> {
-        unreachable!()
+#[cfg(feature = "worker-s3")]
+impl SegmentProcessor for GzipCompressor {
+    fn name(&self) -> &'static str {
+        "Gzip"
     }
-    async fn upload_compressed(
+
+    fn process(
         &self,
-        _segment: &sealed::SealedSegment,
-        _compressed: CompressedSegment,
-    ) {
-        unreachable!()
+        mut data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(async move {
+            let raw = data.bytes;
+            let compressed =
+                tokio::task::spawn_blocking(move || s3::gzip_compress_bytes(&raw)).await;
+            match compressed {
+                Ok(Ok(bytes)) => {
+                    data.metrics.compressed_size = Some(bytes.len() as u64);
+                    data.bytes = bytes;
+                    data.metadata
+                        .insert("content_encoding".into(), "gzip".into());
+                    Ok(data)
+                }
+                Ok(Err(e)) => {
+                    data.bytes = vec![];
+                    Err(ProcessError { data, kind: ProcessErrorKind::Io(e) })
+                }
+                Err(e) => {
+                    data.bytes = vec![];
+                    Err(ProcessError { data, kind: ProcessErrorKind::Io(std::io::Error::other(e)) })
+                }
+            }
+        })
     }
 }
 
@@ -159,45 +251,47 @@ impl SegmentUploader for NoUploader {
 // ---------------------------------------------------------------------------
 
 #[metrics(rename_all = "PascalCase")]
-struct SegmentUploadMetrics {
+#[derive(Debug)]
+pub(crate) struct SegmentProcessMetrics {
     #[metrics(unit = Millisecond)]
-    compression_time: Timer,
-    #[metrics(unit = Millisecond)]
-    upload_time: Timer,
+    total_time: Timer,
     /// 1 on success, 0 on failure.
     success: usize,
     segment_index: u32,
     #[metrics(unit = Byte)]
     uncompressed_size: u64,
     #[metrics(unit = Byte)]
-    compressed_size: u64,
+    compressed_size: Option<u64>,
+    /// Per-processor metrics, keyed by processor name.
+    #[metrics(flatten)]
+    pipeline: PipelineMetrics,
 }
 
 // ---------------------------------------------------------------------------
 // WorkerLoop — the async state machine
 // ---------------------------------------------------------------------------
 
-pub(crate) struct WorkerLoop<U> {
+pub(crate) struct WorkerLoop {
     dir: PathBuf,
     stem: String,
     poll_interval: Duration,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    uploader: Option<Arc<U>>,
+    processors: Vec<Box<dyn SegmentProcessor>>,
     metrics_sink: BoxEntrySink,
 }
 
-impl<U: SegmentUploader + Sync + 'static> WorkerLoop<U> {
+impl WorkerLoop {
     pub(crate) fn new(
         config: BackgroundTaskConfig,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        uploader: Option<U>,
+        processors: Vec<Box<dyn SegmentProcessor>>,
     ) -> Self {
         Self {
             dir: config.trace_dir().to_path_buf(),
             stem: config.trace_stem().to_string(),
             poll_interval: config.poll_interval(),
             stop,
-            uploader: uploader.map(Arc::new),
+            processors,
             metrics_sink: config.metrics_sink,
         }
     }
@@ -209,21 +303,26 @@ impl<U: SegmentUploader + Sync + 'static> WorkerLoop<U> {
                 return;
             }
 
-            self.poll_once().await;
-            tokio::time::sleep(self.poll_interval).await;
+            let found = self.process_open_segments().await;
+            if !found {
+                tokio::time::sleep(self.poll_interval).await;
+            }
         }
     }
 
-    async fn poll_once(&mut self) {
+    /// Returns true if any segments were found and processed.
+    async fn process_open_segments(&mut self) -> bool {
         let segments = match sealed::find_sealed_segments(&self.dir, &self.stem) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(target: "dial9_worker", "failed to scan for sealed segments: {e}");
-                return;
+                return false;
             }
         };
         tracing::debug!(target: "dial9_worker", dir = %self.dir.display(), stem = %self.stem, count = segments.len(), "scanned for sealed segments");
+        let found = !segments.is_empty();
         self.process_segments(&segments).await;
+        found
     }
 
     async fn drain(&mut self) {
@@ -235,69 +334,94 @@ impl<U: SegmentUploader + Sync + 'static> WorkerLoop<U> {
     }
 
     async fn process_segments(&mut self, segments: &[sealed::SealedSegment]) {
-        let Some(uploader) = &self.uploader else {
+        if self.processors.is_empty() {
             return;
-        };
+        }
 
-        // Compress sequentially, spawn uploads concurrently (bounded by semaphore).
-        let upload_semaphore = Arc::new(tokio::sync::Semaphore::new(2));
-        let mut upload_handles = Vec::new();
-
-        for segment in segments {
+        'next_segment: for segment in segments {
             let uncompressed_size = std::fs::metadata(&segment.path)
                 .map(|m| m.len())
                 .unwrap_or(0);
 
-            let mut metrics = SegmentUploadMetrics {
-                compression_time: Timer::start_now(),
-                upload_time: Timer::default(),
+            let bytes = match std::fs::read(&segment.path) {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::debug!(target: "dial9_worker", path = %segment.path.display(), "segment already evicted, skipping");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(target: "dial9_worker", error = %e, "failed to read segment");
+                    continue;
+                }
+            };
+
+            let metrics = SegmentProcessMetrics {
+                total_time: Timer::start_now(),
                 success: 0,
                 segment_index: segment.index,
                 uncompressed_size,
-                compressed_size: 0,
+                compressed_size: None,
+                pipeline: PipelineMetrics::default(),
             }
             .append_on_drop(self.metrics_sink.clone());
 
-            let compressed = uploader.compress(segment).await;
-            metrics.compression_time.stop();
-
-            let Some(c) = compressed else { continue };
-            metrics.compressed_size = c.data.len() as u64;
-
-            // Spawn upload — acquire semaphore to bound concurrency.
-            let permit = upload_semaphore.clone().acquire_owned().await.unwrap();
-            let uploader = Arc::clone(uploader);
-            let seg = sealed::SealedSegment {
-                path: segment.path.clone(),
-                index: segment.index,
+            let mut data = SegmentData {
+                segment: segment.clone(),
+                bytes,
+                metadata: HashMap::from([
+                    (
+                        "epoch_secs".into(),
+                        segment.creation_epoch_secs().to_string(),
+                    ),
+                    ("segment_index".into(), segment.index.to_string()),
+                ]),
+                metrics,
             };
-            upload_handles.push(tokio::spawn(async move {
-                metrics.upload_time = Timer::start_now();
-                uploader.upload_compressed(&seg, c).await;
-                metrics.upload_time.stop();
-                metrics.success = 1;
-                drop(permit);
-            }));
-        }
 
-        for handle in upload_handles {
-            let _ = handle.await;
+            for processor in &self.processors {
+                let mut stage = StageMetrics::start();
+                match processor.process(data).await {
+                    Ok(next) => {
+                        data = next;
+                        stage.succeed();
+                        data.metrics.pipeline.push(processor.name(), stage);
+                    }
+                    Err(e) => {
+                        data = e.data;
+                        stage.time.stop();
+                        data.metrics.pipeline.push(processor.name(), stage);
+                        data.metrics.total_time.stop();
+                        if matches!(&e.kind, ProcessErrorKind::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
+                        {
+                            tracing::debug!(target: "dial9_worker", path = %segment.path.display(), "segment evicted during processing, skipping");
+                        } else {
+                            tracing::warn!(target: "dial9_worker", error = %e.kind, cause = ?e.kind, path = %segment.path.display(), "processor failed, skipping segment");
+                        }
+                        continue 'next_segment;
+                    }
+                }
+            }
+
+            data.metrics.compressed_size = Some(data.bytes.len() as u64);
+            data.metrics.success = 1;
+            data.metrics.total_time.stop();
+            // `data` dropped here — metrics guard flushes automatically
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// S3Uploader — production impl with S3
+// S3PipelineUploader — production S3 upload processor
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "worker-s3")]
-pub(crate) struct S3Uploader {
+pub(crate) struct S3PipelineUploader {
     uploader: s3::S3Uploader,
     circuit_breaker: std::sync::Mutex<connection::CircuitBreaker>,
 }
 
 #[cfg(feature = "worker-s3")]
-impl S3Uploader {
+impl S3PipelineUploader {
     async fn new(config: &mut BackgroundTaskConfig) -> Self {
         let s3_config = config.s3().clone();
 
@@ -338,10 +462,53 @@ impl S3Uploader {
     }
 }
 
+#[cfg(feature = "worker-s3")]
+impl SegmentProcessor for S3PipelineUploader {
+    fn name(&self) -> &'static str {
+        "S3Upload"
+    }
+
+    fn process(
+        &self,
+        data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(async move {
+            if !self.circuit_breaker.lock().unwrap().should_attempt() {
+                tracing::debug!(target: "dial9_worker", path = %data.segment.path.display(), "circuit breaker open, skipping upload");
+                return Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "circuit breaker open",
+                    )),
+                });
+            }
+            match self
+                .uploader
+                .upload_and_delete(&data.segment, data.bytes.clone(), &data.metadata)
+                .await
+            {
+                Ok(key) => {
+                    self.circuit_breaker.lock().unwrap().on_success();
+                    tracing::info!(target: "dial9_worker", "uploaded {key}");
+                    Ok(data)
+                }
+                Err(kind) => {
+                    if matches!(&kind, ProcessErrorKind::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
+                    {
+                        tracing::debug!(target: "dial9_worker", path = %data.segment.path.display(), "segment already evicted, skipping");
+                    } else {
+                        self.circuit_breaker.lock().unwrap().on_failure();
+                        tracing::warn!(target: "dial9_worker", error = %kind, "upload failed");
+                    }
+                    Err(ProcessError { data, kind })
+                }
+            }
+        })
+    }
+}
+
 /// Detect the region of an S3 bucket via HeadBucket.
-///
-/// On success the response includes the region directly. On a 301 redirect
-/// (wrong region) the `x-amz-bucket-region` header contains the correct one.
 #[cfg(feature = "worker-s3")]
 async fn detect_bucket_region(client: &aws_sdk_s3::Client, bucket: &str) -> String {
     match client.head_bucket().bucket(bucket).send().await {
@@ -377,58 +544,6 @@ async fn detect_bucket_region(client: &aws_sdk_s3::Client, bucket: &str) -> Stri
     }
 }
 
-#[cfg(feature = "worker-s3")]
-impl SegmentUploader for S3Uploader {
-    async fn compress(&self, segment: &sealed::SealedSegment) -> Option<CompressedSegment> {
-        let epoch_secs = segment.creation_epoch_secs();
-        let path = segment.path.clone();
-        match tokio::task::spawn_blocking(move || s3::gzip_compress_file_sync(&path)).await {
-            Ok(Ok(data)) => Some(CompressedSegment { data, epoch_secs }),
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::debug!(target: "dial9_worker", path = %segment.path.display(), "segment already evicted, skipping");
-                None
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(target: "dial9_worker", error = %e, "compression failed");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(target: "dial9_worker", error = %e, "compression task panicked");
-                None
-            }
-        }
-    }
-
-    async fn upload_compressed(
-        &self,
-        segment: &sealed::SealedSegment,
-        compressed: CompressedSegment,
-    ) {
-        if !self.circuit_breaker.lock().unwrap().should_attempt() {
-            return;
-        }
-        match self
-            .uploader
-            .upload_compressed_and_delete(segment, compressed.data, compressed.epoch_secs)
-            .await
-        {
-            Ok(key) => {
-                self.circuit_breaker.lock().unwrap().on_success();
-                tracing::info!(target: "dial9_worker", "uploaded {key}");
-            }
-            Err(e) => {
-                if matches!(&e, s3::UploadError::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
-                {
-                    tracing::debug!(target: "dial9_worker", path = %segment.path.display(), "segment already evicted, skipping");
-                    return;
-                }
-                self.circuit_breaker.lock().unwrap().on_failure();
-                tracing::warn!(target: "dial9_worker", error = %e, cause = ?e, "upload failed");
-            }
-        }
-    }
-}
-
 #[cfg(all(test, feature = "worker-s3"))]
 mod tests {
     use super::*;
@@ -446,12 +561,12 @@ mod tests {
             }
         }
 
-        /// Simulate the upload logic from S3Uploader::upload
+        /// Simulate the upload logic from S3PipelineUploader::process
         async fn upload_segment(&mut self, segment: &sealed::SealedSegment) {
             if !self.circuit_breaker.should_attempt() {
                 return;
             }
-            // Attempt to read the file (like gzip_compress_file_sync would)
+            // Attempt to read the file (like the worker would)
             match tokio::fs::read(&segment.path).await {
                 Ok(_) => self.circuit_breaker.on_success(),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

@@ -2,6 +2,7 @@
 //!
 //! Runs a high-throughput workload with small segment sizes to force rapid rotation,
 //! then monitors the backlog of sealed-but-not-uploaded segments on disk.
+//! After shutdown, lists S3 to report how many segments were uploaded vs created.
 //!
 //! ```bash
 //! cargo run --release -p dial9-tokio-telemetry --example s3_stress_test -- \
@@ -53,6 +54,57 @@ fn count_sealed_files(dir: &std::path::Path, stem: &str) -> u32 {
             name.starts_with(stem) && name.ends_with(".bin") && !name.ends_with(".active")
         })
         .count() as u32
+}
+
+/// List all S3 objects under a prefix. Returns (count, max_segment_index).
+/// Segment index is parsed from the key suffix `{epoch}-{index}.bin.gz`.
+async fn list_s3_objects(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    prefix: &str,
+) -> (u64, Option<u64>) {
+    let mut count = 0u64;
+    let mut max_index: Option<u64> = None;
+    let mut continuation_token = None;
+    loop {
+        let mut req = client.list_objects_v2().bucket(bucket).prefix(prefix);
+        if let Some(token) = continuation_token.take() {
+            req = req.continuation_token(token);
+        }
+        match req.send().await {
+            Ok(resp) => {
+                for obj in resp.contents() {
+                    count += 1;
+                    // Parse segment index from key like ".../{epoch}-{index}.bin.gz"
+                    if let Some(key) = obj.key() {
+                        if let Some(filename) = key.rsplit('/').next() {
+                            // e.g. "1773249038-115.bin.gz"
+                            let stem = filename
+                                .strip_suffix(".bin.gz")
+                                .or_else(|| filename.strip_suffix(".bin"));
+                            if let Some(stem) = stem {
+                                if let Some(idx_str) = stem.rsplit('-').next() {
+                                    if let Ok(idx) = idx_str.parse::<u64>() {
+                                        max_index =
+                                            Some(max_index.map_or(idx, |cur: u64| cur.max(idx)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if resp.is_truncated() == Some(true) {
+                    continuation_token = resp.next_continuation_token().map(String::from);
+                } else {
+                    return (count, max_index);
+                }
+            }
+            Err(e) => {
+                eprintln!("  ⚠ Failed to list S3 objects: {e}");
+                return (count, max_index);
+            }
+        }
+    }
 }
 
 fn main() -> std::io::Result<()> {
@@ -167,7 +219,6 @@ fn main() -> std::io::Result<()> {
                     "  [{:>5.1}s] [{phase}] tasks: {tasks:>10}, backlog: {backlog:>3} sealed files (peak: {max_backlog})",
                     elapsed.as_secs_f64(),
                 );
-                // Stop monitoring once drain is complete
                 if elapsed >= load_duration && backlog == 0 {
                     eprintln!();
                     let drain_time = elapsed - load_duration;
@@ -185,7 +236,6 @@ fn main() -> std::io::Result<()> {
                     eprintln!("  Total tasks:   {tasks}");
                     break;
                 }
-                // Safety: don't monitor forever
                 if elapsed > load_duration + Duration::from_secs(120) {
                     eprintln!("  ⚠ Timed out waiting for drain (backlog: {backlog})");
                     break;
@@ -196,8 +246,6 @@ fn main() -> std::io::Result<()> {
         let _ = spawner.await;
         eprintln!();
         eprintln!("Load complete, waiting for worker to drain...");
-
-        // Wait for monitor to see backlog hit 0, then shut down
         let _ = monitor.await;
 
         eprintln!("Calling graceful_shutdown...");
@@ -206,6 +254,32 @@ fn main() -> std::io::Result<()> {
             .await
             .expect("graceful shutdown");
         eprintln!("Done.");
+
+        // Count uploaded objects in S3
+        eprintln!();
+        eprintln!("Counting S3 objects under s3://{}/{}/ ...", args.bucket, args.prefix);
+        let mut sdk_conf = aws_config::defaults(aws_config::BehaviorVersion::latest());
+        if let Some(region) = &args.region {
+            sdk_conf = sdk_conf.region(aws_config::Region::new(region.clone()));
+        }
+        let client = aws_sdk_s3::Client::new(&sdk_conf.load().await);
+        let (uploaded, max_idx) = list_s3_objects(&client, &args.bucket, &args.prefix).await;
+
+        // max segment index + 1 = total segments created (indices are 0-based)
+        let total_created = max_idx.map(|i| i + 1).unwrap_or(uploaded);
+        let missed = total_created.saturating_sub(uploaded);
+
+        eprintln!();
+        eprintln!("=== Upload Summary ===");
+        eprintln!("  Total segments created: {total_created}");
+        eprintln!("  Uploaded to S3:         {uploaded}");
+        eprintln!("  Missed (evicted):       {missed}");
+        if total_created > 0 {
+            eprintln!(
+                "  Upload rate:            {:.1}%",
+                uploaded as f64 / total_created as f64 * 100.0
+            );
+        }
     });
 
     Ok(())

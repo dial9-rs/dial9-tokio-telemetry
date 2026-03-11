@@ -103,10 +103,8 @@ fn sched_event_timestamps_align_with_wall_clock() {
             .map(|&t| {
                 if t < start {
                     start - t
-                } else if t > end {
-                    t - end
                 } else {
-                    0
+                    t.saturating_sub(end)
                 }
             })
             .min()

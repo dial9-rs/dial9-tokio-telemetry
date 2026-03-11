@@ -31,11 +31,11 @@ fn guard_drop_produces_sealed_bin_files() {
 
     let bin_files: Vec<_> = entries
         .iter()
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "bin"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "bin"))
         .collect();
     let active_files: Vec<_> = entries
         .iter()
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "active"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "active"))
         .collect();
 
     assert!(!bin_files.is_empty(), "should have at least one .bin file");

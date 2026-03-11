@@ -242,6 +242,7 @@ impl RotatingWriter {
         self.write_segment_metadata()?;
         self.rotated = true;
 
+        tracing::info!(segment_index = self.next_index - 1, "rotated to new trace segment");
         self.evict_oldest()?;
         Ok(())
     }
@@ -405,7 +406,7 @@ mod tests {
             .filter(|e| {
                 let p = e.path();
                 p.extension()
-                    .map_or(false, |ext| ext == "bin" || ext == "active")
+                    .is_some_and(|ext| ext == "bin" || ext == "active")
             })
             .map(|e| e.metadata().unwrap().len())
             .sum()
@@ -581,7 +582,7 @@ mod tests {
     fn test_writer_stops_on_tiny_overshoot_after_eviction() {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
-        let header = format::HEADER_SIZE as u64;
+        let _header = format::HEADER_SIZE as u64;
         // Use max_file_size that doesn't evenly divide by event size,
         // so files end up slightly under max_file_size (with leftover bytes).
         // Over 100 files, these leftovers accumulate and push total_size

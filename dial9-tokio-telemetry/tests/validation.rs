@@ -40,7 +40,7 @@ pub fn validate_trace_matches_metrics(
     eprintln!("=== Trace Analysis ===");
     eprintln!("  total_events={}", analysis.total_events);
     eprintln!("  duration_ns={}", analysis.duration_ns);
-    for w in 0..num_workers {
+    for (w, metrics_poll) in metrics_polls.iter().enumerate().take(num_workers) {
         if let Some(stats) = analysis.worker_stats.get(&w) {
             eprintln!(
                 "  worker {}: polls={}, parks={}, unparks={}, poll_time_ns={}",
@@ -49,7 +49,7 @@ pub fn validate_trace_matches_metrics(
         } else {
             eprintln!(
                 "  worker {}: MISSING from trace (tokio polls={})",
-                w, metrics_polls[w]
+                w, metrics_poll
             );
         }
     }
@@ -183,20 +183,19 @@ pub fn validate_trace_matches_metrics(
     let mut last_ts: Vec<Option<u64>> = vec![None; num_workers];
     let mut violations = Vec::new();
     for (idx, event) in events.iter().enumerate() {
-        if let Some(ts) = event.timestamp_nanos() {
-            if let Some(wid) = event.worker_id() {
-                if wid < num_workers {
-                    if let Some(prev) = last_ts[wid] {
-                        if ts < prev {
-                            violations.push((idx, wid, prev, ts));
-                            if violations.len() >= 5 {
-                                break;
-                            }
-                        }
-                    }
-                    last_ts[wid] = Some(ts);
+        if let Some(ts) = event.timestamp_nanos()
+            && let Some(wid) = event.worker_id()
+            && wid < num_workers
+        {
+            if let Some(prev) = last_ts[wid]
+                && ts < prev
+            {
+                violations.push((idx, wid, prev, ts));
+                if violations.len() >= 5 {
+                    break;
                 }
             }
+            last_ts[wid] = Some(ts);
         }
     }
     check!(

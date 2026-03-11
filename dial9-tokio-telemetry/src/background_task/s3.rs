@@ -1,14 +1,34 @@
 //! S3 uploader for sealed trace segments.
 //!
-//! Gzip-compresses sealed segments and uploads them to S3 using the transfer manager.
+//! Uploads processed segment bytes to S3 using the transfer manager.
 //! Deletes local files only after confirmed upload.
 
+use crate::background_task::ProcessErrorKind;
 use crate::background_task::instance_metadata::InstanceIdentity;
 use crate::background_task::sealed::SealedSegment;
 use aws_sdk_s3_transfer_manager::Client;
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use std::collections::HashMap;
 use std::io::Write;
+use std::sync::Arc;
+
+/// Trait for custom S3 object key generation.
+///
+/// Implement this to control the S3 key layout. The default key layout is
+/// `{prefix}/{date}/{HHMM}/{service}/{instance}/{epoch}-{index}.bin.gz`.
+pub trait S3KeyFn: Send + Sync {
+    fn object_key(&self, segment: &SealedSegment, metadata: &HashMap<String, String>) -> String;
+}
+
+impl<F> S3KeyFn for F
+where
+    F: Fn(&SealedSegment, &HashMap<String, String>) -> String + Send + Sync,
+{
+    fn object_key(&self, segment: &SealedSegment, metadata: &HashMap<String, String>) -> String {
+        self(segment, metadata)
+    }
+}
 
 /// Configuration for S3 uploads.
 #[derive(Clone, bon::Builder)]
@@ -23,6 +43,9 @@ pub struct S3Config {
     prefix: Option<String>,
     /// Optional AWS region override. When `None`, uses the SDK default.
     region: Option<String>,
+    /// Custom S3 key function. When set, overrides the default key layout.
+    #[builder(with = |key_fn: impl S3KeyFn + 'static| Arc::new(key_fn) as Arc<dyn S3KeyFn>)]
+    key_fn: Option<Arc<dyn S3KeyFn>>,
 }
 
 impl S3Config {
@@ -38,19 +61,42 @@ impl S3Config {
 
     /// Build the S3 object key for a sealed segment.
     ///
-    /// Format: `{prefix}/{date}/{HHMM}/{service}/{instance}/{epoch_secs}-{index}.bin.gz`
-    /// Time-first layout enables incident correlation across all services with a
-    /// single `ListObjectsV2` prefix query.
-    pub(crate) fn object_key(&self, segment: &SealedSegment, epoch_secs: u64) -> String {
+    /// If a custom `key_fn` is set, delegates to it. Otherwise uses the
+    /// default time-first layout:
+    /// `{prefix}/{date}/{HHMM}/{service}/{instance}/{epoch_secs}-{index}.bin.gz`
+    pub(crate) fn object_key(
+        &self,
+        segment: &SealedSegment,
+        metadata: &HashMap<String, String>,
+    ) -> String {
+        if let Some(key_fn) = &self.key_fn {
+            return key_fn.object_key(segment, metadata);
+        }
+
+        let epoch_secs: u64 = metadata
+            .get("epoch_secs")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let date_hour = time_bucket_from_epoch(epoch_secs);
         let ts = epoch_secs.to_string();
+
+        let extension = if metadata
+            .get("content_encoding")
+            .is_some_and(|v| v == "gzip")
+        {
+            ".bin.gz"
+        } else {
+            ".bin"
+        };
+
         let suffix = format!(
-            "{}/{}/{}/{}-{}.bin.gz",
+            "{}/{}/{}/{}-{}{}",
             date_hour,
             self.service_name,
             self.instance_path.as_str(),
             ts,
-            segment.index
+            segment.index,
+            extension,
         );
         match &self.prefix {
             Some(p) => format!("{p}/{suffix}"),
@@ -74,6 +120,7 @@ fn time_bucket_from_epoch(epoch_secs: u64) -> String {
 }
 
 /// Gzip-compress a file synchronously. Intended for use with `spawn_blocking`.
+#[cfg(test)]
 pub(crate) fn gzip_compress_file_sync(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
@@ -89,34 +136,11 @@ pub(crate) fn gzip_compress_file_sync(path: &std::path::Path) -> std::io::Result
     encoder.finish()
 }
 
-/// Errors from [`S3Uploader::upload_compressed_and_delete`].
-#[derive(Debug)]
-pub(crate) enum UploadError {
-    /// Local I/O failed (compress or delete).
-    Io(std::io::Error),
-    /// S3 transfer failed.
-    Transfer(aws_sdk_s3_transfer_manager::error::Error),
-}
-
-impl std::fmt::Display for UploadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "I/O error: {e}"),
-            Self::Transfer(e) => write!(f, "S3 transfer error: {e}"),
-        }
-    }
-}
-
-impl From<std::io::Error> for UploadError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
-}
-
-impl From<aws_sdk_s3_transfer_manager::error::Error> for UploadError {
-    fn from(e: aws_sdk_s3_transfer_manager::error::Error) -> Self {
-        Self::Transfer(e)
-    }
+/// Gzip-compress bytes in memory.
+pub(crate) fn gzip_compress_bytes(data: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(data)?;
+    encoder.finish()
 }
 
 /// Uploads sealed trace segments to S3.
@@ -130,33 +154,53 @@ impl S3Uploader {
         Self { client, config }
     }
 
-    /// Upload a sealed segment to S3, then delete the local file on success.
+    /// Upload segment bytes to S3, then delete the local file on success.
     ///
     /// Returns the S3 key of the uploaded object.
-    pub(crate) async fn upload_compressed_and_delete(
+    pub(crate) async fn upload_and_delete(
         &self,
         segment: &SealedSegment,
-        compressed: Vec<u8>,
-        epoch_secs: u64,
-    ) -> Result<String, UploadError> {
-        let key = self.config.object_key(segment, epoch_secs);
-        let ts_str = epoch_secs.to_string();
+        data: Vec<u8>,
+        metadata: &HashMap<String, String>,
+    ) -> Result<String, ProcessErrorKind> {
+        let key = self.config.object_key(segment, metadata);
+
+        let content_type = if metadata
+            .get("content_encoding")
+            .is_some_and(|v| v == "gzip")
+        {
+            "application/gzip"
+        } else {
+            "application/octet-stream"
+        };
 
         let handle = aws_sdk_s3_transfer_manager::operation::upload::UploadInput::builder()
             .bucket(&self.config.bucket)
             .key(&key)
-            .content_type("application/gzip")
+            .content_type(content_type)
             .metadata("service", &self.config.service_name)
             .metadata("boot-id", &self.config.boot_id)
             .metadata("segment-index", segment.index.to_string())
-            .metadata("start-time", &ts_str)
+            .metadata(
+                "start-time",
+                metadata
+                    .get("epoch_secs")
+                    .map(|s| s.as_str())
+                    .unwrap_or("0"),
+            )
             .metadata("host", self.config.instance_path.as_str())
-            .body(compressed.into())
+            .body(data.into())
             .initiate_with(&self.client)?;
 
         handle.join().await?;
 
-        tokio::fs::remove_file(&segment.path).await?;
+        match tokio::fs::remove_file(&segment.path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!(target: "dial9_worker", path = %segment.path.display(), "segment already removed");
+            }
+            Err(e) => return Err(e.into()),
+        }
 
         Ok(key)
     }
@@ -185,6 +229,13 @@ mod tests {
             path: path.into(),
             index,
         }
+    }
+
+    fn make_metadata(epoch_secs: u64) -> HashMap<String, String> {
+        HashMap::from([
+            ("epoch_secs".into(), epoch_secs.to_string()),
+            ("content_encoding".into(), "gzip".into()),
+        ])
     }
 
     /// Create a transfer manager Client backed by s3s-fs (in-memory fake S3).
@@ -241,7 +292,8 @@ mod tests {
     fn object_key_includes_all_components() {
         let config = make_config();
         let segment = make_segment("/tmp/trace.3.bin", 3);
-        let key = config.object_key(&segment, 1741209000);
+        let metadata = make_metadata(1741209000);
+        let key = config.object_key(&segment, &metadata);
         assert_eq!(
             key,
             "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-3.bin.gz"
@@ -257,11 +309,42 @@ mod tests {
             .boot_id("test-boot-id")
             .build();
         let segment = make_segment("/tmp/trace.0.bin", 0);
-        let key = config.object_key(&segment, 1741209000);
+        let metadata = make_metadata(1741209000);
+        let key = config.object_key(&segment, &metadata);
         assert_eq!(
             key,
             "2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz"
         );
+    }
+
+    #[test]
+    fn object_key_without_compression() {
+        let config = make_config();
+        let segment = make_segment("/tmp/trace.0.bin", 0);
+        let metadata = HashMap::from([("epoch_secs".into(), "1741209000".into())]);
+        let key = config.object_key(&segment, &metadata);
+        assert_eq!(
+            key,
+            "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin"
+        );
+    }
+
+    #[test]
+    fn custom_key_fn_overrides_default() {
+        let config = S3Config::builder()
+            .bucket("test-bucket")
+            .service_name("svc")
+            .instance_path("host")
+            .boot_id("bid")
+            .key_fn(|segment: &SealedSegment, meta: &HashMap<String, String>| {
+                let ts = meta.get("epoch_secs").unwrap();
+                format!("custom/{}-{}.bin.gz", ts, segment.index)
+            })
+            .build();
+        let segment = make_segment("/tmp/trace.5.bin", 5);
+        let metadata = make_metadata(1741209000);
+        let key = config.object_key(&segment, &metadata);
+        assert_eq!(key, "custom/1741209000-5.bin.gz");
     }
 
     // --- Gzip compression tests ---
@@ -274,6 +357,18 @@ mod tests {
         std::fs::write(&path, original).unwrap();
 
         let compressed = gzip_compress_file_sync(&path).unwrap();
+        assert_ne!(&compressed[..], &original[..]);
+
+        let mut decoder = GzDecoder::new(&compressed[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn gzip_compress_bytes_roundtrips() {
+        let original = b"hello world, this is trace data that should compress well!";
+        let compressed = gzip_compress_bytes(original).unwrap();
         assert_ne!(&compressed[..], &original[..]);
 
         let mut decoder = GzDecoder::new(&compressed[..]);
@@ -306,7 +401,8 @@ mod tests {
             .boot_id("bid")
             .build();
         let segment = make_segment("/tmp/trace.0.bin", 0);
-        let key = config.object_key(&segment, 1741209000);
+        let metadata = make_metadata(1741209000);
+        let key = config.object_key(&segment, &metadata);
         // No prefix → date-hour is first component
         assert!(key.starts_with("2025-03-05/"));
     }
@@ -334,8 +430,9 @@ mod tests {
 
         // Compress, then upload and delete
         let compressed = gzip_compress_file_sync(&segment_path).unwrap();
+        let metadata = make_metadata(1741209000);
         let key = uploader
-            .upload_compressed_and_delete(&segment, compressed, 1741209000)
+            .upload_and_delete(&segment, compressed, &metadata)
             .await
             .unwrap();
 
@@ -380,8 +477,9 @@ mod tests {
         let segment = make_segment(&segment_path, 5);
 
         let compressed = gzip_compress_file_sync(&segment_path).unwrap();
+        let metadata = make_metadata(1741209000);
         let key = uploader
-            .upload_compressed_and_delete(&segment, compressed, 1741209000)
+            .upload_and_delete(&segment, compressed, &metadata)
             .await
             .unwrap();
 
@@ -426,8 +524,9 @@ mod tests {
         let segment = make_segment(&segment_path, 3);
 
         let compressed = gzip_compress_file_sync(&segment_path).unwrap();
+        let metadata = make_metadata(1741209000);
         let key = uploader
-            .upload_compressed_and_delete(&segment, compressed, 1741209000)
+            .upload_and_delete(&segment, compressed, &metadata)
             .await
             .unwrap();
 

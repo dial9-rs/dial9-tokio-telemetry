@@ -42,6 +42,7 @@ assert2 = "0.3"
 criterion = "0.5"
 clap = { version = "4", features = ["derive"] }
 hdrhistogram = "7"
+metrique-writer = { version = "0.1", features = ["test-util"] }
 proptest = "1"
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -49,6 +50,7 @@ s3s = "0.13.0"
 s3s-fs = "0.13.0"
 s3s-aws = "0.13.0"
 aws-sdk-s3 = "1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
 async-trait = "0.1.89"
 uuid = { version = "1", features = ["v4"] }
 
