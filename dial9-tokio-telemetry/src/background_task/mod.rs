@@ -553,6 +553,8 @@ async fn detect_bucket_region(client: &aws_sdk_s3::Client, bucket: &str) -> Stri
 mod tests {
     use super::*;
     use assert2::check;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Deps that record whether on_failure was called by proxying through
     /// a real S3Uploader-like upload path.
@@ -596,5 +598,311 @@ mod tests {
         deps.upload_segment(&missing).await;
 
         check!(deps.circuit_breaker.is_closed());
+    }
+
+    // --- Review finding #1: compressed_size metric is non-zero after pipeline ---
+
+    /// After a successful pipeline run (gzip + upload), the CompressedSize
+    /// metric must reflect the actual compressed byte count, not 0.
+    #[tokio::test]
+    async fn compressed_size_metric_is_nonzero_after_pipeline() {
+        use metrique_writer::test_util::Inspector;
+        use metrique_writer::AnyEntrySink;
+
+        let s3_root = tempfile::tempdir().unwrap();
+        let local_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        // Write a segment file with enough data to compress
+        let segment_path = local_dir.path().join("trace.0.bin");
+        let data = vec![42u8; 4096];
+        std::fs::write(&segment_path, &data).unwrap();
+
+        let inspector = Inspector::default();
+        let sink = inspector.clone().boxed();
+
+        // Build a real pipeline: GzipCompressor → S3PipelineUploader
+        let s3_config = s3::S3Config::builder()
+            .bucket("test-bucket")
+            .service_name("test")
+            .instance_path("test")
+            .boot_id("test")
+            .region("us-east-1")
+            .build();
+
+        let fs = s3s_fs::FileSystem::new(s3_root.path()).unwrap();
+        let mut builder = s3s::service::S3ServiceBuilder::new(fs);
+        builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+        let s3_service = builder.build();
+        let s3_client: s3s_aws::Client = s3_service.into();
+        let s3_sdk_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(s3_client)
+            .force_path_style(true)
+            .build();
+        let sdk_client = aws_sdk_s3::Client::from_conf(s3_sdk_config);
+        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
+            aws_sdk_s3_transfer_manager::Config::builder()
+                .client(sdk_client)
+                .build(),
+        );
+
+        let uploader = s3::S3Uploader::new(tm_client, s3_config);
+        let mut processors: Vec<Box<dyn SegmentProcessor>> = vec![
+            Box::new(GzipCompressor),
+            Box::new(S3PipelineUploader {
+                uploader,
+                circuit_breaker: connection::CircuitBreaker::new(),
+            }),
+        ];
+
+        let segment = sealed::SealedSegment {
+            path: segment_path.clone(),
+            index: 0,
+        };
+
+        let metrics = SegmentProcessMetrics {
+            total_time: metrique::timers::Timer::start_now(),
+            success: 0,
+            segment_index: 0,
+            uncompressed_size: data.len() as u64,
+            compressed_size: None,
+            pipeline: PipelineMetrics::default(),
+        }
+        .append_on_drop(sink);
+
+        let mut pipe_data = SegmentData {
+            segment,
+            bytes: data,
+            metadata: HashMap::from([
+                ("epoch_secs".into(), "1741209000".into()),
+                ("segment_index".into(), "0".into()),
+            ]),
+            metrics,
+        };
+
+        for processor in &mut processors {
+            let mut stage = StageMetrics::start();
+            pipe_data = processor.process(pipe_data).await.unwrap();
+            stage.succeed();
+            pipe_data.metrics.pipeline.push(processor.name(), stage);
+        }
+
+        // This is what process_segments does at the end — the bug is here:
+        pipe_data.metrics.compressed_size = Some(pipe_data.bytes.len() as u64);
+        pipe_data.metrics.success = 1;
+        pipe_data.metrics.total_time.stop();
+        drop(pipe_data);
+
+        let entries = inspector.entries();
+        check!(entries.len() == 1);
+        let entry = &entries[0];
+        let compressed = entry.metrics["CompressedSize"].as_u64();
+        // BUG: compressed_size is 0 because bytes were mem::take'd by S3 uploader
+        // then overwritten at the end of process_segments.
+        // This test will FAIL until the bug is fixed.
+        check!(compressed > 0, "CompressedSize should be non-zero, got {}", compressed);
+    }
+
+    // --- Review finding #10: uncompressed_size should use bytes.len() ---
+
+    /// uncompressed_size should match the actual bytes read, not a separate
+    /// metadata() call that could race with eviction.
+    #[test]
+    fn uncompressed_size_matches_bytes_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.0.bin");
+        let data = vec![0u8; 1234];
+        std::fs::write(&path, &data).unwrap();
+
+        // Read the file the way process_segments does
+        let uncompressed_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let bytes = std::fs::read(&path).unwrap();
+
+        // These should be equal — the metadata call is redundant
+        check!(uncompressed_size == bytes.len() as u64);
+
+        // The real assertion: bytes.len() is the canonical source of truth
+        check!(bytes.len() == 1234);
+    }
+
+    // --- Review finding #4: WorkerLoop drain on stop ---
+
+    /// When the stop signal is set, the worker must drain remaining segments
+    /// before exiting.
+    #[tokio::test]
+    async fn worker_loop_drains_on_stop() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create some sealed segments
+        std::fs::write(dir.path().join("trace.0.bin"), b"segment0").unwrap();
+        std::fs::write(dir.path().join("trace.1.bin"), b"segment1").unwrap();
+
+        let processed = Arc::new(AtomicUsize::new(0));
+
+        struct CountingProcessor(Arc<AtomicUsize>);
+        impl SegmentProcessor for CountingProcessor {
+            fn name(&self) -> &'static str {
+                "Counter"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                let counter = self.0.clone();
+                Box::pin(async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(data)
+                })
+            }
+        }
+
+        let stop = Arc::new(AtomicBool::new(true)); // already stopped
+        let config = BackgroundTaskConfig::builder()
+            .trace_path(dir.path().join("trace.bin"))
+            .s3(s3::S3Config::builder()
+                .bucket("b")
+                .service_name("s")
+                .instance_path("i")
+                .boot_id("b")
+                .build())
+            .build();
+
+        let processors: Vec<Box<dyn SegmentProcessor>> =
+            vec![Box::new(CountingProcessor(processed.clone()))];
+
+        let worker = WorkerLoop::new(config, stop, processors);
+        worker.run().await;
+
+        // Worker should have drained both segments even though stop was set
+        check!(processed.load(Ordering::SeqCst) == 2);
+    }
+
+    /// When a processor fails, the worker skips that segment and continues
+    /// with the next one.
+    #[tokio::test]
+    async fn worker_loop_continues_after_processor_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("trace.0.bin"), b"fail").unwrap();
+        std::fs::write(dir.path().join("trace.1.bin"), b"succeed").unwrap();
+
+        let processed = Arc::new(AtomicUsize::new(0));
+
+        struct FailFirstProcessor {
+            counter: Arc<AtomicUsize>,
+            calls: usize,
+        }
+        impl SegmentProcessor for FailFirstProcessor {
+            fn name(&self) -> &'static str {
+                "FailFirst"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.calls += 1;
+                let should_fail = self.calls == 1;
+                let counter = self.counter.clone();
+                Box::pin(async move {
+                    if should_fail {
+                        Err(ProcessError {
+                            data,
+                            kind: ProcessErrorKind::Io(std::io::Error::other("test failure")),
+                        })
+                    } else {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        Ok(data)
+                    }
+                })
+            }
+        }
+
+        let stop = Arc::new(AtomicBool::new(true));
+        let config = BackgroundTaskConfig::builder()
+            .trace_path(dir.path().join("trace.bin"))
+            .s3(s3::S3Config::builder()
+                .bucket("b")
+                .service_name("s")
+                .instance_path("i")
+                .boot_id("b")
+                .build())
+            .build();
+
+        let processors: Vec<Box<dyn SegmentProcessor>> =
+            vec![Box::new(FailFirstProcessor {
+                counter: processed.clone(),
+                calls: 0,
+            })];
+
+        let worker = WorkerLoop::new(config, stop, processors);
+        worker.run().await;
+
+        // Second segment should still be processed despite first failing
+        check!(processed.load(Ordering::SeqCst) == 1);
+    }
+}
+
+// --- Review finding #9: trace_stem edge cases ---
+
+#[cfg(all(test, feature = "worker-s3"))]
+mod trace_stem_tests {
+    use super::*;
+    use assert2::check;
+
+    fn dummy_s3() -> s3::S3Config {
+        s3::S3Config::builder()
+            .bucket("b")
+            .service_name("s")
+            .instance_path("i")
+            .boot_id("b")
+            .build()
+    }
+
+    #[test]
+    fn trace_stem_normal_path() {
+        let config = BackgroundTaskConfig::builder()
+            .trace_path("/tmp/traces/trace.bin")
+            .s3(dummy_s3())
+            .build();
+        check!(config.trace_stem() == "trace");
+    }
+
+    #[test]
+    fn trace_stem_directory_path() {
+        // A path like "/tmp/traces/" — file_stem returns "traces", not an error
+        let config = BackgroundTaskConfig::builder()
+            .trace_path("/tmp/traces/")
+            .s3(dummy_s3())
+            .build();
+        // This is the current behavior — it returns "traces" not "trace"
+        // which would silently match the wrong files
+        check!(config.trace_stem() == "traces");
+    }
+
+    #[test]
+    fn trace_stem_root_path() {
+        // A path like "/" has no file stem
+        let config = BackgroundTaskConfig::builder()
+            .trace_path("/")
+            .s3(dummy_s3())
+            .build();
+        // Should fall back to "trace" and log an error
+        check!(config.trace_stem() == "trace");
+    }
+
+    #[test]
+    fn trace_dir_for_directory_path() {
+        let config = BackgroundTaskConfig::builder()
+            .trace_path("/tmp/traces/")
+            .s3(dummy_s3())
+            .build();
+        // trace_dir should be the parent of the path
+        check!(config.trace_dir() == std::path::Path::new("/tmp"));
     }
 }

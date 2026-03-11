@@ -544,18 +544,46 @@ mod tests {
 
         let client = fake_s3_client(s3_root.path());
         let config = make_config();
-        let _uploader = S3Uploader::new(client, config);
+        let uploader = S3Uploader::new(client, config);
 
         let segment_path = local_dir.path().join("trace.0.bin");
         std::fs::write(&segment_path, b"should survive").unwrap();
 
-        // Compress from a nonexistent file to trigger failure
-        let bad_segment = make_segment(local_dir.path().join("nonexistent.bin"), 0);
-        let result = gzip_compress_file_sync(&bad_segment.path);
+        let segment = make_segment(&segment_path, 0);
+        let compressed = gzip_compress_bytes(b"should survive").unwrap();
+        let metadata = make_metadata(1741209000);
+
+        // Destroy the S3 backend filesystem — uploads will fail
+        drop(s3_root);
+
+        let result = uploader
+            .upload_and_delete(&segment, compressed, &metadata)
+            .await;
 
         check!(result.is_err());
-
-        // The original file should be untouched
+        // The local file must survive the failed upload
         check!(segment_path.exists());
+    }
+
+    // --- Review finding #6: object_key with epoch_secs fallback to 0 ---
+
+    #[test]
+    fn object_key_epoch_secs_fallback_to_zero_produces_1970_path() {
+        let config = make_config();
+        let segment = make_segment("/tmp/trace.0.bin", 0);
+        // No epoch_secs in metadata — falls back to 0
+        let metadata = HashMap::new();
+        let key = config.object_key(&segment, &metadata);
+        // epoch 0 → 1970-01-01/0000 — this is a silent misconfiguration
+        check!(key.contains("1970-01-01/0000"));
+    }
+
+    #[test]
+    fn object_key_epoch_secs_unparseable_falls_back_to_zero() {
+        let config = make_config();
+        let segment = make_segment("/tmp/trace.0.bin", 0);
+        let metadata = HashMap::from([("epoch_secs".into(), "not-a-number".into())]);
+        let key = config.object_key(&segment, &metadata);
+        check!(key.contains("1970-01-01/0000"));
     }
 }

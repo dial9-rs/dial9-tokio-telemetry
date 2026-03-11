@@ -672,6 +672,29 @@ fn stress_test_all_segments_uploaded_and_valid() {
         "expected many events across all segments, got {total_events}"
     );
 
+    // Invariant 4: segment indices are contiguous (no gaps).
+    // Parse segment index from each key: .../{epoch}-{index}.bin.gz
+    let mut segment_indices: Vec<u32> = objects
+        .iter()
+        .filter_map(|key| {
+            let filename = key.rsplit('/').next()?;
+            let stem = filename.strip_suffix(".bin.gz")?;
+            let idx_str = stem.rsplit('-').next()?;
+            idx_str.parse().ok()
+        })
+        .collect();
+    segment_indices.sort();
+    segment_indices.dedup();
+    if let (Some(&min), Some(&max)) = (segment_indices.first(), segment_indices.last()) {
+        let expected_count = (max - min + 1) as usize;
+        assert_eq!(
+            segment_indices.len(),
+            expected_count,
+            "segment indices should be contiguous from {min} to {max}, but got {} unique indices: {segment_indices:?}",
+            segment_indices.len(),
+        );
+    }
+
     let ratio = total_uncompressed as f64 / total_compressed as f64;
     eprintln!(
         "stress test passed: {} objects, {} total events, {:.1}MB uncompressed, {:.1}MB compressed, {:.1}:1 ratio",
