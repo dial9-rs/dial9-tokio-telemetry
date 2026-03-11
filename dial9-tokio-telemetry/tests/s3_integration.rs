@@ -490,6 +490,7 @@ fn region_auto_detection_corrects_wrong_client_region() {
 /// 3. Compression ratio is sane (compressed < uncompressed)
 /// 4. Segment indices are sorted with no duplicates (gaps expected from eviction)
 /// 5. Total events across all segments is non-trivial
+/// 6. Worker metrics match: success count == object count, sizes non-zero, stages succeed
 #[test]
 fn stress_test_all_segments_uploaded_and_valid() {
     use dial9_tokio_telemetry::telemetry::analysis::TraceReader;
@@ -515,11 +516,15 @@ fn stress_test_all_segments_uploaded_and_valid() {
         .region("us-east-1")
         .build();
 
+    let metrique_writer::test_util::TestEntrySink { inspector, sink: metrics_sink } =
+        metrique_writer::test_util::test_entry_sink();
+
     let uploader_config = BackgroundTaskConfig::builder()
         .trace_path(&trace_path)
         .poll_interval(std::time::Duration::from_millis(50))
         .s3(s3_config)
         .client(client.clone())
+        .metrics_sink(metrics_sink)
         .build();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -693,6 +698,38 @@ fn stress_test_all_segments_uploaded_and_valid() {
         "segment indices should have no duplicates, but found {} duplicates",
         before_dedup - segment_indices.len(),
     );
+
+    // Invariant 6: worker metrics are consistent with uploaded objects.
+    let entries = inspector.entries();
+    let successes: Vec<_> = entries
+        .iter()
+        .filter(|e| e.metrics["Success"].as_u64() == 1)
+        .collect();
+    assert_eq!(
+        successes.len(),
+        objects.len(),
+        "metric success count ({}) should match uploaded object count ({})",
+        successes.len(),
+        objects.len(),
+    );
+    for entry in &successes {
+        let compressed = entry.metrics["CompressedSize"].as_u64();
+        let uncompressed = entry.metrics["UncompressedSize"].as_u64();
+        assert!(compressed > 0, "CompressedSize should be non-zero");
+        assert!(uncompressed > 0, "UncompressedSize should be non-zero");
+        assert!(
+            compressed < uncompressed,
+            "compressed ({compressed}) should be < uncompressed ({uncompressed})"
+        );
+        assert!(
+            entry.metrics["Gzip.Success"].as_u64() == 1,
+            "Gzip stage should succeed"
+        );
+        assert!(
+            entry.metrics["S3Upload.Success"].as_u64() == 1,
+            "S3Upload stage should succeed"
+        );
+    }
 
     let ratio = total_uncompressed as f64 / total_compressed as f64;
     eprintln!(
