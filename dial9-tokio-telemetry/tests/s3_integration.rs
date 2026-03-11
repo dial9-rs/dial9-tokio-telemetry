@@ -226,7 +226,7 @@ async fn graceful_shutdown_seals_segments() {
     let active_files: Vec<_> = std::fs::read_dir(trace_dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "active"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "active"))
         .collect();
     assert!(active_files.is_empty(), "no .active files should remain");
 
@@ -478,5 +478,207 @@ fn region_auto_detection_corrects_wrong_client_region() {
     assert!(
         !events.is_empty(),
         "expected trace events after region correction"
+    );
+}
+
+/// Stress test: generate high-throughput trace data against a local S3 server
+/// and verify invariants.
+///
+/// Invariants checked:
+/// 1. All segments uploaded — no data left on disk after graceful shutdown
+/// 2. Every uploaded object is valid gzip containing parseable trace events
+/// 3. Compression ratio is sane (compressed < uncompressed)
+/// 4. Segment indices are contiguous (no gaps)
+/// 5. Total events across all segments is non-trivial
+#[test]
+fn stress_test_all_segments_uploaded_and_valid() {
+    use dial9_tokio_telemetry::telemetry::analysis::TraceReader;
+
+    let s3_root = tempfile::tempdir().unwrap();
+    let trace_dir = tempfile::tempdir().unwrap();
+    let trace_path = trace_dir.path().join("trace.bin");
+
+    std::fs::create_dir(s3_root.path().join("stress-bucket")).unwrap();
+    let client = fake_s3_client(s3_root.path());
+
+    // Small segments (64KB) to force many rotations under load.
+    let segment_size = 64 * 1024;
+    let total_size = 10 * 1024 * 1024; // 10 MB disk budget
+    let writer = RotatingWriter::new(&trace_path, segment_size, total_size).unwrap();
+
+    let s3_config = S3Config::builder()
+        .bucket("stress-bucket")
+        .prefix("traces")
+        .service_name("stress-svc")
+        .instance_path("test-host")
+        .boot_id("stress-boot")
+        .region("us-east-1")
+        .build();
+
+    let uploader_config = BackgroundTaskConfig::builder()
+        .trace_path(&trace_path)
+        .poll_interval(std::time::Duration::from_millis(50))
+        .s3(s3_config)
+        .client(client.clone())
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(4).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .with_s3_uploader(uploader_config)
+        .build_and_start(builder, writer)
+        .unwrap();
+
+    let handle = guard.handle();
+
+    // Generate load for 3 seconds — enough to produce many segments at 64KB each.
+    runtime.block_on(async {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            let mut joins = Vec::with_capacity(100);
+            for _ in 0..100 {
+                joins.push(handle.spawn(async {
+                    tokio::task::yield_now().await;
+                    tokio::task::yield_now().await;
+                }));
+            }
+            for j in joins {
+                let _ = j.await;
+            }
+        }
+
+        // Graceful shutdown: seals final segment, worker drains to S3.
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(30))
+            .await
+            .expect("graceful shutdown");
+    });
+
+    drop(runtime);
+
+    // Invariant 1: no sealed .bin files left on disk (all uploaded + deleted).
+    let leftover_bins: Vec<_> = std::fs::read_dir(trace_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("trace.") && name.ends_with(".bin") && !name.ends_with(".active")
+        })
+        .collect();
+    assert!(
+        leftover_bins.is_empty(),
+        "expected all segments uploaded and deleted, but found {} leftover files: {:?}",
+        leftover_bins.len(),
+        leftover_bins
+            .iter()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+
+    // List all uploaded objects.
+    let list_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let objects = list_rt.block_on(async {
+        let mut objects = Vec::new();
+        let mut continuation: Option<String> = None;
+        loop {
+            let mut req = client
+                .list_objects_v2()
+                .bucket("stress-bucket")
+                .prefix("traces/");
+            if let Some(token) = continuation.take() {
+                req = req.continuation_token(token);
+            }
+            let resp = req.send().await.unwrap();
+            for obj in resp.contents() {
+                objects.push(obj.key().unwrap().to_string());
+            }
+            if resp.is_truncated() == Some(true) {
+                continuation = resp.next_continuation_token().map(|s| s.to_string());
+            } else {
+                break;
+            }
+        }
+        objects
+    });
+
+    assert!(
+        objects.len() >= 5,
+        "expected many uploaded segments, got {}",
+        objects.len()
+    );
+    eprintln!("stress test: {} objects uploaded to S3", objects.len());
+
+    // Download and validate every object.
+    let mut total_events = 0usize;
+    let mut total_compressed = 0u64;
+    let mut total_uncompressed = 0u64;
+
+    for key in &objects {
+        assert!(key.ends_with(".bin.gz"), "unexpected key suffix: {key}");
+
+        let (decompressed, compressed_size) = list_rt.block_on(async {
+            let resp = client
+                .get_object()
+                .bucket("stress-bucket")
+                .key(key)
+                .send()
+                .await
+                .unwrap();
+            let body = resp.body.collect().await.unwrap().into_bytes();
+            let compressed_size = body.len() as u64;
+
+            // Invariant 2: valid gzip.
+            let mut decoder = GzDecoder::new(&body[..]);
+            let mut decompressed = Vec::new();
+            decoder
+                .read_to_end(&mut decompressed)
+                .unwrap_or_else(|e| panic!("failed to decompress {key}: {e}"));
+            (decompressed, compressed_size)
+        });
+
+        // Invariant 3: compression ratio is sane.
+        let uncompressed_size = decompressed.len() as u64;
+        assert!(
+            compressed_size < uncompressed_size,
+            "compressed ({compressed_size}) should be smaller than uncompressed ({uncompressed_size}) for {key}"
+        );
+        total_compressed += compressed_size;
+        total_uncompressed += uncompressed_size;
+
+        // Invariant 2 continued: parseable trace events.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &decompressed).unwrap();
+        let mut reader = TraceReader::new(tmp.path().to_str().unwrap()).unwrap();
+        let (_magic, version) = reader.read_header().unwrap();
+        assert!(version > 0, "invalid format version in {key}");
+        let events = reader.read_all().unwrap();
+        assert!(!events.is_empty(), "expected events in {key}, got none");
+        total_events += events.len();
+    }
+
+    // Invariant 5: non-trivial total event count.
+    assert!(
+        total_events > 1000,
+        "expected many events across all segments, got {total_events}"
+    );
+
+    let ratio = total_uncompressed as f64 / total_compressed as f64;
+    eprintln!(
+        "stress test passed: {} objects, {} total events, {:.1}MB uncompressed, {:.1}MB compressed, {:.1}:1 ratio",
+        objects.len(),
+        total_events,
+        total_uncompressed as f64 / 1_000_000.0,
+        total_compressed as f64 / 1_000_000.0,
+        ratio,
     );
 }

@@ -201,51 +201,54 @@ See [TRACE_ANALYSIS_GUIDE.md](/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) fo
 
 With the `worker-s3` feature, sealed trace segments are automatically gzip-compressed and uploaded to S3 by a background worker thread. The application process is unaffected — uploads happen asynchronously after segments are sealed.
 
-```rust,ignore
+```rust,no_run
+# #[cfg(feature = "worker-s3")]
+# fn main() -> std::io::Result<()> {
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
-use dial9_tokio_telemetry::background_task::UploaderConfig;
+use dial9_tokio_telemetry::background_task::BackgroundTaskConfig;
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 
-fn main() -> std::io::Result<()> {
-    let writer = RotatingWriter::new(
-        "/tmp/my_traces/trace.bin",
-        1024 * 1024,      // rotate after 1 MiB per file
-        5 * 1024 * 1024,  // keep at most 5 MiB on disk
-    )?;
+let writer = RotatingWriter::new(
+    "/tmp/my_traces/trace.bin",
+    1024 * 1024,      // rotate after 1 MiB per file
+    5 * 1024 * 1024,  // keep at most 5 MiB on disk
+)?;
 
-    let s3_config = S3Config::builder()
-        .bucket("my-trace-bucket")
-        .prefix("traces")
-        .service_name("my-service")
-        .instance_path("us-east-1/i-0abc123")
-        .boot_id("unique-boot-id")
-        .build();
+let s3_config = S3Config::builder()
+    .bucket("my-trace-bucket")
+    .prefix("traces")
+    .service_name("my-service")
+    .instance_path("us-east-1/i-0abc123")
+    .boot_id("unique-boot-id")
+    .build();
 
-    let uploader_config = UploaderConfig::builder()
-        .trace_path("/tmp/my_traces/trace.bin")
-        .s3(s3_config)
-        .build();
+let uploader_config = BackgroundTaskConfig::builder()
+    .trace_path("/tmp/my_traces/trace.bin")
+    .s3(s3_config)
+    .build();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
+let mut builder = tokio::runtime::Builder::new_multi_thread();
+builder.worker_threads(4).enable_all();
 
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
-        .with_s3_uploader(uploader_config)
-        .build_and_start(builder, writer)?;
+let (runtime, guard) = TracedRuntime::builder()
+    .with_task_tracking(true)
+    .with_s3_uploader(uploader_config)
+    .build_and_start(builder, writer)?;
 
-    runtime.block_on(async {
-        // your async code here
-    });
+runtime.block_on(async {
+    // your async code here
+});
 
-    // guard drop: flushes, seals final segment, worker drains remaining to S3
-    Ok(())
-}
+// guard drop: flushes, seals final segment, worker drains remaining to S3
+# Ok(())
+# }
+# #[cfg(not(feature = "worker-s3"))]
+# fn main() {}
 ```
 
 Objects land at `s3://{bucket}/{prefix}/{date-time}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz` with metadata headers (`service`, `boot-id`, etc.) for quick inspection via `HeadObject`.
 
-The `{date-time}` bucket (e.g. `2026-03-07/2030`) uses 10-minute windows and is the first key component after the prefix, enabling efficient incident correlation: `aws s3 ls s3://bucket/traces/2026-03-07/2030/` lists all traces from all services during that window.
+The `{date-time}` bucket (e.g. `2026-03-07/2030`) uses 1-minute windows and is the first key component after the prefix, enabling efficient incident correlation: `aws s3 ls s3://bucket/traces/2026-03-07/2030/` lists all traces from all services during that window.
 
 The worker uses exponential backoff if S3 is unreachable — it never crashes or affects the application. Symbolized files stay on disk in degraded mode and can be uploaded later.
 

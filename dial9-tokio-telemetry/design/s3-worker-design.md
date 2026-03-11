@@ -43,7 +43,7 @@ Sealed:   trace.3.bin          (atomic rename)
 
 **Problem:** The primary access pattern is incident correlation — "what was happening across all services at time T?" This means time should be the first index in the key hierarchy.
 
-**Decision:** Time (10-minute bucket) is the first component after the optional prefix:
+**Decision:** Time (1-minute bucket) is the first component after the optional prefix:
 
 ```
 {prefix}/{date-time}/{service}/{instance}/{epoch_secs}-{index}.bin.gz
@@ -64,7 +64,7 @@ Time-first is strictly better for incident correlation and no worse for single-s
 - Time-range queries across all services with a single `ListObjectsV2` prefix
 - Natural Athena partitioning if we add Parquet output later
 - Efficient S3 lifecycle policies (delete everything older than N days)
-- 10-minute bucketing gives 144 prefixes per day — manageable for listing and lifecycle policies
+- 1-minute bucketing gives 1440 prefixes per day — manageable for listing and lifecycle policies
 
 **Tradeoff:** Requires reasonable clock sync, but we already need that for trace timestamps.
 
@@ -206,7 +206,7 @@ loop {
 s3://{bucket}/{prefix}/{date-time}/{service}/{instance}/{epoch_secs}-{index}.bin.gz
 ```
 
-- `{date-time}`: `2026-03-07/2030` — 10-minute bucket (enables time-range queries across all services)
+- `{date-time}`: `2026-03-07/2030` — 1-minute bucket (enables time-range queries across all services)
 - `{service}`: user-provided service name
 - `{instance}`: `us-east-1/i-0abc123` or `dc-west/rack4-host7` (opaque string)
 - `{epoch_secs}`: Unix epoch seconds

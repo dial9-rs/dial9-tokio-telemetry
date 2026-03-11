@@ -13,7 +13,20 @@
 /// let id = InstanceIdentity::new("us-east-1/i-0abc123");
 /// assert_eq!(id.as_str(), "us-east-1/i-0abc123");
 /// ```
+#[derive(Clone)]
 pub struct InstanceIdentity(String);
+
+impl From<String> for InstanceIdentity {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for InstanceIdentity {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
 
 impl InstanceIdentity {
     /// Create an identity from an explicit string.

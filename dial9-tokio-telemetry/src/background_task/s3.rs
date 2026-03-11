@@ -3,12 +3,12 @@
 //! Gzip-compresses sealed segments and uploads them to S3 using the transfer manager.
 //! Deletes local files only after confirmed upload.
 
+use crate::background_task::instance_metadata::InstanceIdentity;
 use crate::background_task::sealed::SealedSegment;
 use aws_sdk_s3_transfer_manager::Client;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::io::Write;
-use tokio::io::AsyncReadExt;
 
 /// Configuration for S3 uploads.
 #[derive(Clone, bon::Builder)]
@@ -16,7 +16,8 @@ use tokio::io::AsyncReadExt;
 pub struct S3Config {
     bucket: String,
     service_name: String,
-    instance_path: String,
+    #[builder(into)]
+    instance_path: InstanceIdentity,
     boot_id: String,
     /// Optional key prefix. When `None`, keys start at the time bucket.
     prefix: Option<String>,
@@ -37,7 +38,7 @@ impl S3Config {
 
     /// Build the S3 object key for a sealed segment.
     ///
-    /// Format: `{prefix}/{date-hour}/{service}/{instance}/{epoch_secs}-{index}.bin.gz`
+    /// Format: `{prefix}/{date}/{HHMM}/{service}/{instance}/{epoch_secs}-{index}.bin.gz`
     /// Time-first layout enables incident correlation across all services with a
     /// single `ListObjectsV2` prefix query.
     pub(crate) fn object_key(&self, segment: &SealedSegment, epoch_secs: u64) -> String {
@@ -45,7 +46,11 @@ impl S3Config {
         let ts = epoch_secs.to_string();
         let suffix = format!(
             "{}/{}/{}/{}-{}.bin.gz",
-            date_hour, self.service_name, self.instance_path, ts, segment.index
+            date_hour,
+            self.service_name,
+            self.instance_path.as_str(),
+            ts,
+            segment.index
         );
         match &self.prefix {
             Some(p) => format!("{p}/{suffix}"),
@@ -54,28 +59,28 @@ impl S3Config {
     }
 }
 
-/// Convert epoch seconds to `YYYY-MM-DD/HHM0` string for S3 key bucketing.
-/// Minutes are truncated to 10-minute buckets (00, 10, 20, 30, 40, 50).
+/// Convert epoch seconds to `YYYY-MM-DD/HHMM` string for S3 key bucketing.
 fn time_bucket_from_epoch(epoch_secs: u64) -> String {
     let dt = time::OffsetDateTime::from_unix_timestamp(epoch_secs as i64)
         .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-    let format = time::format_description::parse("[year]-[month]-[day]/[hour][minute]")
-        .expect("static format");
-    let mut s = dt.format(&format).expect("format never fails for UTC");
-    // Truncate minutes to 10-minute bucket: replace last digit with '0'
-    let last = s.len() - 1;
-    s.replace_range(last..=last, "0");
-    s
+    format!(
+        "{:04}-{:02}-{:02}/{:02}{:02}",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute()
+    )
 }
 
-/// Gzip-compress by streaming from an async reader in chunks.
-/// Avoids holding the entire uncompressed file in memory.
-pub async fn gzip_compress_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    let mut file = tokio::fs::File::open(path).await?;
+/// Gzip-compress a file synchronously. Intended for use with `spawn_blocking`.
+pub(crate) fn gzip_compress_file_sync(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
     let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = file.read(&mut buf).await?;
+        let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
@@ -84,7 +89,7 @@ pub async fn gzip_compress_file(path: &std::path::Path) -> std::io::Result<Vec<u
     encoder.finish()
 }
 
-/// Errors from [`S3Uploader::upload_and_delete`].
+/// Errors from [`S3Uploader::upload_compressed_and_delete`].
 #[derive(Debug)]
 pub(crate) enum UploadError {
     /// Local I/O failed (compress or delete).
@@ -128,12 +133,12 @@ impl S3Uploader {
     /// Upload a sealed segment to S3, then delete the local file on success.
     ///
     /// Returns the S3 key of the uploaded object.
-    pub(crate) async fn upload_and_delete(
+    pub(crate) async fn upload_compressed_and_delete(
         &self,
         segment: &SealedSegment,
+        compressed: Vec<u8>,
         epoch_secs: u64,
     ) -> Result<String, UploadError> {
-        let compressed = gzip_compress_file(&segment.path).await?;
         let key = self.config.object_key(segment, epoch_secs);
         let ts_str = epoch_secs.to_string();
 
@@ -145,7 +150,7 @@ impl S3Uploader {
             .metadata("boot-id", &self.config.boot_id)
             .metadata("segment-index", segment.index.to_string())
             .metadata("start-time", &ts_str)
-            .metadata("host", &self.config.instance_path)
+            .metadata("host", self.config.instance_path.as_str())
             .body(compressed.into())
             .initiate_with(&self.client)?;
 
@@ -261,14 +266,14 @@ mod tests {
 
     // --- Gzip compression tests ---
 
-    #[tokio::test]
-    async fn gzip_compress_roundtrips() {
+    #[test]
+    fn gzip_compress_roundtrips() {
         let original = b"hello world, this is trace data that should compress well!";
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.bin");
         std::fs::write(&path, original).unwrap();
 
-        let compressed = gzip_compress_file(&path).await.unwrap();
+        let compressed = gzip_compress_file_sync(&path).unwrap();
         assert_ne!(&compressed[..], &original[..]);
 
         let mut decoder = GzDecoder::new(&compressed[..]);
@@ -277,13 +282,13 @@ mod tests {
         assert_eq!(decompressed, original);
     }
 
-    #[tokio::test]
-    async fn gzip_compress_empty_input() {
+    #[test]
+    fn gzip_compress_empty_input() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.bin");
         std::fs::write(&path, b"").unwrap();
 
-        let compressed = gzip_compress_file(&path).await.unwrap();
+        let compressed = gzip_compress_file_sync(&path).unwrap();
         let mut decoder = GzDecoder::new(&compressed[..]);
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
@@ -327,9 +332,10 @@ mod tests {
         std::fs::write(&segment_path, original_data).unwrap();
         let segment = make_segment(&segment_path, 0);
 
-        // Upload and delete
+        // Compress, then upload and delete
+        let compressed = gzip_compress_file_sync(&segment_path).unwrap();
         let key = uploader
-            .upload_and_delete(&segment, 1741209000)
+            .upload_compressed_and_delete(&segment, compressed, 1741209000)
             .await
             .unwrap();
 
@@ -373,8 +379,9 @@ mod tests {
         std::fs::write(&segment_path, original_data).unwrap();
         let segment = make_segment(&segment_path, 5);
 
+        let compressed = gzip_compress_file_sync(&segment_path).unwrap();
         let key = uploader
-            .upload_and_delete(&segment, 1741209000)
+            .upload_compressed_and_delete(&segment, compressed, 1741209000)
             .await
             .unwrap();
 
@@ -418,8 +425,9 @@ mod tests {
         std::fs::write(&segment_path, b"trace data").unwrap();
         let segment = make_segment(&segment_path, 3);
 
+        let compressed = gzip_compress_file_sync(&segment_path).unwrap();
         let key = uploader
-            .upload_and_delete(&segment, 1741209000)
+            .upload_compressed_and_delete(&segment, compressed, 1741209000)
             .await
             .unwrap();
 
@@ -450,24 +458,22 @@ mod tests {
         std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
         let client = fake_s3_client(s3_root.path());
-        // Use a read-only directory to make the delete fail after upload succeeds?
-        // Actually, the simplest way: point the segment at a file that doesn't exist
-        // so the read fails before upload.
         let config = make_config();
-        let uploader = S3Uploader::new(client, config);
+        let _uploader = S3Uploader::new(client, config);
 
         let segment_path = local_dir.path().join("trace.0.bin");
-        // Write the file, then make it unreadable
         std::fs::write(&segment_path, b"should survive").unwrap();
 
-        // Create a segment pointing to a nonexistent file to trigger read failure
+        // Compress from a nonexistent file to trigger failure
         let bad_segment = make_segment(local_dir.path().join("nonexistent.bin"), 0);
+        let result = gzip_compress_file_sync(&bad_segment.path);
 
-        let result = uploader.upload_and_delete(&bad_segment, 1741209000).await;
+        assert!(
+            result.is_err(),
+            "expected compress to fail for missing file"
+        );
 
-        assert!(result.is_err(), "expected upload to fail for missing file");
-
-        // The original file should be untouched (we never tried to delete it)
+        // The original file should be untouched
         assert!(segment_path.exists());
     }
 }

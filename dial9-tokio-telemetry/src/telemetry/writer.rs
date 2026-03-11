@@ -252,7 +252,10 @@ impl RotatingWriter {
             if let Some((path, size)) = self.files.pop_front() {
                 self.total_size -= size;
                 if let Err(e) = fs::remove_file(&path) {
-                    tracing::warn!("failed to evict old trace segment {}: {e}", path.display());
+                    // NotFound is expected when the S3 worker already deleted the file.
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!("failed to evict old trace segment {}: {e}", path.display());
+                    }
                 }
             }
         }
@@ -295,7 +298,7 @@ impl RotatingWriter {
         // Check if we've exceeded budget even without rotation
         if self.total_size > self.max_total_size {
             self.current_writer.flush()?;
-            self.stopped = true;
+            self.evict_oldest()?;
         }
         Ok(())
     }
@@ -564,6 +567,47 @@ mod tests {
         // File must be readable, not corrupted
         let events = read_trace_events(&rotating_file(&base, 0));
         assert!(events.len() < 100, "should have stopped writing");
+    }
+
+    /// Bug: write_event_inner sets stopped=true when total_size slightly exceeds
+    /// max_total_size, without attempting eviction. This happens right after
+    /// rotate() + evict_oldest() brings total_size just under budget, then the
+    /// first event in the new file pushes it a few bytes over. The writer
+    /// permanently stops even though eviction could free space.
+    ///
+    /// Reproduces the stress test failure: 64-worker runtime with 1MB segments
+    /// and 100MB budget stops producing segments after ~100 rotations.
+    #[test]
+    fn test_writer_stops_on_tiny_overshoot_after_eviction() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let header = format::HEADER_SIZE as u64;
+        // Use max_file_size that doesn't evenly divide by event size,
+        // so files end up slightly under max_file_size (with leftover bytes).
+        // Over 100 files, these leftovers accumulate and push total_size
+        // past max_total_size after eviction.
+        let max_file_size = 200;
+        let num_files = 100u64;
+        let max_total_size = max_file_size * num_files;
+        let mut writer = RotatingWriter::new(&base, max_file_size, max_total_size).unwrap();
+
+        // Write many events. The event size (11 bytes for park_event) doesn't
+        // divide evenly into (max_file_size - header), so each file wastes a
+        // few bytes. After 100 rotations, total_size drifts above max_total_size.
+        for i in 0..5000 {
+            writer.write_event(&park_event()).unwrap();
+            if writer.stopped {
+                panic!(
+                    "Writer stopped at event {i}! total_size={}, max_total_size={}, \
+                     current_size={}, files={}. \
+                     write_event_inner should try eviction before stopping.",
+                    writer.total_size,
+                    max_total_size,
+                    writer.current_size,
+                    writer.files.len()
+                );
+            }
+        }
     }
 
     #[test]
