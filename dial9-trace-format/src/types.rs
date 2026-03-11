@@ -134,7 +134,13 @@ impl FieldValue {
             FieldType::String => {
                 let len = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
                 let bytes = data.get(4..4 + len)?;
-                let s = String::from_utf8(bytes.to_vec()).ok()?;
+                let s = std::str::from_utf8(bytes)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|_| {
+                        // Spec requires UTF-8 but we don't want to silently drop the
+                        // entire event. Replace invalid sequences so decoding can continue.
+                        String::from_utf8_lossy(bytes).into_owned()
+                    });
                 Some((FieldValue::String(s), &data[4 + len..]))
             }
             FieldType::Bytes => {

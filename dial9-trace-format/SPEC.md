@@ -41,6 +41,8 @@ Every frame begins with a 1-byte tag:
 
 Unknown tags **must** cause the decoder to stop (the stream cannot be advanced without knowing the frame size).
 
+Frames may appear in any order, with one constraint: a schema frame for a given `type_id` **must** appear before any event frame that references that `type_id`.
+
 ### Schema Frame (`0x01`)
 
 Defines the layout of an event type.
@@ -63,7 +65,7 @@ Each **FieldDef**:
 | name | [u8; name_len] | UTF-8 field name |
 | field_type | u8 | Field type tag (see Field Types) |
 
-A `type_id` **must not** be registered more than once in a stream.
+A `type_id` **must not** be registered more than once in a stream with a different schema. Re-registering the same `type_id` with an identical schema is permitted (idempotent) and decoders **must** accept it.
 
 The `has_timestamp` flag indicates whether events of this type include a packed nanosecond timestamp in the event frame header. When set, the timestamp is encoded in the event header (see Event Frame) and is **not** included in the field list. The schema's `field_count` and `fields` describe only the non-timestamp payload fields.
 
@@ -193,9 +195,7 @@ A string map carries an ordered list of key-value pairs (both UTF-8 strings):
 
 ### LEB128
 
-**Unsigned LEB128**: Encode 7 bits per byte, MSB is continuation bit. A `u64` requires at most 10 bytes.
-
-**Signed LEB128**: Same structure, but sign-extended on decode. If the final byte has bit 6 set and `shift < 64`, the result is sign-extended with ones.
+**LEB128 (Little Endian Base 128)**: Variable-length integer encoding. Each byte encodes 7 bits of the value; the MSB is a continuation bit. A `u64` requires at most 10 bytes.
 
 ## Limits
 

@@ -1,15 +1,16 @@
 # dial9-trace-format
 
-A self-describing binary trace format. Schemas are embedded in the stream so readers don't need out-of-band type definitions. Designed for tokio runtime telemetry but usable for any structured event stream.
+A binary trace format for tokio runtime telemetry, usable for any structured event stream.
 
 See [SPEC.md](SPEC.md) for the wire format specification.
 
 ## Design principles
 
-1. **Relatively compact.** Events average ~15 bytes raw and ~3 bytes gzipped on a real-world tokio trace. The format isn't the absolute smallest possible — it trades a few bytes of overhead for the properties below.
-2. **Extremely fast to write.** The encoder does no allocations per event and uses fixed-width or LEB128 fields with no framing overhead beyond a 3-byte header. Benchmarks show ~48M events/s encode throughput on a single core.
-3. **Compressible.** Schemas are written once; events are pure data with no repeated field names or tags. Timestamps are delta-encoded as 3-byte offsets. This structure compresses well — gzip reduces a typical trace to ~20% of its raw size (and beats a hand-tuned bespoke format by 1.4x after compression).
-4. **Simple enough to port.** The entire wire format is ~5 frame types, LEB128 integers, and little-endian fixed-width fields. A [JavaScript decoder](js/decode.js) is under 200 lines. No code generation or IDL compiler is needed to read a stream — schemas are inline.
+1. **Self-describing.** Schemas are embedded in the stream so readers don't need out-of-band type definitions. No code generation or IDL compiler is needed to read a stream.
+2. **Relatively compact.** Events average ~15 bytes raw and ~3 bytes gzipped on a real-world tokio trace. The format isn't the absolute smallest possible; it trades a few bytes of overhead for the properties below.
+3. **Extremely fast to write.** The encoder does no allocations per event and uses fixed-width or [LEB128](https://en.wikipedia.org/wiki/LEB128) (variable-length integer) fields with no framing overhead beyond a 3-byte header. Benchmarks show ~48M events/s encode throughput on a single core.
+4. **Compressible.** Schemas are written once; events are pure data with no repeated field names or tags. Timestamps are delta-encoded as 3-byte offsets. This structure compresses well: gzip reduces a typical trace to ~20% of its raw size (and beats a hand-tuned bespoke format by 1.4x after compression).
+5. **Simple enough to port.** The entire wire format is ~5 frame types, LEB128 integers, and little-endian fixed-width fields. A [JavaScript decoder](js/decode.js) is under 200 lines.
 
 ## Numbers
 
@@ -21,6 +22,8 @@ On a 42k-event tokio runtime trace (`format_comparison` example, release mode):
 | Hand-tuned bespoke format | 586 KB (13.7 B/event) | 177 KB (4.1 B/event) |
 
 The self-describing format is ~8% larger raw but **37% smaller after gzip** because its regular structure compresses better than the bespoke format's variable-length tag soup.
+
+At 42k events per trace and a 1-second collection interval, a continuously-running agent produces roughly **11 GB/day raw** or **2.3 GB/day gzipped**.
 
 Throughput (criterion, 1M mixed events, single core):
 
@@ -88,26 +91,29 @@ Integer fields use fixed-width little-endian encoding (`u8`, `u16`, `u32`) or LE
 
 ### Manual schema registration
 
-For event types not known at compile time, register schemas with a marker type:
+For event types whose fields are determined at runtime (e.g., user-defined metrics with dynamic dimensions), register schemas with a marker type:
 
 ```rust
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
 
-struct HttpRequest; // marker type
+struct CustomMetric; // marker type — one per dynamic schema
 
 let mut enc = Encoder::new();
-enc.register_schema_for::<HttpRequest>("HttpRequest", vec![
-    FieldDef { name: "timestamp_ns".into(), field_type: FieldType::Varint },
-    FieldDef { name: "method".into(), field_type: FieldType::String },
-    FieldDef { name: "status".into(), field_type: FieldType::Varint },
-]);
 
-enc.write_event_for::<HttpRequest>(&[
+// Fields determined at runtime (e.g., from a config file)
+let fields = vec![
+    FieldDef { name: "timestamp_ns".into(), field_type: FieldType::Varint },
+    FieldDef { name: "name".into(), field_type: FieldType::String },
+    FieldDef { name: "value".into(), field_type: FieldType::Varint },
+];
+enc.register_schema_for::<CustomMetric>("CustomMetric", fields);
+
+enc.write_event_for::<CustomMetric>(&[
     FieldValue::Varint(1_000_000),
-    FieldValue::string("GET"),
-    FieldValue::Varint(200),
+    FieldValue::string("request_count"),
+    FieldValue::Varint(42),
 ]);
 ```
 

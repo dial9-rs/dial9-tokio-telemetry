@@ -80,7 +80,9 @@ impl<W: Write> Encoder<W> {
     }
 
     /// Register a schema for a marker type `T`. The encoder assigns the wire type_id.
-    /// Returns the assigned type_id. Panics if `T` is already registered.
+    /// Returns the assigned type_id, or the existing type_id if `T` was already registered
+    /// with the same schema (idempotent). Returns an error if `T` was already registered
+    /// with a different schema.
     pub fn register_schema_for<T: 'static>(
         &mut self,
         name: &str,
@@ -90,6 +92,9 @@ impl<W: Write> Encoder<W> {
     }
 
     /// Register a schema with explicit timestamp flag.
+    /// Returns the assigned type_id, or the existing type_id if `T` was already registered
+    /// with the same schema (idempotent). Returns an error if `T` was already registered
+    /// with a different schema.
     pub fn register_schema_for_with_timestamp<T: 'static>(
         &mut self,
         name: &str,
@@ -97,10 +102,21 @@ impl<W: Write> Encoder<W> {
         fields: Vec<crate::schema::FieldDef>,
     ) -> io::Result<WireTypeId> {
         let rust_id = TypeId::of::<T>();
-        for &(tid, _) in &self.type_ids {
-            if tid == rust_id {
-                panic!("type already registered: {name}");
+        // If already registered, check idempotency
+        if let Some(&(_, wire_id)) = self.type_ids.iter().find(|(tid, _)| *tid == rust_id) {
+            let existing = self.registry.get(wire_id).unwrap();
+            let new_entry = SchemaEntry {
+                name: name.to_string(),
+                has_timestamp,
+                fields,
+            };
+            if *existing == new_entry {
+                return Ok(wire_id);
             }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("type already registered with different schema: {name}"),
+            ));
         }
         let id = self.registry.next_type_id();
         let entry = SchemaEntry {
@@ -169,7 +185,7 @@ impl<W: Write> Encoder<W> {
             (None, values)
         };
 
-        debug_assert_eq!(
+        assert_eq!(
             field_values.len(),
             schema.fields.len(),
             "value count does not match schema field count for type_id {tid:?}"
@@ -258,6 +274,41 @@ mod tests {
     fn encoder_rejects_unregistered_type() {
         let mut enc = Encoder::new();
         enc.write_event_for::<Unregistered>(&[]).unwrap();
+    }
+
+    #[test]
+    fn idempotent_re_registration() {
+        let mut enc = Encoder::new();
+        let fields = vec![FieldDef {
+            name: "v".into(),
+            field_type: FieldType::Varint,
+        }];
+        let id1 = enc
+            .register_schema_for::<TestEvent>("Ev", fields.clone())
+            .unwrap();
+        let id2 = enc.register_schema_for::<TestEvent>("Ev", fields).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn re_registration_different_schema_errors() {
+        let mut enc = Encoder::new();
+        enc.register_schema_for::<TestEvent>(
+            "Ev",
+            vec![FieldDef {
+                name: "v".into(),
+                field_type: FieldType::Varint,
+            }],
+        )
+        .unwrap();
+        let result = enc.register_schema_for::<TestEvent>(
+            "Ev",
+            vec![FieldDef {
+                name: "different".into(),
+                field_type: FieldType::Bool,
+            }],
+        );
+        assert!(result.is_err());
     }
 
     #[test]
