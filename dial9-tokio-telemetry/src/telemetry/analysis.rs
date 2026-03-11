@@ -2,11 +2,12 @@ use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
 use crate::telemetry::format;
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufReader, Result};
+use std::fs;
+use std::io::Result;
 
 pub struct TraceReader {
-    reader: BufReader<File>,
+    events: Vec<TelemetryEvent>,
+    pos: usize,
     /// Spawn location definitions accumulated during reading.
     pub spawn_locations: HashMap<SpawnLocationId, String>,
     /// Task ID → spawn location ID mapping built from TaskSpawn events.
@@ -21,9 +22,11 @@ pub struct TraceReader {
 
 impl TraceReader {
     pub fn new(path: &str) -> Result<Self> {
-        let file = File::open(path)?;
+        let data = fs::read(path)?;
+        let all_events = format::decode_events(&data)?;
         Ok(Self {
-            reader: BufReader::new(file),
+            events: all_events,
+            pos: 0,
             spawn_locations: HashMap::new(),
             task_spawn_locs: HashMap::new(),
             callframe_symbols: HashMap::new(),
@@ -32,70 +35,44 @@ impl TraceReader {
         })
     }
 
-    pub fn read_header(&mut self) -> Result<(String, u32)> {
-        format::read_header(&mut self.reader)
+    /// Backward-compatible header read. The new format handles headers
+    /// internally during decoding, so this is a no-op that returns the
+    /// format identifier.
+    pub fn read_header(&self) -> Result<(&'static str, u32)> {
+        Ok(("TRC\0", 1))
     }
 
     /// Read the next event without filtering — returns all events including
     /// metadata records (SpawnLocationDef, TaskSpawn, CallframeDef).
     /// Still accumulates metadata into lookup tables as a side effect.
     pub fn read_raw_event(&mut self) -> Result<Option<TelemetryEvent>> {
-        let event = format::read_event(&mut self.reader)?;
-        match &event {
-            Some(TelemetryEvent::SpawnLocationDef { id, location }) => {
-                self.spawn_locations.insert(*id, location.clone());
-            }
-            Some(TelemetryEvent::TaskSpawn {
-                task_id,
-                spawn_loc_id,
-                ..
-            }) => {
-                self.task_spawn_locs.insert(*task_id, *spawn_loc_id);
-            }
-            Some(TelemetryEvent::CallframeDef {
-                address, symbol, ..
-            }) => {
-                self.callframe_symbols.insert(*address, symbol.clone());
-            }
-            Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
-                self.thread_names.insert(*tid, name.clone());
-            }
-            Some(TelemetryEvent::SegmentMetadata { entries }) => {
-                self.segment_metadata = entries.clone();
-            }
-            _ => {}
+        if self.pos >= self.events.len() {
+            return Ok(None);
         }
-        Ok(event)
+        let event = self.events[self.pos].clone();
+        self.pos += 1;
+        self.accumulate_metadata(&event);
+        Ok(Some(event))
     }
 
     /// Read the next runtime telemetry event, automatically accumulating
-    /// SpawnLocationDef and TaskSpawn metadata records.
+    /// metadata records (SpawnLocationDef, TaskSpawn, CallframeDef, etc.)
+    /// without returning them.
     pub fn read_event(&mut self) -> Result<Option<TelemetryEvent>> {
         loop {
-            match format::read_event(&mut self.reader)? {
-                None => return Ok(None),
-                Some(TelemetryEvent::SpawnLocationDef { id, location }) => {
-                    self.spawn_locations.insert(id, location);
-                }
-                Some(TelemetryEvent::TaskSpawn {
-                    task_id,
-                    spawn_loc_id,
-                    ..
-                }) => {
-                    self.task_spawn_locs.insert(task_id, spawn_loc_id);
-                }
-                Some(TelemetryEvent::CallframeDef {
-                    address, symbol, ..
-                }) => {
-                    self.callframe_symbols.insert(address, symbol);
-                }
-                Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
-                    self.thread_names.insert(tid, name);
-                }
-                Some(TelemetryEvent::SegmentMetadata { entries }) => {
-                    self.segment_metadata = entries;
-                }
-                Some(e) => return Ok(Some(e)),
+            if self.pos >= self.events.len() {
+                return Ok(None);
+            }
+            let event = self.events[self.pos].clone();
+            self.pos += 1;
+            self.accumulate_metadata(&event);
+            match &event {
+                TelemetryEvent::SpawnLocationDef { .. }
+                | TelemetryEvent::TaskSpawn { .. }
+                | TelemetryEvent::CallframeDef { .. }
+                | TelemetryEvent::ThreadNameDef { .. }
+                | TelemetryEvent::SegmentMetadata { .. } => continue,
+                _ => return Ok(Some(event)),
             }
         }
     }
@@ -106,6 +83,33 @@ impl TraceReader {
             events.push(event);
         }
         Ok(events)
+    }
+
+    fn accumulate_metadata(&mut self, event: &TelemetryEvent) {
+        match event {
+            TelemetryEvent::SpawnLocationDef { id, location } => {
+                self.spawn_locations.insert(*id, location.clone());
+            }
+            TelemetryEvent::TaskSpawn {
+                task_id,
+                spawn_loc_id,
+                ..
+            } => {
+                self.task_spawn_locs.insert(*task_id, *spawn_loc_id);
+            }
+            TelemetryEvent::CallframeDef {
+                address, symbol, ..
+            } => {
+                self.callframe_symbols.insert(*address, symbol.clone());
+            }
+            TelemetryEvent::ThreadNameDef { tid, name } => {
+                self.thread_names.insert(*tid, name.clone());
+            }
+            TelemetryEvent::SegmentMetadata { entries } => {
+                self.segment_metadata = entries.clone();
+            }
+            _ => {}
+        }
     }
 }
 

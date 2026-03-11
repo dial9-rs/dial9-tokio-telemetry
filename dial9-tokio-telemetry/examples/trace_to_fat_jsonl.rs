@@ -60,12 +60,8 @@ fn main() -> std::io::Result<()> {
     }
 
     let mut reader = TraceReader::new(&args[1])?;
-    let (magic, version) = reader.read_header()?;
-    if magic != "TOKIOTRC" {
-        eprintln!("not a TOKIOTRC file (got: {magic})");
-        std::process::exit(1);
-    }
-    eprintln!("TOKIOTRC v{version}, converting to fat events...");
+    reader.read_header()?;
+    eprintln!("reading trace, converting to fat events...");
 
     let out: Box<dyn Write> = if let Some(path) = args.get(2) {
         Box::new(std::fs::File::create(path)?)

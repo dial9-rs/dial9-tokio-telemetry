@@ -546,7 +546,7 @@ mod tests {
         let location_a = loc_a();
         let location_b = loc_b();
 
-        let writer = crate::telemetry::writer::RotatingWriter::new(&base, 100, 100_000).unwrap();
+        let writer = crate::telemetry::writer::RotatingWriter::new(&base, 500, 100_000).unwrap();
         let mut ew = EventWriter::new(Box::new(writer));
 
         let locations = [

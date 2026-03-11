@@ -62,6 +62,11 @@ impl<W: Write> Encoder<W> {
         self.state.writer
     }
 
+    /// Borrow the inner writer.
+    pub fn as_inner(&self) -> &W {
+        &self.state.writer
+    }
+
     fn lookup_or_register<T: TraceEvent + 'static>(&mut self) -> io::Result<WireTypeId> {
         let rust_id = TypeId::of::<T>();
         for &(tid, wire_id) in &self.type_ids {
