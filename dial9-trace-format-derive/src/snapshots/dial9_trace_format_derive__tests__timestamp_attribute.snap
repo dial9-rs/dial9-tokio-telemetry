@@ -4,6 +4,7 @@ expression: "expand_to_string(quote!\n{\n    struct PollStart\n    {\n        #[
 ---
 #[derive(Debug, Clone)]
 struct PollStartRef<'a> {
+    pub timestamp_ns: u64,
     pub worker_id: <u64 as ::dial9_trace_format::TraceField>::Ref<'a>,
     pub task_id: <u64 as ::dial9_trace_format::TraceField>::Ref<'a>,
 }
@@ -35,9 +36,11 @@ impl ::dial9_trace_format::TraceEvent for PollStart {
         Ok(())
     }
     fn decode<'a>(
+        timestamp_ns: Option<u64>,
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
     ) -> Option<Self::Ref<'a>> {
         Some(PollStartRef {
+            timestamp_ns: timestamp_ns?,
             worker_id: <u64 as ::dial9_trace_format::TraceField>::decode_ref(
                 fields.get(0usize)?,
             )?,

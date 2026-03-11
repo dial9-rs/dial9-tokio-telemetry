@@ -61,105 +61,105 @@ impl TraceField for CpuSampleSource {
 // ── Derive structs ──────────────────────────────────────────────────────────
 
 #[derive(TraceEvent)]
-struct PollStartEvent {
+pub struct PollStartEvent {
     #[traceevent(timestamp)]
-    timestamp_ns: u64,
-    worker_id: u8,
-    local_queue: u8,
-    task_id: TaskId,
-    spawn_loc_id: SpawnLocationId,
+    pub timestamp_ns: u64,
+    pub worker_id: u8,
+    pub local_queue: u8,
+    pub task_id: TaskId,
+    pub spawn_loc_id: SpawnLocationId,
 }
 
 #[derive(TraceEvent)]
-struct PollEndEvent {
+pub struct PollEndEvent {
     #[traceevent(timestamp)]
-    timestamp_ns: u64,
-    worker_id: u8,
+    pub timestamp_ns: u64,
+    pub worker_id: u8,
 }
 
 #[derive(TraceEvent)]
-struct WorkerParkEvent {
+pub struct WorkerParkEvent {
     #[traceevent(timestamp)]
-    timestamp_ns: u64,
-    worker_id: u8,
-    local_queue: u8,
-    cpu_time_ns: u64,
+    pub timestamp_ns: u64,
+    pub worker_id: u8,
+    pub local_queue: u8,
+    pub cpu_time_ns: u64,
 }
 
 #[derive(TraceEvent)]
-struct WorkerUnparkEvent {
+pub struct WorkerUnparkEvent {
     #[traceevent(timestamp)]
-    timestamp_ns: u64,
-    worker_id: u8,
-    local_queue: u8,
-    cpu_time_ns: u64,
-    sched_wait_ns: u64,
+    pub timestamp_ns: u64,
+    pub worker_id: u8,
+    pub local_queue: u8,
+    pub cpu_time_ns: u64,
+    pub sched_wait_ns: u64,
 }
 
 #[derive(TraceEvent)]
-struct QueueSampleEvent {
+pub struct QueueSampleEvent {
     #[traceevent(timestamp)]
-    timestamp_ns: u64,
-    global_queue: u8,
+    pub timestamp_ns: u64,
+    pub global_queue: u8,
 }
 
 #[derive(TraceEvent)]
-struct SpawnLocationDefEvent {
-    id: SpawnLocationId,
-    location: String,
+pub struct SpawnLocationDefEvent {
+    pub id: SpawnLocationId,
+    pub location: String,
 }
 
 #[derive(TraceEvent)]
-struct TaskSpawnEvent {
+pub struct TaskSpawnEvent {
     #[traceevent(timestamp)]
-    timestamp_ns: u64,
-    task_id: TaskId,
-    spawn_loc_id: SpawnLocationId,
+    pub timestamp_ns: u64,
+    pub task_id: TaskId,
+    pub spawn_loc_id: SpawnLocationId,
 }
 
 #[derive(TraceEvent)]
-struct TaskTerminateEvent {
+pub struct TaskTerminateEvent {
     #[traceevent(timestamp)]
-    timestamp_ns: u64,
-    task_id: TaskId,
+    pub timestamp_ns: u64,
+    pub task_id: TaskId,
 }
 
 #[derive(TraceEvent)]
-struct CpuSampleEvent {
+pub struct CpuSampleEvent {
     #[traceevent(timestamp)]
-    timestamp_ns: u64,
-    worker_id: u8,
-    tid: u32,
-    source: CpuSampleSource,
-    callchain: StackFrames,
+    pub timestamp_ns: u64,
+    pub worker_id: u8,
+    pub tid: u32,
+    pub source: CpuSampleSource,
+    pub callchain: StackFrames,
 }
 
 #[derive(TraceEvent)]
-struct CallframeDefEvent {
-    address: u64,
-    symbol: String,
+pub struct CallframeDefEvent {
+    pub address: u64,
+    pub symbol: String,
     /// Empty string encodes None.
-    location: String,
+    pub location: String,
 }
 
 #[derive(TraceEvent)]
-struct ThreadNameDefEvent {
-    tid: u32,
-    name: String,
+pub struct ThreadNameDefEvent {
+    pub tid: u32,
+    pub name: String,
 }
 
 #[derive(TraceEvent)]
-struct WakeEventEvent {
+pub struct WakeEventEvent {
     #[traceevent(timestamp)]
-    timestamp_ns: u64,
-    waker_task_id: TaskId,
-    woken_task_id: TaskId,
-    target_worker: u8,
+    pub timestamp_ns: u64,
+    pub waker_task_id: TaskId,
+    pub woken_task_id: TaskId,
+    pub target_worker: u8,
 }
 
 #[derive(TraceEvent)]
-struct SegmentMetadataEvent {
-    entries: Vec<(String, String)>,
+pub struct SegmentMetadataEvent {
+    pub entries: Vec<(String, String)>,
 }
 
 // ── Encode ──────────────────────────────────────────────────────────────────
@@ -293,133 +293,170 @@ pub fn write_event<W: Write>(enc: &mut Encoder<W>, event: &TelemetryEvent) -> io
 
 /// Decode all events from a byte slice into `TelemetryEvent`s.
 pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
-    use dial9_trace_format::decoder::{DecodedFrame, Decoder};
+    Ok(decode_events_ref(data)?.into_iter().map(TelemetryEvent::from).collect())
+}
+
+/// Decode all events from a byte slice into zero-copy [`TelemetryEventRef`]s.
+/// The returned refs borrow from `data`.
+pub fn decode_events_ref(data: &[u8]) -> io::Result<Vec<TelemetryEventRef<'_>>> {
+    use dial9_trace_format::decoder::Decoder;
 
     let mut dec =
         Decoder::new(data).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
     let mut events = Vec::new();
 
-    for frame in dec.decode_all() {
-        if let DecodedFrame::Event { type_id, timestamp_ns, values } = frame {
-            let name = match dec.registry().get(type_id) {
-                Some(s) => &s.name,
-                None => continue,
-            };
-            if let Some(ev) = decode_one(name, timestamp_ns, &values) {
-                events.push(ev);
-            }
+    dec.for_each_event(|ev| {
+        if let Some(ev) = decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
+            events.push(ev);
         }
-    }
+    }).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
     Ok(events)
 }
 
-fn v(values: &[dial9_trace_format::types::FieldValue], i: usize) -> u64 {
-    match values.get(i) {
-        Some(dial9_trace_format::types::FieldValue::Varint(n)) => *n,
-        _ => 0,
+// ── Zero-copy typed decode ──────────────────────────────────────────────────
+
+/// Zero-copy enum of all telemetry event types. Each variant wraps the
+/// derive-generated `*EventRef<'a>` that borrows directly from the decode
+/// buffer. Timestamped events carry their timestamp inside the Ref struct.
+#[derive(Debug, Clone)]
+pub enum TelemetryEventRef<'a> {
+    PollStart(PollStartEventRef<'a>),
+    PollEnd(PollEndEventRef<'a>),
+    WorkerPark(WorkerParkEventRef<'a>),
+    WorkerUnpark(WorkerUnparkEventRef<'a>),
+    QueueSample(QueueSampleEventRef<'a>),
+    SpawnLocationDef(SpawnLocationDefEventRef<'a>),
+    TaskSpawn(TaskSpawnEventRef<'a>),
+    TaskTerminate(TaskTerminateEventRef<'a>),
+    CpuSample(CpuSampleEventRef<'a>),
+    CallframeDef(CallframeDefEventRef<'a>),
+    ThreadNameDef(ThreadNameDefEventRef<'a>),
+    WakeEvent(WakeEventEventRef<'a>),
+    SegmentMetadata(SegmentMetadataEventRef<'a>),
+}
+
+impl<'a> TelemetryEventRef<'a> {
+    /// Returns the timestamp in nanoseconds, if this event type carries one.
+    pub fn timestamp_ns(&self) -> Option<u64> {
+        match self {
+            Self::PollStart(e) => Some(e.timestamp_ns),
+            Self::PollEnd(e) => Some(e.timestamp_ns),
+            Self::WorkerPark(e) => Some(e.timestamp_ns),
+            Self::WorkerUnpark(e) => Some(e.timestamp_ns),
+            Self::QueueSample(e) => Some(e.timestamp_ns),
+            Self::TaskSpawn(e) => Some(e.timestamp_ns),
+            Self::TaskTerminate(e) => Some(e.timestamp_ns),
+            Self::CpuSample(e) => Some(e.timestamp_ns),
+            Self::WakeEvent(e) => Some(e.timestamp_ns),
+            Self::SpawnLocationDef(_)
+            | Self::CallframeDef(_)
+            | Self::ThreadNameDef(_)
+            | Self::SegmentMetadata(_) => None,
+        }
     }
 }
 
-fn s(values: &[dial9_trace_format::types::FieldValue], i: usize) -> String {
-    match values.get(i) {
-        Some(dial9_trace_format::types::FieldValue::String(s)) => s.clone(),
-        _ => String::new(),
-    }
-}
-
-fn decode_one(
+/// Decode a single event from its schema name and zero-copy field values into
+/// a [`TelemetryEventRef`]. Returns `None` for unknown event names.
+pub fn decode_ref<'a>(
     name: &str,
     timestamp_ns: Option<u64>,
-    values: &[dial9_trace_format::types::FieldValue],
-) -> Option<TelemetryEvent> {
-    let ts = timestamp_ns.unwrap_or(0);
+    fields: &[dial9_trace_format::types::FieldValueRef<'a>],
+) -> Option<TelemetryEventRef<'a>> {
+    use dial9_trace_format::TraceEvent as _;
     Some(match name {
-        "PollStartEvent" => TelemetryEvent::PollStart {
-            timestamp_nanos: ts,
-            worker_id: v(values, 0) as usize,
-            worker_local_queue_depth: v(values, 1) as usize,
-            task_id: TaskId::from_u32(v(values, 2) as u32),
-            spawn_loc_id: SpawnLocationId::from_u16(v(values, 3) as u16),
-        },
-        "PollEndEvent" => TelemetryEvent::PollEnd {
-            timestamp_nanos: ts,
-            worker_id: v(values, 0) as usize,
-        },
-        "WorkerParkEvent" => TelemetryEvent::WorkerPark {
-            timestamp_nanos: ts,
-            worker_id: v(values, 0) as usize,
-            worker_local_queue_depth: v(values, 1) as usize,
-            cpu_time_nanos: v(values, 2),
-        },
-        "WorkerUnparkEvent" => TelemetryEvent::WorkerUnpark {
-            timestamp_nanos: ts,
-            worker_id: v(values, 0) as usize,
-            worker_local_queue_depth: v(values, 1) as usize,
-            cpu_time_nanos: v(values, 2),
-            sched_wait_delta_nanos: v(values, 3),
-        },
-        "QueueSampleEvent" => TelemetryEvent::QueueSample {
-            timestamp_nanos: ts,
-            global_queue_depth: v(values, 0) as usize,
-        },
-        "SpawnLocationDefEvent" => TelemetryEvent::SpawnLocationDef {
-            id: SpawnLocationId::from_u16(v(values, 0) as u16),
-            location: s(values, 1),
-        },
-        "TaskSpawnEvent" => TelemetryEvent::TaskSpawn {
-            timestamp_nanos: ts,
-            task_id: TaskId::from_u32(v(values, 0) as u32),
-            spawn_loc_id: SpawnLocationId::from_u16(v(values, 1) as u16),
-        },
-        "TaskTerminateEvent" => TelemetryEvent::TaskTerminate {
-            timestamp_nanos: ts,
-            task_id: TaskId::from_u32(v(values, 0) as u32),
-        },
-        "CpuSampleEvent" => {
-            let callchain = match values.get(3) {
-                Some(dial9_trace_format::types::FieldValue::StackFrames(f)) => f.clone(),
-                _ => vec![],
-            };
-            TelemetryEvent::CpuSample {
-                timestamp_nanos: ts,
-                worker_id: v(values, 0) as usize,
-                tid: v(values, 1) as u32,
-                source: CpuSampleSource::from_u8(v(values, 2) as u8),
-                callchain,
-            }
-        }
-        "CallframeDefEvent" => {
-            let loc = s(values, 2);
-            TelemetryEvent::CallframeDef {
-                address: v(values, 0),
-                symbol: s(values, 1),
-                location: if loc.is_empty() { None } else { Some(loc) },
-            }
-        }
-        "ThreadNameDefEvent" => TelemetryEvent::ThreadNameDef {
-            tid: v(values, 0) as u32,
-            name: s(values, 1),
-        },
-        "WakeEventEvent" => TelemetryEvent::WakeEvent {
-            timestamp_nanos: ts,
-            waker_task_id: TaskId::from_u32(v(values, 0) as u32),
-            woken_task_id: TaskId::from_u32(v(values, 1) as u32),
-            target_worker: v(values, 2) as u8,
-        },
-        "SegmentMetadataEvent" => {
-            let entries = match values.first() {
-                Some(dial9_trace_format::types::FieldValue::StringMap(map)) => map
-                    .iter()
-                    .filter_map(|(k, val)| {
-                        Some((String::from_utf8(k.clone()).ok()?, String::from_utf8(val.clone()).ok()?))
-                    })
-                    .collect(),
-                _ => vec![],
-            };
-            TelemetryEvent::SegmentMetadata { entries }
-        }
+        "PollStartEvent" => TelemetryEventRef::PollStart(PollStartEvent::decode(timestamp_ns, fields)?),
+        "PollEndEvent" => TelemetryEventRef::PollEnd(PollEndEvent::decode(timestamp_ns, fields)?),
+        "WorkerParkEvent" => TelemetryEventRef::WorkerPark(WorkerParkEvent::decode(timestamp_ns, fields)?),
+        "WorkerUnparkEvent" => TelemetryEventRef::WorkerUnpark(WorkerUnparkEvent::decode(timestamp_ns, fields)?),
+        "QueueSampleEvent" => TelemetryEventRef::QueueSample(QueueSampleEvent::decode(timestamp_ns, fields)?),
+        "SpawnLocationDefEvent" => TelemetryEventRef::SpawnLocationDef(SpawnLocationDefEvent::decode(timestamp_ns, fields)?),
+        "TaskSpawnEvent" => TelemetryEventRef::TaskSpawn(TaskSpawnEvent::decode(timestamp_ns, fields)?),
+        "TaskTerminateEvent" => TelemetryEventRef::TaskTerminate(TaskTerminateEvent::decode(timestamp_ns, fields)?),
+        "CpuSampleEvent" => TelemetryEventRef::CpuSample(CpuSampleEvent::decode(timestamp_ns, fields)?),
+        "CallframeDefEvent" => TelemetryEventRef::CallframeDef(CallframeDefEvent::decode(timestamp_ns, fields)?),
+        "ThreadNameDefEvent" => TelemetryEventRef::ThreadNameDef(ThreadNameDefEvent::decode(timestamp_ns, fields)?),
+        "WakeEventEvent" => TelemetryEventRef::WakeEvent(WakeEventEvent::decode(timestamp_ns, fields)?),
+        "SegmentMetadataEvent" => TelemetryEventRef::SegmentMetadata(SegmentMetadataEvent::decode(timestamp_ns, fields)?),
         _ => return None,
     })
+}
+
+impl From<TelemetryEventRef<'_>> for TelemetryEvent {
+    fn from(r: TelemetryEventRef<'_>) -> Self {
+        match r {
+            TelemetryEventRef::PollStart(e) => TelemetryEvent::PollStart {
+                timestamp_nanos: e.timestamp_ns,
+                worker_id: e.worker_id as usize,
+                worker_local_queue_depth: e.local_queue as usize,
+                task_id: e.task_id,
+                spawn_loc_id: e.spawn_loc_id,
+            },
+            TelemetryEventRef::PollEnd(e) => TelemetryEvent::PollEnd {
+                timestamp_nanos: e.timestamp_ns,
+                worker_id: e.worker_id as usize,
+            },
+            TelemetryEventRef::WorkerPark(e) => TelemetryEvent::WorkerPark {
+                timestamp_nanos: e.timestamp_ns,
+                worker_id: e.worker_id as usize,
+                worker_local_queue_depth: e.local_queue as usize,
+                cpu_time_nanos: e.cpu_time_ns,
+            },
+            TelemetryEventRef::WorkerUnpark(e) => TelemetryEvent::WorkerUnpark {
+                timestamp_nanos: e.timestamp_ns,
+                worker_id: e.worker_id as usize,
+                worker_local_queue_depth: e.local_queue as usize,
+                cpu_time_nanos: e.cpu_time_ns,
+                sched_wait_delta_nanos: e.sched_wait_ns,
+            },
+            TelemetryEventRef::QueueSample(e) => TelemetryEvent::QueueSample {
+                timestamp_nanos: e.timestamp_ns,
+                global_queue_depth: e.global_queue as usize,
+            },
+            TelemetryEventRef::SpawnLocationDef(e) => TelemetryEvent::SpawnLocationDef {
+                id: e.id,
+                location: e.location.to_owned(),
+            },
+            TelemetryEventRef::TaskSpawn(e) => TelemetryEvent::TaskSpawn {
+                timestamp_nanos: e.timestamp_ns,
+                task_id: e.task_id,
+                spawn_loc_id: e.spawn_loc_id,
+            },
+            TelemetryEventRef::TaskTerminate(e) => TelemetryEvent::TaskTerminate {
+                timestamp_nanos: e.timestamp_ns,
+                task_id: e.task_id,
+            },
+            TelemetryEventRef::CpuSample(e) => TelemetryEvent::CpuSample {
+                timestamp_nanos: e.timestamp_ns,
+                worker_id: e.worker_id as usize,
+                tid: e.tid,
+                source: e.source,
+                callchain: e.callchain.iter().collect(),
+            },
+            TelemetryEventRef::CallframeDef(e) => {
+                let loc = e.location;
+                TelemetryEvent::CallframeDef {
+                    address: e.address,
+                    symbol: e.symbol.to_owned(),
+                    location: if loc.is_empty() { None } else { Some(loc.to_owned()) },
+                }
+            }
+            TelemetryEventRef::ThreadNameDef(e) => TelemetryEvent::ThreadNameDef {
+                tid: e.tid,
+                name: e.name.to_owned(),
+            },
+            TelemetryEventRef::WakeEvent(e) => TelemetryEvent::WakeEvent {
+                timestamp_nanos: e.timestamp_ns,
+                waker_task_id: e.waker_task_id,
+                woken_task_id: e.woken_task_id,
+                target_worker: e.target_worker,
+            },
+            TelemetryEventRef::SegmentMetadata(e) => TelemetryEvent::SegmentMetadata {
+                entries: e.entries.iter().map(|(k, v)| (k.to_owned(), v.to_owned())).collect(),
+            },
+        }
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

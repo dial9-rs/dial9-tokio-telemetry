@@ -394,7 +394,7 @@ impl<'a> StringMapIter<'a> {
 }
 
 impl<'a> Iterator for StringMapIter<'a> {
-    type Item = (&'a [u8], &'a [u8]);
+    type Item = (&'a str, &'a str);
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
             return None;
@@ -402,12 +402,12 @@ impl<'a> Iterator for StringMapIter<'a> {
         let klen =
             u32::from_le_bytes(self.data.get(self.pos..self.pos + 4)?.try_into().ok()?) as usize;
         self.pos += 4;
-        let k = self.data.get(self.pos..self.pos + klen)?;
+        let k = std::str::from_utf8(self.data.get(self.pos..self.pos + klen)?).ok()?;
         self.pos += klen;
         let vlen =
             u32::from_le_bytes(self.data.get(self.pos..self.pos + 4)?.try_into().ok()?) as usize;
         self.pos += 4;
-        let v = self.data.get(self.pos..self.pos + vlen)?;
+        let v = std::str::from_utf8(self.data.get(self.pos..self.pos + vlen)?).ok()?;
         self.pos += vlen;
         self.remaining -= 1;
         Some((k, v))

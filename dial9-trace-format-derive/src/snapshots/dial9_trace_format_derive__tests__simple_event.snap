@@ -29,6 +29,7 @@ impl ::dial9_trace_format::TraceEvent for SimpleEvent {
         Ok(())
     }
     fn decode<'a>(
+        timestamp_ns: Option<u64>,
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
     ) -> Option<Self::Ref<'a>> {
         Some(SimpleEventRef {
