@@ -113,6 +113,7 @@ fn parse_segment_index(file_name: &str, stem: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::check;
     use std::fs::File;
     use tempfile::TempDir;
 
@@ -128,9 +129,9 @@ mod tests {
         touch(dir.path(), "trace.2.bin.active");
 
         let segments = find_sealed_segments(dir.path(), "trace").unwrap();
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].index, 0);
-        assert_eq!(segments[1].index, 1);
+        check!(segments.len() == 2);
+        check!(segments[0].index == 0);
+        check!(segments[1].index == 1);
     }
 
     #[test]
@@ -142,7 +143,7 @@ mod tests {
 
         let segments = find_sealed_segments(dir.path(), "trace").unwrap();
         let indices: Vec<u32> = segments.iter().map(|s| s.index).collect();
-        assert_eq!(indices, vec![2, 5, 9]);
+        check!(indices == [2, 5, 9]);
     }
 
     #[test]
@@ -154,15 +155,15 @@ mod tests {
         touch(dir.path(), "readme.md");
 
         let segments = find_sealed_segments(dir.path(), "trace").unwrap();
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].index, 0);
+        check!(segments.len() == 1);
+        check!(segments[0].index == 0);
     }
 
     #[test]
     fn empty_directory() {
         let dir = TempDir::new().unwrap();
         let segments = find_sealed_segments(dir.path(), "trace").unwrap();
-        assert!(segments.is_empty());
+        check!(segments.is_empty());
     }
 
     #[test]
@@ -174,13 +175,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
 
-        // Create a segment with metadata
         let mut writer = RotatingWriter::single_file(&base).unwrap();
         writer
             .set_segment_metadata(vec![("test".into(), "value".into())])
             .unwrap();
 
-        // Write an event to ensure the file has content
         let event = TelemetryEvent::WorkerPark {
             timestamp_nanos: 1000000000,
             worker_id: 0,
@@ -190,7 +189,6 @@ mod tests {
         writer.write_event(&event).unwrap();
         writer.flush().unwrap();
 
-        // Create a SealedSegment and test timestamp parsing
         let segment = SealedSegment {
             path: base.clone(),
             index: 0,
@@ -198,20 +196,13 @@ mod tests {
 
         let timestamp_nanos = segment.parse_segment_timestamp().unwrap();
 
-        // The timestamp should be reasonably recent (within last minute)
         let now_nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
         let diff = now_nanos.abs_diff(timestamp_nanos);
 
-        // Should be within 1 minute (60 billion nanoseconds)
-        assert!(
-            diff < 60_000_000_000,
-            "Timestamp {} is too far from now {}",
-            timestamp_nanos,
-            now_nanos
-        );
+        check!(diff < 60_000_000_000);
     }
 
     #[test]
@@ -223,13 +214,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
 
-        // Create a segment with metadata
         let mut writer = RotatingWriter::single_file(&base).unwrap();
         writer
             .set_segment_metadata(vec![("test".into(), "value".into())])
             .unwrap();
 
-        // Write an event to ensure the file has content
         let event = TelemetryEvent::WorkerPark {
             timestamp_nanos: 1000000000,
             worker_id: 0,
@@ -239,7 +228,6 @@ mod tests {
         writer.write_event(&event).unwrap();
         writer.flush().unwrap();
 
-        // Create a SealedSegment and test creation_epoch_secs
         let segment = SealedSegment {
             path: base.clone(),
             index: 0,
@@ -251,29 +239,23 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        // The epoch seconds should be reasonably recent (within last minute)
         let diff = expected_secs.abs_diff(epoch_secs);
 
-        assert!(
-            diff < 60,
-            "Creation epoch {} is too far from now {}",
-            epoch_secs,
-            expected_secs
-        );
+        check!(diff < 60);
     }
 
     #[test]
     fn parse_segment_index_valid() {
-        assert_eq!(parse_segment_index("trace.0.bin", "trace"), Some(0));
-        assert_eq!(parse_segment_index("trace.42.bin", "trace"), Some(42));
-        assert_eq!(parse_segment_index("my-app.100.bin", "my-app"), Some(100));
+        check!(parse_segment_index("trace.0.bin", "trace") == Some(0));
+        check!(parse_segment_index("trace.42.bin", "trace") == Some(42));
+        check!(parse_segment_index("my-app.100.bin", "my-app") == Some(100));
     }
 
     #[test]
     fn parse_segment_index_invalid() {
-        assert_eq!(parse_segment_index("trace.0.bin.active", "trace"), None);
-        assert_eq!(parse_segment_index("trace.bin", "trace"), None);
-        assert_eq!(parse_segment_index("other.0.bin", "trace"), None);
-        assert_eq!(parse_segment_index("trace.abc.bin", "trace"), None);
+        check!(parse_segment_index("trace.0.bin.active", "trace") == None);
+        check!(parse_segment_index("trace.bin", "trace") == None);
+        check!(parse_segment_index("other.0.bin", "trace") == None);
+        check!(parse_segment_index("trace.abc.bin", "trace") == None);
     }
 }

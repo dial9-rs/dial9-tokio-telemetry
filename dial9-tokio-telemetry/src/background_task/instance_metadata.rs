@@ -52,10 +52,11 @@ impl InstanceIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::check;
 
     #[test]
     fn from_hostname_returns_non_empty_string() {
         let id = InstanceIdentity::from_hostname();
-        assert!(!id.as_str().is_empty());
+        check!(!id.as_str().is_empty());
     }
 }

@@ -158,7 +158,7 @@ impl From<aws_sdk_s3_transfer_manager::error::Error> for ProcessErrorKind {
 ///
 /// Implementations handle one concern: compress, symbolize, upload, etc.
 /// The worker calls processors in sequence for each segment.
-pub(crate) trait SegmentProcessor: Send + Sync {
+pub(crate) trait SegmentProcessor: Send {
     /// Human-readable name for this processor (used in metrics).
     fn name(&self) -> &'static str;
 
@@ -166,9 +166,21 @@ pub(crate) trait SegmentProcessor: Send + Sync {
     /// Returns the (possibly modified) data for the next processor,
     /// or an error to skip this segment.
     fn process(
-        &self,
+        &mut self,
         data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>;
+}
+
+/// Build the processor pipeline. Requires an async context for S3 client setup.
+#[cfg(feature = "worker-s3")]
+async fn build_pipeline(config: &mut BackgroundTaskConfig) -> Vec<Box<dyn SegmentProcessor>> {
+    let s3_uploader = S3PipelineUploader::new(config).await;
+    vec![Box::new(GzipCompressor), Box::new(s3_uploader)]
+}
+
+#[cfg(not(feature = "worker-s3"))]
+async fn build_pipeline(_config: &mut BackgroundTaskConfig) -> Vec<Box<dyn SegmentProcessor>> {
+    Vec::new()
 }
 
 /// The worker loop function. Runs on a dedicated thread, polls for sealed
@@ -177,7 +189,7 @@ pub(crate) trait SegmentProcessor: Send + Sync {
 /// Creates a single-threaded tokio runtime for async processors (e.g. S3 upload).
 /// The worker is a "good citizen": it will lose data rather than disrupt the application.
 pub(crate) fn run_background_task(
-    #[cfg_attr(not(feature = "worker-s3"), allow(unused_mut))] mut config: BackgroundTaskConfig,
+    mut config: BackgroundTaskConfig,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -186,22 +198,14 @@ pub(crate) fn run_background_task(
         .build()
         .expect("failed to create worker runtime");
 
+    let processors = rt.block_on(build_pipeline(&mut config));
+
+    tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), "worker started");
     rt.block_on(async {
-        #[allow(unused_mut)]
-        let mut processors: Vec<Box<dyn SegmentProcessor>> = Vec::new();
-
-        #[cfg(feature = "worker-s3")]
-        {
-            let s3_uploader = S3PipelineUploader::new(&mut config).await;
-            processors.push(Box::new(GzipCompressor));
-            processors.push(Box::new(s3_uploader));
-        }
-
-        tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), "worker started");
         let worker = WorkerLoop::new(config, stop, processors);
         worker.run().await;
-        tracing::info!(target: "dial9_worker", "worker stopped");
     });
+    tracing::info!(target: "dial9_worker", "worker stopped");
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +222,7 @@ impl SegmentProcessor for GzipCompressor {
     }
 
     fn process(
-        &self,
+        &mut self,
         mut data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
@@ -378,7 +382,7 @@ impl WorkerLoop {
                 metrics,
             };
 
-            for processor in &self.processors {
+            for processor in &mut self.processors {
                 let mut stage = StageMetrics::start();
                 match processor.process(data).await {
                     Ok(next) => {
@@ -417,7 +421,7 @@ impl WorkerLoop {
 #[cfg(feature = "worker-s3")]
 pub(crate) struct S3PipelineUploader {
     uploader: s3::S3Uploader,
-    circuit_breaker: std::sync::Mutex<connection::CircuitBreaker>,
+    circuit_breaker: connection::CircuitBreaker,
 }
 
 #[cfg(feature = "worker-s3")]
@@ -457,7 +461,7 @@ impl S3PipelineUploader {
 
         Self {
             uploader: s3::S3Uploader::new(tm_client, s3_config),
-            circuit_breaker: std::sync::Mutex::new(connection::CircuitBreaker::new()),
+            circuit_breaker: connection::CircuitBreaker::new(),
         }
     }
 }
@@ -469,11 +473,11 @@ impl SegmentProcessor for S3PipelineUploader {
     }
 
     fn process(
-        &self,
-        data: SegmentData,
+        &mut self,
+        mut data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
-            if !self.circuit_breaker.lock().unwrap().should_attempt() {
+            if !self.circuit_breaker.should_attempt() {
                 tracing::debug!(target: "dial9_worker", path = %data.segment.path.display(), "circuit breaker open, skipping upload");
                 return Err(ProcessError {
                     data,
@@ -483,13 +487,14 @@ impl SegmentProcessor for S3PipelineUploader {
                     )),
                 });
             }
+            let bytes = std::mem::take(&mut data.bytes);
             match self
                 .uploader
-                .upload_and_delete(&data.segment, data.bytes.clone(), &data.metadata)
+                .upload_and_delete(&data.segment, bytes, &data.metadata)
                 .await
             {
                 Ok(key) => {
-                    self.circuit_breaker.lock().unwrap().on_success();
+                    self.circuit_breaker.on_success();
                     tracing::info!(target: "dial9_worker", "uploaded {key}");
                     Ok(data)
                 }
@@ -498,7 +503,7 @@ impl SegmentProcessor for S3PipelineUploader {
                     {
                         tracing::debug!(target: "dial9_worker", path = %data.segment.path.display(), "segment already evicted, skipping");
                     } else {
-                        self.circuit_breaker.lock().unwrap().on_failure();
+                        self.circuit_breaker.on_failure();
                         tracing::warn!(target: "dial9_worker", error = %kind, "upload failed");
                     }
                     Err(ProcessError { data, kind })
@@ -547,6 +552,7 @@ async fn detect_bucket_region(client: &aws_sdk_s3::Client, bucket: &str) -> Stri
 #[cfg(all(test, feature = "worker-s3"))]
 mod tests {
     use super::*;
+    use assert2::check;
 
     /// Deps that record whether on_failure was called by proxying through
     /// a real S3Uploader-like upload path.
@@ -589,9 +595,6 @@ mod tests {
         let mut deps = NotFoundTestDeps::new();
         deps.upload_segment(&missing).await;
 
-        assert!(
-            deps.circuit_breaker.is_closed(),
-            "circuit breaker should stay closed after NotFound"
-        );
+        check!(deps.circuit_breaker.is_closed());
     }
 }

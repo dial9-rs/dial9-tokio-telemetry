@@ -210,6 +210,7 @@ impl S3Uploader {
 mod tests {
     use super::*;
     use crate::background_task::sealed::SealedSegment;
+    use assert2::check;
     use flate2::read::GzDecoder;
     use std::io::Read;
     use std::path::PathBuf;
@@ -294,10 +295,7 @@ mod tests {
         let segment = make_segment("/tmp/trace.3.bin", 3);
         let metadata = make_metadata(1741209000);
         let key = config.object_key(&segment, &metadata);
-        assert_eq!(
-            key,
-            "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-3.bin.gz"
-        );
+        check!(key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-3.bin.gz");
     }
 
     #[test]
@@ -311,10 +309,7 @@ mod tests {
         let segment = make_segment("/tmp/trace.0.bin", 0);
         let metadata = make_metadata(1741209000);
         let key = config.object_key(&segment, &metadata);
-        assert_eq!(
-            key,
-            "2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz"
-        );
+        check!(key == "2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz");
     }
 
     #[test]
@@ -323,10 +318,7 @@ mod tests {
         let segment = make_segment("/tmp/trace.0.bin", 0);
         let metadata = HashMap::from([("epoch_secs".into(), "1741209000".into())]);
         let key = config.object_key(&segment, &metadata);
-        assert_eq!(
-            key,
-            "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin"
-        );
+        check!(key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin");
     }
 
     #[test]
@@ -344,7 +336,7 @@ mod tests {
         let segment = make_segment("/tmp/trace.5.bin", 5);
         let metadata = make_metadata(1741209000);
         let key = config.object_key(&segment, &metadata);
-        assert_eq!(key, "custom/1741209000-5.bin.gz");
+        check!(key == "custom/1741209000-5.bin.gz");
     }
 
     // --- Gzip compression tests ---
@@ -357,24 +349,24 @@ mod tests {
         std::fs::write(&path, original).unwrap();
 
         let compressed = gzip_compress_file_sync(&path).unwrap();
-        assert_ne!(&compressed[..], &original[..]);
+        check!(compressed[..] != original[..]);
 
         let mut decoder = GzDecoder::new(&compressed[..]);
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
-        assert_eq!(decompressed, original);
+        check!(decompressed == original);
     }
 
     #[test]
     fn gzip_compress_bytes_roundtrips() {
         let original = b"hello world, this is trace data that should compress well!";
         let compressed = gzip_compress_bytes(original).unwrap();
-        assert_ne!(&compressed[..], &original[..]);
+        check!(compressed[..] != original[..]);
 
         let mut decoder = GzDecoder::new(&compressed[..]);
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
-        assert_eq!(decompressed, original);
+        check!(decompressed == original);
     }
 
     #[test]
@@ -387,7 +379,7 @@ mod tests {
         let mut decoder = GzDecoder::new(&compressed[..]);
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
-        assert!(decompressed.is_empty());
+        check!(decompressed.is_empty());
     }
 
     // --- Builder tests ---
@@ -404,7 +396,7 @@ mod tests {
         let metadata = make_metadata(1741209000);
         let key = config.object_key(&segment, &metadata);
         // No prefix → date-hour is first component
-        assert!(key.starts_with("2025-03-05/"));
+        check!(key.starts_with("2025-03-05/"));
     }
 
     // --- S3 integration tests via s3s-fs ---
@@ -436,13 +428,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            key,
-            "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz"
-        );
+        check!(key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz");
 
         // Local file should be deleted
-        assert!(!segment_path.exists());
+        check!(!segment_path.exists());
 
         // Download from S3 and verify contents
         let resp = raw_client
@@ -456,7 +445,7 @@ mod tests {
         let mut decoder = GzDecoder::new(&body[..]);
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
-        assert_eq!(decompressed, original_data);
+        check!(decompressed == original_data);
     }
 
     #[tokio::test]
@@ -478,7 +467,7 @@ mod tests {
 
         let compressed = gzip_compress_file_sync(&segment_path).unwrap();
         let metadata = make_metadata(1741209000);
-        let key = uploader
+        let _key = uploader
             .upload_and_delete(&segment, compressed, &metadata)
             .await
             .unwrap();
@@ -487,7 +476,7 @@ mod tests {
         let get_result = raw_s3_client
             .get_object()
             .bucket("test-bucket")
-            .key(&key)
+            .key(&_key)
             .send()
             .await
             .unwrap();
@@ -498,7 +487,7 @@ mod tests {
         let mut decoder = GzDecoder::new(&body[..]);
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
-        assert_eq!(decompressed, original_data);
+        check!(decompressed == original_data);
     }
 
     #[tokio::test]
@@ -540,14 +529,11 @@ mod tests {
             .unwrap();
 
         let meta = head.metadata().unwrap();
-        assert_eq!(meta.get("service").unwrap(), "checkout-api");
-        assert_eq!(
-            meta.get("boot-id").unwrap(),
-            "a3f7c2d1-dead-beef-1234-567890abcdef"
-        );
-        assert_eq!(meta.get("segment-index").unwrap(), "3");
-        assert_eq!(meta.get("start-time").unwrap(), "1741209000");
-        assert_eq!(meta.get("host").unwrap(), "us-east-1/i-0abc123");
+        check!(meta.get("service").unwrap() == "checkout-api");
+        check!(meta.get("boot-id").unwrap() == "a3f7c2d1-dead-beef-1234-567890abcdef");
+        check!(meta.get("segment-index").unwrap() == "3");
+        check!(meta.get("start-time").unwrap() == "1741209000");
+        check!(meta.get("host").unwrap() == "us-east-1/i-0abc123");
     }
 
     #[tokio::test]
@@ -567,12 +553,9 @@ mod tests {
         let bad_segment = make_segment(local_dir.path().join("nonexistent.bin"), 0);
         let result = gzip_compress_file_sync(&bad_segment.path);
 
-        assert!(
-            result.is_err(),
-            "expected compress to fail for missing file"
-        );
+        check!(result.is_err());
 
         // The original file should be untouched
-        assert!(segment_path.exists());
+        check!(segment_path.exists());
     }
 }

@@ -124,14 +124,15 @@ impl<NS: NameStyle> InflectableEntry<NS> for PipelineMetricsEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::check;
     use metrique_writer::test_util::test_metric;
 
     #[test]
     fn empty_pipeline_emits_nothing() {
         let m = PipelineMetrics::default();
         let entry = test_metric(m);
-        assert!(entry.metrics.is_empty());
-        assert!(entry.values.is_empty());
+        check!(entry.metrics.is_empty());
+        check!(entry.values.is_empty());
     }
 
     #[test]
@@ -142,8 +143,8 @@ mod tests {
         m.push("Gzip", stage);
 
         let entry = test_metric(m);
-        assert!(entry.metrics["Gzip.Time"].as_u64() < 1000);
-        assert!(entry.metrics["Gzip.Success"].as_bool());
+        check!(entry.metrics["Gzip.Time"].as_u64() < 1000);
+        check!(entry.metrics["Gzip.Success"].as_bool());
     }
 
     #[test]
@@ -154,7 +155,7 @@ mod tests {
         m.push("S3Upload", stage);
 
         let entry = test_metric(m);
-        assert!(!entry.metrics["S3Upload.Success"].as_bool());
+        check!(!entry.metrics["S3Upload.Success"].as_bool());
     }
 
     #[test]
@@ -170,10 +171,10 @@ mod tests {
         m.push("S3Upload", s2);
 
         let entry = test_metric(m);
-        assert!(entry.metrics["Gzip.Success"].as_bool());
-        assert!(!entry.metrics["S3Upload.Success"].as_bool());
-        assert!(entry.metrics.contains_key("Gzip.Time"));
-        assert!(entry.metrics.contains_key("S3Upload.Time"));
+        check!(entry.metrics["Gzip.Success"].as_bool());
+        check!(!entry.metrics["S3Upload.Success"].as_bool());
+        check!(entry.metrics.contains_key("Gzip.Time"));
+        check!(entry.metrics.contains_key("S3Upload.Time"));
     }
 
     /// Not a real assertion test — prints the full SegmentProcessMetrics shape
@@ -211,14 +212,14 @@ mod tests {
         eprintln!("==================================");
 
         // Verify the pipeline stage keys are present alongside the top-level keys
-        assert!(entry.metrics.contains_key("TotalTime"));
-        assert!(entry.metrics.contains_key("Success"));
-        assert!(entry.metrics.contains_key("SegmentIndex"));
-        assert!(entry.metrics.contains_key("UncompressedSize"));
-        assert!(entry.metrics.contains_key("CompressedSize"));
-        assert!(entry.metrics.contains_key("Gzip.Time"));
-        assert!(entry.metrics.contains_key("Gzip.Success"));
-        assert!(entry.metrics.contains_key("S3Upload.Time"));
-        assert!(entry.metrics.contains_key("S3Upload.Success"));
+        check!(entry.metrics.contains_key("TotalTime"));
+        check!(entry.metrics.contains_key("Success"));
+        check!(entry.metrics.contains_key("SegmentIndex"));
+        check!(entry.metrics.contains_key("UncompressedSize"));
+        check!(entry.metrics.contains_key("CompressedSize"));
+        check!(entry.metrics.contains_key("Gzip.Time"));
+        check!(entry.metrics.contains_key("Gzip.Success"));
+        check!(entry.metrics.contains_key("S3Upload.Time"));
+        check!(entry.metrics.contains_key("S3Upload.Success"));
     }
 }

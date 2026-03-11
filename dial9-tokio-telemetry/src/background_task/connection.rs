@@ -71,21 +71,22 @@ impl CircuitBreaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::check;
     use std::time::Duration;
 
     #[test]
     fn starts_closed() {
         let cb = CircuitBreaker::new();
-        assert!(cb.is_closed());
-        assert!(cb.should_attempt());
+        check!(cb.is_closed());
+        check!(cb.should_attempt());
     }
 
     #[test]
     fn opens_on_failure() {
         let mut cb = CircuitBreaker::new();
         cb.on_failure();
-        assert!(!cb.is_closed());
-        assert_eq!(cb.current_backoff(), Some(Duration::from_secs(1)));
+        check!(!cb.is_closed());
+        check!(cb.current_backoff() == Some(Duration::from_secs(1)));
     }
 
     #[test]
@@ -93,19 +94,19 @@ mod tests {
         let mut cb = CircuitBreaker::new();
         cb.on_failure();
         cb.on_success();
-        assert!(cb.is_closed());
-        assert!(cb.should_attempt());
+        check!(cb.is_closed());
+        check!(cb.should_attempt());
     }
 
     #[test]
     fn backoff_doubles_on_repeated_failures() {
         let mut cb = CircuitBreaker::new();
         cb.on_failure();
-        assert_eq!(cb.current_backoff(), Some(Duration::from_secs(1)));
+        check!(cb.current_backoff() == Some(Duration::from_secs(1)));
         cb.on_failure();
-        assert_eq!(cb.current_backoff(), Some(Duration::from_secs(2)));
+        check!(cb.current_backoff() == Some(Duration::from_secs(2)));
         cb.on_failure();
-        assert_eq!(cb.current_backoff(), Some(Duration::from_secs(4)));
+        check!(cb.current_backoff() == Some(Duration::from_secs(4)));
     }
 
     #[test]
@@ -114,7 +115,7 @@ mod tests {
         for _ in 0..20 {
             cb.on_failure();
         }
-        assert_eq!(cb.current_backoff(), Some(Duration::from_secs(300)));
+        check!(cb.current_backoff() == Some(Duration::from_secs(300)));
     }
 
     #[test]
@@ -123,9 +124,9 @@ mod tests {
         cb.on_failure();
         cb.on_failure();
         cb.on_success();
-        assert!(cb.is_closed());
-        assert_eq!(cb.current_backoff(), None);
+        check!(cb.is_closed());
+        check!(cb.current_backoff() == None);
         cb.on_failure();
-        assert_eq!(cb.current_backoff(), Some(Duration::from_secs(1)));
+        check!(cb.current_backoff() == Some(Duration::from_secs(1)));
     }
 }
