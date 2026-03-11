@@ -414,7 +414,6 @@ impl WorkerLoop {
                 }
             }
 
-            data.metrics.compressed_size = Some(data.bytes.len() as u64);
             data.metrics.success = 1;
             data.metrics.total_time.stop();
             // `data` dropped here — metrics guard flushes automatically
@@ -489,10 +488,7 @@ impl SegmentProcessor for S3PipelineUploader {
                 tracing::debug!(target: "dial9_worker", path = %data.segment.path.display(), "circuit breaker open, skipping upload");
                 return Err(ProcessError {
                     data,
-                    kind: ProcessErrorKind::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "circuit breaker open",
-                    )),
+                    kind: ProcessErrorKind::Io(std::io::Error::other("circuit breaker open")),
                 });
             }
             let bytes = std::mem::take(&mut data.bytes);
@@ -701,8 +697,7 @@ mod tests {
             pipe_data.metrics.pipeline.push(processor.name(), stage);
         }
 
-        // This is what process_segments does at the end — the bug is here:
-        pipe_data.metrics.compressed_size = Some(pipe_data.bytes.len() as u64);
+        // After fix: compressed_size is set by GzipCompressor, not overwritten
         pipe_data.metrics.success = 1;
         pipe_data.metrics.total_time.stop();
         drop(pipe_data);
@@ -711,9 +706,6 @@ mod tests {
         check!(entries.len() == 1);
         let entry = &entries[0];
         let compressed = entry.metrics["CompressedSize"].as_u64();
-        // BUG: compressed_size is 0 because bytes were mem::take'd by S3 uploader
-        // then overwritten at the end of process_segments.
-        // This test will FAIL until the bug is fixed.
         check!(
             compressed > 0,
             "CompressedSize should be non-zero, got {}",

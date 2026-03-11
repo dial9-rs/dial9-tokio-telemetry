@@ -76,20 +76,17 @@ async fn list_s3_objects(
                 for obj in resp.contents() {
                     count += 1;
                     // Parse segment index from key like ".../{epoch}-{index}.bin.gz"
-                    if let Some(key) = obj.key() {
-                        if let Some(filename) = key.rsplit('/').next() {
-                            // e.g. "1773249038-115.bin.gz"
-                            let stem = filename
-                                .strip_suffix(".bin.gz")
-                                .or_else(|| filename.strip_suffix(".bin"));
-                            if let Some(stem) = stem {
-                                if let Some(idx_str) = stem.rsplit('-').next() {
-                                    if let Ok(idx) = idx_str.parse::<u64>() {
-                                        max_index =
-                                            Some(max_index.map_or(idx, |cur: u64| cur.max(idx)));
-                                    }
-                                }
-                            }
+                    if let Some(key) = obj.key()
+                        && let Some(filename) = key.rsplit('/').next()
+                    {
+                        let stem = filename
+                            .strip_suffix(".bin.gz")
+                            .or_else(|| filename.strip_suffix(".bin"));
+                        if let Some(stem) = stem
+                            && let Some(idx_str) = stem.rsplit('-').next()
+                            && let Ok(idx) = idx_str.parse::<u64>()
+                        {
+                            max_index = Some(max_index.map_or(idx, |cur: u64| cur.max(idx)));
                         }
                     }
                 }

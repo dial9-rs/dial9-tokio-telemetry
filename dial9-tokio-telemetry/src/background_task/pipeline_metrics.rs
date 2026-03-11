@@ -36,15 +36,9 @@ impl StageMetrics {
 }
 
 /// Collects per-stage metrics for the segment processing pipeline.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct PipelineMetrics {
     stages: Vec<(&'static str, StageMetrics)>,
-}
-
-impl Default for PipelineMetrics {
-    fn default() -> Self {
-        Self { stages: Vec::new() }
-    }
 }
 
 impl PipelineMetrics {

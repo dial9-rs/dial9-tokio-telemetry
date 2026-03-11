@@ -53,7 +53,6 @@ impl SealedSegment {
 
     /// Parse the timestamp from the SegmentMetadata header in the segment file.
     /// Returns the timestamp in nanoseconds if successful.
-    #[allow(dead_code)]
     fn parse_segment_timestamp(&self) -> std::io::Result<u64> {
         let file = File::open(&self.path)?;
         let mut reader = BufReader::new(file);
