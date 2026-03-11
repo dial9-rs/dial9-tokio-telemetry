@@ -199,6 +199,7 @@ mod tests {
             segment_index: 7,
             uncompressed_size: 65536,
             compressed_size: Some(12345),
+            invalid_file_header: false,
             pipeline,
         };
 
@@ -217,6 +218,8 @@ mod tests {
         check!(entry.metrics.contains_key("SegmentIndex"));
         check!(entry.metrics.contains_key("UncompressedSize"));
         check!(entry.metrics.contains_key("CompressedSize"));
+        check!(entry.metrics.contains_key("InvalidFileHeader"));
+        check!(entry.metrics["InvalidFileHeader"] == false);
         check!(entry.metrics.contains_key("Gzip.Time"));
         check!(entry.metrics.contains_key("Gzip.Success"));
         check!(entry.metrics.contains_key("S3Upload.Time"));

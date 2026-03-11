@@ -239,11 +239,17 @@ impl SegmentProcessor for GzipCompressor {
                 }
                 Ok(Err(e)) => {
                     data.bytes = vec![];
-                    Err(ProcessError { data, kind: ProcessErrorKind::Io(e) })
+                    Err(ProcessError {
+                        data,
+                        kind: ProcessErrorKind::Io(e),
+                    })
                 }
                 Err(e) => {
                     data.bytes = vec![];
-                    Err(ProcessError { data, kind: ProcessErrorKind::Io(std::io::Error::other(e)) })
+                    Err(ProcessError {
+                        data,
+                        kind: ProcessErrorKind::Io(std::io::Error::other(e)),
+                    })
                 }
             }
         })
@@ -266,6 +272,8 @@ pub(crate) struct SegmentProcessMetrics {
     uncompressed_size: u64,
     #[metrics(unit = Byte)]
     compressed_size: Option<u64>,
+    /// True when the segment file lacks a valid SegmentMetadata header.
+    invalid_file_header: bool,
     /// Per-processor metrics, keyed by processor name.
     #[metrics(flatten)]
     pipeline: PipelineMetrics,
@@ -359,12 +367,15 @@ impl WorkerLoop {
                 }
             };
 
+            let (epoch_secs, header_valid) = segment.creation_epoch_secs();
+
             let metrics = SegmentProcessMetrics {
                 total_time: Timer::start_now(),
                 success: 0,
                 segment_index: segment.index,
                 uncompressed_size,
                 compressed_size: None,
+                invalid_file_header: !header_valid,
                 pipeline: PipelineMetrics::default(),
             }
             .append_on_drop(self.metrics_sink.clone());
@@ -373,10 +384,7 @@ impl WorkerLoop {
                 segment: segment.clone(),
                 bytes,
                 metadata: HashMap::from([
-                    (
-                        "epoch_secs".into(),
-                        segment.creation_epoch_secs().to_string(),
-                    ),
+                    ("epoch_secs".into(), epoch_secs.to_string()),
                     ("segment_index".into(), segment.index.to_string()),
                 ]),
                 metrics,
@@ -606,8 +614,8 @@ mod tests {
     /// metric must reflect the actual compressed byte count, not 0.
     #[tokio::test]
     async fn compressed_size_metric_is_nonzero_after_pipeline() {
-        use metrique_writer::test_util::Inspector;
         use metrique_writer::AnyEntrySink;
+        use metrique_writer::test_util::Inspector;
 
         let s3_root = tempfile::tempdir().unwrap();
         let local_dir = tempfile::tempdir().unwrap();
@@ -671,6 +679,7 @@ mod tests {
             segment_index: 0,
             uncompressed_size: data.len() as u64,
             compressed_size: None,
+            invalid_file_header: false,
             pipeline: PipelineMetrics::default(),
         }
         .append_on_drop(sink);
@@ -705,7 +714,11 @@ mod tests {
         // BUG: compressed_size is 0 because bytes were mem::take'd by S3 uploader
         // then overwritten at the end of process_segments.
         // This test will FAIL until the bug is fixed.
-        check!(compressed > 0, "CompressedSize should be non-zero, got {}", compressed);
+        check!(
+            compressed > 0,
+            "CompressedSize should be non-zero, got {}",
+            compressed
+        );
     }
 
     // --- Review finding #10: uncompressed_size should use bytes.len() ---
@@ -834,11 +847,10 @@ mod tests {
                 .build())
             .build();
 
-        let processors: Vec<Box<dyn SegmentProcessor>> =
-            vec![Box::new(FailFirstProcessor {
-                counter: processed.clone(),
-                calls: 0,
-            })];
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(FailFirstProcessor {
+            counter: processed.clone(),
+            calls: 0,
+        })];
 
         let worker = WorkerLoop::new(config, stop, processors);
         worker.run().await;

@@ -295,7 +295,9 @@ mod tests {
         let segment = make_segment("/tmp/trace.3.bin", 3);
         let metadata = make_metadata(1741209000);
         let key = config.object_key(&segment, &metadata);
-        check!(key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-3.bin.gz");
+        check!(
+            key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-3.bin.gz"
+        );
     }
 
     #[test]
@@ -428,7 +430,9 @@ mod tests {
             .await
             .unwrap();
 
-        check!(key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz");
+        check!(
+            key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz"
+        );
 
         // Local file should be deleted
         check!(!segment_path.exists());

@@ -29,14 +29,15 @@ impl SealedSegment {
 
     /// Segment creation time as epoch seconds, parsed from SegmentMetadata header.
     /// Falls back to file mtime if header parsing fails, then current time if mtime is unavailable.
-    pub(crate) fn creation_epoch_secs(&self) -> u64 {
+    /// Returns `(epoch_secs, header_valid)`.
+    pub(crate) fn creation_epoch_secs(&self) -> (u64, bool) {
         // First try to parse timestamp from SegmentMetadata header
         if let Ok(timestamp_nanos) = self.parse_segment_timestamp() {
-            return timestamp_nanos / 1_000_000_000;
+            return (timestamp_nanos / 1_000_000_000, true);
         }
 
         // Fall back to file mtime
-        std::fs::metadata(&self.path)
+        let secs = std::fs::metadata(&self.path)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -46,7 +47,8 @@ impl SealedSegment {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs()
-            })
+            });
+        (secs, false)
     }
 
     /// Parse the timestamp from the SegmentMetadata header in the segment file.
@@ -233,7 +235,8 @@ mod tests {
             index: 0,
         };
 
-        let epoch_secs = segment.creation_epoch_secs();
+        let (epoch_secs, header_valid) = segment.creation_epoch_secs();
+        check!(header_valid);
         let expected_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

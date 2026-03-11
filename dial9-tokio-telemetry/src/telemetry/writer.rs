@@ -242,7 +242,10 @@ impl RotatingWriter {
         self.write_segment_metadata()?;
         self.rotated = true;
 
-        tracing::info!(segment_index = self.next_index - 1, "rotated to new trace segment");
+        tracing::info!(
+            segment_index = self.next_index - 1,
+            "rotated to new trace segment"
+        );
         self.evict_oldest()?;
         Ok(())
     }
