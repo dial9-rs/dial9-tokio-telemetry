@@ -1,6 +1,5 @@
 mod cpu_flush_state;
 mod event_writer;
-mod flush_state;
 mod shared_state;
 
 pub(crate) use shared_state::SharedState;
@@ -13,7 +12,7 @@ use cpu_flush_state::CpuFlushState;
 use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::task_metadata::TaskId;
-use crate::telemetry::writer::{TraceWriter, WriteAtomicResult};
+use crate::telemetry::writer::TraceWriter;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -43,7 +42,8 @@ impl TelemetryRecorder {
 
         for batch in self.shared.collector.drain() {
             for raw in batch {
-                if let Ok(WriteAtomicResult::Rotated) = self.event_writer.write_raw_event(raw) {
+                if let Err(e) = self.event_writer.write_raw_event(raw) {
+                    eprintln!("telemetry write error: {e}");
                     self.shared.enabled.store(false, Ordering::Relaxed);
                     return;
                 }
@@ -487,44 +487,11 @@ impl TracedRuntime {
 mod tests {
     use super::*;
     use crate::telemetry::writer::NullWriter;
-    use flush_state::FlushState;
-    use smallvec::SmallVec;
     use std::panic::Location;
 
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
         let _recorder = TelemetryRecorder::new(NullWriter);
-    }
-
-    #[test]
-    fn test_flush_state_intern() {
-        let mut fs = FlushState::new();
-        #[track_caller]
-        fn get_loc() -> &'static Location<'static> {
-            Location::caller()
-        }
-        let loc = get_loc();
-        let id1 = fs.intern(loc);
-        let id2 = fs.intern(loc);
-        assert_eq!(id1, id2);
-        assert_ne!(id1.as_u16(), 0);
-    }
-
-    #[test]
-    fn test_flush_state_on_rotate_clears_emitted() {
-        let mut fs = FlushState::new();
-        #[track_caller]
-        fn get_loc() -> &'static Location<'static> {
-            Location::caller()
-        }
-        let loc = get_loc();
-        let id = fs.intern(loc);
-        let mut defs = SmallVec::new();
-        fs.collect_def(id, &mut defs);
-        assert_eq!(defs.len(), 1);
-        assert!(fs.emitted_this_file.contains(&id));
-        fs.on_rotate();
-        assert!(!fs.emitted_this_file.contains(&id));
     }
 
     #[test]
@@ -722,13 +689,12 @@ mod tests {
                     };
                     *timestamp += 1;
 
-                    match ew.write_raw_event(raw).unwrap() {
-                        WriteAtomicResult::Written => {
+                    match ew.write_raw_event(raw) {
+                        Ok(()) => {
                             *expected_raw += 1;
                         }
-                        WriteAtomicResult::OversizedBatch => {}
-                        WriteAtomicResult::Rotated => {
-                            panic!("double rotation on raw event retry");
+                        Err(e) => {
+                            panic!("write_raw_event failed: {e}");
                         }
                     }
                 }
