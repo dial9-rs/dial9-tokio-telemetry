@@ -230,7 +230,7 @@ impl TelemetryEvent {
 /// Raw event emitted by worker threads into thread-local buffers.
 /// Carries rich data (including `&'static Location`) with no locking.
 /// Converted to wire format by the flush thread.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum RawEvent {
     PollStart {
         timestamp_nanos: u64,
@@ -274,6 +274,25 @@ pub enum RawEvent {
         waker_task_id: crate::telemetry::task_metadata::TaskId,
         woken_task_id: crate::telemetry::task_metadata::TaskId,
         target_worker: u8,
+    },
+    /// A CPU stack trace sample from perf_event, attributed to a worker thread.
+    CpuSample {
+        timestamp_nanos: u64,
+        worker_id: usize,
+        tid: u32,
+        source: CpuSampleSource,
+        callchain: Vec<u64>,
+    },
+    /// Definition of a callframe symbol: maps an address to its resolved name.
+    CallframeDef {
+        address: u64,
+        symbol: String,
+        location: Option<String>,
+    },
+    /// Maps an OS thread ID to its name.
+    ThreadNameDef {
+        tid: u32,
+        name: String,
     },
 }
 

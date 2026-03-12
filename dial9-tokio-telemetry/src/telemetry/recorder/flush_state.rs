@@ -5,18 +5,18 @@ use std::collections::{HashMap, HashSet};
 use std::panic::Location;
 
 /// Flush-thread state for interning spawn locations and tracking per-file emissions.
-pub(super) struct FlushState {
+pub struct FlushState {
     /// Location pointer (as usize) → SpawnLocationId. Only touched by flush thread.
     intern_map: HashMap<usize, SpawnLocationId>,
     /// SpawnLocationId → location string.
     intern_strings: Vec<String>,
     /// Which SpawnLocationIds have been emitted as SpawnLocationDef in the current file.
-    pub(super) emitted_this_file: HashSet<SpawnLocationId>,
+    emitted_this_file: HashSet<SpawnLocationId>,
     next_id: u16,
 }
 
 impl FlushState {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         let intern_strings = vec!["<unknown>".to_string()];
         Self {
             intern_map: HashMap::new(),
@@ -27,7 +27,7 @@ impl FlushState {
     }
 
     /// Intern a location, returning its SpawnLocationId.
-    pub(super) fn intern(&mut self, location: &'static Location<'static>) -> SpawnLocationId {
+    pub(crate) fn intern(&mut self, location: &'static Location<'static>) -> SpawnLocationId {
         let ptr = location as *const Location<'static> as usize;
         if let Some(&id) = self.intern_map.get(&ptr) {
             return id;
@@ -45,7 +45,7 @@ impl FlushState {
     }
 
     /// If this id hasn't been emitted in the current file, push its def into `defs`.
-    pub(super) fn collect_def(
+    pub(crate) fn collect_def(
         &mut self,
         id: SpawnLocationId,
         defs: &mut SmallVec<[TelemetryEvent; 3]>,
@@ -57,7 +57,7 @@ impl FlushState {
     }
 
     /// Resolve a RawEvent into a SmallVec of wire events: defs first, then the event itself.
-    pub(super) fn resolve(&mut self, raw: RawEvent) -> SmallVec<[TelemetryEvent; 3]> {
+    pub fn resolve(&mut self, raw: RawEvent) -> SmallVec<[TelemetryEvent; 3]> {
         let mut events = SmallVec::new();
         match raw {
             RawEvent::TaskSpawn {
@@ -158,12 +158,41 @@ impl FlushState {
                     target_worker,
                 });
             }
+            RawEvent::CpuSample {
+                timestamp_nanos,
+                worker_id,
+                tid,
+                source,
+                callchain,
+            } => {
+                events.push(TelemetryEvent::CpuSample {
+                    timestamp_nanos,
+                    worker_id,
+                    tid,
+                    source,
+                    callchain,
+                });
+            }
+            RawEvent::CallframeDef {
+                address,
+                symbol,
+                location,
+            } => {
+                events.push(TelemetryEvent::CallframeDef {
+                    address,
+                    symbol,
+                    location,
+                });
+            }
+            RawEvent::ThreadNameDef { tid, name } => {
+                events.push(TelemetryEvent::ThreadNameDef { tid, name });
+            }
         }
         events
     }
 
     /// Called on file rotation — next reference to any id will re-emit its def.
-    pub(super) fn on_rotate(&mut self) {
+    pub(crate) fn on_rotate(&mut self) {
         self.emitted_this_file.clear();
     }
 }

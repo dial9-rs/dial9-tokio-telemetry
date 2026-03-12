@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_parse_segment_timestamp() {
-        use crate::telemetry::events::TelemetryEvent;
+        use crate::telemetry::events::RawEvent;
         use crate::telemetry::writer::{RotatingWriter, TraceWriter};
         use tempfile::TempDir;
 
@@ -181,13 +181,13 @@ mod tests {
             .set_segment_metadata(vec![("test".into(), "value".into())])
             .unwrap();
 
-        let event = TelemetryEvent::WorkerPark {
+        let event = RawEvent::WorkerPark {
             timestamp_nanos: 1000000000,
             worker_id: 0,
             worker_local_queue_depth: 0,
             cpu_time_nanos: 0,
         };
-        writer.write_event(&event).unwrap();
+        writer.write_event(event).unwrap();
         writer.flush().unwrap();
 
         let segment = SealedSegment {
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_creation_epoch_secs_uses_parsed_timestamp() {
-        use crate::telemetry::events::TelemetryEvent;
+        use crate::telemetry::events::RawEvent;
         use crate::telemetry::writer::{RotatingWriter, TraceWriter};
         use tempfile::TempDir;
 
@@ -220,13 +220,13 @@ mod tests {
             .set_segment_metadata(vec![("test".into(), "value".into())])
             .unwrap();
 
-        let event = TelemetryEvent::WorkerPark {
+        let event = RawEvent::WorkerPark {
             timestamp_nanos: 1000000000,
             worker_id: 0,
             worker_local_queue_depth: 0,
             cpu_time_nanos: 0,
         };
-        writer.write_event(&event).unwrap();
+        writer.write_event(event).unwrap();
         writer.flush().unwrap();
 
         let segment = SealedSegment {

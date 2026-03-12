@@ -1,5 +1,5 @@
 #[cfg(feature = "cpu-profiling")]
-use crate::telemetry::events::TelemetryEvent;
+use crate::telemetry::events::{RawEvent, TelemetryEvent};
 #[cfg(feature = "cpu-profiling")]
 use std::collections::{HashMap, HashSet};
 
@@ -45,13 +45,13 @@ impl CpuFlushState {
     pub(super) fn collect_cpu_event_batch(
         &mut self,
         event: &TelemetryEvent,
-    ) -> Vec<TelemetryEvent> {
+    ) -> Vec<RawEvent> {
         let mut batch = Vec::new();
         if let TelemetryEvent::CpuSample { tid, .. } = event
             && !self.thread_name_emitted_this_file.contains(tid)
         {
             if let Some(name) = self.thread_name_intern.get(tid) {
-                batch.push(TelemetryEvent::ThreadNameDef {
+                batch.push(RawEvent::ThreadNameDef {
                     tid: *tid,
                     name: name.clone(),
                 });
@@ -73,7 +73,7 @@ impl CpuFlushState {
                         (symbol, location)
                     });
                     let (symbol, location) = self.callframe_intern[&addr].clone();
-                    batch.push(TelemetryEvent::CallframeDef {
+                    batch.push(RawEvent::CallframeDef {
                         address: addr,
                         symbol,
                         location,
@@ -82,7 +82,22 @@ impl CpuFlushState {
                 }
             }
         }
-        batch.push(event.clone());
+        if let TelemetryEvent::CpuSample {
+            timestamp_nanos,
+            worker_id,
+            tid,
+            source,
+            callchain,
+        } = event
+        {
+            batch.push(RawEvent::CpuSample {
+                timestamp_nanos: *timestamp_nanos,
+                worker_id: *worker_id,
+                tid: *tid,
+                source: *source,
+                callchain: callchain.clone(),
+            });
+        }
         batch
     }
 }
