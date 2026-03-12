@@ -415,7 +415,7 @@ impl WorkerLoop {
                     Err(e) => {
                         tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, error = %e.kind, "processor failed");
                         data = e.data;
-                        stage.time.stop();
+                        stage.fail();
                         data.metrics.pipeline.push(processor.name(), stage);
                         data.metrics.total_time.stop();
                         if matches!(&e.kind, ProcessErrorKind::Io(io) if io.kind() == std::io::ErrorKind::NotFound)

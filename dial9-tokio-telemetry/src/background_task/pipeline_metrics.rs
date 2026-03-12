@@ -12,25 +12,71 @@ use metrique::{CloseValue, CloseValueRef, InflectableEntry, NameStyle};
 use metrique_writer::{EntryWriter, Value};
 use std::borrow::Cow;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetriqueResult {
+    Success,
+    Failure,
+}
+
+impl CloseValue for MetriqueResult {
+    type Closed = <MetriqueResultEntry as CloseValue>::Closed;
+
+    fn close(self) -> Self::Closed {
+        self.close_ref()
+    }
+}
+
+impl CloseValue for &'_ MetriqueResult {
+    type Closed = <MetriqueResultEntry as CloseValue>::Closed;
+
+    fn close(self) -> Self::Closed {
+        match self {
+            MetriqueResult::Success => MetriqueResultEntry {
+                success: true,
+                failure: false,
+            }
+            .close(),
+            MetriqueResult::Failure => MetriqueResultEntry {
+                success: false,
+                failure: true,
+            }
+            .close(),
+        }
+    }
+}
+
+#[metrics(subfield)]
+#[derive(Debug)]
+pub struct MetriqueResultEntry {
+    success: bool,
+    failure: bool,
+}
+
 /// Metrics for a single pipeline stage.
 #[metrics(subfield, rename_all = "PascalCase")]
 #[derive(Debug)]
 pub(crate) struct StageMetrics {
     #[metrics(unit = Millisecond)]
     pub(crate) time: Timer,
-    pub(crate) success: bool,
+    #[metrics(flatten)]
+    pub(crate) status: Option<MetriqueResult>,
 }
 
 impl StageMetrics {
     pub(crate) fn start() -> Self {
         Self {
             time: Timer::start_now(),
-            success: false,
+            status: None,
         }
     }
 
     pub(crate) fn succeed(&mut self) {
-        self.success = true;
+        self.status = Some(MetriqueResult::Success);
+        self.time.stop();
+    }
+
+    pub(crate) fn fail(&mut self) {
+        self.status = Some(MetriqueResult::Failure);
         self.time.stop();
     }
 }
@@ -139,17 +185,19 @@ mod tests {
         let entry = test_metric(m);
         check!(entry.metrics["Gzip.Time"].as_u64() < 1000);
         check!(entry.metrics["Gzip.Success"].as_bool());
+        check!(!entry.metrics["Gzip.Failure"].as_bool());
     }
 
     #[test]
     fn single_stage_failure() {
         let mut m = PipelineMetrics::default();
         let mut stage = StageMetrics::start();
-        stage.time.stop();
+        stage.fail();
         m.push("S3Upload", stage);
 
         let entry = test_metric(m);
         check!(!entry.metrics["S3Upload.Success"].as_bool());
+        check!(entry.metrics["S3Upload.Failure"].as_bool());
     }
 
     #[test]
@@ -161,12 +209,14 @@ mod tests {
         m.push("Gzip", s1);
 
         let mut s2 = StageMetrics::start();
-        s2.time.stop();
+        s2.fail();
         m.push("S3Upload", s2);
 
         let entry = test_metric(m);
         check!(entry.metrics["Gzip.Success"].as_bool());
+        check!(!entry.metrics["Gzip.Failure"].as_bool());
         check!(!entry.metrics["S3Upload.Success"].as_bool());
+        check!(entry.metrics["S3Upload.Failure"].as_bool());
         check!(entry.metrics.contains_key("Gzip.Time"));
         check!(entry.metrics.contains_key("S3Upload.Time"));
     }
@@ -209,7 +259,9 @@ mod tests {
         check!(entry.metrics["InvalidFileHeader"] == false);
         check!(entry.metrics.contains_key("Gzip.Time"));
         check!(entry.metrics.contains_key("Gzip.Success"));
+        check!(entry.metrics.contains_key("Gzip.Failure"));
         check!(entry.metrics.contains_key("S3Upload.Time"));
         check!(entry.metrics.contains_key("S3Upload.Success"));
+        check!(entry.metrics.contains_key("S3Upload.Failure"));
     }
 }

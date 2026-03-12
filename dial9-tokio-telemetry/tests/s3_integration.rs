@@ -9,8 +9,8 @@ use dial9_tokio_telemetry::background_task::BackgroundTaskConfig;
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use fake_s3::{
-    fake_s3_client, fake_s3_client_always_failing, fake_s3_client_flaky,
-    fake_s3_client_hanging, fake_s3_client_with_region,
+    fake_s3_client, fake_s3_client_always_failing, fake_s3_client_flaky, fake_s3_client_hanging,
+    fake_s3_client_with_region,
 };
 use flate2::read::GzDecoder;
 use std::io::Read;
@@ -373,8 +373,10 @@ fn stress_test_all_segments_uploaded_and_valid() {
         .region("us-east-1")
         .build();
 
-    let metrique_writer::test_util::TestEntrySink { inspector, sink: metrics_sink } =
-        metrique_writer::test_util::test_entry_sink();
+    let metrique_writer::test_util::TestEntrySink {
+        inspector,
+        sink: metrics_sink,
+    } = metrique_writer::test_util::test_entry_sink();
 
     let uploader_config = BackgroundTaskConfig::builder()
         .trace_path(&trace_path)
@@ -622,7 +624,8 @@ async fn graceful_shutdown_completes_when_s3_hangs() {
     let shutdown_timeout = std::time::Duration::from_secs(3);
     let test_deadline = std::time::Duration::from_secs(10);
 
-    let result = tokio::time::timeout(test_deadline, guard.graceful_shutdown(shutdown_timeout)).await;
+    let result =
+        tokio::time::timeout(test_deadline, guard.graceful_shutdown(shutdown_timeout)).await;
 
     // If the test-level timeout fires, graceful_shutdown hung — that's the bug.
     assert!(
@@ -754,8 +757,10 @@ fn permanently_broken_s3_produces_failure_metrics() {
         .region("us-east-1")
         .build();
 
-    let metrique_writer::test_util::TestEntrySink { inspector, sink: metrics_sink } =
-        metrique_writer::test_util::test_entry_sink();
+    let metrique_writer::test_util::TestEntrySink {
+        inspector,
+        sink: metrics_sink,
+    } = metrique_writer::test_util::test_entry_sink();
 
     let uploader_config = BackgroundTaskConfig::builder()
         .trace_path(&trace_path)

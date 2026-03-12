@@ -1,0 +1,120 @@
+---
+source: dial9-trace-format-derive/src/lib.rs
+expression: "expand_to_string(quote!\n{\n    struct AllFieldTypes\n    {\n        a_u8: u8, b_u16: u16, c_u32: u32, d_u64: u64, e_i64: i64, f_f64: f64,\n        g_bool: bool, h_string: String, i_bytes: Vec<u8>, j_interned:\n        InternedString, k_frames: StackFrames, l_map: Vec<(String, String)>,\n    }\n})"
+---
+#[derive(Debug, Clone)]
+struct AllFieldTypesRef<'a> {
+    pub a_u8: <u8 as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub b_u16: <u16 as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub c_u32: <u32 as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub d_u64: <u64 as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub e_i64: <i64 as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub f_f64: <f64 as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub g_bool: <bool as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub h_string: <String as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub i_bytes: <Vec<u8> as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub j_interned: <InternedString as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub k_frames: <StackFrames as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub l_map: <Vec<(String, String)> as ::dial9_trace_format::TraceField>::Ref<'a>,
+}
+impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
+    type Ref<'a> = AllFieldTypesRef<'a>;
+    fn event_name() -> &'static str {
+        "AllFieldTypes"
+    }
+    fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
+        vec![
+            ::dial9_trace_format::schema::FieldDef { name : "a_u8".to_string(),
+            field_type : < u8 as ::dial9_trace_format::TraceField > ::field_type(), },
+            ::dial9_trace_format::schema::FieldDef { name : "b_u16".to_string(),
+            field_type : < u16 as ::dial9_trace_format::TraceField > ::field_type(), },
+            ::dial9_trace_format::schema::FieldDef { name : "c_u32".to_string(),
+            field_type : < u32 as ::dial9_trace_format::TraceField > ::field_type(), },
+            ::dial9_trace_format::schema::FieldDef { name : "d_u64".to_string(),
+            field_type : < u64 as ::dial9_trace_format::TraceField > ::field_type(), },
+            ::dial9_trace_format::schema::FieldDef { name : "e_i64".to_string(),
+            field_type : < i64 as ::dial9_trace_format::TraceField > ::field_type(), },
+            ::dial9_trace_format::schema::FieldDef { name : "f_f64".to_string(),
+            field_type : < f64 as ::dial9_trace_format::TraceField > ::field_type(), },
+            ::dial9_trace_format::schema::FieldDef { name : "g_bool".to_string(),
+            field_type : < bool as ::dial9_trace_format::TraceField > ::field_type(), },
+            ::dial9_trace_format::schema::FieldDef { name : "h_string".to_string(),
+            field_type : < String as ::dial9_trace_format::TraceField > ::field_type(),
+            }, ::dial9_trace_format::schema::FieldDef { name : "i_bytes".to_string(),
+            field_type : < Vec < u8 > as ::dial9_trace_format::TraceField >
+            ::field_type(), }, ::dial9_trace_format::schema::FieldDef { name :
+            "j_interned".to_string(), field_type : < InternedString as
+            ::dial9_trace_format::TraceField > ::field_type(), },
+            ::dial9_trace_format::schema::FieldDef { name : "k_frames".to_string(),
+            field_type : < StackFrames as ::dial9_trace_format::TraceField >
+            ::field_type(), }, ::dial9_trace_format::schema::FieldDef { name : "l_map"
+            .to_string(), field_type : < Vec < (String, String) > as
+            ::dial9_trace_format::TraceField > ::field_type(), }
+        ]
+    }
+    fn encode_fields<W: ::std::io::Write>(
+        &self,
+        enc: &mut ::dial9_trace_format::EventEncoder<'_, W>,
+    ) -> ::std::io::Result<()> {
+        <u8 as ::dial9_trace_format::TraceField>::encode(&self.a_u8, enc)?;
+        <u16 as ::dial9_trace_format::TraceField>::encode(&self.b_u16, enc)?;
+        <u32 as ::dial9_trace_format::TraceField>::encode(&self.c_u32, enc)?;
+        <u64 as ::dial9_trace_format::TraceField>::encode(&self.d_u64, enc)?;
+        <i64 as ::dial9_trace_format::TraceField>::encode(&self.e_i64, enc)?;
+        <f64 as ::dial9_trace_format::TraceField>::encode(&self.f_f64, enc)?;
+        <bool as ::dial9_trace_format::TraceField>::encode(&self.g_bool, enc)?;
+        <String as ::dial9_trace_format::TraceField>::encode(&self.h_string, enc)?;
+        <Vec<u8> as ::dial9_trace_format::TraceField>::encode(&self.i_bytes, enc)?;
+        <InternedString as ::dial9_trace_format::TraceField>::encode(
+            &self.j_interned,
+            enc,
+        )?;
+        <StackFrames as ::dial9_trace_format::TraceField>::encode(&self.k_frames, enc)?;
+        <Vec<
+            (String, String),
+        > as ::dial9_trace_format::TraceField>::encode(&self.l_map, enc)?;
+        Ok(())
+    }
+    fn decode<'a>(
+        fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
+    ) -> Option<Self::Ref<'a>> {
+        Some(AllFieldTypesRef {
+            a_u8: <u8 as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(0usize)?,
+            )?,
+            b_u16: <u16 as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(1usize)?,
+            )?,
+            c_u32: <u32 as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(2usize)?,
+            )?,
+            d_u64: <u64 as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(3usize)?,
+            )?,
+            e_i64: <i64 as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(4usize)?,
+            )?,
+            f_f64: <f64 as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(5usize)?,
+            )?,
+            g_bool: <bool as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(6usize)?,
+            )?,
+            h_string: <String as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(7usize)?,
+            )?,
+            i_bytes: <Vec<
+                u8,
+            > as ::dial9_trace_format::TraceField>::decode_ref(fields.get(8usize)?)?,
+            j_interned: <InternedString as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(9usize)?,
+            )?,
+            k_frames: <StackFrames as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(10usize)?,
+            )?,
+            l_map: <Vec<
+                (String, String),
+            > as ::dial9_trace_format::TraceField>::decode_ref(fields.get(11usize)?)?,
+        })
+    }
+}

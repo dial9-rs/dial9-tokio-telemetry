@@ -1,0 +1,30 @@
+---
+source: dial9-trace-format-derive/src/lib.rs
+expression: "expand_to_string(quote! { struct EmptyEvent {} })"
+---
+#[derive(Debug, Clone)]
+struct EmptyEventRef<'a> {
+    _marker: ::std::marker::PhantomData<&'a ()>,
+}
+impl ::dial9_trace_format::TraceEvent for EmptyEvent {
+    type Ref<'a> = EmptyEventRef<'a>;
+    fn event_name() -> &'static str {
+        "EmptyEvent"
+    }
+    fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
+        vec![]
+    }
+    fn encode_fields<W: ::std::io::Write>(
+        &self,
+        enc: &mut ::dial9_trace_format::EventEncoder<'_, W>,
+    ) -> ::std::io::Result<()> {
+        Ok(())
+    }
+    fn decode<'a>(
+        fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
+    ) -> Option<Self::Ref<'a>> {
+        Some(EmptyEventRef {
+            _marker: ::std::marker::PhantomData,
+        })
+    }
+}
