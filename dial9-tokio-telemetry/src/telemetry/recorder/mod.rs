@@ -560,10 +560,10 @@ mod tests {
 
             for ev in &events {
                 if let TelemetryEvent::PollStart { spawn_loc_id, .. } = ev {
-                    let loc = reader.spawn_locations.get(spawn_loc_id).unwrap_or_else(|| {
+                    let loc = reader.string_pool.get(&spawn_loc_id.0).unwrap_or_else(|| {
                         panic!(
-                            "file {path:?}: spawn_loc_id {spawn_loc_id:?} has no definition {:#?}",
-                            reader.spawn_locations
+                            "file {path:?}: spawn_loc_id {spawn_loc_id:?} not in string pool {:#?}",
+                            reader.string_pool
                         )
                     });
                     assert!(
@@ -574,8 +574,8 @@ mod tests {
             }
 
             for (task_id, spawn_loc_id) in &reader.task_spawn_locs {
-                reader.spawn_locations.get(spawn_loc_id).unwrap_or_else(|| {
-                    panic!("file {path:?}: task {task_id:?} spawn_loc_id {spawn_loc_id:?} has no definition")
+                reader.string_pool.get(&spawn_loc_id.0).unwrap_or_else(|| {
+                    panic!("file {path:?}: task {task_id:?} spawn_loc_id {spawn_loc_id:?} not in string pool")
                 });
             }
 
@@ -592,7 +592,7 @@ mod tests {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
         use crate::telemetry::events::{CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER};
-        use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
+        use crate::telemetry::task_metadata::TaskId;
         use crate::telemetry::writer::RotatingWriter;
         use cpu_flush_state::CpuFlushState;
         use proptest::prelude::*;
@@ -723,19 +723,11 @@ mod tests {
                     events.push(ev);
                 }
 
-                let mut spawn_loc_defs: HashSet<SpawnLocationId> = HashSet::new();
                 let mut thread_name_defs: HashSet<u32> = HashSet::new();
                 let mut callframe_defs: HashSet<u64> = HashSet::new();
 
                 for ev in &events {
                     match ev {
-                        TelemetryEvent::SpawnLocationDef { id, location } => {
-                            assert!(
-                                location.contains(':'),
-                                "{path_str}: SpawnLocationDef has bad location: {location:?}"
-                            );
-                            spawn_loc_defs.insert(*id);
-                        }
                         TelemetryEvent::ThreadNameDef { tid, .. } => {
                             thread_name_defs.insert(*tid);
                         }
@@ -743,9 +735,10 @@ mod tests {
                             callframe_defs.insert(*address);
                         }
                         TelemetryEvent::PollStart { spawn_loc_id, .. } => {
+                            // Verify spawn location is in the string pool
                             assert!(
-                                spawn_loc_defs.contains(spawn_loc_id),
-                                "{path_str}: PollStart references spawn_loc_id {spawn_loc_id:?} but no SpawnLocationDef in this file. Defs: {spawn_loc_defs:?}"
+                                reader.string_pool.contains_key(&spawn_loc_id.0),
+                                "{path_str}: PollStart references spawn_loc_id {spawn_loc_id:?} but not in string pool"
                             );
                             total_raw += 1;
                         }

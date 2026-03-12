@@ -6,12 +6,12 @@
 //! to/from the wire format via `#[derive(TraceEvent)]` structs.
 
 use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
-use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
+use crate::telemetry::task_metadata::TaskId;
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::types::{
     EventEncoder, FieldType, FieldValueRef,
 };
-use dial9_trace_format::{StackFrames, TraceEvent, TraceField};
+use dial9_trace_format::{InternedString, StackFrames, TraceEvent, TraceField};
 use std::io::{self, Write};
 
 // ── TraceField impls for newtypes ───────────────────────────────────────────
@@ -25,20 +25,6 @@ impl TraceField for TaskId {
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
         match val {
             FieldValueRef::Varint(v) => Some(TaskId::from_u32(*v as u32)),
-            _ => None,
-        }
-    }
-}
-
-impl TraceField for SpawnLocationId {
-    type Ref<'a> = SpawnLocationId;
-    fn field_type() -> FieldType { FieldType::U16 }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
-        enc.write_u16(self.as_u16())
-    }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::Varint(v) => Some(SpawnLocationId::from_u16(*v as u16)),
             _ => None,
         }
     }
@@ -67,7 +53,7 @@ pub struct PollStartEvent {
     pub worker_id: u8,
     pub local_queue: u8,
     pub task_id: TaskId,
-    pub spawn_loc_id: SpawnLocationId,
+    pub spawn_loc_id: InternedString,
 }
 
 #[derive(TraceEvent)]
@@ -104,17 +90,11 @@ pub struct QueueSampleEvent {
 }
 
 #[derive(TraceEvent)]
-pub struct SpawnLocationDefEvent {
-    pub id: SpawnLocationId,
-    pub location: String,
-}
-
-#[derive(TraceEvent)]
 pub struct TaskSpawnEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     pub task_id: TaskId,
-    pub spawn_loc_id: SpawnLocationId,
+    pub spawn_loc_id: InternedString,
 }
 
 #[derive(TraceEvent)]
@@ -193,7 +173,6 @@ pub fn register_schemas<W: Write>(enc: &mut Encoder<W>) -> io::Result<()> {
     register::<WorkerParkEvent, _>(enc)?;
     register::<WorkerUnparkEvent, _>(enc)?;
     register::<QueueSampleEvent, _>(enc)?;
-    register::<SpawnLocationDefEvent, _>(enc)?;
     register::<TaskSpawnEvent, _>(enc)?;
     register::<TaskTerminateEvent, _>(enc)?;
     register::<CpuSampleEvent, _>(enc)?;
@@ -242,9 +221,6 @@ pub fn write_event<W: Write>(enc: &mut Encoder<W>, event: &TelemetryEvent) -> io
                 timestamp_ns: *timestamp_nanos,
                 global_queue: *global_queue_depth as u8,
             })
-        }
-        TelemetryEvent::SpawnLocationDef { id, location } => {
-            enc.write(&SpawnLocationDefEvent { id: *id, location: location.clone() })
         }
         TelemetryEvent::TaskSpawn { timestamp_nanos, task_id, spawn_loc_id } => {
             enc.write(&TaskSpawnEvent {
@@ -326,7 +302,6 @@ pub enum TelemetryEventRef<'a> {
     WorkerPark(WorkerParkEventRef<'a>),
     WorkerUnpark(WorkerUnparkEventRef<'a>),
     QueueSample(QueueSampleEventRef<'a>),
-    SpawnLocationDef(SpawnLocationDefEventRef<'a>),
     TaskSpawn(TaskSpawnEventRef<'a>),
     TaskTerminate(TaskTerminateEventRef<'a>),
     CpuSample(CpuSampleEventRef<'a>),
@@ -349,8 +324,7 @@ impl<'a> TelemetryEventRef<'a> {
             Self::TaskTerminate(e) => Some(e.timestamp_ns),
             Self::CpuSample(e) => Some(e.timestamp_ns),
             Self::WakeEvent(e) => Some(e.timestamp_ns),
-            Self::SpawnLocationDef(_)
-            | Self::CallframeDef(_)
+            Self::CallframeDef(_)
             | Self::ThreadNameDef(_)
             | Self::SegmentMetadata(_) => None,
         }
@@ -371,7 +345,6 @@ pub fn decode_ref<'a>(
         "WorkerParkEvent" => TelemetryEventRef::WorkerPark(WorkerParkEvent::decode(timestamp_ns, fields)?),
         "WorkerUnparkEvent" => TelemetryEventRef::WorkerUnpark(WorkerUnparkEvent::decode(timestamp_ns, fields)?),
         "QueueSampleEvent" => TelemetryEventRef::QueueSample(QueueSampleEvent::decode(timestamp_ns, fields)?),
-        "SpawnLocationDefEvent" => TelemetryEventRef::SpawnLocationDef(SpawnLocationDefEvent::decode(timestamp_ns, fields)?),
         "TaskSpawnEvent" => TelemetryEventRef::TaskSpawn(TaskSpawnEvent::decode(timestamp_ns, fields)?),
         "TaskTerminateEvent" => TelemetryEventRef::TaskTerminate(TaskTerminateEvent::decode(timestamp_ns, fields)?),
         "CpuSampleEvent" => TelemetryEventRef::CpuSample(CpuSampleEvent::decode(timestamp_ns, fields)?),
@@ -413,10 +386,6 @@ impl From<TelemetryEventRef<'_>> for TelemetryEvent {
             TelemetryEventRef::QueueSample(e) => TelemetryEvent::QueueSample {
                 timestamp_nanos: e.timestamp_ns,
                 global_queue_depth: e.global_queue as usize,
-            },
-            TelemetryEventRef::SpawnLocationDef(e) => TelemetryEvent::SpawnLocationDef {
-                id: e.id,
-                location: e.location.to_owned(),
             },
             TelemetryEventRef::TaskSpawn(e) => TelemetryEvent::TaskSpawn {
                 timestamp_nanos: e.timestamp_ns,
@@ -464,11 +433,23 @@ impl From<TelemetryEventRef<'_>> for TelemetryEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
+    use crate::telemetry::task_metadata::TaskId;
 
     fn roundtrip(event: &TelemetryEvent) -> TelemetryEvent {
         let mut enc = Encoder::new();
         register_schemas(&mut enc).unwrap();
+        write_event(&mut enc, event).unwrap();
+        let bytes = enc.finish();
+        let events = decode_events(&bytes).unwrap();
+        assert_eq!(events.len(), 1, "expected 1 event, got {}", events.len());
+        events.into_iter().next().unwrap()
+    }
+
+    /// Roundtrip helper that pre-interns a string so InternedString fields decode correctly.
+    fn roundtrip_with_intern(event: &TelemetryEvent, intern: &str) -> TelemetryEvent {
+        let mut enc = Encoder::new();
+        register_schemas(&mut enc).unwrap();
+        enc.intern_string(intern).unwrap();
         write_event(&mut enc, event).unwrap();
         let bytes = enc.finish();
         let events = decode_events(&bytes).unwrap();
@@ -483,9 +464,9 @@ mod tests {
             worker_id: 3,
             worker_local_queue_depth: 17,
             task_id: TaskId::from_u32(42),
-            spawn_loc_id: SpawnLocationId::from_u16(5),
+            spawn_loc_id: InternedString(0),
         };
-        assert_eq!(roundtrip(&event), event);
+        assert_eq!(roundtrip_with_intern(&event, "test_loc"), event);
     }
 
     #[test]
@@ -527,22 +508,13 @@ mod tests {
     }
 
     #[test]
-    fn spawn_location_def_roundtrip() {
-        let event = TelemetryEvent::SpawnLocationDef {
-            id: SpawnLocationId::from_u16(42),
-            location: "src/main.rs:123:45".to_string(),
-        };
-        assert_eq!(roundtrip(&event), event);
-    }
-
-    #[test]
     fn task_spawn_roundtrip() {
         let event = TelemetryEvent::TaskSpawn {
             timestamp_nanos: 5_000_000,
             task_id: TaskId::from_u32(99),
-            spawn_loc_id: SpawnLocationId::from_u16(7),
+            spawn_loc_id: InternedString(0),
         };
-        assert_eq!(roundtrip(&event), event);
+        assert_eq!(roundtrip_with_intern(&event, "test_loc"), event);
     }
 
     #[test]
@@ -625,28 +597,26 @@ mod tests {
 
     #[test]
     fn mixed_event_stream() {
+        let loc = InternedString(0);
         let events = vec![
-            TelemetryEvent::SpawnLocationDef {
-                id: SpawnLocationId::from_u16(1),
-                location: "src/main.rs:10:1".to_string(),
-            },
             TelemetryEvent::TaskSpawn {
                 timestamp_nanos: 500_000,
                 task_id: TaskId::from_u32(100),
-                spawn_loc_id: SpawnLocationId::from_u16(1),
+                spawn_loc_id: loc,
             },
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_000_000,
                 worker_id: 0,
                 worker_local_queue_depth: 3,
                 task_id: TaskId::from_u32(100),
-                spawn_loc_id: SpawnLocationId::from_u16(1),
+                spawn_loc_id: loc,
             },
             TelemetryEvent::PollEnd { timestamp_nanos: 2_000_000, worker_id: 0 },
         ];
 
         let mut enc = Encoder::new();
         register_schemas(&mut enc).unwrap();
+        enc.intern_string("src/main.rs:10:1").unwrap();
         for e in &events {
             write_event(&mut enc, e).unwrap();
         }

@@ -1,6 +1,7 @@
 use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
 use crate::telemetry::format;
-use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
+use crate::telemetry::task_metadata::TaskId;
+use dial9_trace_format::InternedString;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Result;
@@ -8,30 +9,41 @@ use std::io::Result;
 pub struct TraceReader {
     events: Vec<TelemetryEvent>,
     pos: usize,
-    /// Spawn location definitions accumulated during reading.
-    pub spawn_locations: HashMap<SpawnLocationId, String>,
-    /// Task ID → spawn location ID mapping built from TaskSpawn events.
-    pub task_spawn_locs: HashMap<TaskId, SpawnLocationId>,
+    /// Task ID → spawn location (InternedString) mapping built from TaskSpawn events.
+    pub task_spawn_locs: HashMap<TaskId, InternedString>,
     /// Callframe address → symbol name mapping built from CallframeDef events.
     pub callframe_symbols: HashMap<u64, String>,
     /// OS tid → thread name mapping built from ThreadNameDef events.
     pub thread_names: HashMap<u32, String>,
     /// Key-value metadata from the most recent SegmentMetadata event.
     pub segment_metadata: Vec<(String, String)>,
+    /// The decoder's string pool — maps pool IDs to strings.
+    pub string_pool: HashMap<u32, String>,
 }
 
 impl TraceReader {
     pub fn new(path: &str) -> Result<Self> {
         let data = fs::read(path)?;
-        let all_events = format::decode_events(&data)?;
+        let (all_events, string_pool) = {
+            use dial9_trace_format::decoder::Decoder;
+            let mut dec = Decoder::new(&data)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid trace header"))?;
+            let mut events = Vec::new();
+            dec.for_each_event(|ev| {
+                if let Some(ev) = format::decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
+                    events.push(TelemetryEvent::from(ev));
+                }
+            }).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            (events, dec.string_pool().clone())
+        };
         Ok(Self {
             events: all_events,
             pos: 0,
-            spawn_locations: HashMap::new(),
             task_spawn_locs: HashMap::new(),
             callframe_symbols: HashMap::new(),
             thread_names: HashMap::new(),
             segment_metadata: Vec::new(),
+            string_pool,
         })
     }
 
@@ -67,8 +79,7 @@ impl TraceReader {
             self.pos += 1;
             self.accumulate_metadata(&event);
             match &event {
-                TelemetryEvent::SpawnLocationDef { .. }
-                | TelemetryEvent::TaskSpawn { .. }
+                TelemetryEvent::TaskSpawn { .. }
                 | TelemetryEvent::CallframeDef { .. }
                 | TelemetryEvent::ThreadNameDef { .. }
                 | TelemetryEvent::SegmentMetadata { .. } => continue,
@@ -87,9 +98,6 @@ impl TraceReader {
 
     fn accumulate_metadata(&mut self, event: &TelemetryEvent) {
         match event {
-            TelemetryEvent::SpawnLocationDef { id, location } => {
-                self.spawn_locations.insert(*id, location.clone());
-            }
             TelemetryEvent::TaskSpawn {
                 task_id,
                 spawn_loc_id,
@@ -138,7 +146,7 @@ pub struct TraceAnalysis {
     pub max_global_queue: usize,
     pub avg_global_queue: f64,
     /// Per-spawn-location statistics (only populated when task tracking is enabled).
-    pub spawn_location_stats: HashMap<SpawnLocationId, SpawnLocationStats>,
+    pub spawn_location_stats: HashMap<InternedString, SpawnLocationStats>,
 }
 
 /// Build a sorted list of (timestamp, global_queue_depth) from QueueSample events.
@@ -170,9 +178,8 @@ fn lookup_global_queue_depth(timeline: &[(u64, usize)], timestamp: u64) -> usize
 pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
     let mut worker_stats: HashMap<usize, WorkerStats> = HashMap::new();
     let mut poll_starts: HashMap<usize, u64> = HashMap::new();
-    // Track spawn_loc_id at PollStart for computing per-location poll time at PollEnd
-    let mut poll_start_locs: HashMap<usize, SpawnLocationId> = HashMap::new();
-    let mut spawn_location_stats: HashMap<SpawnLocationId, SpawnLocationStats> = HashMap::new();
+    let mut poll_start_locs: HashMap<usize, InternedString> = HashMap::new();
+    let mut spawn_location_stats: HashMap<InternedString, SpawnLocationStats> = HashMap::new();
     let mut max_global_queue = 0;
     let mut global_queue_sum = 0u64;
     let mut global_queue_count = 0u64;
@@ -203,7 +210,7 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
                 stats.max_local_queue = stats.max_local_queue.max(*worker_local_queue_depth);
                 stats.poll_count += 1;
                 poll_starts.insert(*worker_id, *timestamp_nanos);
-                if spawn_loc_id.as_u16() != 0 {
+                if *spawn_loc_id != InternedString::default() {
                     spawn_location_stats
                         .entry(*spawn_loc_id)
                         .or_default()
@@ -248,8 +255,7 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
                 stats.total_sched_wait_ns += sched_wait_delta_nanos;
                 stats.max_sched_wait_ns = stats.max_sched_wait_ns.max(*sched_wait_delta_nanos);
             }
-            TelemetryEvent::SpawnLocationDef { .. }
-            | TelemetryEvent::TaskSpawn { .. }
+            TelemetryEvent::TaskSpawn { .. }
             | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::CpuSample { .. }
             | TelemetryEvent::CallframeDef { .. }
@@ -377,7 +383,7 @@ pub fn compute_active_periods(events: &[TelemetryEvent]) -> Vec<ActivePeriod> {
 
 pub fn print_analysis(
     analysis: &TraceAnalysis,
-    spawn_locations: &HashMap<SpawnLocationId, String>,
+    string_pool: &HashMap<u32, String>,
 ) {
     println!("\n=== Trace Analysis ===");
     println!("Total events: {}", analysis.total_events);
@@ -417,8 +423,8 @@ pub fn print_analysis(
         let mut locs: Vec<_> = analysis.spawn_location_stats.iter().collect();
         locs.sort_by(|a, b| b.1.poll_count.cmp(&a.1.poll_count));
         for (id, stats) in locs {
-            let name = spawn_locations
-                .get(id)
+            let name = string_pool
+                .get(&id.0)
                 .map(|s| s.as_str())
                 .unwrap_or("<unknown>");
             let avg_poll_us = if stats.poll_count > 0 {
@@ -481,7 +487,7 @@ pub struct LongPoll {
     pub end_ns: u64,
     pub duration_ns: u64,
     pub task_id: TaskId,
-    pub spawn_loc_id: SpawnLocationId,
+    pub spawn_loc_id: InternedString,
 }
 
 /// Detect polls that exceed `threshold_ns` nanoseconds.
@@ -490,7 +496,7 @@ pub struct LongPoll {
 /// time range, and task metadata (when task tracking is enabled).
 pub fn detect_long_polls(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<LongPoll> {
     let mut long_polls = Vec::new();
-    let mut poll_starts: HashMap<usize, (u64, TaskId, SpawnLocationId)> = HashMap::new();
+    let mut poll_starts: HashMap<usize, (u64, TaskId, InternedString)> = HashMap::new();
 
     for event in events {
         match event {
@@ -647,7 +653,7 @@ pub struct SampledPoll {
     pub start_ns: u64,
     pub end_ns: u64,
     pub task_id: TaskId,
-    pub spawn_loc_id: SpawnLocationId,
+    pub spawn_loc_id: InternedString,
     pub cpu_sample_count: usize,
     pub sched_sample_count: usize,
 }
@@ -661,14 +667,14 @@ pub fn detect_sampled_polls(events: &[TelemetryEvent]) -> Vec<SampledPoll> {
         start_ns: u64,
         end_ns: u64,
         task_id: TaskId,
-        spawn_loc_id: SpawnLocationId,
+        spawn_loc_id: InternedString,
         cpu_samples: usize,
         sched_samples: usize,
     }
 
     // First pass: build poll spans per worker
     let mut polls: Vec<PollSpan> = Vec::new();
-    let mut poll_starts: HashMap<usize, (u64, TaskId, SpawnLocationId)> = HashMap::new();
+    let mut poll_starts: HashMap<usize, (u64, TaskId, InternedString)> = HashMap::new();
 
     for event in events {
         match event {
@@ -746,7 +752,8 @@ pub fn detect_sampled_polls(events: &[TelemetryEvent]) -> Vec<SampledPoll> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::task_metadata::{UNKNOWN_SPAWN_LOCATION_ID, UNKNOWN_TASK_ID};
+    use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
+    use dial9_trace_format::InternedString;
 
     #[test]
     fn test_analyze_empty() {
@@ -764,7 +771,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 3,
                 task_id: UNKNOWN_TASK_ID,
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::QueueSample {
                 timestamp_nanos: 2_000_000,
@@ -790,7 +797,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 10,
                 task_id: UNKNOWN_TASK_ID,
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 2_000_000,
@@ -856,7 +863,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 0,
                 task_id: TaskId::from_u32(1),
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 3_000_000, // 2ms poll
@@ -867,7 +874,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 0,
                 task_id: TaskId::from_u32(2),
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 4_500_000, // 0.5ms poll
@@ -889,7 +896,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 0,
                 task_id: UNKNOWN_TASK_ID,
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 1_500_000, // 0.5ms
@@ -908,14 +915,14 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 0,
                 task_id: TaskId::from_u32(1),
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_000_000,
                 worker_id: 1,
                 worker_local_queue_depth: 0,
                 task_id: TaskId::from_u32(2),
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 5_000_000, // 4ms
@@ -1030,7 +1037,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 0,
                 task_id: task,
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 1_600_000,
@@ -1059,7 +1066,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 0,
                 task_id: task,
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 1_100_000,
@@ -1085,7 +1092,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 0,
                 task_id: task,
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 2_000_100_000,
@@ -1104,7 +1111,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 0,
                 task_id: TaskId::from_u32(1),
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::CpuSample {
                 timestamp_nanos: 1_500_000,
@@ -1140,7 +1147,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 0,
                 task_id: UNKNOWN_TASK_ID,
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 2_000_000,
@@ -1159,7 +1166,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 0,
                 task_id: UNKNOWN_TASK_ID,
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 2_000_000,

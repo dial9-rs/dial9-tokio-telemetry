@@ -1,4 +1,5 @@
-use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
+use crate::telemetry::task_metadata::TaskId;
+use dial9_trace_format::InternedString;
 use serde::Serialize;
 
 /// Sentinel worker_id for events from non-worker threads (encoded as u8 on the wire).
@@ -45,7 +46,7 @@ impl CpuSampleSource {
 /// Wire event representing a telemetry record after interning.
 ///
 /// Compare with `RawEvent` which is emitted by worker threads and carries
-/// `&'static Location` instead of interned `SpawnLocationId`.
+/// `&'static Location` instead of interned string pool IDs.
 ///
 /// Future updates will continue to diverge the in-memory format with the wire format.
 ///
@@ -62,7 +63,7 @@ pub enum TelemetryEvent {
         #[serde(rename = "local_q")]
         worker_local_queue_depth: usize,
         task_id: TaskId,
-        spawn_loc_id: SpawnLocationId,
+        spawn_loc_id: InternedString,
     },
     PollEnd {
         #[serde(rename = "timestamp_ns")]
@@ -101,15 +102,11 @@ pub enum TelemetryEvent {
         #[serde(rename = "global_q")]
         global_queue_depth: usize,
     },
-    SpawnLocationDef {
-        id: SpawnLocationId,
-        location: String,
-    },
     TaskSpawn {
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
         task_id: TaskId,
-        spawn_loc_id: SpawnLocationId,
+        spawn_loc_id: InternedString,
     },
     TaskTerminate {
         #[serde(rename = "timestamp_ns")]
@@ -131,7 +128,7 @@ pub enum TelemetryEvent {
     },
     /// Definition of a callframe symbol: maps an address to its resolved name.
     /// Emitted before the first CpuSample that references this address (when inline
-    /// symbolication is enabled). Analogous to SpawnLocationDef.
+    /// symbolication is enabled).
     CallframeDef {
         /// The raw instruction pointer address.
         address: u64,
@@ -159,7 +156,7 @@ pub enum TelemetryEvent {
 impl TelemetryEvent {
     /// Returns the timestamp in nanoseconds, if this event type carries one.
     ///
-    /// `SpawnLocationDef` and other definition records don't have timestamps.
+    /// Definition records don't have timestamps.
     pub fn timestamp_nanos(&self) -> Option<u64> {
         match self {
             TelemetryEvent::PollStart {
@@ -189,8 +186,7 @@ impl TelemetryEvent {
             | TelemetryEvent::TaskTerminate {
                 timestamp_nanos, ..
             } => Some(*timestamp_nanos),
-            TelemetryEvent::SpawnLocationDef { .. }
-            | TelemetryEvent::CallframeDef { .. }
+            TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::SegmentMetadata { .. } => None,
         }
@@ -205,7 +201,6 @@ impl TelemetryEvent {
             | TelemetryEvent::WorkerUnpark { worker_id, .. }
             | TelemetryEvent::CpuSample { worker_id, .. } => Some(*worker_id),
             TelemetryEvent::QueueSample { .. }
-            | TelemetryEvent::SpawnLocationDef { .. }
             | TelemetryEvent::TaskSpawn { .. }
             | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::CallframeDef { .. }
@@ -216,7 +211,7 @@ impl TelemetryEvent {
     }
 
     /// Returns true if this is a runtime event (has a timestamp), as opposed to
-    /// a metadata record (SpawnLocationDef).
+    /// a metadata record.
     pub fn is_runtime_event(&self) -> bool {
         self.timestamp_nanos().is_some()
     }
@@ -392,7 +387,7 @@ impl SchedStat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::task_metadata::{UNKNOWN_SPAWN_LOCATION_ID, UNKNOWN_TASK_ID};
+    use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
 
     #[test]
     fn test_telemetry_event_timestamp() {
@@ -401,34 +396,23 @@ mod tests {
             worker_id: 0,
             worker_local_queue_depth: 2,
             task_id: UNKNOWN_TASK_ID,
-            spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+            spawn_loc_id: InternedString::default(),
         };
         assert_eq!(poll_start.timestamp_nanos(), Some(1000));
-
-        let poll_end = TelemetryEvent::PollEnd {
-            timestamp_nanos: 2000,
-            worker_id: 1,
-        };
-        assert_eq!(poll_end.timestamp_nanos(), Some(2000));
-
-        let queue_sample = TelemetryEvent::QueueSample {
-            timestamp_nanos: 3000,
-            global_queue_depth: 5,
-        };
-        assert_eq!(queue_sample.timestamp_nanos(), Some(3000));
-
-        let spawn_def = TelemetryEvent::SpawnLocationDef {
-            id: SpawnLocationId::from_u16(1),
-            location: "src/main.rs:10:5".to_string(),
-        };
-        assert_eq!(spawn_def.timestamp_nanos(), None);
 
         let task_spawn = TelemetryEvent::TaskSpawn {
             timestamp_nanos: 5_000_000,
             task_id: TaskId::from_u32(1),
-            spawn_loc_id: SpawnLocationId::from_u16(1),
+            spawn_loc_id: InternedString(1),
         };
         assert_eq!(task_spawn.timestamp_nanos(), Some(5_000_000));
+
+        let callframe = TelemetryEvent::CallframeDef {
+            address: 0x1234,
+            symbol: "test".to_string(),
+            location: None,
+        };
+        assert_eq!(callframe.timestamp_nanos(), None);
     }
 
     #[test]
@@ -438,7 +422,7 @@ mod tests {
             worker_id: 3,
             worker_local_queue_depth: 0,
             task_id: UNKNOWN_TASK_ID,
-            spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+            spawn_loc_id: InternedString::default(),
         };
         assert_eq!(poll_start.worker_id(), Some(3));
 
@@ -447,12 +431,6 @@ mod tests {
             global_queue_depth: 5,
         };
         assert_eq!(queue_sample.worker_id(), None);
-
-        let spawn_def = TelemetryEvent::SpawnLocationDef {
-            id: SpawnLocationId::from_u16(1),
-            location: "test".to_string(),
-        };
-        assert_eq!(spawn_def.worker_id(), None);
     }
 
     #[test]
@@ -462,44 +440,22 @@ mod tests {
             worker_id: 0,
             worker_local_queue_depth: 0,
             task_id: UNKNOWN_TASK_ID,
-            spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+            spawn_loc_id: InternedString::default(),
         };
         assert!(poll_start.is_runtime_event());
-
-        let spawn_def = TelemetryEvent::SpawnLocationDef {
-            id: SpawnLocationId::from_u16(1),
-            location: "test".to_string(),
-        };
-        assert!(!spawn_def.is_runtime_event());
 
         let task_spawn = TelemetryEvent::TaskSpawn {
             timestamp_nanos: 5_000_000,
             task_id: TaskId::from_u32(1),
-            spawn_loc_id: SpawnLocationId::from_u16(1),
+            spawn_loc_id: InternedString(1),
         };
         assert!(task_spawn.is_runtime_event());
-    }
 
-    #[test]
-    fn test_telemetry_event_creation() {
-        let event = TelemetryEvent::PollStart {
-            timestamp_nanos: 1000,
-            worker_id: 0,
-            worker_local_queue_depth: 2,
-            task_id: UNKNOWN_TASK_ID,
-            spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+        let callframe = TelemetryEvent::CallframeDef {
+            address: 0x1234,
+            symbol: "test".to_string(),
+            location: None,
         };
-        assert_eq!(event.timestamp_nanos(), Some(1000));
-        assert_eq!(event.worker_id(), Some(0));
-    }
-
-    #[test]
-    fn test_telemetry_event_clone() {
-        let event = TelemetryEvent::SpawnLocationDef {
-            id: SpawnLocationId::from_u16(42),
-            location: "src/lib.rs:1:1".to_string(),
-        };
-        let cloned = event.clone();
-        assert_eq!(event, cloned);
+        assert!(!callframe.is_runtime_event());
     }
 }

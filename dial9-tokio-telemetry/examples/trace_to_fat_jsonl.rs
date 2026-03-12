@@ -97,7 +97,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             worker: *worker_id,
             local_q: *worker_local_queue_depth,
             task_id: task_id.to_u32(),
-            spawn_location: reader.spawn_locations.get(spawn_loc_id).cloned(),
+            spawn_location: reader.string_pool.get(&spawn_loc_id.0).cloned(),
         }),
         TelemetryEvent::PollEnd {
             timestamp_nanos,
@@ -169,8 +169,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             woken_task_id: woken_task_id.to_u32(),
             target_worker: *target_worker,
         }),
-        TelemetryEvent::SpawnLocationDef { .. }
-        | TelemetryEvent::TaskSpawn { .. }
+        TelemetryEvent::TaskSpawn { .. }
         | TelemetryEvent::TaskTerminate { .. }
         | TelemetryEvent::CallframeDef { .. }
         | TelemetryEvent::ThreadNameDef { .. }

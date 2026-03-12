@@ -994,6 +994,7 @@ dependencies = [
  "criterion",
  "dial9-trace-format-derive",
  "flate2",
+ "serde",
  "serde_json",
  "tempfile",
 ]

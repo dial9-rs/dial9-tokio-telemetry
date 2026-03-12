@@ -1,9 +1,8 @@
 use crate::telemetry::events::{RawEvent, TelemetryEvent};
 use crate::telemetry::format;
-use crate::telemetry::task_metadata::SpawnLocationId;
 use dial9_trace_format::encoder::Encoder;
-use smallvec::SmallVec;
-use std::collections::{HashMap, HashSet, VecDeque};
+use dial9_trace_format::InternedString;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::panic::Location;
@@ -82,56 +81,38 @@ impl TraceWriter for NullWriter {
 
 // ── Spawn-location interning ────────────────────────────────────────────────
 
-/// Tracks Location → SpawnLocationId interning and per-file def emission.
-struct SpawnLocationState {
-    /// Location pointer (as usize) → SpawnLocationId.
-    intern_map: HashMap<usize, SpawnLocationId>,
-    /// SpawnLocationId → location string.
-    intern_strings: Vec<String>,
-    /// Which SpawnLocationIds have been emitted in the current file.
-    emitted_this_file: HashSet<SpawnLocationId>,
-    next_id: u16,
+/// Caches Location pointer → InternedString mapping. The actual string interning
+/// is done by the encoder's string pool; this just avoids formatting the location
+/// string on every event.
+struct SpawnLocationCache {
+    intern_map: HashMap<usize, InternedString>,
 }
 
-impl SpawnLocationState {
+impl SpawnLocationCache {
     fn new() -> Self {
         Self {
             intern_map: HashMap::new(),
-            intern_strings: vec!["<unknown>".to_string()],
-            emitted_this_file: HashSet::new(),
-            next_id: 1,
         }
     }
 
-    fn intern(&mut self, location: &'static Location<'static>) -> SpawnLocationId {
+    fn intern<W: Write>(
+        &mut self,
+        location: &'static Location<'static>,
+        encoder: &mut Encoder<W>,
+    ) -> io::Result<InternedString> {
         let ptr = location as *const Location<'static> as usize;
         if let Some(&id) = self.intern_map.get(&ptr) {
-            return id;
+            return Ok(id);
         }
-        let id = SpawnLocationId(self.next_id);
-        self.next_id += 1;
-        self.intern_map.insert(ptr, id);
-        self.intern_strings.push(format!(
+        let loc_str = format!(
             "{}:{}:{}",
             location.file(),
             location.line(),
             location.column()
-        ));
-        id
-    }
-
-    /// Collect any SpawnLocationDef events needed before referencing `id`.
-    fn collect_defs(&mut self, id: SpawnLocationId) -> SmallVec<[TelemetryEvent; 1]> {
-        let mut defs = SmallVec::new();
-        if self.emitted_this_file.insert(id) {
-            let loc = self.intern_strings[id.as_u16() as usize].clone();
-            defs.push(TelemetryEvent::SpawnLocationDef { id, location: loc });
-        }
-        defs
-    }
-
-    fn on_rotate(&mut self) {
-        self.emitted_this_file.clear();
+        );
+        let id = encoder.intern_string(&loc_str)?;
+        self.intern_map.insert(ptr, id);
+        Ok(id)
     }
 }
 
@@ -164,8 +145,8 @@ impl<W: Write> Write for CountingWriter<W> {
 /// A writer that rotates trace files to bound disk usage.
 ///
 /// Owns the encoder and spawn-location interning state. Handles converting
-/// `RawEvent`s to wire format, including emitting `SpawnLocationDef` events
-/// when a location is first referenced in a file.
+/// `RawEvent`s to wire format, interning spawn locations via the encoder's
+/// string pool.
 pub struct RotatingWriter {
     base_path: PathBuf,
     max_file_size: u64,
@@ -177,7 +158,7 @@ pub struct RotatingWriter {
     stopped: bool,
     rotated: bool,
     has_events_in_current_file: bool,
-    locations: SpawnLocationState,
+    locations: SpawnLocationCache,
 }
 
 impl RotatingWriter {
@@ -217,7 +198,7 @@ impl RotatingWriter {
             stopped: false,
             rotated: false,
             has_events_in_current_file: false,
-            locations: SpawnLocationState::new(),
+            locations: SpawnLocationCache::new(),
         })
     }
 
@@ -243,7 +224,7 @@ impl RotatingWriter {
             stopped: false,
             rotated: false,
             has_events_in_current_file: false,
-            locations: SpawnLocationState::new(),
+            locations: SpawnLocationCache::new(),
         })
     }
 
@@ -273,7 +254,7 @@ impl RotatingWriter {
         self.files.push_back((new_path, preamble_size));
         self.rotated = true;
         self.has_events_in_current_file = false;
-        self.locations.on_rotate();
+        self.locations.intern_map.clear();
 
         self.evict_oldest()?;
         Ok(())
@@ -336,7 +317,7 @@ impl RotatingWriter {
             return Ok(());
         }
 
-        // Intern location and emit defs + event together (no rotation between them).
+        // Intern location and emit event directly — no SpawnLocationDef needed.
         match raw {
             RawEvent::PollStart {
                 timestamp_nanos,
@@ -345,10 +326,7 @@ impl RotatingWriter {
                 task_id,
                 location,
             } => {
-                let id = self.locations.intern(location);
-                for def in self.locations.collect_defs(id) {
-                    format::write_event(&mut self.encoder, &def)?;
-                }
+                let id = self.locations.intern(location, &mut self.encoder)?;
                 format::write_event(
                     &mut self.encoder,
                     &TelemetryEvent::PollStart {
@@ -365,10 +343,7 @@ impl RotatingWriter {
                 task_id,
                 location,
             } => {
-                let id = self.locations.intern(location);
-                for def in self.locations.collect_defs(id) {
-                    format::write_event(&mut self.encoder, &def)?;
-                }
+                let id = self.locations.intern(location, &mut self.encoder)?;
                 format::write_event(
                     &mut self.encoder,
                     &TelemetryEvent::TaskSpawn {
@@ -512,7 +487,8 @@ impl TraceWriter for RotatingWriter {
 mod tests {
     use super::*;
     use crate::telemetry::analysis::TraceReader;
-    use crate::telemetry::task_metadata::{UNKNOWN_SPAWN_LOCATION_ID, UNKNOWN_TASK_ID};
+    use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
+    use dial9_trace_format::InternedString;
     use tempfile::TempDir;
 
     fn park_event() -> TelemetryEvent {
@@ -577,14 +553,13 @@ mod tests {
         while let Some(ev) = reader.read_raw_event().unwrap() {
             all.push(ev);
         }
-        // Should have SpawnLocationDef + PollStart
-        assert_eq!(all.len(), 2);
-        assert!(matches!(all[0], TelemetryEvent::SpawnLocationDef { .. }));
-        assert!(matches!(all[1], TelemetryEvent::PollStart { .. }));
+        // Should have just PollStart (no SpawnLocationDef — interning is in the string pool)
+        assert_eq!(all.len(), 1);
+        assert!(matches!(all[0], TelemetryEvent::PollStart { .. }));
     }
 
     #[test]
-    fn test_write_raw_event_deduplicates_defs() {
+    fn test_write_raw_event_deduplicates_interning() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test_dedup.bin");
         let mut writer = RotatingWriter::single_file(&path).unwrap();
@@ -604,16 +579,12 @@ mod tests {
         writer.flush().unwrap();
 
         let mut reader = TraceReader::new(path.to_str().unwrap()).unwrap();
-        let mut defs = 0;
         let mut polls = 0;
         while let Some(ev) = reader.read_raw_event().unwrap() {
-            match ev {
-                TelemetryEvent::SpawnLocationDef { .. } => defs += 1,
-                TelemetryEvent::PollStart { .. } => polls += 1,
-                _ => {}
+            if matches!(ev, TelemetryEvent::PollStart { .. }) {
+                polls += 1;
             }
         }
-        assert_eq!(defs, 1, "def should be emitted only once");
         assert_eq!(polls, 3);
     }
 
@@ -749,7 +720,7 @@ mod tests {
                 worker_id: 0,
                 worker_local_queue_depth: 2,
                 task_id: UNKNOWN_TASK_ID,
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
+                spawn_loc_id: InternedString::default(),
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 1000,
