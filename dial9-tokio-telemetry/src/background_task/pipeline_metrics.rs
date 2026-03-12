@@ -184,8 +184,8 @@ mod tests {
 
         let entry = test_metric(m);
         check!(entry.metrics["Gzip.Time"].as_u64() < 1000);
-        check!(entry.metrics["Gzip.Success"].as_bool());
-        check!(!entry.metrics["Gzip.Failure"].as_bool());
+        check!(entry.metrics["Gzip.Success"] == true);
+        check!(entry.metrics["Gzip.Failure"] == false);
     }
 
     #[test]
@@ -196,8 +196,8 @@ mod tests {
         m.push("S3Upload", stage);
 
         let entry = test_metric(m);
-        check!(!entry.metrics["S3Upload.Success"].as_bool());
-        check!(entry.metrics["S3Upload.Failure"].as_bool());
+        check!(entry.metrics["S3Upload.Success"] == false);
+        check!(entry.metrics["S3Upload.Failure"] == true);
     }
 
     #[test]
@@ -213,10 +213,10 @@ mod tests {
         m.push("S3Upload", s2);
 
         let entry = test_metric(m);
-        check!(entry.metrics["Gzip.Success"].as_bool());
-        check!(!entry.metrics["Gzip.Failure"].as_bool());
-        check!(!entry.metrics["S3Upload.Success"].as_bool());
-        check!(entry.metrics["S3Upload.Failure"].as_bool());
+        check!(entry.metrics["Gzip.Success"] == true);
+        check!(entry.metrics["Gzip.Failure"] == false);
+        check!(entry.metrics["S3Upload.Success"] == false);
+        check!(entry.metrics["S3Upload.Failure"] == true);
         check!(entry.metrics.contains_key("Gzip.Time"));
         check!(entry.metrics.contains_key("S3Upload.Time"));
     }
@@ -239,7 +239,7 @@ mod tests {
 
         let m = SegmentProcessMetrics {
             total_time: Timer::start_now(),
-            success: 1,
+            status: Some(super::MetriqueResult::Success),
             segment_index: 7,
             uncompressed_size: 65536,
             compressed_size: Some(12345),
@@ -252,6 +252,7 @@ mod tests {
         // Verify the pipeline stage keys are present alongside the top-level keys
         check!(entry.metrics.contains_key("TotalTime"));
         check!(entry.metrics.contains_key("Success"));
+        check!(entry.metrics.contains_key("Failure"));
         check!(entry.metrics.contains_key("SegmentIndex"));
         check!(entry.metrics.contains_key("UncompressedSize"));
         check!(entry.metrics.contains_key("CompressedSize"));

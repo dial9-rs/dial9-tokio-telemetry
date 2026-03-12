@@ -11,7 +11,7 @@ use metrique::unit::Byte;
 use metrique::unit::Millisecond;
 use metrique::unit_of_work::metrics;
 use metrique_writer::BoxEntrySink;
-use pipeline_metrics::{PipelineMetrics, StageMetrics};
+use pipeline_metrics::{MetriqueResult, PipelineMetrics, StageMetrics};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -279,8 +279,8 @@ impl SegmentProcessor for GzipCompressor {
 pub(crate) struct SegmentProcessMetrics {
     #[metrics(unit = Millisecond)]
     total_time: Timer,
-    /// 1 on success, 0 on failure.
-    success: usize,
+    #[metrics(flatten)]
+    status: Option<MetriqueResult>,
     segment_index: u32,
     #[metrics(unit = Byte)]
     uncompressed_size: u64,
@@ -382,7 +382,7 @@ impl WorkerLoop {
 
             let metrics = SegmentProcessMetrics {
                 total_time: Timer::start_now(),
-                success: 0,
+                status: None,
                 segment_index: segment.index,
                 uncompressed_size,
                 compressed_size: None,
@@ -417,6 +417,7 @@ impl WorkerLoop {
                         data = e.data;
                         stage.fail();
                         data.metrics.pipeline.push(processor.name(), stage);
+                        data.metrics.status = Some(MetriqueResult::Failure);
                         data.metrics.total_time.stop();
                         if matches!(&e.kind, ProcessErrorKind::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
                         {
@@ -429,7 +430,7 @@ impl WorkerLoop {
                 }
             }
 
-            data.metrics.success = 1;
+            data.metrics.status = Some(MetriqueResult::Success);
             data.metrics.total_time.stop();
             // `data` dropped here — metrics guard flushes automatically
         }
@@ -686,7 +687,7 @@ mod tests {
 
         let metrics = SegmentProcessMetrics {
             total_time: metrique::timers::Timer::start_now(),
-            success: 0,
+            status: None,
             segment_index: 0,
             uncompressed_size: data.len() as u64,
             compressed_size: None,
@@ -713,7 +714,7 @@ mod tests {
         }
 
         // After fix: compressed_size is set by GzipCompressor, not overwritten
-        pipe_data.metrics.success = 1;
+        pipe_data.metrics.status = Some(MetriqueResult::Success);
         pipe_data.metrics.total_time.stop();
         drop(pipe_data);
 

@@ -538,7 +538,7 @@ fn stress_test_all_segments_uploaded_and_valid() {
     let entries = inspector.entries();
     let successes: Vec<_> = entries
         .iter()
-        .filter(|e| e.metrics["Success"].as_u64() == 1)
+        .filter(|e| e.metrics["Success"] == true)
         .collect();
     assert_eq!(
         successes.len(),
@@ -798,7 +798,7 @@ fn permanently_broken_s3_produces_failure_metrics() {
 
     let failures = entries
         .iter()
-        .filter(|e| e.metrics["Success"].as_u64() == 0)
+        .filter(|e| e.metrics["Failure"] == true)
         .count();
     assert_eq!(
         failures,
