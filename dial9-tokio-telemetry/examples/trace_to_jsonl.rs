@@ -6,7 +6,6 @@
 //! If output is omitted, writes to stdout.
 
 use dial9_tokio_telemetry::telemetry::TraceReader;
-use serde_json;
 use std::io::{BufWriter, Write};
 
 fn main() -> std::io::Result<()> {
@@ -33,8 +32,7 @@ fn main() -> std::io::Result<()> {
 
     let mut count = 0u64;
     while let Some(e) = reader.read_raw_event()? {
-        serde_json::to_writer(&mut w, &e)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        serde_json::to_writer(&mut w, &e).map_err(std::io::Error::other)?;
         w.write_all(b"\n")?;
         count += 1;
     }

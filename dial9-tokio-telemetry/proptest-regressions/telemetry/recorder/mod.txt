@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b3217ab71249bb1564914a81448f8eb1e11ac5057d6ab3e52cf95d45787cbaaa # shrinks to rounds = [FlushRound { cpu_ops: [], raw_ops: [PollStart { location_idx: 0 }] }], max_file_size = 88

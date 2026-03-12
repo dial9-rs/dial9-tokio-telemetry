@@ -16,8 +16,12 @@
 //!   8: CallframeDef                 → code(u8) + address(u64) + string_len(u16) + string_bytes(N)                                      = 11 + N bytes
 //!   9: WakeEvent                    → code(u8) + timestamp_us(u32) + waker_task_id(u32) + woken_task_id(u32) + target_worker(u8)        = 14 bytes
 //!  10: ThreadNameDef                → code(u8) + tid(u32) + string_len(u16) + string_bytes(N)                                          = 7 + N bytes
+//!  11: SegmentMetadata              → code(u8) + timestamp_nanos(u64) + num_entries(u16) + (key_len(u16) + key_bytes(K) + val_len(u16) + val_bytes(V))*        = 11 + Σ(4+K+V) bytes
 //! 172: TaskTerminate                → code(u8) + timestamp_us(u32) + task_id(u32)                                                       = 9 bytes
-//!  11: SegmentMetadata              → code(u8) + num_entries(u16) + (key_len(u16) + key_bytes(K) + val_len(u16) + val_bytes(V))*        = 3 + Σ(4+K+V) bytes
+//!
+//! Wire code 172 is intentionally non-sequential to avoid conflicts with future
+//! codes in the 12-170 range. New event types should use the next sequential code
+//! after 11 (i.e. 12, 13, ...) unless there's a specific reason not to.
 //! ```
 //!
 //! Timestamps are microseconds since trace start. u32 micros supports traces up to ~71 minutes.
@@ -40,13 +44,16 @@
 //!
 //! ### v16 → v17 changes
 //! - Added SegmentMetadata (code 11): key-value metadata at start of each segment
+//!
+//! ### v17 → v18 changes
+//! - Added timestamp_nanos(u64) to SegmentMetadata (code 11): records segment creation time
 
 use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
 use std::io::{Read, Result, Write};
 
 pub const MAGIC: &[u8; 8] = b"TOKIOTRC";
-pub const VERSION: u32 = 17;
+pub const VERSION: u32 = 18;
 pub const HEADER_SIZE: usize = 12; // 8 magic + 4 version
 
 // Wire codes
@@ -81,9 +88,10 @@ pub fn wire_event_size(event: &TelemetryEvent) -> usize {
         } => 1 + 8 + 2 + symbol.len() + 2 + location.as_ref().map_or(0, |l| l.len()),
         TelemetryEvent::ThreadNameDef { name, .. } => 1 + 4 + 2 + name.len(),
         TelemetryEvent::WakeEvent { .. } => 14,
-        TelemetryEvent::SegmentMetadata { entries } => {
-            // code(u8) + num_entries(u16) + for each: key_len(u16) + key + val_len(u16) + val
-            1 + 2
+        TelemetryEvent::SegmentMetadata { entries, .. } => {
+            // code(u8) + timestamp_nanos(u64) + num_entries(u16) + for each: key_len(u16) + key + val_len(u16) + val
+            1 + 8
+                + 2
                 + entries
                     .iter()
                     .map(|(k, v)| 2 + k.len() + 2 + v.len())
@@ -252,8 +260,12 @@ pub fn write_event(w: &mut impl Write, event: &TelemetryEvent) -> Result<()> {
             w.write_all(&woken_task_id.to_u32().to_le_bytes())?;
             w.write_all(&[*target_worker])?;
         }
-        TelemetryEvent::SegmentMetadata { entries } => {
+        TelemetryEvent::SegmentMetadata {
+            timestamp_nanos,
+            entries,
+        } => {
             w.write_all(&[WIRE_SEGMENT_METADATA])?;
+            w.write_all(&timestamp_nanos.to_le_bytes())?;
             if entries.len() > u16::MAX as usize {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -388,6 +400,10 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
         return Ok(Some(TelemetryEvent::ThreadNameDef { tid, name }));
     }
     if tag[0] == WIRE_SEGMENT_METADATA {
+        let mut timestamp_bytes = [0u8; 8];
+        r.read_exact(&mut timestamp_bytes)?;
+        let timestamp_nanos = u64::from_le_bytes(timestamp_bytes);
+
         let mut num_bytes = [0u8; 2];
         r.read_exact(&mut num_bytes)?;
         let num = u16::from_le_bytes(num_bytes) as usize;
@@ -419,7 +435,10 @@ pub fn read_event(r: &mut impl Read) -> Result<Option<TelemetryEvent>> {
 
             entries.push((key, val));
         }
-        return Ok(Some(TelemetryEvent::SegmentMetadata { entries }));
+        return Ok(Some(TelemetryEvent::SegmentMetadata {
+            timestamp_nanos,
+            entries,
+        }));
     }
     let mut ts = [0u8; 4];
     r.read_exact(&mut ts)?;
@@ -550,8 +569,8 @@ mod tests {
         let mut buf = Vec::new();
         write_event(&mut buf, event).unwrap();
         assert_eq!(buf.len(), wire_event_size(event));
-        let decoded = read_event(&mut Cursor::new(buf)).unwrap().unwrap();
-        decoded
+
+        read_event(&mut Cursor::new(buf)).unwrap().unwrap()
     }
 
     /// Helper: read the next runtime event, skipping metadata records.
@@ -1138,7 +1157,7 @@ mod tests {
             write_event(&mut buf, e).unwrap();
         }
 
-        let expected_size: usize = events.iter().map(|e| wire_event_size(e)).sum();
+        let expected_size: usize = events.iter().map(wire_event_size).sum();
         assert_eq!(buf.len(), expected_size);
 
         // Read all events back (including metadata)
@@ -1222,6 +1241,7 @@ mod tests {
     #[test]
     fn test_segment_metadata_roundtrip() {
         let event = TelemetryEvent::SegmentMetadata {
+            timestamp_nanos: 1234567890123456789,
             entries: vec![
                 ("service".into(), "checkout-api".into()),
                 ("host".into(), "i-0abc123".into()),
@@ -1233,7 +1253,10 @@ mod tests {
 
     #[test]
     fn test_segment_metadata_empty_roundtrip() {
-        let event = TelemetryEvent::SegmentMetadata { entries: vec![] };
+        let event = TelemetryEvent::SegmentMetadata {
+            timestamp_nanos: 9876543210987654321,
+            entries: vec![],
+        };
         let decoded = roundtrip(&event);
         assert_eq!(decoded, event);
     }

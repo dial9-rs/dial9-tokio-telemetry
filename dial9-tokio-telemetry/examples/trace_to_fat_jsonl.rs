@@ -77,8 +77,7 @@ fn main() -> std::io::Result<()> {
     let mut count = 0u64;
     while let Some(e) = reader.read_raw_event()? {
         if let Some(fat) = to_fat_event(&e, &reader) {
-            serde_json::to_writer(&mut w, &fat)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            serde_json::to_writer(&mut w, &fat).map_err(std::io::Error::other)?;
             w.write_all(b"\n")?;
             count += 1;
         }

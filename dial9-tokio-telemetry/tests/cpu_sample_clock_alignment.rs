@@ -144,10 +144,8 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
             .map(|&t| {
                 if t < burn_start {
                     burn_start - t
-                } else if t > burn_end {
-                    t - burn_end
                 } else {
-                    0
+                    t.saturating_sub(burn_end)
                 }
             })
             .min()
@@ -268,7 +266,10 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     let (writer, events) = common::CapturingWriter::new();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
+    builder
+        .worker_threads(2)
+        .thread_name("test-traced-runtime")
+        .enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_cpu_profiling(CpuProfilingConfig {
@@ -337,10 +338,10 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     // spawn_blocking threads are named "tokio-runtime-w" by tokio
     let blocking_def = thread_defs
         .iter()
-        .find(|(_, name)| name.starts_with("tokio-runtime-w"));
+        .find(|(_, name)| name.starts_with("test-traced-run"));
     assert!(
         blocking_def.is_some(),
-        "expected ThreadNameDef for a tokio blocking thread (tokio-runtime-w*), got: {thread_defs:?}"
+        "expected ThreadNameDef for a tokio blocking thread (test-traced-run), got: {thread_defs:?}"
     );
     let blocking_tid = blocking_def.unwrap().0;
 

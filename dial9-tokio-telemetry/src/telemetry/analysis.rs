@@ -60,7 +60,7 @@ impl TraceReader {
             Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
                 self.thread_names.insert(*tid, name.clone());
             }
-            Some(TelemetryEvent::SegmentMetadata { entries }) => {
+            Some(TelemetryEvent::SegmentMetadata { entries, .. }) => {
                 self.segment_metadata = entries.clone();
             }
             _ => {}
@@ -92,7 +92,7 @@ impl TraceReader {
                 Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
                     self.thread_names.insert(tid, name);
                 }
-                Some(TelemetryEvent::SegmentMetadata { entries }) => {
+                Some(TelemetryEvent::SegmentMetadata { entries, .. }) => {
                     self.segment_metadata = entries;
                 }
                 Some(e) => return Ok(Some(e)),

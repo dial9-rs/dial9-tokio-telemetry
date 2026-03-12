@@ -154,7 +154,7 @@ fn main() {
         .map(|s| s.as_str())
         .collect();
 
-    let mode = positional.get(0).copied().unwrap_or("baseline");
+    let mode = positional.first().copied().unwrap_or("baseline");
     let duration_secs: u64 = positional
         .get(1)
         .and_then(|s| s.parse().ok())

@@ -49,7 +49,16 @@ impl TelemetryRecorder {
                 }
             }
         }
-        self.event_writer.flush().unwrap();
+        if let Err(e) = self.event_writer.flush() {
+            tracing::warn!("failed to flush trace data: {e}");
+        }
+    }
+
+    fn seal(&mut self) {
+        self.flush();
+        if let Err(e) = self.event_writer.seal() {
+            tracing::warn!("failed to seal trace segment: {e}");
+        }
     }
 
     pub(crate) fn install(
@@ -230,11 +239,18 @@ impl TelemetryHandle {
     }
 }
 
+/// Holds the worker thread and its stop signal.
+struct WorkerHandle {
+    shutdown: Option<tokio::sync::oneshot::Sender<Duration>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
 /// RAII guard returned by [`TracedRuntimeBuilder::build`].
 pub struct TelemetryGuard {
     handle: TelemetryHandle,
     stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    flush_thread: Option<std::thread::JoinHandle<()>>,
+    worker: Option<WorkerHandle>,
 }
 
 impl TelemetryGuard {
@@ -253,12 +269,47 @@ impl TelemetryGuard {
     pub fn disable(&self) {
         self.handle.disable();
     }
+
+    /// Flush remaining events, seal the final segment, and wait for the
+    /// worker to drain. Returns `Ok(())` if the worker finishes within the
+    /// timeout, `Err` if it times out or the worker panics.
+    ///
+    /// Consumes the guard so `Drop` becomes a no-op.
+    pub async fn graceful_shutdown(mut self, timeout: Duration) -> Result<(), std::io::Error> {
+        tracing::debug!(target: "dial9_telemetry", "graceful_shutdown starting");
+        // 1. Stop flush thread
+        self.stop.store(true, Ordering::Release);
+        if let Some(t) = self.flush_thread.take() {
+            tracing::debug!(target: "dial9_telemetry", "joining flush thread");
+            let _ = t.join();
+            tracing::debug!(target: "dial9_telemetry", "flush thread joined");
+        }
+
+        // 2. Seal final segment
+        self.handle.recorder.lock().unwrap().seal();
+        tracing::debug!(target: "dial9_telemetry", "sealed final segment");
+
+        // 3. Signal worker to drain with the given timeout and wait
+        if let Some(ref mut w) = self.worker {
+            tracing::debug!(target: "dial9_telemetry", timeout_secs = timeout.as_secs(), "waiting for worker drain");
+            if let Some(tx) = w.shutdown.take() {
+                let _ = tx.send(timeout);
+            }
+            if let Some(t) = w.thread.take() {
+                let _ = tokio::task::spawn_blocking(move || t.join()).await;
+            }
+            tracing::debug!(target: "dial9_telemetry", "worker finished");
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
+        // 1. Stop the flush thread
         self.stop.store(true, Ordering::Release);
-        if let Some(t) = self.thread.take() {
+        if let Some(t) = self.flush_thread.take() {
             let _ = t.join();
         }
         // Flush the current thread's buffer (e.g. main thread in block_on)
@@ -270,7 +321,14 @@ impl Drop for TelemetryGuard {
                 self.handle.shared.collector.accept_flush(events);
             }
         });
-        self.handle.recorder.lock().unwrap().flush();
+        // 2. Seal the final segment (.active → .bin)
+        self.handle.recorder.lock().unwrap().seal();
+        // 3. Hard shutdown: drop the sender without sending — worker sees
+        // RecvError and exits without draining. No need to join the thread.
+        // For graceful drain, use graceful_shutdown() instead.
+        if let Some(ref mut w) = self.worker {
+            w.shutdown.take();
+        }
     }
 }
 
@@ -282,6 +340,7 @@ pub struct TracedRuntimeBuilder {
     sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
     #[cfg(feature = "cpu-profiling")]
     inline_callframe_symbols: bool,
+    worker_config: Option<crate::background_task::BackgroundTaskConfig>,
 }
 
 impl TracedRuntimeBuilder {
@@ -311,6 +370,16 @@ impl TracedRuntimeBuilder {
     #[cfg(feature = "cpu-profiling")]
     pub fn with_inline_callframe_symbols(mut self, enabled: bool) -> Self {
         self.inline_callframe_symbols = enabled;
+        self
+    }
+
+    /// Configure an S3 uploader that watches for sealed trace segments
+    /// and uploads them to S3.
+    pub fn with_s3_uploader(
+        mut self,
+        config: crate::background_task::BackgroundTaskConfig,
+    ) -> Self {
+        self.worker_config = Some(config);
         self
     }
 
@@ -400,13 +469,31 @@ impl TracedRuntimeBuilder {
         };
 
         let guard_shared = recorder.lock().unwrap().shared.clone();
+
+        #[allow(unused_mut)]
+        let mut worker = None;
+        if let Some(config) = self.worker_config {
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            let wt = std::thread::Builder::new()
+                .name("dial9-worker".into())
+                .spawn(move || {
+                    crate::background_task::run_background_task(config, shutdown_rx);
+                })
+                .expect("failed to spawn dial9-worker thread");
+            worker = Some(WorkerHandle {
+                shutdown: Some(shutdown_tx),
+                thread: Some(wt),
+            });
+        }
+
         let guard = TelemetryGuard {
             handle: TelemetryHandle {
                 shared: guard_shared,
                 recorder,
             },
             stop,
-            thread: Some(thread),
+            flush_thread: Some(thread),
+            worker,
         };
 
         Ok((runtime, guard))
@@ -440,6 +527,7 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
+            worker_config: None,
         }
     }
 
@@ -458,6 +546,7 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
+            worker_config: None,
         }
         .build(builder, writer)
     }
@@ -478,6 +567,7 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
+            worker_config: None,
         }
         .build_and_start(builder, writer)
     }
@@ -570,12 +660,13 @@ mod tests {
             .unwrap();
         }
         ew.flush().unwrap();
+        ew.seal().unwrap();
 
         let mut files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().map_or(false, |ext| ext == "bin"))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
             .collect();
         files.sort();
         assert!(
@@ -740,7 +831,7 @@ mod tests {
                 .unwrap()
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| p.extension().map_or(false, |ext| ext == "bin"))
+                .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
                 .collect();
             files.sort();
 
@@ -851,6 +942,7 @@ mod tests {
                     );
                 }
                 ew.flush().unwrap();
+                ew.seal().unwrap();
 
                 let actual_raw = verify_files(dir.path());
 

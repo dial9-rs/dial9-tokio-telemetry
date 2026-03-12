@@ -68,7 +68,9 @@ impl EventWriter {
                 match self.writer.write_atomic(&events)? {
                     r @ (WriteAtomicResult::Written | WriteAtomicResult::OversizedBatch) => Ok(r),
                     WriteAtomicResult::Rotated => {
-                        eprintln!("double failed to write events. this is a bug. disabling");
+                        tracing::error!(
+                            "double failed to write events after rotation — this is a bug, disabling"
+                        );
                         Ok(WriteAtomicResult::Rotated)
                     }
                 }
@@ -158,5 +160,9 @@ impl EventWriter {
 
     pub(crate) fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
+    }
+
+    pub(crate) fn seal(&mut self) -> std::io::Result<()> {
+        self.writer.seal()
     }
 }
