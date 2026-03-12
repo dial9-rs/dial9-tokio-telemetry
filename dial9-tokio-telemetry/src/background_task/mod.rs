@@ -190,7 +190,7 @@ async fn build_pipeline(_config: &mut BackgroundTaskConfig) -> Vec<Box<dyn Segme
 /// The worker is a "good citizen": it will lose data rather than disrupt the application.
 pub(crate) fn run_background_task(
     mut config: BackgroundTaskConfig,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shutdown: tokio::sync::oneshot::Receiver<Duration>,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .thread_name("dial9-worker-rt")
@@ -202,8 +202,22 @@ pub(crate) fn run_background_task(
 
     tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), "worker started");
     rt.block_on(async {
-        let worker = WorkerLoop::new(config, stop, processors);
-        worker.run().await;
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut worker = WorkerLoop::new(config, processors, stop.clone());
+        let mut run_fut = std::pin::pin!(worker.run());
+        // Poll the worker until we receive a shutdown signal with a drain timeout.
+        let drain_timeout = tokio::select! {
+            () = &mut run_fut => return,
+            msg = shutdown => msg.unwrap_or(Duration::ZERO),
+        };
+        eprintln!("[worker] stop signal received, draining with {drain_timeout:?} timeout...");
+        // Tell the worker to exit after its current processing cycle.
+        stop.cancel();
+        // Give it `drain_timeout` to finish; after that, drop the future.
+        match tokio::time::timeout(drain_timeout, run_fut).await {
+            Ok(()) => eprintln!("[worker] drain complete"),
+            Err(_) => eprintln!("[worker] drain timed out"),
+        }
     });
     tracing::info!(target: "dial9_worker", "worker stopped");
 }
@@ -287,42 +301,46 @@ pub(crate) struct WorkerLoop {
     dir: PathBuf,
     stem: String,
     poll_interval: Duration,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     processors: Vec<Box<dyn SegmentProcessor>>,
     metrics_sink: BoxEntrySink,
+    /// When cancelled, the worker finishes its current cycle and exits
+    /// instead of sleeping.
+    stop: tokio_util::sync::CancellationToken,
 }
 
 impl WorkerLoop {
     pub(crate) fn new(
         config: BackgroundTaskConfig,
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         processors: Vec<Box<dyn SegmentProcessor>>,
+        stop: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
             dir: config.trace_dir().to_path_buf(),
             stem: config.trace_stem().to_string(),
             poll_interval: config.poll_interval(),
-            stop,
             processors,
             metrics_sink: config.metrics_sink,
+            stop,
         }
     }
 
-    pub(crate) async fn run(mut self) {
+    pub(crate) async fn run(&mut self) {
         loop {
-            if self.stop.load(std::sync::atomic::Ordering::Acquire) {
-                self.drain().await;
+            let segements_uploaded = self.process_open_segments().await;
+            if self.stop.is_cancelled() {
+                tracing::debug!(target: "dial9_worker", "Exiting run loop: cancellation received");
                 return;
             }
-
-            let found = self.process_open_segments().await;
-            if !found {
-                tokio::time::sleep(self.poll_interval).await;
+            // if we didn't upload anything wait `poll_interval` (cancelling if we get shutdown while waiting)
+            if !segements_uploaded {
+                tokio::select! {
+                    _ = self.stop.cancelled() => {}
+                    _ = tokio::time::sleep(self.poll_interval) => {}
+                }
             }
         }
     }
 
-    /// Returns true if any segments were found and processed.
     async fn process_open_segments(&mut self) -> bool {
         let segments = match sealed::find_sealed_segments(&self.dir, &self.stem) {
             Ok(s) => s,
@@ -337,20 +355,19 @@ impl WorkerLoop {
         found
     }
 
-    async fn drain(&mut self) {
-        tracing::info!(target: "dial9_worker", "draining remaining segments");
-        if let Ok(segments) = sealed::find_sealed_segments(&self.dir, &self.stem) {
-            tracing::info!(target: "dial9_worker", count = segments.len(), "found segments to drain");
-            self.process_segments(&segments).await;
-        }
-    }
-
     async fn process_segments(&mut self, segments: &[sealed::SealedSegment]) {
         if self.processors.is_empty() {
             return;
         }
 
-        'next_segment: for segment in segments {
+        'next_segment: for (seg_idx, segment) in segments.iter().enumerate() {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "[worker] processing segment {}/{}: {}",
+                seg_idx + 1,
+                segments.len(),
+                segment.path.display()
+            );
             let uncompressed_size = std::fs::metadata(&segment.path)
                 .map(|m| m.len())
                 .unwrap_or(0);
@@ -392,13 +409,32 @@ impl WorkerLoop {
 
             for processor in &mut self.processors {
                 let mut stage = StageMetrics::start();
+                let proc_start = std::time::Instant::now();
+                eprintln!(
+                    "[worker] running processor {} on segment {}",
+                    processor.name(),
+                    seg_idx + 1
+                );
                 match processor.process(data).await {
                     Ok(next) => {
+                        eprintln!(
+                            "[worker] processor {} succeeded on segment {} ({:.1}ms)",
+                            processor.name(),
+                            seg_idx + 1,
+                            proc_start.elapsed().as_secs_f64() * 1000.0
+                        );
                         data = next;
                         stage.succeed();
                         data.metrics.pipeline.push(processor.name(), stage);
                     }
                     Err(e) => {
+                        eprintln!(
+                            "[worker] processor {} FAILED on segment {} ({:.1}ms): {}",
+                            processor.name(),
+                            seg_idx + 1,
+                            proc_start.elapsed().as_secs_f64() * 1000.0,
+                            e.kind
+                        );
                         data = e.data;
                         stage.time.stop();
                         data.metrics.pipeline.push(processor.name(), stage);
@@ -558,7 +594,7 @@ mod tests {
     use super::*;
     use assert2::check;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Deps that record whether on_failure was called by proxying through
     /// a real S3Uploader-like upload path.
@@ -767,7 +803,9 @@ mod tests {
             }
         }
 
-        let stop = Arc::new(AtomicBool::new(true)); // already stopped
+        // Pre-cancelled token so the worker processes once and exits.
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
         let config = BackgroundTaskConfig::builder()
             .trace_path(dir.path().join("trace.bin"))
             .s3(s3::S3Config::builder()
@@ -781,7 +819,7 @@ mod tests {
         let processors: Vec<Box<dyn SegmentProcessor>> =
             vec![Box::new(CountingProcessor(processed.clone()))];
 
-        let worker = WorkerLoop::new(config, stop, processors);
+        let mut worker = WorkerLoop::new(config, processors, stop);
         worker.run().await;
 
         // Worker should have drained both segments even though stop was set
@@ -828,7 +866,8 @@ mod tests {
             }
         }
 
-        let stop = Arc::new(AtomicBool::new(true));
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
         let config = BackgroundTaskConfig::builder()
             .trace_path(dir.path().join("trace.bin"))
             .s3(s3::S3Config::builder()
@@ -844,7 +883,7 @@ mod tests {
             calls: 0,
         })];
 
-        let worker = WorkerLoop::new(config, stop, processors);
+        let mut worker = WorkerLoop::new(config, processors, stop);
         worker.run().await;
 
         // Second segment should still be processed despite first failing

@@ -241,16 +241,8 @@ impl TelemetryHandle {
 
 /// Holds the worker thread and its stop signal.
 struct WorkerHandle {
-    stop: Arc<AtomicBool>,
-    thread: std::thread::JoinHandle<()>,
-}
-
-impl WorkerHandle {
-    /// Signal the worker to stop and wait for it to finish.
-    fn shutdown(self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = self.thread.join();
-    }
+    shutdown: Option<tokio::sync::oneshot::Sender<Duration>>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// RAII guard returned by [`TracedRuntimeBuilder::build`].
@@ -284,31 +276,29 @@ impl TelemetryGuard {
     ///
     /// Consumes the guard so `Drop` becomes a no-op.
     pub async fn graceful_shutdown(mut self, timeout: Duration) -> Result<(), std::io::Error> {
+        eprintln!("[graceful_shutdown] starting");
         // 1. Stop flush thread
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.flush_thread.take() {
+            eprintln!("[graceful_shutdown] joining flush thread...");
             let _ = t.join();
+            eprintln!("[graceful_shutdown] flush thread joined");
         }
 
         // 2. Seal final segment
         self.handle.recorder.lock().unwrap().seal();
+        eprintln!("[graceful_shutdown] sealed final segment");
 
-        if let Some(w) = self.worker.take() {
-            // 3. Signal worker to stop and wait with timeout
-            match tokio::time::timeout(timeout, tokio::task::spawn_blocking(move || w.shutdown()))
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(join_err)) => {
-                    return Err(std::io::Error::other(join_err));
-                }
-                Err(_elapsed) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "worker did not finish within timeout",
-                    ));
-                }
+        // 3. Signal worker to drain with the given timeout and wait
+        if let Some(ref mut w) = self.worker {
+            eprintln!("[graceful_shutdown] waiting for worker with {}s drain timeout...", timeout.as_secs());
+            if let Some(tx) = w.shutdown.take() {
+                let _ = tx.send(timeout);
             }
+            if let Some(t) = w.thread.take() {
+                let _ = tokio::task::spawn_blocking(move || t.join()).await;
+            }
+            eprintln!("[graceful_shutdown] worker finished");
         }
 
         Ok(())
@@ -333,9 +323,11 @@ impl Drop for TelemetryGuard {
         });
         // 2. Seal the final segment (.active → .bin)
         self.handle.recorder.lock().unwrap().seal();
-        // 3. Signal worker to stop and drain remaining segments
-        if let Some(w) = self.worker.take() {
-            w.shutdown();
+        // 3. Hard shutdown: drop the sender without sending — worker sees
+        // RecvError and exits without draining. No need to join the thread.
+        // For graceful drain, use graceful_shutdown() instead.
+        if let Some(ref mut w) = self.worker {
+            w.shutdown.take();
         }
     }
 }
@@ -481,17 +473,16 @@ impl TracedRuntimeBuilder {
         #[allow(unused_mut)]
         let mut worker = None;
         if let Some(config) = self.worker_config {
-            let ws = Arc::new(AtomicBool::new(false));
-            let ws_clone = ws.clone();
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             let wt = std::thread::Builder::new()
                 .name("dial9-worker".into())
                 .spawn(move || {
-                    crate::background_task::run_background_task(config, ws_clone);
+                    crate::background_task::run_background_task(config, shutdown_rx);
                 })
                 .expect("failed to spawn dial9-worker thread");
             worker = Some(WorkerHandle {
-                stop: ws,
-                thread: wt,
+                shutdown: Some(shutdown_tx),
+                thread: Some(wt),
             });
         }
 

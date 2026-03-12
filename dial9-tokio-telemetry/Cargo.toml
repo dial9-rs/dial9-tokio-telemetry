@@ -13,6 +13,7 @@ all-features = true
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "rt-multi-thread", "sync", "net", "io-util"] }
+tokio-util = "0.7"
 arc-swap = "1"
 libc.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
