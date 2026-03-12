@@ -28,8 +28,15 @@ pub struct StackFrames(pub Vec<u64>);
 
 /// An interned string reference (pool ID). Created by [`Encoder::intern_string`].
 /// On the wire this is a `PooledString` (u32 LE).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct InternedString(pub u32);
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for InternedString {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.0)
+    }
+}
 
 impl std::fmt::Debug for InternedString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -394,7 +401,7 @@ impl<'a> StringMapIter<'a> {
 }
 
 impl<'a> Iterator for StringMapIter<'a> {
-    type Item = (&'a [u8], &'a [u8]);
+    type Item = (&'a str, &'a str);
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
             return None;
@@ -402,12 +409,12 @@ impl<'a> Iterator for StringMapIter<'a> {
         let klen =
             u32::from_le_bytes(self.data.get(self.pos..self.pos + 4)?.try_into().ok()?) as usize;
         self.pos += 4;
-        let k = self.data.get(self.pos..self.pos + klen)?;
+        let k = std::str::from_utf8(self.data.get(self.pos..self.pos + klen)?).ok()?;
         self.pos += klen;
         let vlen =
             u32::from_le_bytes(self.data.get(self.pos..self.pos + 4)?.try_into().ok()?) as usize;
         self.pos += 4;
-        let v = self.data.get(self.pos..self.pos + vlen)?;
+        let v = std::str::from_utf8(self.data.get(self.pos..self.pos + vlen)?).ok()?;
         self.pos += vlen;
         self.remaining -= 1;
         Some((k, v))

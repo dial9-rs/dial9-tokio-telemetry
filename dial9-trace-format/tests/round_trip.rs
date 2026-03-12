@@ -87,12 +87,12 @@ fn full_round_trip() {
     assert!(matches!(&decoded[1], DecodedFrame::Schema(s) if s.name == "CpuSample"));
 
     assert_eq!(
-        dec.string_pool().get(&thread_id.0),
-        Some(&"worker-0".to_string())
+        dec.string_pool().get(thread_id.0),
+        Some("worker-0")
     );
     assert_eq!(
-        dec.string_pool().get(&sym_name_id.0),
-        Some(&"my_function".to_string())
+        dec.string_pool().get(sym_name_id.0),
+        Some("my_function")
     );
 
     // Verify poll event

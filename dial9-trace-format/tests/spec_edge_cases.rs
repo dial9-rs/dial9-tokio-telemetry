@@ -381,8 +381,8 @@ fn interleaved_pool_and_events() {
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all();
     assert_eq!(frames.len(), 5);
-    assert_eq!(dec.string_pool().get(&id0.0), Some(&"first".to_string()));
-    assert_eq!(dec.string_pool().get(&id1.0), Some(&"second".to_string()));
+    assert_eq!(dec.string_pool().get(id0.0), Some("first"));
+    assert_eq!(dec.string_pool().get(id1.0), Some("second"));
 }
 
 // --- Field type tag exhaustiveness ---

@@ -26,6 +26,48 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+/// A decoded event passed to [`Decoder::for_each_event`].
+///
+/// `'a` is the lifetime of the input data buffer (strings, stack frames borrow from it).
+/// `'f` is the lifetime of the `fields` slice and schema name (reused across calls).
+pub struct RawEvent<'a, 'f> {
+    pub type_id: WireTypeId,
+    pub name: &'f str,
+    pub timestamp_ns: Option<u64>,
+    pub fields: &'f [FieldValueRef<'a>],
+    pub string_pool: &'f StringPool,
+}
+
+/// A map from interned string IDs to their resolved string values.
+///
+/// Populated automatically by the [`Decoder`] as it processes `StringPool` frames.
+/// Pass a reference to [`crate::TraceEvent::decode`] so that `InternedString` fields
+/// resolve to `&str` in derived `Ref` types.
+#[derive(Debug, Clone, Default)]
+pub struct StringPool(HashMap<u32, String>);
+
+impl StringPool {
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    pub fn insert(&mut self, id: u32, value: String) {
+        self.0.insert(id, value);
+    }
+
+    pub fn get(&self, id: u32) -> Option<&str> {
+        self.0.get(&id).map(|s| s.as_str())
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Decoded events yielded by the decoder.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedFrame {
@@ -54,6 +96,7 @@ pub enum DecodedFrameRef<'a> {
 }
 
 struct SchemaCache {
+    name: String,
     field_types: Vec<FieldType>,
     has_timestamp: bool,
 }
@@ -63,7 +106,7 @@ pub struct Decoder<'a> {
     pos: usize,
     registry: SchemaRegistry,
     schema_cache: HashMap<WireTypeId, SchemaCache>,
-    string_pool: HashMap<u32, String>,
+    string_pool: StringPool,
     version: u8,
     timestamp_base_ns: u64,
 }
@@ -76,7 +119,7 @@ impl<'a> Decoder<'a> {
             pos: HEADER_SIZE,
             registry: SchemaRegistry::new(),
             schema_cache: HashMap::new(),
-            string_pool: HashMap::new(),
+            string_pool: StringPool::new(),
             version,
             timestamp_base_ns: 0,
         })
@@ -90,7 +133,7 @@ impl<'a> Decoder<'a> {
         self.version
     }
 
-    pub fn string_pool(&self) -> &HashMap<u32, String> {
+    pub fn string_pool(&self) -> &StringPool {
         &self.string_pool
     }
 
@@ -105,6 +148,7 @@ impl<'a> Decoder<'a> {
         self.schema_cache.insert(
             type_id,
             SchemaCache {
+                name: entry.name.clone(),
                 field_types: entry.fields.iter().map(|f| f.field_type).collect(),
                 has_timestamp: entry.has_timestamp,
             },
@@ -241,17 +285,15 @@ impl<'a> Decoder<'a> {
 
     /// Process all events with a callback, avoiding per-event Vec allocations.
     /// Schemas and string pools are registered automatically.
-    /// The callback receives (type_id, timestamp_ns, &[FieldValueRef]).
     ///
-    /// The `FieldValueRef` values in the callback borrow from the decoder's input
-    /// buffer (lifetime `'a`). They are valid for the duration of each callback
-    /// invocation but the slice is reused across calls, so values cannot be
+    /// The [`RawEvent`] passed to the callback borrows from the decoder's input
+    /// buffer. The `fields` slice is reused across calls, so values cannot be
     /// stored across iterations without copying.
     ///
     /// Returns `Err` if the stream is malformed.
     pub fn for_each_event(
         &mut self,
-        mut f: impl FnMut(WireTypeId, Option<u64>, &[FieldValueRef<'a>]),
+        mut f: impl for<'f> FnMut(RawEvent<'a, 'f>),
     ) -> Result<(), DecodeError> {
         let mut values_buf: Vec<FieldValueRef<'a>> = Vec::new();
         while self.pos < self.data.len() {
@@ -321,7 +363,28 @@ impl<'a> Decoder<'a> {
                     if let Some(ts) = timestamp_ns {
                         self.timestamp_base_ns = ts;
                     }
-                    f(type_id, timestamp_ns, &values_buf);
+                    f(RawEvent {
+                        type_id,
+                        name: &cache.name,
+                        timestamp_ns,
+                        fields: &values_buf,
+                        string_pool: &self.string_pool,
+                    });
+                }
+                codec::TAG_TIMESTAMP_RESET => {
+                    // Handle timestamp resets inline to avoid next_frame_ref's
+                    // recursive consumption of the following frame.
+                    let ts = match self.data.get(self.pos + 1..self.pos + 9) {
+                        Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
+                        None => {
+                            return Err(DecodeError {
+                                pos: self.pos,
+                                message: "truncated timestamp reset".into(),
+                            });
+                        }
+                    };
+                    self.timestamp_base_ns = ts;
+                    self.pos += 9;
                 }
                 _ => {
                     // Use next_frame_ref for non-event frames (schema, pool, symbol table, reset)
@@ -410,7 +473,7 @@ mod tests {
 
         let mut dec = Decoder::new(&data).unwrap();
         dec.decode_all();
-        assert_eq!(dec.string_pool().get(&id.0), Some(&"hello".to_string()));
+        assert_eq!(dec.string_pool().get(id.0), Some("hello"));
     }
 
     #[test]
