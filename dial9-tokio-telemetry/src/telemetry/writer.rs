@@ -1,5 +1,6 @@
 use crate::telemetry::events::{RawEvent, TelemetryEvent};
-use crate::telemetry::format;
+use crate::telemetry::format::{self, PollStartEvent, PollEndEvent, WorkerParkEvent,
+    WorkerUnparkEvent, QueueSampleEvent, TaskSpawnEvent, TaskTerminateEvent, WakeEventEvent};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::InternedString;
 use std::collections::{HashMap, VecDeque};
@@ -317,7 +318,7 @@ impl RotatingWriter {
             return Ok(());
         }
 
-        // Intern location and emit event directly — no SpawnLocationDef needed.
+        // Encode directly to derive structs — no TelemetryEvent intermediate.
         match raw {
             RawEvent::PollStart {
                 timestamp_nanos,
@@ -326,44 +327,35 @@ impl RotatingWriter {
                 task_id,
                 location,
             } => {
-                let id = self.locations.intern(location, &mut self.encoder)?;
-                format::write_event(
-                    &mut self.encoder,
-                    &TelemetryEvent::PollStart {
-                        timestamp_nanos,
-                        worker_id,
-                        worker_local_queue_depth,
-                        task_id,
-                        spawn_loc_id: id,
-                    },
-                )?;
+                let spawn_loc_id = self.locations.intern(location, &mut self.encoder)?;
+                self.encoder.write(&PollStartEvent {
+                    timestamp_ns: timestamp_nanos,
+                    worker_id: worker_id as u8,
+                    local_queue: worker_local_queue_depth as u8,
+                    task_id,
+                    spawn_loc_id,
+                })?;
             }
             RawEvent::TaskSpawn {
                 timestamp_nanos,
                 task_id,
                 location,
             } => {
-                let id = self.locations.intern(location, &mut self.encoder)?;
-                format::write_event(
-                    &mut self.encoder,
-                    &TelemetryEvent::TaskSpawn {
-                        timestamp_nanos,
-                        task_id,
-                        spawn_loc_id: id,
-                    },
-                )?;
+                let spawn_loc_id = self.locations.intern(location, &mut self.encoder)?;
+                self.encoder.write(&TaskSpawnEvent {
+                    timestamp_ns: timestamp_nanos,
+                    task_id,
+                    spawn_loc_id,
+                })?;
             }
             RawEvent::PollEnd {
                 timestamp_nanos,
                 worker_id,
             } => {
-                format::write_event(
-                    &mut self.encoder,
-                    &TelemetryEvent::PollEnd {
-                        timestamp_nanos,
-                        worker_id,
-                    },
-                )?;
+                self.encoder.write(&PollEndEvent {
+                    timestamp_ns: timestamp_nanos,
+                    worker_id: worker_id as u8,
+                })?;
             }
             RawEvent::WorkerPark {
                 timestamp_nanos,
@@ -371,15 +363,12 @@ impl RotatingWriter {
                 worker_local_queue_depth,
                 cpu_time_nanos,
             } => {
-                format::write_event(
-                    &mut self.encoder,
-                    &TelemetryEvent::WorkerPark {
-                        timestamp_nanos,
-                        worker_id,
-                        worker_local_queue_depth,
-                        cpu_time_nanos,
-                    },
-                )?;
+                self.encoder.write(&WorkerParkEvent {
+                    timestamp_ns: timestamp_nanos,
+                    worker_id: worker_id as u8,
+                    local_queue: worker_local_queue_depth as u8,
+                    cpu_time_ns: cpu_time_nanos,
+                })?;
             }
             RawEvent::WorkerUnpark {
                 timestamp_nanos,
@@ -388,40 +377,31 @@ impl RotatingWriter {
                 cpu_time_nanos,
                 sched_wait_delta_nanos,
             } => {
-                format::write_event(
-                    &mut self.encoder,
-                    &TelemetryEvent::WorkerUnpark {
-                        timestamp_nanos,
-                        worker_id,
-                        worker_local_queue_depth,
-                        cpu_time_nanos,
-                        sched_wait_delta_nanos,
-                    },
-                )?;
+                self.encoder.write(&WorkerUnparkEvent {
+                    timestamp_ns: timestamp_nanos,
+                    worker_id: worker_id as u8,
+                    local_queue: worker_local_queue_depth as u8,
+                    cpu_time_ns: cpu_time_nanos,
+                    sched_wait_ns: sched_wait_delta_nanos,
+                })?;
             }
             RawEvent::QueueSample {
                 timestamp_nanos,
                 global_queue_depth,
             } => {
-                format::write_event(
-                    &mut self.encoder,
-                    &TelemetryEvent::QueueSample {
-                        timestamp_nanos,
-                        global_queue_depth,
-                    },
-                )?;
+                self.encoder.write(&QueueSampleEvent {
+                    timestamp_ns: timestamp_nanos,
+                    global_queue: global_queue_depth as u8,
+                })?;
             }
             RawEvent::TaskTerminate {
                 timestamp_nanos,
                 task_id,
             } => {
-                format::write_event(
-                    &mut self.encoder,
-                    &TelemetryEvent::TaskTerminate {
-                        timestamp_nanos,
-                        task_id,
-                    },
-                )?;
+                self.encoder.write(&TaskTerminateEvent {
+                    timestamp_ns: timestamp_nanos,
+                    task_id,
+                })?;
             }
             RawEvent::WakeEvent {
                 timestamp_nanos,
@@ -429,15 +409,12 @@ impl RotatingWriter {
                 woken_task_id,
                 target_worker,
             } => {
-                format::write_event(
-                    &mut self.encoder,
-                    &TelemetryEvent::WakeEvent {
-                        timestamp_nanos,
-                        waker_task_id,
-                        woken_task_id,
-                        target_worker,
-                    },
-                )?;
+                self.encoder.write(&WakeEventEvent {
+                    timestamp_ns: timestamp_nanos,
+                    waker_task_id,
+                    woken_task_id,
+                    target_worker,
+                })?;
             }
         }
         self.has_events_in_current_file = true;
