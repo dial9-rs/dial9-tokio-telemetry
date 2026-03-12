@@ -276,29 +276,29 @@ impl TelemetryGuard {
     ///
     /// Consumes the guard so `Drop` becomes a no-op.
     pub async fn graceful_shutdown(mut self, timeout: Duration) -> Result<(), std::io::Error> {
-        eprintln!("[graceful_shutdown] starting");
+        tracing::debug!(target: "dial9_telemetry", "graceful_shutdown starting");
         // 1. Stop flush thread
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.flush_thread.take() {
-            eprintln!("[graceful_shutdown] joining flush thread...");
+            tracing::debug!(target: "dial9_telemetry", "joining flush thread");
             let _ = t.join();
-            eprintln!("[graceful_shutdown] flush thread joined");
+            tracing::debug!(target: "dial9_telemetry", "flush thread joined");
         }
 
         // 2. Seal final segment
         self.handle.recorder.lock().unwrap().seal();
-        eprintln!("[graceful_shutdown] sealed final segment");
+        tracing::debug!(target: "dial9_telemetry", "sealed final segment");
 
         // 3. Signal worker to drain with the given timeout and wait
         if let Some(ref mut w) = self.worker {
-            eprintln!("[graceful_shutdown] waiting for worker with {}s drain timeout...", timeout.as_secs());
+            tracing::debug!(target: "dial9_telemetry", timeout_secs = timeout.as_secs(), "waiting for worker drain");
             if let Some(tx) = w.shutdown.take() {
                 let _ = tx.send(timeout);
             }
             if let Some(t) = w.thread.take() {
                 let _ = tokio::task::spawn_blocking(move || t.join()).await;
             }
-            eprintln!("[graceful_shutdown] worker finished");
+            tracing::debug!(target: "dial9_telemetry", "worker finished");
         }
 
         Ok(())

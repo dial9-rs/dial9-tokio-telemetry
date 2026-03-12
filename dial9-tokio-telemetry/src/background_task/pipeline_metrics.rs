@@ -198,13 +198,6 @@ mod tests {
         };
 
         let entry = test_metric(m);
-        eprintln!("=== SegmentProcessMetrics keys ===");
-        let mut keys: Vec<_> = entry.metrics.keys().collect();
-        keys.sort();
-        for k in &keys {
-            eprintln!("  {k}: {}", entry.metrics[k.as_str()].as_u64());
-        }
-        eprintln!("==================================");
 
         // Verify the pipeline stage keys are present alongside the top-level keys
         check!(entry.metrics.contains_key("TotalTime"));

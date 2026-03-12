@@ -210,13 +210,13 @@ pub(crate) fn run_background_task(
             () = &mut run_fut => return,
             msg = shutdown => msg.unwrap_or(Duration::ZERO),
         };
-        eprintln!("[worker] stop signal received, draining with {drain_timeout:?} timeout...");
+        tracing::info!(target: "dial9_worker", ?drain_timeout, "stop signal received, draining");
         // Tell the worker to exit after its current processing cycle.
         stop.cancel();
         // Give it `drain_timeout` to finish; after that, drop the future.
         match tokio::time::timeout(drain_timeout, run_fut).await {
-            Ok(()) => eprintln!("[worker] drain complete"),
-            Err(_) => eprintln!("[worker] drain timed out"),
+            Ok(()) => tracing::info!(target: "dial9_worker", "drain complete"),
+            Err(_) => tracing::warn!(target: "dial9_worker", "drain timed out"),
         }
     });
     tracing::info!(target: "dial9_worker", "worker stopped");
@@ -361,13 +361,7 @@ impl WorkerLoop {
         }
 
         'next_segment: for (seg_idx, segment) in segments.iter().enumerate() {
-            let now = std::time::Instant::now();
-            eprintln!(
-                "[worker] processing segment {}/{}: {}",
-                seg_idx + 1,
-                segments.len(),
-                segment.path.display()
-            );
+            tracing::debug!(target: "dial9_worker", segment = seg_idx + 1, total = segments.len(), path = %segment.path.display(), "processing segment");
             let uncompressed_size = std::fs::metadata(&segment.path)
                 .map(|m| m.len())
                 .unwrap_or(0);
@@ -410,31 +404,16 @@ impl WorkerLoop {
             for processor in &mut self.processors {
                 let mut stage = StageMetrics::start();
                 let proc_start = std::time::Instant::now();
-                eprintln!(
-                    "[worker] running processor {} on segment {}",
-                    processor.name(),
-                    seg_idx + 1
-                );
+                tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, "running processor");
                 match processor.process(data).await {
                     Ok(next) => {
-                        eprintln!(
-                            "[worker] processor {} succeeded on segment {} ({:.1}ms)",
-                            processor.name(),
-                            seg_idx + 1,
-                            proc_start.elapsed().as_secs_f64() * 1000.0
-                        );
+                        tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, "processor succeeded");
                         data = next;
                         stage.succeed();
                         data.metrics.pipeline.push(processor.name(), stage);
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[worker] processor {} FAILED on segment {} ({:.1}ms): {}",
-                            processor.name(),
-                            seg_idx + 1,
-                            proc_start.elapsed().as_secs_f64() * 1000.0,
-                            e.kind
-                        );
+                        tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, error = %e.kind, "processor failed");
                         data = e.data;
                         stage.time.stop();
                         data.metrics.pipeline.push(processor.name(), stage);
