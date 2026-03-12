@@ -1,13 +1,9 @@
-mod cpu_flush_state;
 mod event_writer;
 mod shared_state;
 
 pub(crate) use shared_state::SharedState;
 
 use event_writer::EventWriter;
-
-#[cfg(feature = "cpu-profiling")]
-use cpu_flush_state::CpuFlushState;
 
 use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::events::RawEvent;
@@ -346,9 +342,7 @@ impl TracedRuntimeBuilder {
         #[cfg(feature = "cpu-profiling")]
         {
             let mut rec = recorder.lock().unwrap();
-            let mut cpu_flush = CpuFlushState::new();
-            cpu_flush.inline_callframe_symbols = self.inline_callframe_symbols;
-            rec.event_writer.cpu_flush = Some(cpu_flush);
+            rec.event_writer.writer.set_inline_callframe_symbols(self.inline_callframe_symbols);
             if let Some(Ok(sampler)) = sampler {
                 rec.event_writer.cpu_profiler = Some(sampler);
             }
@@ -594,7 +588,6 @@ mod tests {
         use crate::telemetry::events::{CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER};
         use crate::telemetry::task_metadata::TaskId;
         use crate::telemetry::writer::RotatingWriter;
-        use cpu_flush_state::CpuFlushState;
         use proptest::prelude::*;
         use std::collections::HashSet;
 
@@ -664,15 +657,16 @@ mod tests {
                     callchain,
                 } = op
                 {
-                    let event = TelemetryEvent::CpuSample {
-                        timestamp_nanos: *timestamp,
-                        worker_id: *worker_id,
-                        tid: *tid,
-                        source: CpuSampleSource::CpuProfile,
-                        callchain: callchain.clone(),
-                    };
+                    let thread_name = format!("thread-{tid}");
+                    let _ = ew.writer.write_cpu_sample(
+                        *timestamp,
+                        *worker_id,
+                        *tid,
+                        CpuSampleSource::CpuProfile,
+                        callchain,
+                        Some(&thread_name),
+                    );
                     *timestamp += 1;
-                    ew.write_cpu_event(&event);
                 }
             }
 
@@ -782,12 +776,7 @@ mod tests {
                 let writer = RotatingWriter::new(&base, max_file_size, 1_000_000).unwrap();
 
                 let mut ew = EventWriter::new(Box::new(writer));
-                let mut cpu = CpuFlushState::new();
-                cpu.inline_callframe_symbols = true;
-                for tid in 0u32..4 {
-                    cpu.thread_name_intern.insert(tid, format!("thread-{tid}"));
-                }
-                ew.cpu_flush = Some(cpu);
+                ew.writer.set_inline_callframe_symbols(true);
 
                 #[track_caller]
                 fn loc0() -> &'static Location<'static> { Location::caller() }

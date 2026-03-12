@@ -1,5 +1,5 @@
-use dial9_tokio_telemetry::telemetry::events::{RawEvent, TelemetryEvent};
-use dial9_tokio_telemetry::telemetry::writer::{TraceWriter, WriteAtomicResult};
+use dial9_tokio_telemetry::telemetry::events::{CpuSampleSource, RawEvent, TelemetryEvent};
+use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
 use dial9_trace_format::InternedString;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -77,14 +77,27 @@ impl TraceWriter for CapturingWriter {
         Ok(())
     }
 
-    fn write_event(&mut self, event: &TelemetryEvent) -> std::io::Result<()> {
-        self.events.lock().unwrap().push(event.clone());
+    fn write_cpu_sample(
+        &mut self,
+        timestamp_nanos: u64,
+        worker_id: usize,
+        tid: u32,
+        source: CpuSampleSource,
+        callchain: &[u64],
+        thread_name: Option<&str>,
+    ) -> std::io::Result<()> {
+        let mut events = self.events.lock().unwrap();
+        if let Some(name) = thread_name {
+            events.push(TelemetryEvent::ThreadNameDef { tid, name: name.to_string() });
+        }
+        events.push(TelemetryEvent::CpuSample {
+            timestamp_nanos,
+            worker_id,
+            tid,
+            source,
+            callchain: callchain.to_vec(),
+        });
         Ok(())
-    }
-
-    fn write_atomic(&mut self, events: &[TelemetryEvent]) -> std::io::Result<WriteAtomicResult> {
-        self.events.lock().unwrap().extend_from_slice(events);
-        Ok(WriteAtomicResult::Written)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
