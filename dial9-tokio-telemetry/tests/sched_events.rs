@@ -38,11 +38,6 @@ fn sched_events_capture_context_switches() {
     drop(runtime);
     drop(guard);
 
-    if common::is_ci() {
-        eprintln!("sched events not actually captured in ci");
-        return;
-    }
-
     let events = events.lock().unwrap();
 
     // 1. CpuSample events exist with SchedEvent source and some are attributed to workers

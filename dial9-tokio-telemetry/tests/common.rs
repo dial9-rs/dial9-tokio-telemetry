@@ -2,12 +2,6 @@ use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
 use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
 use std::sync::{Arc, Mutex};
 
-/// Returns true when running in CI (GitHub Actions sets CI=true).
-#[allow(dead_code)]
-pub fn is_ci() -> bool {
-    std::env::var("CI").is_ok()
-}
-
 /// A [`TraceWriter`] that accumulates all events into a shared `Vec`.
 ///
 /// Construct with [`CapturingWriter::new`] and pass the returned

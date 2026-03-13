@@ -21,6 +21,11 @@ runs:
                   rm -fv Cargo.lock
               fi
               cargo build
+        - name: Enable perf_event_open for tests
+          shell: bash
+          run: |
+              sudo sysctl kernel.perf_event_paranoid=1
+              cat /proc/sys/kernel/perf_event_paranoid
         - name: Run tests
           shell: bash
           env:

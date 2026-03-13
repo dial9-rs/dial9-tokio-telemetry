@@ -17,7 +17,7 @@ fn sched_event_timestamps_align_with_wall_clock() {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use crate::common::{CapturingWriter, is_ci};
+    use crate::common::CapturingWriter;
 
     let (writer, events) = CapturingWriter::new();
 
@@ -76,11 +76,6 @@ fn sched_event_timestamps_align_with_wall_clock() {
             _ => None,
         })
         .collect();
-
-    if is_ci() {
-        eprintln!("no schedule events will actually be captured at perf-event 3");
-        return;
-    }
 
     assert!(
         !sched_timestamps.is_empty(),
