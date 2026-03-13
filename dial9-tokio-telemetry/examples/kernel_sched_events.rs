@@ -1,3 +1,32 @@
+//! Example: sched events with kernel stack frames.
+//!
+//! Captures context-switch callchains that include kernel frames, showing
+//! exactly where in the kernel the thread was descheduled.
+//!
+//! Run with:
+//!   cargo run --release --features cpu-profiling --example kernel_sched_events
+//!
+//! Requirements:
+//!   - perf_event_paranoid ≤ 1:  sudo sysctl kernel.perf_event_paranoid=1
+//!   - For kernel symbol names:  sudo sysctl kernel.kptr_restrict=0
+//!     (otherwise kernel frames show as "[kernel] 0x..." addresses)
+//!
+//! Example output (nanosleep descheduling a tokio worker):
+//!
+//!   [kernel] schedule
+//!   [kernel] schedule_hrtimeout_range_clock
+//!   [kernel] do_nanosleep
+//!   [kernel] hrtimer_nanosleep
+//!   [kernel] common_nsleep_timens
+//!   [kernel] __x64_sys_nanosleep
+//!   [kernel] do_syscall_64
+//!   __GI___nanosleep                              ← libc
+//!   std::thread::sleep                            ← userspace
+//!   kernel_sched_events::blocking_task::{{closure}}
+//!   tokio::runtime::task::core::Core<T,S>::poll
+//!   ...
+//!   start_thread
+
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, SchedEventConfig, TracedRuntime};
 use std::time::Duration;
 
