@@ -4,8 +4,7 @@ use blazesym::symbolize::{Input, Symbolizer, source};
 use std::cell::RefCell;
 use std::fs;
 
-// On x86_64, userspace virtual addresses are below this limit.
-const USER_ADDR_LIMIT: u64 = 0x0000_8000_0000_0000;
+use crate::USER_ADDR_LIMIT;
 
 struct SymbolizerState {
     symbolizer: Symbolizer,

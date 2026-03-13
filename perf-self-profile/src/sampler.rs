@@ -7,20 +7,14 @@ use perf_event_data::Record;
 use perf_event_data::endian::Little;
 use perf_event_data::parse::{ParseConfig, Parser};
 use perf_event_open_sys::bindings::{
-    PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_SW_CONTEXT_SWITCHES, PERF_COUNT_SW_CPU_CLOCK,
-    PERF_COUNT_SW_TASK_CLOCK, PERF_FLAG_FD_CLOEXEC, PERF_SAMPLE_CALLCHAIN, PERF_SAMPLE_CPU,
-    PERF_SAMPLE_IP, PERF_SAMPLE_PERIOD, PERF_SAMPLE_TID, PERF_SAMPLE_TIME, PERF_TYPE_HARDWARE,
-    PERF_TYPE_SOFTWARE, perf_event_attr,
+    PERF_CONTEXT_MAX, PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_SW_CONTEXT_SWITCHES,
+    PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK, PERF_FLAG_FD_CLOEXEC,
+    PERF_SAMPLE_CALLCHAIN, PERF_SAMPLE_CPU, PERF_SAMPLE_IP, PERF_SAMPLE_PERIOD, PERF_SAMPLE_TID,
+    PERF_SAMPLE_TIME, PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE, perf_event_attr,
 };
 
+use crate::USER_ADDR_LIMIT;
 use crate::ring_buffer::{RingBuffer, page_size};
-
-// On x86_64, userspace virtual addresses are below 0x0000_8000_0000_0000.
-const USER_ADDR_LIMIT: u64 = 0x0000_8000_0000_0000;
-
-/// Perf callchain context markers (e.g. PERF_CONTEXT_KERNEL, PERF_CONTEXT_USER)
-/// are sentinel values >= this threshold and must be filtered from callchains.
-const PERF_CONTEXT_MAX: u64 = u64::MAX - 4095;
 
 /// Which event source to sample on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
