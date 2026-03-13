@@ -17,7 +17,9 @@ mod common;
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
-    use dial9_tokio_telemetry::telemetry::events::{CpuSampleSource, TelemetryEvent};
+    use dial9_tokio_telemetry::telemetry::events::{
+        CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER,
+    };
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -180,7 +182,12 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
             // Every sample that falls inside this burn window must come from
             // `expected_worker`.  A sample from a different worker would mean
             // the profiler mis-attributed the sample.
+            // Skip UNKNOWN_WORKER (255) samples — on CI the profiler can fire
+            // before the thread-to-worker mapping is visible.
             for &(t, w) in &in_window {
+                if w == UNKNOWN_WORKER {
+                    continue;
+                }
                 assert_eq!(
                     w, expected_worker,
                     "burn window {i}: CPU sample at {t}ns was attributed to worker \
