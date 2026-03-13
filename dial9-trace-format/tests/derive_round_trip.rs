@@ -54,7 +54,9 @@ fn decode_events(data: &[u8]) -> (Decoder<'_>, Vec<(Option<u64>, Vec<FieldValueR
     let mut events = Vec::new();
     for frame in dec.decode_all_ref() {
         if let DecodedFrameRef::Event {
-            timestamp_ns, values, ..
+            timestamp_ns,
+            values,
+            ..
         } = frame
         {
             events.push((timestamp_ns, values));
@@ -120,10 +122,7 @@ fn kitchen_sink_all_field_types() {
     assert_eq!(map_pairs, vec![("key1", "val1"), ("key2", "val2"),]);
 
     // Verify pool was resolved
-    assert_eq!(
-        dec.string_pool().get(interned.0),
-        Some("hello_pool")
-    );
+    assert_eq!(dec.string_pool().get(interned), Some("hello_pool"));
 }
 
 #[test]
@@ -308,9 +307,9 @@ fn interleaved_string_pools() {
     assert_eq!(e2.z, id_a);
 
     // All pool entries resolved
-    assert_eq!(dec.string_pool().get(id_a.0).unwrap(), "alpha");
-    assert_eq!(dec.string_pool().get(id_b.0).unwrap(), "beta");
-    assert_eq!(dec.string_pool().get(id_c.0).unwrap(), "gamma");
+    assert_eq!(dec.string_pool().get(id_a).unwrap(), "alpha");
+    assert_eq!(dec.string_pool().get(id_b).unwrap(), "beta");
+    assert_eq!(dec.string_pool().get(id_c).unwrap(), "gamma");
 }
 
 #[test]
@@ -593,7 +592,11 @@ fn string_map_round_trip() {
     let pairs0: Vec<_> = d0.tags.iter().collect();
     assert_eq!(
         pairs0,
-        vec![("env", "prod"), ("region", "us-east-1"), ("service", "api-gateway"),]
+        vec![
+            ("env", "prod"),
+            ("region", "us-east-1"),
+            ("service", "api-gateway"),
+        ]
     );
 
     let d1 = MapEvent::decode(events[1].0, &events[1].1).unwrap();
@@ -835,7 +838,11 @@ fn for_each_event_with_derive_types() {
     let mut results = Vec::new();
     dec.for_each_event(|ev| {
         let decoded = Ev::decode(ev.timestamp_ns, ev.fields).unwrap();
-        results.push((decoded.timestamp_ns, decoded.worker_id, decoded.name.to_string()));
+        results.push((
+            decoded.timestamp_ns,
+            decoded.worker_id,
+            decoded.name.to_string(),
+        ));
     })
     .unwrap();
 
@@ -857,9 +864,24 @@ fn for_each_event_resolves_interned_strings() {
     let mut enc = Encoder::new();
     let loc_a = enc.intern_string("src/main.rs:42").unwrap();
     let loc_b = enc.intern_string("src/lib.rs:10").unwrap();
-    enc.write(&TaskStart { timestamp_ns: 1_000, task_id: 1, spawn_location: loc_a }).unwrap();
-    enc.write(&TaskStart { timestamp_ns: 2_000, task_id: 2, spawn_location: loc_b }).unwrap();
-    enc.write(&TaskStart { timestamp_ns: 3_000, task_id: 3, spawn_location: loc_a }).unwrap();
+    enc.write(&TaskStart {
+        timestamp_ns: 1_000,
+        task_id: 1,
+        spawn_location: loc_a,
+    })
+    .unwrap();
+    enc.write(&TaskStart {
+        timestamp_ns: 2_000,
+        task_id: 2,
+        spawn_location: loc_b,
+    })
+    .unwrap();
+    enc.write(&TaskStart {
+        timestamp_ns: 3_000,
+        task_id: 3,
+        spawn_location: loc_a,
+    })
+    .unwrap();
     let bytes = enc.finish();
 
     let mut dec = Decoder::new(&bytes).unwrap();
@@ -868,7 +890,7 @@ fn for_each_event_resolves_interned_strings() {
         assert_eq!(ev.name, "TaskStart");
         let decoded = TaskStart::decode(ev.timestamp_ns, ev.fields).unwrap();
         // Resolve InternedString → &str via the string pool on RawEvent
-        let location = ev.string_pool.get(decoded.spawn_location.0).unwrap();
+        let location = ev.string_pool.get(decoded.spawn_location).unwrap();
         results.push((decoded.task_id, location.to_string()));
     })
     .unwrap();

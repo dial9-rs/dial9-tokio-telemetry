@@ -332,7 +332,7 @@ mod tests {
         enc.write_symbol_table(&[SymbolEntry {
             base_addr: 0x1000,
             size: 64,
-            symbol_id: 0,
+            symbol_id: crate::types::InternedString(0),
         }])
         .unwrap();
         let data = enc.finish();

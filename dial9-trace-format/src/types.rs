@@ -29,12 +29,25 @@ pub struct StackFrames(pub Vec<u64>);
 /// An interned string reference (pool ID). Created by [`Encoder::intern_string`].
 /// On the wire this is a `PooledString` (u32 LE).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct InternedString(pub u32);
+pub struct InternedString(pub(crate) u32);
 
 #[cfg(feature = "serde")]
 impl serde::Serialize for InternedString {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_u32(self.0)
+    }
+}
+
+impl InternedString {
+    /// Construct from a raw pool ID. Intended for building data from external
+    /// sources (e.g. wire decoding outside the `Encoder`).
+    pub const fn from_raw(id: u32) -> Self {
+        Self(id)
+    }
+
+    /// Returns the underlying pool ID.
+    pub const fn raw_id(self) -> u32 {
+        self.0
     }
 }
 
@@ -56,7 +69,7 @@ pub enum FieldValue {
     Bool(bool),
     String(String),
     Bytes(Vec<u8>),
-    PooledString(u32),
+    PooledString(InternedString),
     StackFrames(Vec<u64>),
     Varint(u64),
     StringMap(Vec<(Vec<u8>, Vec<u8>)>),
@@ -104,7 +117,7 @@ impl FieldValue {
                 w.write_all(&(v.len() as u32).to_le_bytes())?;
                 w.write_all(v)
             }
-            FieldValue::PooledString(id) => w.write_all(&id.to_le_bytes()),
+            FieldValue::PooledString(id) => w.write_all(&id.0.to_le_bytes()),
             FieldValue::Varint(v) => crate::leb128::encode_unsigned(*v, w),
             FieldValue::StackFrames(addrs) => {
                 w.write_all(&(addrs.len() as u32).to_le_bytes())?;
@@ -157,7 +170,7 @@ impl FieldValue {
             }
             FieldType::PooledString => {
                 let id = u32::from_le_bytes(data.get(..4)?.try_into().ok()?);
-                Some((FieldValue::PooledString(id), &data[4..]))
+                Some((FieldValue::PooledString(InternedString(id)), &data[4..]))
             }
             FieldType::Varint => {
                 let (v, consumed) = crate::leb128::decode_unsigned(data)?;
@@ -829,7 +842,7 @@ mod tests {
 
     #[test]
     fn encode_decode_pooled_string() {
-        let val = FieldValue::PooledString(42);
+        let val = FieldValue::PooledString(InternedString(42));
         let mut buf = Vec::new();
         val.encode(&mut buf).unwrap();
         assert_eq!(buf.len(), 4);

@@ -5,7 +5,7 @@ use crate::codec::{
     WireTypeId,
 };
 use crate::schema::{SchemaEntry, SchemaRegistry};
-use crate::types::{FieldType, FieldValueRef};
+use crate::types::{FieldType, FieldValueRef, InternedString};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -30,6 +30,7 @@ impl std::error::Error for DecodeError {}
 ///
 /// `'a` is the lifetime of the input data buffer (strings, stack frames borrow from it).
 /// `'f` is the lifetime of the `fields` slice and schema name (reused across calls).
+#[non_exhaustive]
 pub struct RawEvent<'a, 'f> {
     pub type_id: WireTypeId,
     pub name: &'f str,
@@ -44,18 +45,18 @@ pub struct RawEvent<'a, 'f> {
 /// Pass a reference to [`crate::TraceEvent::decode`] so that `InternedString` fields
 /// resolve to `&str` in derived `Ref` types.
 #[derive(Debug, Clone, Default)]
-pub struct StringPool(HashMap<u32, String>);
+pub struct StringPool(HashMap<InternedString, String>);
 
 impl StringPool {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(HashMap::new())
     }
 
-    pub fn insert(&mut self, id: u32, value: String) {
+    pub(crate) fn insert(&mut self, id: InternedString, value: String) {
         self.0.insert(id, value);
     }
 
-    pub fn get(&self, id: u32) -> Option<&str> {
+    pub fn get(&self, id: InternedString) -> Option<&str> {
         self.0.get(&id).map(|s| s.as_str())
     }
 
@@ -198,7 +199,7 @@ impl<'a> Decoder<'a> {
             Frame::StringPool(entries) => {
                 for e in &entries {
                     if let Ok(s) = String::from_utf8(e.data.clone()) {
-                        self.string_pool.insert(e.pool_id, s);
+                        self.string_pool.insert(InternedString(e.pool_id), s);
                     }
                 }
                 Ok(Some(DecodedFrame::StringPool(entries)))
@@ -261,7 +262,8 @@ impl<'a> Decoder<'a> {
             FrameRef::StringPool(entries) => {
                 for e in &entries {
                     if let Ok(s) = std::str::from_utf8(e.data) {
-                        self.string_pool.insert(e.pool_id, s.to_string());
+                        self.string_pool
+                            .insert(InternedString(e.pool_id), s.to_string());
                     }
                 }
                 Ok(Some(DecodedFrameRef::StringPool(entries)))
@@ -473,7 +475,7 @@ mod tests {
 
         let mut dec = Decoder::new(&data).unwrap();
         dec.decode_all();
-        assert_eq!(dec.string_pool().get(id.0), Some("hello"));
+        assert_eq!(dec.string_pool().get(id), Some("hello"));
     }
 
     #[test]

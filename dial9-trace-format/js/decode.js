@@ -169,7 +169,11 @@ class TraceDecoder {
     const values = {};
     for (const field of schema.fields) {
       const [val, consumed] = decodeFieldValue(this._view, this._pos, field.fieldType);
-      values[field.name] = val;
+      if (field.fieldType === FieldType.PooledString) {
+        values[field.name] = this.stringPool.get(val) ?? `<unresolved pool#${val}>`;
+      } else {
+        values[field.name] = val;
+      }
       this._pos += consumed;
     }
     const result = { type: 'event', typeId, name: schema.name, values };
@@ -198,8 +202,9 @@ class TraceDecoder {
     for (let i = 0; i < count; i++) {
       const baseAddr = this._view.getBigUint64(this._pos, true); this._pos += 8;
       const size = this._view.getUint32(this._pos, true); this._pos += 4;
-      const symbolId = this._view.getUint32(this._pos, true); this._pos += 4;
-      entries.push({ baseAddr: baseAddr.toString(), size, symbolId });
+      const symbolIdRaw = this._view.getUint32(this._pos, true); this._pos += 4;
+      const symbolName = this.stringPool.get(symbolIdRaw) ?? `<unresolved pool#${symbolIdRaw}>`;
+      entries.push({ baseAddr: baseAddr.toString(), size, symbolName });
     }
     return { type: 'symbol_table', entries };
   }
