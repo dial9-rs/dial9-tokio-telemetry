@@ -4,6 +4,9 @@ use blazesym::symbolize::{Input, Symbolizer, source};
 use std::cell::RefCell;
 use std::fs;
 
+// On x86_64, userspace virtual addresses are below this limit.
+const USER_ADDR_LIMIT: u64 = 0x0000_8000_0000_0000;
+
 struct SymbolizerState {
     symbolizer: Symbolizer,
     /// Map from address range to (path, base_addr)
@@ -92,6 +95,28 @@ pub fn resolve_symbol(addr: u64) -> SymbolInfo {
             });
         }
         let state = opt.as_ref().unwrap();
+
+        // Kernel addresses are >= USER_ADDR_LIMIT
+        if addr >= USER_ADDR_LIMIT {
+            let src = source::Source::Kernel(source::Kernel::default());
+            if let Ok(results) = state.symbolizer.symbolize(&src, Input::AbsAddr(&[addr]))
+                && !results.is_empty()
+                && let Some(sym) = results[0].as_sym()
+            {
+                return SymbolInfo {
+                    name: Some(sym.name.to_string()),
+                    base_addr: sym.addr,
+                    code_info: None,
+                    offset: addr.saturating_sub(sym.addr),
+                };
+            }
+            return SymbolInfo {
+                name: Some(format!("[kernel] {:#x}", addr)),
+                base_addr: addr,
+                code_info: None,
+                offset: 0,
+            };
+        }
 
         // Find which mapping contains this address
         for (start, end, path, file_offset) in &state.mappings {
