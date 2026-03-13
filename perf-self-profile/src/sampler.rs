@@ -7,16 +7,14 @@ use perf_event_data::Record;
 use perf_event_data::endian::Little;
 use perf_event_data::parse::{ParseConfig, Parser};
 use perf_event_open_sys::bindings::{
-    PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_SW_CONTEXT_SWITCHES, PERF_COUNT_SW_CPU_CLOCK,
-    PERF_COUNT_SW_TASK_CLOCK, PERF_FLAG_FD_CLOEXEC, PERF_SAMPLE_CALLCHAIN, PERF_SAMPLE_CPU,
-    PERF_SAMPLE_IP, PERF_SAMPLE_PERIOD, PERF_SAMPLE_TID, PERF_SAMPLE_TIME, PERF_TYPE_HARDWARE,
-    PERF_TYPE_SOFTWARE, perf_event_attr,
+    PERF_CONTEXT_MAX, PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_SW_CONTEXT_SWITCHES,
+    PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK, PERF_FLAG_FD_CLOEXEC, PERF_SAMPLE_CALLCHAIN,
+    PERF_SAMPLE_CPU, PERF_SAMPLE_IP, PERF_SAMPLE_PERIOD, PERF_SAMPLE_TID, PERF_SAMPLE_TIME,
+    PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE, perf_event_attr,
 };
 
+use crate::USER_ADDR_LIMIT;
 use crate::ring_buffer::{RingBuffer, page_size};
-
-// On x86_64, userspace virtual addresses are below 0x0000_8000_0000_0000.
-const USER_ADDR_LIMIT: u64 = 0x0000_8000_0000_0000;
 
 /// Which event source to sample on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +169,7 @@ pub struct PerfSampler {
     events: Vec<PerfEvent>,
     parse_config: ParseConfig<Little>,
     attr: perf_event_attr,
+    include_kernel: bool,
 }
 
 impl PerfSampler {
@@ -213,6 +212,7 @@ impl PerfSampler {
             events,
             parse_config: ParseConfig::from(attr),
             attr,
+            include_kernel: config.include_kernel,
         })
     }
 
@@ -229,6 +229,7 @@ impl PerfSampler {
             events: Vec::new(),
             parse_config: ParseConfig::from(attr),
             attr,
+            include_kernel: config.include_kernel,
         })
     }
 
@@ -368,13 +369,17 @@ impl PerfSampler {
 
                 let sample = match parsed {
                     Record::Sample(s) => {
+                        let include_kernel = self.include_kernel;
                         let callchain = s
                             .callchain()
                             .unwrap_or(&[])
                             .iter()
                             .copied()
-                            // TODO: imrpove this to allow capturing kernel traces when permissions are available
-                            .filter(|&a| a < USER_ADDR_LIMIT && a != 0)
+                            .filter(|&a| {
+                                a != 0
+                                    && a < PERF_CONTEXT_MAX
+                                    && (include_kernel || a < USER_ADDR_LIMIT)
+                            })
                             .collect();
                         Sample {
                             ip: s.ip().unwrap_or(0),
