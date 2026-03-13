@@ -7,8 +7,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 pub trait TraceWriter: Send {
-    fn write_event(&mut self, event: RawEvent) -> std::io::Result<()>;
-    fn write_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()>;
+    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()>;
     fn flush(&mut self) -> std::io::Result<()>;
     /// Returns true if the writer rotated to a new file since the last call to this method.
     /// Used by the flush path to know when to re-emit SpawnLocationDefs.
@@ -20,7 +19,7 @@ pub trait TraceWriter: Send {
     /// is deferred until the entire batch is written.
     fn write_atomic(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
         for event in events {
-            self.write_event(event.clone())?;
+            self.write_event(event)?;
         }
         Ok(())
     }
@@ -32,11 +31,8 @@ pub trait TraceWriter: Send {
 }
 
 impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
-    fn write_event(&mut self, event: RawEvent) -> std::io::Result<()> {
+    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
         (**self).write_event(event)
-    }
-    fn write_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
-        (**self).write_batch(events)
     }
     fn flush(&mut self) -> std::io::Result<()> {
         (**self).flush()
@@ -57,10 +53,7 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
 pub struct NullWriter;
 
 impl TraceWriter for NullWriter {
-    fn write_event(&mut self, _event: RawEvent) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn write_batch(&mut self, _events: &[RawEvent]) -> std::io::Result<()> {
+    fn write_event(&mut self, _event: &RawEvent) -> std::io::Result<()> {
         Ok(())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -349,15 +342,8 @@ impl RotatingWriter {
 }
 
 impl TraceWriter for RotatingWriter {
-    fn write_event(&mut self, event: RawEvent) -> std::io::Result<()> {
-        self.write_resolved(&event)
-    }
-
-    fn write_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
-        for event in events {
-            self.write_event(event.clone())?;
-        }
-        Ok(())
+    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
+        self.write_resolved(event)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -456,7 +442,7 @@ mod tests {
         let path = dir.path().join("test_event_v2.bin");
         let mut writer = RotatingWriter::single_file(&path).unwrap();
 
-        writer.write_event(park_event()).unwrap();
+        writer.write_event(&park_event()).unwrap();
         writer.flush().unwrap();
 
         let metadata = std::fs::metadata(&path).unwrap();
@@ -486,7 +472,7 @@ mod tests {
             }, // 11 bytes
         ];
 
-        for e in events {
+        for e in &events {
             writer.write_event(e).unwrap();
         }
         writer.flush().unwrap();
@@ -532,7 +518,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, 10000).unwrap();
 
         for _ in 0..3 {
-            writer.write_event(park_event()).unwrap();
+            writer.write_event(&park_event()).unwrap();
         }
         writer.seal().unwrap();
 
@@ -553,7 +539,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, max_total_size).unwrap();
 
         for _ in 0..10 {
-            writer.write_event(park_event()).unwrap();
+            writer.write_event(&park_event()).unwrap();
         }
         writer.seal().unwrap();
 
@@ -583,7 +569,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, max_total_size).unwrap();
 
         for _ in 0..100 {
-            writer.write_event(park_event()).unwrap();
+            writer.write_event(&park_event()).unwrap();
         }
         writer.seal().unwrap();
 
@@ -627,7 +613,7 @@ mod tests {
         // divide evenly into (max_file_size - header), so each file wastes a
         // few bytes. After 100 rotations, total_size drifts above max_total_size.
         for i in 0..5000 {
-            writer.write_event(park_event()).unwrap();
+            writer.write_event(&park_event()).unwrap();
             if writer.stopped {
                 panic!(
                     "Writer stopped at event {i}! total_size={}, max_total_size={}, \
@@ -651,7 +637,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, 100000).unwrap();
 
         for _ in 0..5 {
-            writer.write_event(park_event()).unwrap();
+            writer.write_event(&park_event()).unwrap();
         }
         writer.seal().unwrap();
 
@@ -677,7 +663,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, 100000).unwrap();
 
         let events: Vec<_> = (0..3).map(|_| park_event()).collect();
-        writer.write_batch(&events).unwrap();
+        writer.write_atomic(&events).unwrap();
         writer.seal().unwrap();
 
         // All 3 events should be readable across the rotated files.
@@ -701,7 +687,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, 100000).unwrap();
 
         for _ in 0..3 {
-            writer.write_event(park_event()).unwrap();
+            writer.write_event(&park_event()).unwrap();
         }
         writer.seal().unwrap();
 
@@ -724,7 +710,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, 10000, max_total_size).unwrap();
 
         for _ in 0..5 {
-            writer.write_event(park_event()).unwrap();
+            writer.write_event(&park_event()).unwrap();
         }
         // Repeated flush after stop should not error
         assert!(writer.flush().is_ok());
@@ -761,7 +747,7 @@ mod tests {
                 sched_wait_delta_nanos: 0,
             },
         ];
-        for e in events {
+        for e in &events {
             writer.write_event(e).unwrap();
         }
         writer.seal().unwrap();
@@ -786,7 +772,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, 5, 100000).unwrap();
 
         for _ in 0..3 {
-            writer.write_event(park_event()).unwrap();
+            writer.write_event(&park_event()).unwrap();
         }
         writer.seal().unwrap();
 
@@ -815,7 +801,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, 100000).unwrap();
 
         for _ in 0..2 {
-            writer.write_event(park_event()).unwrap();
+            writer.write_event(&park_event()).unwrap();
         }
         writer.seal().unwrap();
 
@@ -831,7 +817,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let mut writer = RotatingWriter::new(&base, 1024, 100000).unwrap();
-        writer.write_event(park_event()).unwrap();
+        writer.write_event(&park_event()).unwrap();
         writer.flush().unwrap();
 
         // Current file should have .active suffix
@@ -850,8 +836,8 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, 100000).unwrap();
 
         // Write 2 events — triggers rotation after first
-        writer.write_event(park_event()).unwrap();
-        writer.write_event(park_event()).unwrap();
+        writer.write_event(&park_event()).unwrap();
+        writer.write_event(&park_event()).unwrap();
         writer.flush().unwrap();
 
         // First file should be sealed (.bin), second should be active
@@ -878,7 +864,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let mut writer = RotatingWriter::new(&base, 1024, 100000).unwrap();
-        writer.write_event(park_event()).unwrap();
+        writer.write_event(&park_event()).unwrap();
         writer.seal().unwrap();
 
         assert!(
@@ -896,7 +882,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.bin");
         let mut writer = RotatingWriter::single_file(&path).unwrap();
-        writer.write_event(park_event()).unwrap();
+        writer.write_event(&park_event()).unwrap();
         writer.flush().unwrap();
 
         // single_file writes directly to the given path, no .active suffix
@@ -915,7 +901,7 @@ mod tests {
                 ("host".into(), "i-0abc123".into()),
             ])
             .unwrap();
-        writer.write_event(park_event()).unwrap();
+        writer.write_event(&park_event()).unwrap();
         writer.flush().unwrap();
 
         // TraceReader absorbs SegmentMetadata into its segment_metadata field
@@ -952,7 +938,7 @@ mod tests {
 
         // Write 3 events
         for _ in 0..3 {
-            writer.write_event(park_event()).unwrap();
+            writer.write_event(&park_event()).unwrap();
         }
         writer.flush().unwrap();
         writer.seal().unwrap();
@@ -987,7 +973,7 @@ mod tests {
         let path = dir.path().join("trace.bin");
         let mut writer = RotatingWriter::single_file(&path).unwrap();
         writer.set_segment_metadata(vec![]).unwrap();
-        writer.write_event(park_event()).unwrap();
+        writer.write_event(&park_event()).unwrap();
         writer.flush().unwrap();
 
         let mut reader = TraceReader::new(path.to_str().unwrap()).unwrap();

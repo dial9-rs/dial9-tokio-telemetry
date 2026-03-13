@@ -187,7 +187,7 @@ mod tests {
             worker_local_queue_depth: 0,
             cpu_time_nanos: 0,
         };
-        writer.write_event(event).unwrap();
+        writer.write_event(&event).unwrap();
         writer.flush().unwrap();
 
         let segment = SealedSegment {
@@ -226,7 +226,7 @@ mod tests {
             worker_local_queue_depth: 0,
             cpu_time_nanos: 0,
         };
-        writer.write_event(event).unwrap();
+        writer.write_event(&event).unwrap();
         writer.flush().unwrap();
 
         let segment = SealedSegment {

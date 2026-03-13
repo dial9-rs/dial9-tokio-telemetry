@@ -39,16 +39,9 @@ impl CapturingWriter {
 }
 
 impl TraceWriter for CapturingWriter {
-    fn write_event(&mut self, event: RawEvent) -> std::io::Result<()> {
-        let resolved = self.resolver.resolve(&event);
+    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
+        let resolved = self.resolver.resolve(event);
         self.events.lock().unwrap().extend(resolved);
-        Ok(())
-    }
-
-    fn write_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
-        for event in events {
-            self.write_event(event.clone())?;
-        }
         Ok(())
     }
 
