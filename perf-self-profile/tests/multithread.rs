@@ -1,4 +1,3 @@
-mod common;
 use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,9 +17,6 @@ fn burn_cpu(stop: &AtomicBool) {
 
 #[test]
 fn profiles_spawned_threads() {
-    if common::is_ci() {
-        return;
-    }
     let mut sampler = PerfSampler::start(SamplerConfig {
         frequency_hz: 999,
         event_source: EventSource::SwCpuClock,
