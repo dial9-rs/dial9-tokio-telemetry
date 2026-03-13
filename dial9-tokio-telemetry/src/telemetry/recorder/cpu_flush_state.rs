@@ -1,5 +1,5 @@
 #[cfg(feature = "cpu-profiling")]
-use crate::telemetry::events::{CallframeDefData, RawEvent, ThreadNameDefData};
+use crate::telemetry::events::{CallframeDefData, CpuSampleData, RawEvent, ThreadNameDefData};
 #[cfg(feature = "cpu-profiling")]
 use std::collections::{HashMap, HashSet};
 
@@ -41,12 +41,10 @@ impl CpuFlushState {
         self.thread_name_emitted_this_file.clear();
     }
 
-    /// Collect the prerequisite def events for a CPU event, updating per-file tracking sets.
-    pub(super) fn collect_cpu_event_batch(&mut self, event: &RawEvent) -> Vec<RawEvent> {
+    /// Collect the prerequisite def events for a CPU sample, updating per-file tracking sets.
+    pub(super) fn collect_cpu_event_batch(&mut self, data: &CpuSampleData) -> Vec<RawEvent> {
         let mut batch = Vec::new();
-        if let RawEvent::CpuSample(data) = event
-            && !self.thread_name_emitted_this_file.contains(&data.tid)
-        {
+        if !self.thread_name_emitted_this_file.contains(&data.tid) {
             if let Some(name) = self.thread_name_intern.get(&data.tid) {
                 batch.push(RawEvent::ThreadNameDef(Box::new(ThreadNameDefData {
                     tid: data.tid,
@@ -55,9 +53,7 @@ impl CpuFlushState {
             }
             self.thread_name_emitted_this_file.insert(data.tid);
         }
-        if self.inline_callframe_symbols
-            && let RawEvent::CpuSample(data) = event
-        {
+        if self.inline_callframe_symbols {
             for &addr in &data.callchain {
                 if !self.callframe_emitted_this_file.contains(&addr) {
                     self.callframe_intern.entry(addr).or_insert_with(|| {
@@ -79,7 +75,7 @@ impl CpuFlushState {
                 }
             }
         }
-        batch.push(event.clone());
+        batch.push(RawEvent::CpuSample(Box::new(data.clone())));
         batch
     }
 }

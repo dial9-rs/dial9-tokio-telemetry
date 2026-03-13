@@ -797,15 +797,15 @@ mod tests {
                     callchain,
                 } = op
                 {
-                    let event = RawEvent::CpuSample(Box::new(CpuSampleData {
+                    let data = CpuSampleData {
                         timestamp_nanos: *timestamp,
                         worker_id: *worker_id,
                         tid: *tid,
                         source: CpuSampleSource::CpuProfile,
                         callchain: callchain.clone(),
-                    }));
+                    };
                     *timestamp += 1;
-                    ew.write_cpu_event(&event);
+                    ew.write_cpu_event(&data);
                 }
             }
 

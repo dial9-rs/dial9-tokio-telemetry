@@ -57,9 +57,9 @@ impl EventWriter {
 
     /// Write a single CPU event, emitting any necessary defs first.
     #[cfg(feature = "cpu-profiling")]
-    pub(crate) fn write_cpu_event(&mut self, event: &RawEvent) {
+    pub(crate) fn write_cpu_event(&mut self, data: &CpuSampleData) {
         if let Some(mut cpu) = self.cpu_flush.take() {
-            let batch = cpu.collect_cpu_event_batch(event);
+            let batch = cpu.collect_cpu_event_batch(data);
             if let Err(e) = self.writer.write_atomic(&batch) {
                 tracing::warn!("failed to write CPU trace event: {e}");
             }
@@ -93,14 +93,14 @@ impl EventWriter {
                 {
                     cpu.thread_name_intern.insert(raw.tid, name.to_string());
                 }
-                let event = RawEvent::CpuSample(Box::new(CpuSampleData {
+                let data = CpuSampleData {
                     timestamp_nanos: raw.timestamp_nanos,
                     worker_id,
                     tid: raw.tid,
                     source: raw.source,
                     callchain: raw.callchain,
-                }));
-                self.write_cpu_event(&event);
+                };
+                self.write_cpu_event(&data);
             });
             self.cpu_profiler = Some(profiler);
         }
@@ -109,14 +109,14 @@ impl EventWriter {
             let mut shared_profiler = shared.sched_profiler.lock().unwrap();
             if let Some(ref mut profiler) = *shared_profiler {
                 profiler.drain(|raw| {
-                    let event = RawEvent::CpuSample(Box::new(CpuSampleData {
+                    let data = CpuSampleData {
                         timestamp_nanos: raw.timestamp_nanos,
                         worker_id: resolve(raw.tid),
                         tid: raw.tid,
                         source: raw.source,
                         callchain: raw.callchain,
-                    }));
-                    self.write_cpu_event(&event);
+                    };
+                    self.write_cpu_event(&data);
                 });
             }
         }
