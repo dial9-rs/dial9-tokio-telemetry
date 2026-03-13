@@ -1,5 +1,5 @@
 use dial9_tokio_telemetry::telemetry::events::{RawEvent, TelemetryEvent};
-use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
+use dial9_tokio_telemetry::telemetry::writer::{EventResolver, TraceWriter};
 use std::sync::{Arc, Mutex};
 
 /// Returns true when running in CI (GitHub Actions sets CI=true).
@@ -21,7 +21,7 @@ pub fn is_ci() -> bool {
 /// ```
 pub struct CapturingWriter {
     events: Arc<Mutex<Vec<TelemetryEvent>>>,
-    flush_state: dial9_tokio_telemetry::telemetry::recorder::flush_state::FlushState,
+    resolver: EventResolver,
 }
 
 impl CapturingWriter {
@@ -31,7 +31,7 @@ impl CapturingWriter {
         (
             Self {
                 events: events.clone(),
-                flush_state: dial9_tokio_telemetry::telemetry::recorder::flush_state::FlushState::new(),
+                resolver: EventResolver::new(),
             },
             events,
         )
@@ -40,7 +40,7 @@ impl CapturingWriter {
 
 impl TraceWriter for CapturingWriter {
     fn write_event(&mut self, event: RawEvent) -> std::io::Result<()> {
-        let resolved = self.flush_state.resolve(event);
+        let resolved = self.resolver.resolve(&event);
         self.events.lock().unwrap().extend(resolved);
         Ok(())
     }

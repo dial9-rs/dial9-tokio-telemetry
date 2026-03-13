@@ -1,8 +1,6 @@
 mod cpu_flush_state;
 mod event_writer;
-/// Spawn-location interning state, used internally by writers.
-#[doc(hidden)]
-pub mod flush_state;
+pub(crate) mod flush_state;
 mod shared_state;
 
 pub(crate) use shared_state::SharedState;
@@ -724,7 +722,7 @@ mod tests {
     mod rotation_proptest {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
-        use crate::telemetry::events::{CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER};
+        use crate::telemetry::events::{CpuSampleData, CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER};
         use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
         use crate::telemetry::writer::RotatingWriter;
         use cpu_flush_state::CpuFlushState;
@@ -797,13 +795,13 @@ mod tests {
                     callchain,
                 } = op
                 {
-                    let event = TelemetryEvent::CpuSample {
+                    let event = RawEvent::CpuSample(Box::new(CpuSampleData {
                         timestamp_nanos: *timestamp,
                         worker_id: *worker_id,
                         tid: *tid,
                         source: CpuSampleSource::CpuProfile,
                         callchain: callchain.clone(),
-                    };
+                    }));
                     *timestamp += 1;
                     ew.write_cpu_event(&event);
                 }

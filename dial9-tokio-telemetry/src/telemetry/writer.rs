@@ -15,9 +15,9 @@ pub trait TraceWriter: Send {
     fn take_rotated(&mut self) -> bool {
         false
     }
-    /// Write a group of events atomically — all events land in the same file.
-    /// Writers that support rotation will rotate *after* writing if the file
-    /// exceeds the size limit, so the batch is always written.
+    /// Write a group of events atomically — all events in the batch land in the
+    /// same file. The file may exceed `max_file_size` after this call; rotation
+    /// is deferred until the entire batch is written.
     fn write_atomic(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
         for event in events {
             self.write_event(event.clone())?;
@@ -65,6 +65,43 @@ impl TraceWriter for NullWriter {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// Resolves [`RawEvent`]s into [`TelemetryEvent`]s by interning spawn locations.
+///
+/// This is useful for custom [`TraceWriter`] implementations (e.g. in tests)
+/// that need to convert raw events into their wire format. The resolver tracks
+/// which spawn-location definitions have been emitted and re-emits them as
+/// needed.
+///
+/// Call [`on_rotate`](Self::on_rotate) when the writer rotates to a new file
+/// so that definitions are re-emitted in the new file.
+pub struct EventResolver {
+    inner: FlushState,
+}
+
+impl EventResolver {
+    /// Create a new resolver with empty interning state.
+    pub fn new() -> Self {
+        Self {
+            inner: FlushState::new(),
+        }
+    }
+
+    /// Resolve a [`RawEvent`] into one or more [`TelemetryEvent`]s.
+    ///
+    /// For events that reference a spawn location, this returns the
+    /// `SpawnLocationDef` (if not yet emitted in the current file) followed
+    /// by the event itself.
+    pub fn resolve(&mut self, raw: &RawEvent) -> smallvec::SmallVec<[TelemetryEvent; 3]> {
+        self.inner.resolve(raw)
+    }
+
+    /// Notify the resolver that the writer rotated to a new file.
+    /// The next reference to any spawn location will re-emit its definition.
+    pub fn on_rotate(&mut self) {
+        self.inner.on_rotate();
     }
 }
 
@@ -266,7 +303,7 @@ impl RotatingWriter {
     /// Resolve a RawEvent and write it. Rotation is deferred until after
     /// the complete logical unit (defs + event) is written, so they always
     /// land in the same file.
-    fn write_resolved(&mut self, event: RawEvent) -> std::io::Result<()> {
+    fn write_resolved(&mut self, event: &RawEvent) -> std::io::Result<()> {
         let resolved = self.flush_state.resolve(event);
         for e in &resolved {
             self.write_event_inner(e)?;
@@ -307,7 +344,7 @@ impl RotatingWriter {
 
 impl TraceWriter for RotatingWriter {
     fn write_event(&mut self, event: RawEvent) -> std::io::Result<()> {
-        self.write_resolved(event)
+        self.write_resolved(&event)
     }
 
     fn write_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
@@ -332,7 +369,7 @@ impl TraceWriter for RotatingWriter {
         for event in events {
             // Write without rotating — rotation is deferred until the
             // entire atomic batch is written.
-            let resolved = self.flush_state.resolve(event.clone());
+            let resolved = self.flush_state.resolve(event);
             for e in &resolved {
                 self.write_event_inner(e)?;
             }

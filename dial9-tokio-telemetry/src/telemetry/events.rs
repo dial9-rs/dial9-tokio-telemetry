@@ -276,24 +276,37 @@ pub enum RawEvent {
         target_worker: u8,
     },
     /// A CPU stack trace sample from perf_event, attributed to a worker thread.
-    CpuSample {
-        timestamp_nanos: u64,
-        worker_id: usize,
-        tid: u32,
-        source: CpuSampleSource,
-        callchain: Vec<u64>,
-    },
+    CpuSample(Box<CpuSampleData>),
     /// Definition of a callframe symbol: maps an address to its resolved name.
-    CallframeDef {
-        address: u64,
-        symbol: String,
-        location: Option<String>,
-    },
+    CallframeDef(Box<CallframeDefData>),
     /// Maps an OS thread ID to its name.
-    ThreadNameDef {
-        tid: u32,
-        name: String,
-    },
+    ThreadNameDef(Box<ThreadNameDefData>),
+}
+
+/// Data for a CPU stack trace sample. Boxed inside [`RawEvent`] to keep the
+/// enum small for the common hot-path variants.
+#[derive(Debug, Clone)]
+pub struct CpuSampleData {
+    pub timestamp_nanos: u64,
+    pub worker_id: usize,
+    pub tid: u32,
+    pub source: CpuSampleSource,
+    pub callchain: Vec<u64>,
+}
+
+/// Data for a callframe symbol definition. Boxed inside [`RawEvent`].
+#[derive(Debug, Clone)]
+pub struct CallframeDefData {
+    pub address: u64,
+    pub symbol: String,
+    pub location: Option<String>,
+}
+
+/// Data for a thread name definition. Boxed inside [`RawEvent`].
+#[derive(Debug, Clone)]
+pub struct ThreadNameDefData {
+    pub tid: u32,
+    pub name: String,
 }
 
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.

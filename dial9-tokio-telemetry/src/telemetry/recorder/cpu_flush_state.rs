@@ -1,5 +1,5 @@
 #[cfg(feature = "cpu-profiling")]
-use crate::telemetry::events::{RawEvent, TelemetryEvent};
+use crate::telemetry::events::{CallframeDefData, RawEvent, ThreadNameDefData};
 #[cfg(feature = "cpu-profiling")]
 use std::collections::{HashMap, HashSet};
 
@@ -44,24 +44,24 @@ impl CpuFlushState {
     /// Collect the prerequisite def events for a CPU event, updating per-file tracking sets.
     pub(super) fn collect_cpu_event_batch(
         &mut self,
-        event: &TelemetryEvent,
+        event: &RawEvent,
     ) -> Vec<RawEvent> {
         let mut batch = Vec::new();
-        if let TelemetryEvent::CpuSample { tid, .. } = event
-            && !self.thread_name_emitted_this_file.contains(tid)
+        if let RawEvent::CpuSample(data) = event
+            && !self.thread_name_emitted_this_file.contains(&data.tid)
         {
-            if let Some(name) = self.thread_name_intern.get(tid) {
-                batch.push(RawEvent::ThreadNameDef {
-                    tid: *tid,
+            if let Some(name) = self.thread_name_intern.get(&data.tid) {
+                batch.push(RawEvent::ThreadNameDef(Box::new(ThreadNameDefData {
+                    tid: data.tid,
                     name: name.clone(),
-                });
+                })));
             }
-            self.thread_name_emitted_this_file.insert(*tid);
+            self.thread_name_emitted_this_file.insert(data.tid);
         }
         if self.inline_callframe_symbols
-            && let TelemetryEvent::CpuSample { callchain, .. } = event
+            && let RawEvent::CpuSample(data) = event
         {
-            for &addr in callchain {
+            for &addr in &data.callchain {
                 if !self.callframe_emitted_this_file.contains(&addr) {
                     self.callframe_intern.entry(addr).or_insert_with(|| {
                         let sym = dial9_perf_self_profile::resolve_symbol(addr);
@@ -73,31 +73,16 @@ impl CpuFlushState {
                         (symbol, location)
                     });
                     let (symbol, location) = self.callframe_intern[&addr].clone();
-                    batch.push(RawEvent::CallframeDef {
+                    batch.push(RawEvent::CallframeDef(Box::new(CallframeDefData {
                         address: addr,
                         symbol,
                         location,
-                    });
+                    })));
                     self.callframe_emitted_this_file.insert(addr);
                 }
             }
         }
-        if let TelemetryEvent::CpuSample {
-            timestamp_nanos,
-            worker_id,
-            tid,
-            source,
-            callchain,
-        } = event
-        {
-            batch.push(RawEvent::CpuSample {
-                timestamp_nanos: *timestamp_nanos,
-                worker_id: *worker_id,
-                tid: *tid,
-                source: *source,
-                callchain: callchain.clone(),
-            });
-        }
+        batch.push(event.clone());
         batch
     }
 }
