@@ -6,7 +6,7 @@ use dial9_trace_format::codec::{
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::schema::{FieldDef, SchemaEntry};
-use dial9_trace_format::types::{FieldType, FieldValue};
+use dial9_trace_format::types::{FieldType, FieldValue, InternedString};
 
 // --- Header edge cases ---
 
@@ -276,7 +276,7 @@ fn symbol_table_max_address() {
     let entries = vec![SymbolEntry {
         base_addr: u64::MAX,
         size: u32::MAX,
-        symbol_id: u32::MAX,
+        symbol_id: InternedString::from_raw(u32::MAX),
     }];
     let mut buf = Vec::new();
     codec::encode_symbol_table(&entries, &mut buf).unwrap();
@@ -371,18 +371,18 @@ fn interleaved_pool_and_events() {
     )
     .unwrap();
     let id0 = enc.intern_string("first").unwrap();
-    enc.write_event_for::<PoolEv>(&[FieldValue::PooledString(id0.0)])
+    enc.write_event_for::<PoolEv>(&[FieldValue::PooledString(id0)])
         .unwrap();
     let id1 = enc.intern_string("second").unwrap();
-    enc.write_event_for::<PoolEv>(&[FieldValue::PooledString(id1.0)])
+    enc.write_event_for::<PoolEv>(&[FieldValue::PooledString(id1)])
         .unwrap();
     let data = enc.finish();
 
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all();
     assert_eq!(frames.len(), 5);
-    assert_eq!(dec.string_pool().get(&id0.0), Some(&"first".to_string()));
-    assert_eq!(dec.string_pool().get(&id1.0), Some(&"second".to_string()));
+    assert_eq!(dec.string_pool().get(id0), Some("first"));
+    assert_eq!(dec.string_pool().get(id1), Some("second"));
 }
 
 // --- Field type tag exhaustiveness ---
