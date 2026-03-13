@@ -42,10 +42,7 @@ impl CpuFlushState {
     }
 
     /// Collect the prerequisite def events for a CPU event, updating per-file tracking sets.
-    pub(super) fn collect_cpu_event_batch(
-        &mut self,
-        event: &RawEvent,
-    ) -> Vec<RawEvent> {
+    pub(super) fn collect_cpu_event_batch(&mut self, event: &RawEvent) -> Vec<RawEvent> {
         let mut batch = Vec::new();
         if let RawEvent::CpuSample(data) = event
             && !self.thread_name_emitted_this_file.contains(&data.tid)

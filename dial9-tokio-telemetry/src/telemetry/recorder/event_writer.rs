@@ -40,17 +40,17 @@ impl EventWriter {
     pub(crate) fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
         // Check if a previous write caused rotation so CPU state can be reset.
         #[cfg(feature = "cpu-profiling")]
-        if self.writer.take_rotated() {
-            if let Some(ref mut cpu) = self.cpu_flush {
-                cpu.on_rotate();
-            }
+        if self.writer.take_rotated()
+            && let Some(ref mut cpu) = self.cpu_flush
+        {
+            cpu.on_rotate();
         }
         self.writer.write_atomic(&[raw])?;
         #[cfg(feature = "cpu-profiling")]
-        if self.writer.take_rotated() {
-            if let Some(ref mut cpu) = self.cpu_flush {
-                cpu.on_rotate();
-            }
+        if self.writer.take_rotated()
+            && let Some(ref mut cpu) = self.cpu_flush
+        {
+            cpu.on_rotate();
         }
         Ok(())
     }

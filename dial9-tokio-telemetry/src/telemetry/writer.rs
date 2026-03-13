@@ -81,6 +81,12 @@ pub struct EventResolver {
     inner: FlushState,
 }
 
+impl Default for EventResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventResolver {
     /// Create a new resolver with empty interning state.
     pub fn new() -> Self {

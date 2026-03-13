@@ -722,7 +722,9 @@ mod tests {
     mod rotation_proptest {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
-        use crate::telemetry::events::{CpuSampleData, CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER};
+        use crate::telemetry::events::{
+            CpuSampleData, CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER,
+        };
         use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
         use crate::telemetry::writer::RotatingWriter;
         use cpu_flush_state::CpuFlushState;

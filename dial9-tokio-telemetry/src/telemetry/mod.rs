@@ -20,8 +20,7 @@ pub use cpu_profile::CpuProfilingConfig;
 #[cfg(feature = "cpu-profiling")]
 pub use cpu_profile::SchedEventConfig;
 pub use events::{
-    CallframeDefData, CpuSampleData, CpuSampleSource, SchedStat, TelemetryEvent,
-    ThreadNameDefData,
+    CallframeDefData, CpuSampleData, CpuSampleSource, SchedStat, TelemetryEvent, ThreadNameDefData,
 };
 pub use recorder::{TelemetryGuard, TelemetryHandle, TracedRuntime, TracedRuntimeBuilder};
 pub use task_metadata::{SpawnLocationId, TaskId, UNKNOWN_SPAWN_LOCATION_ID, UNKNOWN_TASK_ID};
