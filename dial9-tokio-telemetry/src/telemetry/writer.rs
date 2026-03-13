@@ -1,40 +1,27 @@
-use crate::telemetry::events::TelemetryEvent;
+use crate::telemetry::events::{RawEvent, TelemetryEvent};
 use crate::telemetry::format;
+use crate::telemetry::recorder::flush_state::FlushState;
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-/// Result of a [`TraceWriter::write_atomic`] call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriteAtomicResult {
-    /// All events were written to the current file.
-    Written,
-    /// A file rotation occurred before writing. The events were not written;
-    /// callers should re-emit defs and retry into the new file.
-    Rotated,
-    /// The batch is larger than `max_file_size` and will never fit in a single
-    /// file. The events were not written. Callers should skip this batch rather
-    /// than retrying in an infinite loop.
-    OversizedBatch,
-}
-
 pub trait TraceWriter: Send {
-    fn write_event(&mut self, event: &TelemetryEvent) -> std::io::Result<()>;
-    fn write_batch(&mut self, events: &[TelemetryEvent]) -> std::io::Result<()>;
+    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()>;
     fn flush(&mut self) -> std::io::Result<()>;
     /// Returns true if the writer rotated to a new file since the last call to this method.
     /// Used by the flush path to know when to re-emit SpawnLocationDefs.
     fn take_rotated(&mut self) -> bool {
         false
     }
-    /// Write a group of events atomically — all events land in the same file.
-    /// Rotating writers pre-check total size and rotate before writing if needed.
-    fn write_atomic(&mut self, events: &[TelemetryEvent]) -> std::io::Result<WriteAtomicResult> {
+    /// Write a group of events atomically — all events in the batch land in the
+    /// same file. The file may exceed `max_file_size` after this call; rotation
+    /// is deferred until the entire batch is written.
+    fn write_atomic(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
         for event in events {
             self.write_event(event)?;
         }
-        Ok(WriteAtomicResult::Written)
+        Ok(())
     }
     /// Seal the current segment: flush and rename `.active` → `.bin`.
     /// Called on shutdown so the final segment is visible to the worker.
@@ -44,11 +31,8 @@ pub trait TraceWriter: Send {
 }
 
 impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
-    fn write_event(&mut self, event: &TelemetryEvent) -> std::io::Result<()> {
+    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
         (**self).write_event(event)
-    }
-    fn write_batch(&mut self, events: &[TelemetryEvent]) -> std::io::Result<()> {
-        (**self).write_batch(events)
     }
     fn flush(&mut self) -> std::io::Result<()> {
         (**self).flush()
@@ -56,7 +40,7 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     fn take_rotated(&mut self) -> bool {
         (**self).take_rotated()
     }
-    fn write_atomic(&mut self, events: &[TelemetryEvent]) -> std::io::Result<WriteAtomicResult> {
+    fn write_atomic(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
         (**self).write_atomic(events)
     }
     fn seal(&mut self) -> std::io::Result<()> {
@@ -69,14 +53,54 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
 pub struct NullWriter;
 
 impl TraceWriter for NullWriter {
-    fn write_event(&mut self, _event: &TelemetryEvent) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn write_batch(&mut self, _events: &[TelemetryEvent]) -> std::io::Result<()> {
+    fn write_event(&mut self, _event: &RawEvent) -> std::io::Result<()> {
         Ok(())
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// Resolves [`RawEvent`]s into [`TelemetryEvent`]s by interning spawn locations.
+///
+/// This is useful for custom [`TraceWriter`] implementations (e.g. in tests)
+/// that need to convert raw events into their wire format. The resolver tracks
+/// which spawn-location definitions have been emitted and re-emits them as
+/// needed.
+///
+/// Call [`on_rotate`](Self::on_rotate) when the writer rotates to a new file
+/// so that definitions are re-emitted in the new file.
+pub struct EventResolver {
+    inner: FlushState,
+}
+
+impl Default for EventResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EventResolver {
+    /// Create a new resolver with empty interning state.
+    pub fn new() -> Self {
+        Self {
+            inner: FlushState::new(),
+        }
+    }
+
+    /// Resolve a [`RawEvent`] into one or more [`TelemetryEvent`]s.
+    ///
+    /// For events that reference a spawn location, this returns the
+    /// `SpawnLocationDef` (if not yet emitted in the current file) followed
+    /// by the event itself.
+    pub fn resolve(&mut self, raw: &RawEvent) -> smallvec::SmallVec<[TelemetryEvent; 3]> {
+        self.inner.resolve(raw)
+    }
+
+    /// Notify the resolver that the writer rotated to a new file.
+    /// The next reference to any spawn location will re-emit its definition.
+    pub fn on_rotate(&mut self) {
+        self.inner.on_rotate();
     }
 }
 
@@ -103,6 +127,8 @@ pub struct RotatingWriter {
     rotated: bool,
     /// Optional metadata written at the start of each segment.
     segment_metadata: Option<Vec<(String, String)>>,
+    /// Interning state for spawn locations.
+    flush_state: FlushState,
 }
 
 impl RotatingWriter {
@@ -136,6 +162,7 @@ impl RotatingWriter {
             stopped: false,
             rotated: false,
             segment_metadata: None,
+            flush_state: FlushState::new(),
         })
     }
 
@@ -175,6 +202,7 @@ impl RotatingWriter {
             stopped: false,
             rotated: false,
             segment_metadata: None,
+            flush_state: FlushState::new(),
         })
     }
 
@@ -241,6 +269,7 @@ impl RotatingWriter {
         self.files.push_back((new_path, header_size));
         self.write_segment_metadata()?;
         self.rotated = true;
+        self.flush_state.on_rotate();
 
         tracing::info!(
             segment_index = self.next_index - 1,
@@ -270,14 +299,15 @@ impl RotatingWriter {
         Ok(())
     }
 
-    /// Pre-rotate if `bytes` won't fit in the current file.
-    fn ensure_space(&mut self, bytes: u64) -> std::io::Result<()> {
-        if self.stopped {
-            return Ok(());
+    /// Resolve a RawEvent and write it. Rotation is deferred until after
+    /// the complete logical unit (defs + event) is written, so they always
+    /// land in the same file.
+    fn write_resolved(&mut self, event: &RawEvent) -> std::io::Result<()> {
+        let resolved = self.flush_state.resolve(event);
+        for e in &resolved {
+            self.write_event_inner(e)?;
         }
-        if self.current_size + bytes > self.max_file_size {
-            self.rotate()?;
-        }
+        self.maybe_rotate()?;
         Ok(())
     }
 
@@ -286,12 +316,6 @@ impl RotatingWriter {
             return Ok(());
         }
         let event_size = format::wire_event_size(event) as u64;
-        if self.current_size + event_size > self.max_file_size {
-            self.rotate()?;
-            if self.stopped {
-                return Ok(());
-            }
-        }
         format::write_event(&mut self.current_writer, event)?;
         self.current_size += event_size;
         self.total_size += event_size;
@@ -306,18 +330,20 @@ impl RotatingWriter {
         }
         Ok(())
     }
+
+    /// Rotate if the current file exceeds max_file_size.
+    /// Called after writing a complete logical unit (def + event).
+    fn maybe_rotate(&mut self) -> std::io::Result<()> {
+        if !self.stopped && self.current_size > self.max_file_size {
+            self.rotate()?;
+        }
+        Ok(())
+    }
 }
 
 impl TraceWriter for RotatingWriter {
-    fn write_event(&mut self, event: &TelemetryEvent) -> std::io::Result<()> {
-        self.write_event_inner(event)
-    }
-
-    fn write_batch(&mut self, events: &[TelemetryEvent]) -> std::io::Result<()> {
-        for event in events {
-            self.write_event_inner(event)?;
-        }
-        Ok(())
+    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
+        self.write_resolved(event)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -331,29 +357,17 @@ impl TraceWriter for RotatingWriter {
         std::mem::replace(&mut self.rotated, false)
     }
 
-    fn write_atomic(&mut self, events: &[TelemetryEvent]) -> std::io::Result<WriteAtomicResult> {
-        let total: u64 = events
-            .iter()
-            .map(|e| format::wire_event_size(e) as u64)
-            .sum();
-        self.ensure_space(total)?;
-        if self.rotated {
-            // We just rotated into a fresh file. If the batch still doesn't
-            // fit, it will *never* fit — report that instead of Rotated so the
-            // caller doesn't retry in an infinite loop.
-            if self.current_size + total > self.max_file_size {
-                return Ok(WriteAtomicResult::OversizedBatch);
-            }
-            // The batch fits in the new file — signal rotation so the caller
-            // can re-emit defs, but don't write yet (the caller will retry
-            // with the augmented batch).
-            return Ok(WriteAtomicResult::Rotated);
-        }
-
+    fn write_atomic(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
         for event in events {
-            self.write_event_inner(event)?;
+            // Write without rotating — rotation is deferred until the
+            // entire atomic batch is written.
+            let resolved = self.flush_state.resolve(event);
+            for e in &resolved {
+                self.write_event_inner(e)?;
+            }
         }
-        Ok(WriteAtomicResult::Written)
+        self.maybe_rotate()?;
+        Ok(())
     }
 
     fn seal(&mut self) -> std::io::Result<()> {
@@ -375,12 +389,11 @@ mod tests {
     use super::*;
     use crate::telemetry::analysis::TraceReader;
     use crate::telemetry::format;
-    use crate::telemetry::task_metadata::{UNKNOWN_SPAWN_LOCATION_ID, UNKNOWN_TASK_ID};
     use std::io::Read;
     use tempfile::TempDir;
 
-    fn park_event() -> TelemetryEvent {
-        TelemetryEvent::WorkerPark {
+    fn park_event() -> RawEvent {
+        RawEvent::WorkerPark {
             timestamp_nanos: 1000,
             worker_id: 0,
             worker_local_queue_depth: 2,
@@ -429,13 +442,13 @@ mod tests {
         let path = dir.path().join("test_event_v2.bin");
         let mut writer = RotatingWriter::single_file(&path).unwrap();
 
-        let event = park_event();
-        assert!(writer.write_event(&event).is_ok());
-        assert!(writer.flush().is_ok());
+        writer.write_event(&park_event()).unwrap();
+        writer.flush().unwrap();
 
         let metadata = std::fs::metadata(&path).unwrap();
-        let expected = format::HEADER_SIZE + format::wire_event_size(&event);
-        assert_eq!(metadata.len(), expected as u64);
+        // WorkerPark is 11 bytes on the wire
+        let expected = format::HEADER_SIZE as u64 + 11;
+        assert_eq!(metadata.len(), expected);
     }
 
     #[test]
@@ -445,26 +458,27 @@ mod tests {
         let mut writer = RotatingWriter::single_file(&path).unwrap();
 
         let events = vec![
-            TelemetryEvent::PollStart {
+            RawEvent::WorkerPark {
                 timestamp_nanos: 1000,
                 worker_id: 0,
                 worker_local_queue_depth: 2,
-                task_id: UNKNOWN_TASK_ID,
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
-            }, // 13 bytes
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos: 1000,
+                cpu_time_nanos: 0,
+            }, // 11 bytes
+            RawEvent::WorkerPark {
+                timestamp_nanos: 2000,
                 worker_id: 0,
                 worker_local_queue_depth: 2,
                 cpu_time_nanos: 0,
             }, // 11 bytes
         ];
 
-        writer.write_batch(&events).unwrap();
+        for e in &events {
+            writer.write_event(e).unwrap();
+        }
         writer.flush().unwrap();
 
         let metadata = std::fs::metadata(&path).unwrap();
-        assert_eq!(metadata.len(), (format::HEADER_SIZE + 13 + 11) as u64); // 12 + 13 + 11 = 36
+        assert_eq!(metadata.len(), (format::HEADER_SIZE + 11 + 11) as u64);
     }
 
     #[test]
@@ -627,7 +641,9 @@ mod tests {
         }
         writer.seal().unwrap();
 
-        for i in 0..5 {
+        // With rotate-after-overflow, each file gets 2 events (1 fits + 1 overflows).
+        // 5 events → 3 files (2+2+1).
+        for i in 0..3 {
             let file = rotating_file(&base, i);
             assert!(
                 std::path::Path::new(&file).exists(),
@@ -647,11 +663,12 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, 100000).unwrap();
 
         let events: Vec<_> = (0..3).map(|_| park_event()).collect();
-        writer.write_batch(&events).unwrap();
+        writer.write_atomic(&events).unwrap();
         writer.seal().unwrap();
 
-        // All 3 events should be readable across the rotated files
-        let total: usize = (0..3)
+        // All 3 events should be readable across the rotated files.
+        // With rotate-after-overflow: file 0 gets 2 events, file 1 gets 1.
+        let total: usize = (0..2)
             .map(|i| read_trace_events(&rotating_file(&base, i)).len())
             .sum();
         assert_eq!(total, 3);
@@ -663,6 +680,9 @@ mod tests {
         let base = dir.path().join("trace");
         let event_size = 11u64;
         let header = format::HEADER_SIZE as u64;
+        // With rotate-after-overflow, the file that exceeds the limit keeps
+        // the overflowing event. So header + 1 event = exactly at limit,
+        // the 2nd event overflows and stays, then rotation happens.
         let max_file_size = header + event_size;
         let mut writer = RotatingWriter::new(&base, max_file_size, 100000).unwrap();
 
@@ -671,11 +691,13 @@ mod tests {
         }
         writer.seal().unwrap();
 
-        // Each rotated file must be a self-contained, readable trace
-        for i in 0..3 {
-            let events = read_trace_events(&rotating_file(&base, i));
-            assert_eq!(events.len(), 1, "file {} should have exactly 1 event", i);
-        }
+        // Each rotated file must be a self-contained, readable trace.
+        // With rotate-after-overflow, first file gets 2 events (1 fits + 1 overflows),
+        // second file gets 1 event.
+        let total: usize = (0..2)
+            .map(|i| read_trace_events(&rotating_file(&base, i)).len())
+            .sum();
+        assert_eq!(total, 3);
     }
 
     #[test]
@@ -703,49 +725,43 @@ mod tests {
         let max_file_size = header + 15;
         let mut writer = RotatingWriter::new(&base, max_file_size, 100000).unwrap();
 
+        // WorkerPark = 11 bytes, WorkerUnpark = 15 bytes
         let events = [
-            TelemetryEvent::WorkerPark {
+            RawEvent::WorkerPark {
                 timestamp_nanos: 1000,
                 worker_id: 0,
                 worker_local_queue_depth: 2,
                 cpu_time_nanos: 0,
-            }, // 11 bytes
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1000,
-                worker_id: 0,
-                worker_local_queue_depth: 2,
-                task_id: UNKNOWN_TASK_ID,
-                spawn_loc_id: UNKNOWN_SPAWN_LOCATION_ID,
-            }, // 13 bytes
-            TelemetryEvent::WorkerUnpark {
-                timestamp_nanos: 1000,
+            },
+            RawEvent::WorkerPark {
+                timestamp_nanos: 2000,
+                worker_id: 1,
+                worker_local_queue_depth: 0,
+                cpu_time_nanos: 0,
+            },
+            RawEvent::WorkerUnpark {
+                timestamp_nanos: 3000,
                 worker_id: 0,
                 worker_local_queue_depth: 2,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 0,
-            }, // 15 bytes
+            },
         ];
         for e in &events {
             writer.write_event(e).unwrap();
         }
         writer.seal().unwrap();
 
-        // All events should be readable, one per file
-        for i in 0..3 {
-            let read = read_trace_events(&rotating_file(&base, i));
-            assert_eq!(read.len(), 1, "file {} should have 1 event", i);
+        // All events should be readable across files.
+        // With rotate-after-overflow, files can slightly exceed max_file_size.
+        let mut total = 0;
+        for i in 0..10 {
+            let f = rotating_file(&base, i);
+            if std::path::Path::new(&f).exists() {
+                total += read_trace_events(&f).len();
+            }
         }
-        // No file should exceed max_file_size
-        for i in 0..3 {
-            let size = std::fs::metadata(rotating_file(&base, i)).unwrap().len();
-            assert!(
-                size <= max_file_size,
-                "file {} is {} > max {}",
-                i,
-                size,
-                max_file_size
-            );
-        }
+        assert_eq!(total, 3);
     }
 
     #[test]
@@ -789,12 +805,11 @@ mod tests {
         }
         writer.seal().unwrap();
 
-        // Both events readable, no file exceeds max_file_size
+        // Both events readable. With rotate-after-overflow, the first event
+        // fits exactly (no overflow), so the second event overflows and stays
+        // in the same file, then rotation happens.
         let e0 = read_trace_events(&rotating_file(&base, 0));
-        let e1 = read_trace_events(&rotating_file(&base, 1));
-        assert_eq!(e0.len() + e1.len(), 2);
-        assert!(std::fs::metadata(rotating_file(&base, 0)).unwrap().len() <= max_file_size);
-        assert!(std::fs::metadata(rotating_file(&base, 1)).unwrap().len() <= max_file_size);
+        assert_eq!(e0.len(), 2);
     }
 
     #[test]
@@ -921,27 +936,33 @@ mod tests {
             .set_segment_metadata(vec![("k".into(), "v".into())])
             .unwrap();
 
-        // Write 3 events → should produce 3 files (1 event each)
+        // Write 3 events
         for _ in 0..3 {
             writer.write_event(&park_event()).unwrap();
         }
         writer.flush().unwrap();
         writer.seal().unwrap();
 
-        // Check each file has SegmentMetadata as first event
-        for i in 0..3 {
-            let path = rotating_file(&base, i);
-            let mut reader = TraceReader::new(&path).unwrap();
+        // Check each file has SegmentMetadata
+        let mut files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
+            .collect();
+        files.sort();
+        assert!(files.len() >= 2, "expected at least 2 files from rotation");
+
+        for file in &files {
+            let path = file.to_str().unwrap();
+            let mut reader = TraceReader::new(path).unwrap();
             reader.read_header().unwrap();
-            let events = reader.read_all().unwrap();
-            assert!(
-                !events.is_empty(),
-                "file {i} should have at least one event",
-            );
+            let _events = reader.read_all().unwrap();
             assert_eq!(
                 reader.segment_metadata,
                 vec![("k".to_string(), "v".to_string())],
-                "file {i}: expected SegmentMetadata"
+                "{}: expected SegmentMetadata",
+                path
             );
         }
     }

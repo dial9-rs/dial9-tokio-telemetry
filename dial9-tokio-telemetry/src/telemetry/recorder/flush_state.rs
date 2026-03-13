@@ -5,18 +5,18 @@ use std::collections::{HashMap, HashSet};
 use std::panic::Location;
 
 /// Flush-thread state for interning spawn locations and tracking per-file emissions.
-pub(super) struct FlushState {
+pub(crate) struct FlushState {
     /// Location pointer (as usize) → SpawnLocationId. Only touched by flush thread.
     intern_map: HashMap<usize, SpawnLocationId>,
     /// SpawnLocationId → location string.
     intern_strings: Vec<String>,
     /// Which SpawnLocationIds have been emitted as SpawnLocationDef in the current file.
-    pub(super) emitted_this_file: HashSet<SpawnLocationId>,
+    emitted_this_file: HashSet<SpawnLocationId>,
     next_id: u16,
 }
 
 impl FlushState {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let intern_strings = vec!["<unknown>".to_string()];
         Self {
             intern_map: HashMap::new(),
@@ -27,7 +27,7 @@ impl FlushState {
     }
 
     /// Intern a location, returning its SpawnLocationId.
-    pub(super) fn intern(&mut self, location: &'static Location<'static>) -> SpawnLocationId {
+    pub(crate) fn intern(&mut self, location: &'static Location<'static>) -> SpawnLocationId {
         let ptr = location as *const Location<'static> as usize;
         if let Some(&id) = self.intern_map.get(&ptr) {
             return id;
@@ -45,7 +45,7 @@ impl FlushState {
     }
 
     /// If this id hasn't been emitted in the current file, push its def into `defs`.
-    pub(super) fn collect_def(
+    pub(crate) fn collect_def(
         &mut self,
         id: SpawnLocationId,
         defs: &mut SmallVec<[TelemetryEvent; 3]>,
@@ -57,7 +57,7 @@ impl FlushState {
     }
 
     /// Resolve a RawEvent into a SmallVec of wire events: defs first, then the event itself.
-    pub(super) fn resolve(&mut self, raw: RawEvent) -> SmallVec<[TelemetryEvent; 3]> {
+    pub(crate) fn resolve(&mut self, raw: &RawEvent) -> SmallVec<[TelemetryEvent; 3]> {
         let mut events = SmallVec::new();
         match raw {
             RawEvent::TaskSpawn {
@@ -68,8 +68,8 @@ impl FlushState {
                 let spawn_loc_id = self.intern(location);
                 self.collect_def(spawn_loc_id, &mut events);
                 events.push(TelemetryEvent::TaskSpawn {
-                    timestamp_nanos,
-                    task_id,
+                    timestamp_nanos: *timestamp_nanos,
+                    task_id: *task_id,
                     spawn_loc_id,
                 });
             }
@@ -78,8 +78,8 @@ impl FlushState {
                 task_id,
             } => {
                 events.push(TelemetryEvent::TaskTerminate {
-                    timestamp_nanos,
-                    task_id,
+                    timestamp_nanos: *timestamp_nanos,
+                    task_id: *task_id,
                 });
             }
             RawEvent::PollStart {
@@ -92,10 +92,10 @@ impl FlushState {
                 let spawn_loc_id = self.intern(location);
                 self.collect_def(spawn_loc_id, &mut events);
                 events.push(TelemetryEvent::PollStart {
-                    timestamp_nanos,
-                    worker_id,
-                    worker_local_queue_depth,
-                    task_id,
+                    timestamp_nanos: *timestamp_nanos,
+                    worker_id: *worker_id,
+                    worker_local_queue_depth: *worker_local_queue_depth,
+                    task_id: *task_id,
                     spawn_loc_id,
                 });
             }
@@ -104,8 +104,8 @@ impl FlushState {
                 worker_id,
             } => {
                 events.push(TelemetryEvent::PollEnd {
-                    timestamp_nanos,
-                    worker_id,
+                    timestamp_nanos: *timestamp_nanos,
+                    worker_id: *worker_id,
                 });
             }
             RawEvent::WorkerPark {
@@ -115,10 +115,10 @@ impl FlushState {
                 cpu_time_nanos,
             } => {
                 events.push(TelemetryEvent::WorkerPark {
-                    timestamp_nanos,
-                    worker_id,
-                    worker_local_queue_depth,
-                    cpu_time_nanos,
+                    timestamp_nanos: *timestamp_nanos,
+                    worker_id: *worker_id,
+                    worker_local_queue_depth: *worker_local_queue_depth,
+                    cpu_time_nanos: *cpu_time_nanos,
                 });
             }
             RawEvent::WorkerUnpark {
@@ -129,11 +129,11 @@ impl FlushState {
                 sched_wait_delta_nanos,
             } => {
                 events.push(TelemetryEvent::WorkerUnpark {
-                    timestamp_nanos,
-                    worker_id,
-                    worker_local_queue_depth,
-                    cpu_time_nanos,
-                    sched_wait_delta_nanos,
+                    timestamp_nanos: *timestamp_nanos,
+                    worker_id: *worker_id,
+                    worker_local_queue_depth: *worker_local_queue_depth,
+                    cpu_time_nanos: *cpu_time_nanos,
+                    sched_wait_delta_nanos: *sched_wait_delta_nanos,
                 });
             }
             RawEvent::QueueSample {
@@ -141,8 +141,8 @@ impl FlushState {
                 global_queue_depth,
             } => {
                 events.push(TelemetryEvent::QueueSample {
-                    timestamp_nanos,
-                    global_queue_depth,
+                    timestamp_nanos: *timestamp_nanos,
+                    global_queue_depth: *global_queue_depth,
                 });
             }
             RawEvent::WakeEvent {
@@ -152,10 +152,32 @@ impl FlushState {
                 target_worker,
             } => {
                 events.push(TelemetryEvent::WakeEvent {
-                    timestamp_nanos,
-                    waker_task_id,
-                    woken_task_id,
-                    target_worker,
+                    timestamp_nanos: *timestamp_nanos,
+                    waker_task_id: *waker_task_id,
+                    woken_task_id: *woken_task_id,
+                    target_worker: *target_worker,
+                });
+            }
+            RawEvent::CpuSample(data) => {
+                events.push(TelemetryEvent::CpuSample {
+                    timestamp_nanos: data.timestamp_nanos,
+                    worker_id: data.worker_id,
+                    tid: data.tid,
+                    source: data.source,
+                    callchain: data.callchain.clone(),
+                });
+            }
+            RawEvent::CallframeDef(data) => {
+                events.push(TelemetryEvent::CallframeDef {
+                    address: data.address,
+                    symbol: data.symbol.clone(),
+                    location: data.location.clone(),
+                });
+            }
+            RawEvent::ThreadNameDef(data) => {
+                events.push(TelemetryEvent::ThreadNameDef {
+                    tid: data.tid,
+                    name: data.name.clone(),
                 });
             }
         }
@@ -163,7 +185,7 @@ impl FlushState {
     }
 
     /// Called on file rotation — next reference to any id will re-emit its def.
-    pub(super) fn on_rotate(&mut self) {
+    pub(crate) fn on_rotate(&mut self) {
         self.emitted_this_file.clear();
     }
 }

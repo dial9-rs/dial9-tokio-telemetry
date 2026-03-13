@@ -1,6 +1,6 @@
 mod cpu_flush_state;
 mod event_writer;
-mod flush_state;
+pub(crate) mod flush_state;
 mod shared_state;
 
 pub(crate) use shared_state::SharedState;
@@ -13,7 +13,7 @@ use cpu_flush_state::CpuFlushState;
 use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::task_metadata::TaskId;
-use crate::telemetry::writer::{TraceWriter, WriteAtomicResult};
+use crate::telemetry::writer::TraceWriter;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -43,7 +43,8 @@ impl TelemetryRecorder {
 
         for batch in self.shared.collector.drain() {
             for raw in batch {
-                if let Ok(WriteAtomicResult::Rotated) = self.event_writer.write_raw_event(raw) {
+                if let Err(e) = self.event_writer.write_raw_event(raw) {
+                    tracing::warn!("failed to write trace event: {e}");
                     self.shared.enabled.store(false, Ordering::Relaxed);
                     return;
                 }
@@ -612,9 +613,15 @@ mod tests {
         let mut defs = SmallVec::new();
         fs.collect_def(id, &mut defs);
         assert_eq!(defs.len(), 1);
-        assert!(fs.emitted_this_file.contains(&id));
+        // Second collect_def should not emit again
+        let mut defs2 = SmallVec::new();
+        fs.collect_def(id, &mut defs2);
+        assert_eq!(defs2.len(), 0);
+        // After rotation, should re-emit
         fs.on_rotate();
-        assert!(!fs.emitted_this_file.contains(&id));
+        let mut defs3 = SmallVec::new();
+        fs.collect_def(id, &mut defs3);
+        assert_eq!(defs3.len(), 1);
     }
 
     #[test]
@@ -715,7 +722,9 @@ mod tests {
     mod rotation_proptest {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
-        use crate::telemetry::events::{CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER};
+        use crate::telemetry::events::{
+            CpuSampleData, CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER,
+        };
         use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
         use crate::telemetry::writer::RotatingWriter;
         use cpu_flush_state::CpuFlushState;
@@ -788,7 +797,7 @@ mod tests {
                     callchain,
                 } = op
                 {
-                    let event = TelemetryEvent::CpuSample {
+                    let data = CpuSampleData {
                         timestamp_nanos: *timestamp,
                         worker_id: *worker_id,
                         tid: *tid,
@@ -796,7 +805,7 @@ mod tests {
                         callchain: callchain.clone(),
                     };
                     *timestamp += 1;
-                    ew.write_cpu_event(&event);
+                    ew.write_cpu_event(&data);
                 }
             }
 
@@ -813,15 +822,8 @@ mod tests {
                     };
                     *timestamp += 1;
 
-                    match ew.write_raw_event(raw).unwrap() {
-                        WriteAtomicResult::Written => {
-                            *expected_raw += 1;
-                        }
-                        WriteAtomicResult::OversizedBatch => {}
-                        WriteAtomicResult::Rotated => {
-                            panic!("double rotation on raw event retry");
-                        }
-                    }
+                    ew.write_raw_event(raw).unwrap();
+                    *expected_raw += 1;
                 }
             }
         }

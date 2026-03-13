@@ -230,7 +230,7 @@ impl TelemetryEvent {
 /// Raw event emitted by worker threads into thread-local buffers.
 /// Carries rich data (including `&'static Location`) with no locking.
 /// Converted to wire format by the flush thread.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum RawEvent {
     PollStart {
         timestamp_nanos: u64,
@@ -275,6 +275,38 @@ pub enum RawEvent {
         woken_task_id: crate::telemetry::task_metadata::TaskId,
         target_worker: u8,
     },
+    /// A CPU stack trace sample from perf_event, attributed to a worker thread.
+    CpuSample(Box<CpuSampleData>),
+    /// Definition of a callframe symbol: maps an address to its resolved name.
+    CallframeDef(Box<CallframeDefData>),
+    /// Maps an OS thread ID to its name.
+    ThreadNameDef(Box<ThreadNameDefData>),
+}
+
+/// Data for a CPU stack trace sample. Boxed inside [`RawEvent`] to keep the
+/// enum small for the common hot-path variants.
+#[derive(Debug, Clone)]
+pub struct CpuSampleData {
+    pub timestamp_nanos: u64,
+    pub worker_id: usize,
+    pub tid: u32,
+    pub source: CpuSampleSource,
+    pub callchain: Vec<u64>,
+}
+
+/// Data for a callframe symbol definition. Boxed inside [`RawEvent`].
+#[derive(Debug, Clone)]
+pub struct CallframeDefData {
+    pub address: u64,
+    pub symbol: String,
+    pub location: Option<String>,
+}
+
+/// Data for a thread name definition. Boxed inside [`RawEvent`].
+#[derive(Debug, Clone)]
+pub struct ThreadNameDefData {
+    pub tid: u32,
+    pub name: String,
 }
 
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.
