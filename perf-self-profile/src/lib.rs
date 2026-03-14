@@ -40,6 +40,7 @@
 mod ring_buffer;
 mod sampler;
 mod symbolize;
+pub mod tracepoint;
 
 pub use sampler::{EventSource, PerfSampler, Sample, SamplerConfig};
 pub use symbolize::resolve_symbol;

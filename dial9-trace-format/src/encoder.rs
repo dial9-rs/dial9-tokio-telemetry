@@ -5,17 +5,24 @@ use crate::codec::{self, PoolEntry, SymbolEntry, WireTypeId};
 use crate::schema::{SchemaEntry, SchemaRegistry};
 use crate::types::{EncodeState, EventEncoder};
 use std::any::TypeId;
+use std::collections::HashMap;
 use std::io::{self, Write};
+
+/// Key for looking up a previously registered schema.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum SchemaKey {
+    /// Keyed by Rust `TypeId` (compile-time types via `register_schema_for`).
+    Static(TypeId),
+    /// Keyed by name string (runtime-defined types via `register_dynamic_schema`).
+    Dynamic(String),
+}
 
 pub struct Encoder<W: Write = Vec<u8>> {
     state: EncodeState<W>,
     registry: SchemaRegistry,
-    string_pool: std::collections::HashMap<String, u32>,
+    string_pool: HashMap<String, u32>,
     next_pool_id: u32,
-    // Linear scan is faster than HashMap for the typical case (< 20 event types)
-    // due to cache locality and no hashing overhead.
-    // TODO: consider auto-switching to a HashMap when type_ids.len() exceeds a threshold.
-    type_ids: Vec<(TypeId, WireTypeId)>,
+    schema_ids: HashMap<SchemaKey, WireTypeId>,
 }
 
 impl Default for Encoder<Vec<u8>> {
@@ -31,9 +38,9 @@ impl Encoder<Vec<u8>> {
         Self {
             state: EncodeState::new(buf),
             registry: SchemaRegistry::new(),
-            string_pool: std::collections::HashMap::new(),
+            string_pool: HashMap::new(),
             next_pool_id: 0,
-            type_ids: Vec::new(),
+            schema_ids: HashMap::new(),
         }
     }
 
@@ -51,9 +58,9 @@ impl<W: Write> Encoder<W> {
         Ok(Self {
             state: EncodeState::new(writer),
             registry: SchemaRegistry::new(),
-            string_pool: std::collections::HashMap::new(),
+            string_pool: HashMap::new(),
             next_pool_id: 0,
-            type_ids: Vec::new(),
+            schema_ids: HashMap::new(),
         })
     }
 
@@ -62,21 +69,88 @@ impl<W: Write> Encoder<W> {
         self.state.writer
     }
 
-    fn lookup_or_register<T: TraceEvent + 'static>(&mut self) -> io::Result<WireTypeId> {
-        let rust_id = TypeId::of::<T>();
-        for &(tid, wire_id) in &self.type_ids {
-            if tid == rust_id {
+    /// Register a schema under a given key. Idempotent if the schema matches;
+    /// errors if the same key was already registered with a different schema.
+    fn register_schema_impl(
+        &mut self,
+        key: SchemaKey,
+        entry: SchemaEntry,
+    ) -> io::Result<WireTypeId> {
+        if let Some(&wire_id) = self.schema_ids.get(&key) {
+            let existing = self.registry.get(wire_id).unwrap();
+            if *existing == entry {
                 return Ok(wire_id);
             }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "schema already registered with different definition: {}",
+                    entry.name
+                ),
+            ));
         }
         let id = self.registry.next_type_id();
-        let entry = T::schema_entry();
         codec::encode_schema(id, &entry, &mut self.state.writer)?;
         self.registry
             .register(id, entry)
-            .expect("auto-register failed");
-        self.type_ids.push((rust_id, id));
+            .expect("schema registration failed");
+        self.schema_ids.insert(key, id);
         Ok(id)
+    }
+
+    /// Write field values for an event with the given wire type ID.
+    fn write_event_impl(
+        &mut self,
+        type_id: WireTypeId,
+        values: &[crate::types::FieldValue],
+    ) -> io::Result<()> {
+        use crate::types::FieldValue;
+
+        let schema = self.registry.get(type_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown type_id: {type_id:?}"),
+            )
+        })?;
+        let has_timestamp = schema.has_timestamp;
+        let expected_fields = schema.fields.len();
+
+        let (ts_delta, field_values) = if has_timestamp {
+            let ts_ns = match values.first() {
+                Some(FieldValue::Varint(ns)) => *ns,
+                _ => {
+                    panic!(
+                        "has_timestamp schema requires first value to be FieldValue::Varint(timestamp_ns)"
+                    )
+                }
+            };
+            let delta = self.state.encode_timestamp_delta(ts_ns)?;
+            (Some(delta), &values[1..])
+        } else {
+            (None, values)
+        };
+
+        assert_eq!(
+            field_values.len(),
+            expected_fields,
+            "value count does not match schema field count for type_id {type_id:?}"
+        );
+
+        self.state.writer.write_all(&[codec::TAG_EVENT])?;
+        self.state.writer.write_all(&type_id.0.to_le_bytes())?;
+        if let Some(delta) = ts_delta {
+            codec::encode_u24_le(delta, &mut self.state.writer)?;
+        }
+        let mut enc = EventEncoder::new(&mut self.state);
+        for v in field_values {
+            enc.write_field_value(v)?;
+        }
+        Ok(())
+    }
+
+    fn lookup_or_register<T: TraceEvent + 'static>(&mut self) -> io::Result<WireTypeId> {
+        let key = SchemaKey::Static(TypeId::of::<T>());
+        self.register_schema_impl(key, T::schema_entry())
     }
 
     /// Register a schema for a marker type `T`. The encoder assigns the wire type_id.
@@ -101,35 +175,13 @@ impl<W: Write> Encoder<W> {
         has_timestamp: bool,
         fields: Vec<crate::schema::FieldDef>,
     ) -> io::Result<WireTypeId> {
-        let rust_id = TypeId::of::<T>();
-        // If already registered, check idempotency
-        if let Some(&(_, wire_id)) = self.type_ids.iter().find(|(tid, _)| *tid == rust_id) {
-            let existing = self.registry.get(wire_id).unwrap();
-            let new_entry = SchemaEntry {
-                name: name.to_string(),
-                has_timestamp,
-                fields,
-            };
-            if *existing == new_entry {
-                return Ok(wire_id);
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("type already registered with different schema: {name}"),
-            ));
-        }
-        let id = self.registry.next_type_id();
+        let key = SchemaKey::Static(TypeId::of::<T>());
         let entry = SchemaEntry {
             name: name.to_string(),
             has_timestamp,
             fields,
         };
-        codec::encode_schema(id, &entry, &mut self.state.writer)?;
-        self.registry
-            .register(id, entry)
-            .expect("schema registration failed");
-        self.type_ids.push((rust_id, id));
-        Ok(id)
+        self.register_schema_impl(key, entry)
     }
 
     /// Write a derived TraceEvent. Auto-registers the schema on first call for this type.
@@ -158,46 +210,77 @@ impl<W: Write> Encoder<W> {
         &mut self,
         values: &[crate::types::FieldValue],
     ) -> io::Result<()> {
-        use crate::types::FieldValue;
+        let key = SchemaKey::Static(TypeId::of::<T>());
+        let tid = *self
+            .schema_ids
+            .get(&key)
+            .expect("type not registered; call register_schema_for first");
+        self.write_event_impl(tid, values)
+    }
 
-        let rust_id = TypeId::of::<T>();
-        let tid = self
-            .type_ids
-            .iter()
-            .find(|(id, _)| *id == rust_id)
-            .expect("type not registered; call register_schema_for first")
-            .1;
-        let schema = self.registry.get(tid).unwrap();
-        let has_timestamp = schema.has_timestamp;
-
-        let (ts_delta, field_values) = if has_timestamp {
-            let ts_ns = match values.first() {
-                Some(FieldValue::Varint(ns)) => *ns,
-                _ => {
-                    panic!(
-                        "has_timestamp schema requires first value to be FieldValue::Varint(timestamp_ns)"
-                    )
-                }
-            };
-            let delta = self.state.encode_timestamp_delta(ts_ns)?;
-            (Some(delta), &values[1..])
-        } else {
-            (None, values)
+    /// Register a schema by name without requiring a compile-time Rust type.
+    /// Returns the assigned [`WireTypeId`].
+    ///
+    /// All dynamic schemas have timestamps. The timestamp is passed as the first
+    /// element when writing events via [`write_dynamic_event`](Self::write_dynamic_event).
+    ///
+    /// Idempotent: re-registering the same name with the same fields returns the
+    /// existing ID. Returns an error if the name was already registered with a
+    /// different schema.
+    pub fn register_dynamic_schema(
+        &mut self,
+        name: &str,
+        fields: Vec<crate::schema::FieldDef>,
+    ) -> io::Result<WireTypeId> {
+        let key = SchemaKey::Dynamic(name.to_string());
+        let entry = SchemaEntry {
+            name: name.to_string(),
+            has_timestamp: true,
+            fields,
         };
+        self.register_schema_impl(key, entry)
+    }
 
-        assert_eq!(
-            field_values.len(),
-            schema.fields.len(),
-            "value count does not match schema field count for type_id {tid:?}"
-        );
+    /// Write an event for a dynamically registered schema (see
+    /// [`register_dynamic_schema`](Self::register_dynamic_schema)).
+    ///
+    /// `timestamp_ns` is encoded in the event header. `values` contains the
+    /// field values (must match the schema's field count).
+    pub fn write_dynamic_event(
+        &mut self,
+        type_id: WireTypeId,
+        timestamp_ns: u64,
+        values: &[crate::types::FieldValue],
+    ) -> io::Result<()> {
+        let expected_fields = self
+            .registry
+            .get(type_id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown dynamic type_id: {type_id:?}"),
+                )
+            })?
+            .fields
+            .len();
 
-        self.state.writer.write_all(&[codec::TAG_EVENT])?;
-        self.state.writer.write_all(&tid.0.to_le_bytes())?;
-        if let Some(delta) = ts_delta {
-            codec::encode_u24_le(delta, &mut self.state.writer)?;
+        if values.len() != expected_fields {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "value count ({}) does not match schema field count ({}) for type_id {type_id:?}",
+                    values.len(),
+                    expected_fields,
+                ),
+            ));
         }
+
+        let ts_delta = self.state.encode_timestamp_delta(timestamp_ns)?;
+        self.state.writer.write_all(&[codec::TAG_EVENT])?;
+        self.state.writer.write_all(&type_id.0.to_le_bytes())?;
+        codec::encode_u24_le(ts_delta, &mut self.state.writer)?;
         let mut enc = EventEncoder::new(&mut self.state);
-        for v in field_values {
+        for v in values {
             enc.write_field_value(v)?;
         }
         Ok(())
@@ -403,6 +486,114 @@ mod tests {
         // Should at least have the header
         assert!(buf.len() >= 5);
         assert_eq!(&buf[..5], &[0x54, 0x52, 0x43, 0x00, 1]);
+    }
+
+    #[test]
+    fn dynamic_register_and_write() {
+        use crate::decoder::{DecodedFrame, Decoder};
+        use crate::types::FieldValue;
+
+        let mut enc = Encoder::new();
+        let tid = enc
+            .register_dynamic_schema(
+                "MyEvent",
+                vec![
+                    FieldDef {
+                        name: "count".into(),
+                        field_type: FieldType::Varint,
+                    },
+                    FieldDef {
+                        name: "name".into(),
+                        field_type: FieldType::String,
+                    },
+                ],
+            )
+            .unwrap();
+
+        enc.write_dynamic_event(
+            tid,
+            1_000_000,
+            &[FieldValue::Varint(42), FieldValue::String("hello".into())],
+        )
+        .unwrap();
+
+        let bytes = enc.finish();
+        let mut dec = Decoder::new(&bytes).unwrap();
+        let frames = dec.decode_all();
+        let events: Vec<_> = frames
+            .into_iter()
+            .filter_map(|f| match f {
+                DecodedFrame::Event {
+                    timestamp_ns,
+                    values,
+                    ..
+                } => Some((timestamp_ns, values)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, Some(1_000_000));
+        assert_eq!(events[0].1[0], FieldValue::Varint(42));
+        assert_eq!(events[0].1[1], FieldValue::String("hello".into()));
+    }
+
+    #[test]
+    fn dynamic_register_idempotent() {
+        let mut enc = Encoder::new();
+        let fields = vec![FieldDef {
+            name: "v".into(),
+            field_type: FieldType::Varint,
+        }];
+        let id1 = enc
+            .register_dynamic_schema("Ev", fields.clone())
+            .unwrap();
+        let id2 = enc.register_dynamic_schema("Ev", fields).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn dynamic_register_conflict_errors() {
+        let mut enc = Encoder::new();
+        enc.register_dynamic_schema(
+            "Ev",
+            vec![FieldDef {
+                name: "v".into(),
+                field_type: FieldType::Varint,
+            }],
+        )
+        .unwrap();
+        let result = enc.register_dynamic_schema(
+            "Ev",
+            vec![FieldDef {
+                name: "other".into(),
+                field_type: FieldType::Bool,
+            }],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dynamic_write_wrong_field_count_errors() {
+        let mut enc = Encoder::new();
+        let tid = enc
+            .register_dynamic_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        // Pass 2 values for a 1-field schema
+        let result = enc.write_dynamic_event(
+            tid,
+            0,
+            &[
+                crate::types::FieldValue::Varint(1),
+                crate::types::FieldValue::Varint(2),
+            ],
+        );
+        assert!(result.is_err());
     }
 
     /// Verify that the encoder advances the timestamp base after each event,
