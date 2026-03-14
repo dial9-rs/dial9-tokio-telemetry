@@ -13,25 +13,33 @@ fuzz_target!(|data: &[u8]| {
     let n_events = data[0] as usize % 16 + 1;
     let seed = data[1];
 
-    struct Ev;
     let mut enc = Encoder::new();
-    enc.register_schema_for::<Ev>(
-        "FuzzEvent",
-        vec![
-            FieldDef {
-                name: "a".into(),
-                field_type: FieldType::Varint,
-            },
-            FieldDef {
-                name: "b".into(),
-                field_type: FieldType::Varint,
-            },
-        ],
-    );
+    let schema = enc
+        .register_schema(
+            "FuzzEvent",
+            vec![
+                FieldDef {
+                    name: "a".into(),
+                    field_type: FieldType::Varint,
+                },
+                FieldDef {
+                    name: "b".into(),
+                    field_type: FieldType::Varint,
+                },
+            ],
+        )
+        .unwrap();
 
     for i in 0..n_events {
         let val = (seed as u64).wrapping_mul(i as u64 + 1);
-        enc.write_event_for::<Ev>(&[FieldValue::Varint(val), FieldValue::Varint(i as u64)]);
+        let _ = enc.write_event(
+            &schema,
+            &[
+                FieldValue::Varint(i as u64 * 1_000_000),
+                FieldValue::Varint(val),
+                FieldValue::Varint(i as u64),
+            ],
+        );
     }
 
     let bytes = enc.finish();

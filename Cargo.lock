@@ -1392,6 +1392,7 @@ name = "dial9-perf-self-profile"
 version = "0.1.1"
 dependencies = [
  "blazesym",
+ "dial9-trace-format",
  "libc",
  "perf-event-data",
  "perf-event-open-sys2",

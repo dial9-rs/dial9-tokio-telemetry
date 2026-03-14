@@ -12,6 +12,8 @@ use dial9_trace_format::{InternedString, StackFrames, TraceEvent};
 
 #[derive(TraceEvent)]
 struct KitchenSink {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
     a_u8: u8,
     b_u16: u16,
     c_u32: u32,
@@ -27,21 +29,30 @@ struct KitchenSink {
 }
 
 #[derive(TraceEvent)]
-struct Empty {}
+struct Empty {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
+}
 
 #[derive(TraceEvent)]
 struct SingleVarint {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
     v: u64,
 }
 
 #[derive(TraceEvent)]
 struct TwoStrings {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
     a: String,
     b: String,
 }
 
 #[derive(TraceEvent)]
 struct MultiPool {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
     x: InternedString,
     y: InternedString,
     z: InternedString,
@@ -72,6 +83,7 @@ fn kitchen_sink_all_field_types() {
     let interned = enc.intern_string("hello_pool").unwrap();
 
     let ev = KitchenSink {
+        timestamp_ns: 1_000_000,
         a_u8: 255,
         b_u16: 65535,
         c_u32: 0xDEAD_BEEF,
@@ -136,6 +148,7 @@ fn kitchen_sink_zero_and_empty_values() {
     let interned = enc.intern_string("").unwrap();
 
     let ev = KitchenSink {
+        timestamp_ns: 1_000,
         a_u8: 0,
         b_u16: 0,
         c_u32: 0,
@@ -180,8 +193,14 @@ fn kitchen_sink_zero_and_empty_values() {
 #[test]
 fn empty_struct_round_trip() {
     let mut enc = Encoder::new();
-    enc.write(&Empty {}).unwrap();
-    enc.write(&Empty {}).unwrap();
+    enc.write(&Empty {
+        timestamp_ns: 1_000,
+    })
+    .unwrap();
+    enc.write(&Empty {
+        timestamp_ns: 2_000,
+    })
+    .unwrap();
     let data = enc.finish();
 
     let (_, events) = decode_events(&data);
@@ -196,7 +215,11 @@ fn empty_struct_round_trip() {
 fn multi_event_stream_preserves_order() {
     let mut enc = Encoder::new();
     for i in 0..100u64 {
-        enc.write(&SingleVarint { v: i }).unwrap();
+        enc.write(&SingleVarint {
+            timestamp_ns: i * 1_000,
+            v: i,
+        })
+        .unwrap();
     }
     let data = enc.finish();
 
@@ -213,8 +236,13 @@ fn interleaved_event_types() {
     let mut enc = Encoder::new();
     // Alternate between two event types
     for i in 0..20u64 {
-        enc.write(&SingleVarint { v: i }).unwrap();
+        enc.write(&SingleVarint {
+            timestamp_ns: i * 2_000,
+            v: i,
+        })
+        .unwrap();
         enc.write(&TwoStrings {
+            timestamp_ns: i * 2_000 + 1_000,
             a: format!("a{i}"),
             b: format!("b{i}"),
         })
@@ -260,6 +288,7 @@ fn interleaved_string_pools() {
     // Intern strings interleaved with events that reference them
     let id_a = enc.intern_string("alpha").unwrap();
     enc.write(&MultiPool {
+        timestamp_ns: 1_000,
         x: id_a,
         y: id_a,
         z: id_a,
@@ -268,6 +297,7 @@ fn interleaved_string_pools() {
 
     let id_b = enc.intern_string("beta").unwrap();
     enc.write(&MultiPool {
+        timestamp_ns: 2_000,
         x: id_a,
         y: id_b,
         z: id_a,
@@ -276,6 +306,7 @@ fn interleaved_string_pools() {
 
     let id_c = enc.intern_string("gamma").unwrap();
     enc.write(&MultiPool {
+        timestamp_ns: 3_000,
         x: id_c,
         y: id_b,
         z: id_a,
@@ -327,6 +358,7 @@ fn string_pool_deduplication() {
     assert_ne!(id1, id3);
 
     enc.write(&MultiPool {
+        timestamp_ns: 1_000,
         x: id1,
         y: id2,
         z: id3,
@@ -353,6 +385,8 @@ fn string_pool_deduplication() {
 fn stack_frames_edge_cases() {
     #[derive(TraceEvent)]
     struct FrameEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
         frames: StackFrames,
     }
 
@@ -366,9 +400,10 @@ fn stack_frames_edge_cases() {
         vec![0, u64::MAX, 0, u64::MAX],                             // alternating extremes
     ];
 
-    for addrs in &cases {
+    for (idx, addrs) in cases.iter().enumerate() {
         let mut enc = Encoder::new();
         enc.write(&FrameEvent {
+            timestamp_ns: idx as u64 * 1_000,
             frames: StackFrames(addrs.clone()),
         })
         .unwrap();
@@ -394,6 +429,8 @@ fn stack_frames_edge_cases() {
 fn f64_special_values_round_trip() {
     #[derive(TraceEvent)]
     struct Floats {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
         a: f64,
         b: f64,
         c: f64,
@@ -402,6 +439,7 @@ fn f64_special_values_round_trip() {
 
     let mut enc = Encoder::new();
     enc.write(&Floats {
+        timestamp_ns: 1_000,
         a: f64::INFINITY,
         b: f64::NEG_INFINITY,
         c: -0.0,
@@ -431,11 +469,17 @@ fn f64_special_values_round_trip() {
 fn f64_nan_round_trip() {
     #[derive(TraceEvent)]
     struct NanEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
         v: f64,
     }
 
     let mut enc = Encoder::new();
-    enc.write(&NanEvent { v: f64::NAN }).unwrap();
+    enc.write(&NanEvent {
+        timestamp_ns: 1_000,
+        v: f64::NAN,
+    })
+    .unwrap();
     let data = enc.finish();
 
     let mut dec = Decoder::new(&data).unwrap();
@@ -456,6 +500,7 @@ fn f64_nan_round_trip() {
 fn unicode_string_round_trip() {
     let mut enc = Encoder::new();
     enc.write(&TwoStrings {
+        timestamp_ns: 1_000,
         a: "日本語テスト 🎌".to_string(),
         b: "émojis: 🦀🔥💯 and ñ".to_string(),
     })
@@ -481,12 +526,18 @@ fn unicode_string_round_trip() {
 fn large_bytes_field() {
     #[derive(TraceEvent)]
     struct BlobEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
         data: Vec<u8>,
     }
 
     let big = vec![0xABu8; 64 * 1024]; // 64KB
     let mut enc = Encoder::new();
-    enc.write(&BlobEvent { data: big.clone() }).unwrap();
+    enc.write(&BlobEvent {
+        timestamp_ns: 1_000,
+        data: big.clone(),
+    })
+    .unwrap();
     let data = enc.finish();
 
     let mut dec = Decoder::new(&data).unwrap();
@@ -508,6 +559,8 @@ fn large_bytes_field() {
 fn varint_boundary_values() {
     #[derive(TraceEvent)]
     struct Boundaries {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
         a: u8,
         b: u16,
         c: u32,
@@ -517,6 +570,7 @@ fn varint_boundary_values() {
     let mut enc = Encoder::new();
     // LEB128 boundaries: 127/128, 16383/16384
     enc.write(&Boundaries {
+        timestamp_ns: 1_000,
         a: 127,
         b: 128,
         c: 16383,
@@ -524,6 +578,7 @@ fn varint_boundary_values() {
     })
     .unwrap();
     enc.write(&Boundaries {
+        timestamp_ns: 2_000,
         a: u8::MAX,
         b: u16::MAX,
         c: u32::MAX,
@@ -531,6 +586,7 @@ fn varint_boundary_values() {
     })
     .unwrap();
     enc.write(&Boundaries {
+        timestamp_ns: 3_000,
         a: 0,
         b: 0,
         c: 0,
@@ -569,11 +625,14 @@ fn decode_wrong_field_count_returns_none() {
 fn string_map_round_trip() {
     #[derive(TraceEvent)]
     struct MapEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
         tags: Vec<(String, String)>,
     }
 
     let mut enc = Encoder::new();
     enc.write(&MapEvent {
+        timestamp_ns: 1_000,
         tags: vec![
             ("env".into(), "prod".into()),
             ("region".into(), "us-east-1".into()),
@@ -582,9 +641,14 @@ fn string_map_round_trip() {
     })
     .unwrap();
     // Empty map
-    enc.write(&MapEvent { tags: vec![] }).unwrap();
+    enc.write(&MapEvent {
+        timestamp_ns: 2_000,
+        tags: vec![],
+    })
+    .unwrap();
     // Unicode keys/values
     enc.write(&MapEvent {
+        timestamp_ns: 3_000,
         tags: vec![("名前".into(), "テスト".into())],
     })
     .unwrap();
@@ -616,16 +680,21 @@ fn string_map_round_trip() {
 fn many_events_many_types_stress() {
     #[derive(TraceEvent)]
     struct TypeA {
+        #[traceevent(timestamp)]
         ts: u64,
         val: u32,
     }
     #[derive(TraceEvent)]
     struct TypeB {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
         name: String,
         flag: bool,
     }
     #[derive(TraceEvent)]
     struct TypeC {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
         x: f64,
         y: f64,
     }
@@ -642,12 +711,14 @@ fn many_events_many_types_stress() {
                 .unwrap(),
             1 => enc
                 .write(&TypeB {
+                    timestamp_ns: i as u64 * 1000,
                     name: format!("ev{i}"),
                     flag: i % 2 == 0,
                 })
                 .unwrap(),
             2 => enc
                 .write(&TypeC {
+                    timestamp_ns: i as u64 * 1000,
                     x: i as f64 * 0.1,
                     y: -(i as f64),
                 })
@@ -681,7 +752,6 @@ fn many_events_many_types_stress() {
             0 => {
                 assert_eq!(schema_name, a_name);
                 let d = TypeA::decode(vals).unwrap();
-                assert_eq!(d.ts, idx as u64 * 1000);
                 assert_eq!(d.val, idx as u32);
             }
             1 => {
@@ -753,7 +823,11 @@ fn timestamp_backwards_via_derive_write() {
 fn encoder_new_to_with_preallocated_buffer() {
     let buf = Vec::with_capacity(64);
     let mut enc = Encoder::new_to(buf).unwrap();
-    enc.write(&SingleVarint { v: 42 }).unwrap();
+    enc.write(&SingleVarint {
+        timestamp_ns: 1_000,
+        v: 42,
+    })
+    .unwrap();
     let data = enc.into_inner();
 
     let (_, events) = decode_events(&data);
@@ -855,6 +929,7 @@ fn for_each_event_with_derive_types() {
 
 #[derive(TraceEvent)]
 struct SpanEvent {
+    #[traceevent(timestamp)]
     timestamp_ns: u64,
     parent_id: u64,
     name: String,
@@ -869,19 +944,19 @@ fn derive_event_name() {
 #[test]
 fn derive_field_defs() {
     let defs = SpanEvent::field_defs();
-    assert_eq!(defs.len(), 4);
-    assert_eq!(defs[0].name, "timestamp_ns");
+    assert_eq!(defs.len(), 3);
+    assert_eq!(defs[0].name, "parent_id");
     assert_eq!(defs[0].field_type, FieldType::Varint);
-    assert_eq!(defs[1].name, "parent_id");
-    assert_eq!(defs[1].field_type, FieldType::Varint);
-    assert_eq!(defs[2].name, "name");
-    assert_eq!(defs[2].field_type, FieldType::String);
-    assert_eq!(defs[3].name, "duration_ns");
-    assert_eq!(defs[3].field_type, FieldType::Varint);
+    assert_eq!(defs[1].name, "name");
+    assert_eq!(defs[1].field_type, FieldType::String);
+    assert_eq!(defs[2].name, "duration_ns");
+    assert_eq!(defs[2].field_type, FieldType::Varint);
 }
 
 #[derive(TraceEvent)]
 struct SmallTypes {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
     a: u8,
     b: u16,
     c: u32,
