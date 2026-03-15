@@ -91,30 +91,35 @@ Integer fields use fixed-width little-endian encoding (`u8`, `u16`, `u32`) or LE
 
 ### Manual schema registration
 
-For event types whose fields are determined at runtime (e.g., user-defined metrics with dynamic dimensions), register schemas with a marker type:
+For event types whose fields are determined at runtime (e.g., user-defined metrics, kernel tracepoints), register schemas by name:
 
 ```rust
-use dial9_trace_format::encoder::Encoder;
+use dial9_trace_format::encoder::{Encoder, Schema};
 use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
-
-struct CustomMetric; // marker type — one per dynamic schema
 
 let mut enc = Encoder::new();
 
 // Fields determined at runtime (e.g., from a config file)
-let fields = vec![
-    FieldDef { name: "timestamp_ns".into(), field_type: FieldType::Varint },
+let schema = enc.register_schema("CustomMetric", vec![
     FieldDef { name: "name".into(), field_type: FieldType::String },
     FieldDef { name: "value".into(), field_type: FieldType::Varint },
-];
-enc.register_schema_for::<CustomMetric>("CustomMetric", fields);
+]).unwrap();
 
-enc.write_event_for::<CustomMetric>(&[
-    FieldValue::Varint(1_000_000),
-    FieldValue::string("request_count"),
+// First value is always the timestamp (encoded in the event header)
+enc.write_event(&schema, &[
+    FieldValue::Varint(1_000_000),       // timestamp_ns
+    FieldValue::String("request_count".into()),
     FieldValue::Varint(42),
-]);
+]).unwrap();
+
+// Schemas are portable — pass the same handle to a different encoder
+let mut enc2 = Encoder::new();
+enc2.write_event(&schema, &[
+    FieldValue::Varint(2_000_000),
+    FieldValue::String("error_count".into()),
+    FieldValue::Varint(3),
+]).unwrap();
 ```
 
 ### String interning
