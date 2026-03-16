@@ -333,6 +333,7 @@ impl Drop for TelemetryGuard {
 }
 
 pub struct TracedRuntimeBuilder {
+    enabled: bool,
     task_tracking_enabled: bool,
     #[cfg(feature = "cpu-profiling")]
     cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
@@ -344,6 +345,28 @@ pub struct TracedRuntimeBuilder {
 }
 
 impl TracedRuntimeBuilder {
+    /// Set to `false` to build a plain runtime with no telemetry
+    /// installed and a dummy [`TelemetryGuard`]. Defaults to `true`.
+    ///
+    /// Unlike [`TelemetryGuard::enable`]/[`TelemetryGuard::disable`]
+    /// (which toggle recording at runtime), this controls whether
+    /// telemetry hooks and threads are installed at all.
+    ///
+    /// ```no_run
+    /// # use dial9_tokio_telemetry::telemetry::writer::NullWriter;
+    /// # use dial9_tokio_telemetry::telemetry::recorder::TracedRuntime;
+    /// let enabled = std::env::var("ENABLE_DIAL9").is_ok();
+    /// let builder = tokio::runtime::Builder::new_multi_thread();
+    /// let (runtime, guard) = TracedRuntime::builder()
+    ///     .install(enabled)
+    ///     .build_and_start(builder, NullWriter)?;
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn install(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
     pub fn with_task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking_enabled = enabled;
         self
@@ -383,6 +406,26 @@ impl TracedRuntimeBuilder {
         self
     }
 
+    /// Build a plain runtime with a dummy guard.
+    fn build_disabled(
+        mut builder: tokio::runtime::Builder,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        use crate::telemetry::writer::NullWriter;
+        let runtime = builder.build()?;
+        let shared = Arc::new(SharedState::new(Instant::now()));
+        let recorder = Arc::new(Mutex::new(TelemetryRecorder {
+            shared: shared.clone(),
+            event_writer: EventWriter::new(Box::new(NullWriter)),
+        }));
+        let guard = TelemetryGuard {
+            handle: TelemetryHandle { shared, recorder },
+            stop: Arc::new(AtomicBool::new(true)),
+            flush_thread: None,
+            worker: None,
+        };
+        Ok((runtime, guard))
+    }
+
     /// Build the traced runtime. Recording starts **disabled** — call
     /// [`TelemetryGuard::enable`] to begin, or use
     /// [`build_and_start`](Self::build_and_start).
@@ -391,6 +434,9 @@ impl TracedRuntimeBuilder {
         mut builder: tokio::runtime::Builder,
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        if !self.enabled {
+            return Self::build_disabled(builder);
+        }
         let start_instant = Instant::now();
         #[cfg(feature = "cpu-profiling")]
         let start_mono_ns = crate::telemetry::cpu_profile::clock_monotonic_ns();
@@ -520,6 +566,7 @@ pub struct TracedRuntime;
 impl TracedRuntime {
     pub fn builder() -> TracedRuntimeBuilder {
         TracedRuntimeBuilder {
+            enabled: true,
             task_tracking_enabled: false,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
@@ -539,6 +586,7 @@ impl TracedRuntime {
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
+            enabled: true,
             task_tracking_enabled: false,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
@@ -560,6 +608,7 @@ impl TracedRuntime {
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
+            enabled: true,
             task_tracking_enabled: false,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
@@ -584,6 +633,34 @@ mod tests {
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
         let _recorder = TelemetryRecorder::new(NullWriter);
+    }
+
+    #[test]
+    fn build_disabled_produces_working_runtime_with_noop_guard() {
+        let builder = tokio::runtime::Builder::new_multi_thread();
+        let (runtime, guard) = TracedRuntime::builder()
+            .install(false)
+            .build(builder, NullWriter)
+            .unwrap();
+
+        // Guard methods should be safe no-ops
+        guard.enable();
+        guard.disable();
+        let handle = guard.handle();
+        let _start = guard.start_time();
+
+        // Runtime should work normally, including handle.spawn
+        runtime.block_on(async {
+            let result = tokio::spawn(async { 42 }).await.unwrap();
+            assert_eq!(result, 42);
+
+            let traced = handle.spawn(async { 7 }).await.unwrap();
+            assert_eq!(traced, 7);
+        });
+
+        // No flush thread or worker to join
+        assert!(guard.flush_thread.is_none());
+        assert!(guard.worker.is_none());
     }
 
     #[test]

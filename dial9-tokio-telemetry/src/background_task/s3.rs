@@ -13,31 +13,74 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 
+/// Generate a per-process identifier from PID and current timestamp.
+fn default_boot_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{}", std::process::id(), nanos)
+}
+
+/// Metadata about a sealed trace segment, passed to custom key functions.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct SegmentInfo {
+    /// The segment index (e.g. 3 for `trace.3.bin`).
+    pub index: u32,
+    /// Segment creation time as seconds since the Unix epoch.
+    pub epoch_secs: u64,
+}
+
 /// Trait for custom S3 object key generation.
 ///
 /// Implement this to control the S3 key layout. The default key layout is
 /// `{prefix}/{date}/{HHMM}/{service}/{instance}/{epoch}-{index}.bin.gz`.
 pub trait S3KeyFn: Send + Sync {
-    fn object_key(&self, segment: &SealedSegment, metadata: &HashMap<String, String>) -> String;
+    fn object_key(&self, segment: &SegmentInfo) -> String;
 }
 
 impl<F> S3KeyFn for F
 where
-    F: Fn(&SealedSegment, &HashMap<String, String>) -> String + Send + Sync,
+    F: Fn(&SegmentInfo) -> String + Send + Sync,
 {
-    fn object_key(&self, segment: &SealedSegment, metadata: &HashMap<String, String>) -> String {
-        self(segment, metadata)
+    fn object_key(&self, segment: &SegmentInfo) -> String {
+        self(segment)
     }
 }
 
 /// Configuration for S3 uploads.
+///
+/// Only `bucket` and `service_name` are required. The remaining fields have
+/// sensible defaults:
+///
+/// - `instance_path`: system hostname
+/// - `boot_id`: `{pid}-{timestamp_nanos}` (unique per process start)
+/// - `prefix`: none (keys start at the time bucket)
+/// - `region`: auto-detected via `HeadBucket`
+/// - `key_fn`: built-in time-first layout
+///
+/// # Default key layout
+///
+/// ```text
+/// {prefix}/{YYYY-MM-DD}/{HHMM}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz
+/// ```
+///
+/// Override with [`key_fn`](S3ConfigBuilder::key_fn) for a custom layout.
 #[derive(Clone, bon::Builder)]
 #[builder(on(String, into))]
 pub struct S3Config {
     bucket: String,
     service_name: String,
-    #[builder(into)]
+    /// Instance identifier for S3 key paths. Defaults to the system hostname.
+    #[builder(into, default = InstanceIdentity::from_hostname())]
     instance_path: InstanceIdentity,
+    /// Identifies this process lifetime. Stored as S3 object metadata to
+    /// correlate segments from the same application run. A new value each
+    /// time the application restarts lets you group or filter by run.
+    ///
+    /// Defaults to `{pid}-{timestamp_nanos}`.
+    #[builder(default = default_boot_id())]
     boot_id: String,
     /// Optional key prefix. When `None`, keys start at the time bucket.
     prefix: Option<String>,
@@ -69,14 +112,18 @@ impl S3Config {
         segment: &SealedSegment,
         metadata: &HashMap<String, String>,
     ) -> String {
-        if let Some(key_fn) = &self.key_fn {
-            return key_fn.object_key(segment, metadata);
-        }
-
         let epoch_secs: u64 = metadata
             .get("epoch_secs")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+
+        if let Some(key_fn) = &self.key_fn {
+            let info = SegmentInfo {
+                index: segment.index,
+                epoch_secs,
+            };
+            return key_fn.object_key(&info);
+        }
         let date_hour = time_bucket_from_epoch(epoch_secs);
         let ts = epoch_secs.to_string();
 
@@ -330,9 +377,8 @@ mod tests {
             .service_name("svc")
             .instance_path("host")
             .boot_id("bid")
-            .key_fn(|segment: &SealedSegment, meta: &HashMap<String, String>| {
-                let ts = meta.get("epoch_secs").unwrap();
-                format!("custom/{}-{}.bin.gz", ts, segment.index)
+            .key_fn(|segment: &SegmentInfo| {
+                format!("custom/{}-{}.bin.gz", segment.epoch_secs, segment.index)
             })
             .build();
         let segment = make_segment("/tmp/trace.5.bin", 5);
