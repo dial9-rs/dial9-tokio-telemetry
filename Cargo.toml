@@ -17,6 +17,8 @@ version = "0.1.1"
 [workspace.dependencies]
 libc = "0.2"
 dial9-perf-self-profile = { version = "0.1.1", path = "perf-self-profile" }
+dial9-trace-format = { path = "dial9-trace-format" }
+dial9-trace-format-derive = { path = "dial9-trace-format-derive" }
 
 [profile.release]
 debug = 1
