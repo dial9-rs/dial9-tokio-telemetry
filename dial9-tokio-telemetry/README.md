@@ -245,7 +245,7 @@ runtime.block_on(async {
 # fn main() {}
 ```
 
-Objects land at `s3://{bucket}/{prefix}/{YYYY-MM-DD}/{HHMM}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz`. The time bucket is the first key component after the prefix, enabling efficient incident correlation: `aws s3 ls s3://bucket/traces/2026-03-07/2030/` lists all traces from all services during that minute. The key layout can be fully customized via `S3Config::builder().key_fn(...)`.
+By default (customizable via `S3Config::builder().key_fn(...)`), objects land at `s3://{bucket}/{prefix}/{YYYY-MM-DD}/{HHMM}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz`. The time bucket is the first key component after the prefix, enabling efficient incident correlation: `aws s3 ls s3://bucket/traces/2026-03-07/2030/` lists all traces from all services during that minute.
 
 The worker requires `s3:PutObject` and `s3:HeadBucket` permissions.
 
