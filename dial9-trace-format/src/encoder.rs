@@ -62,6 +62,11 @@ impl<W: Write> Encoder<W> {
         self.state.writer
     }
 
+    /// Borrow the inner writer.
+    pub fn as_inner(&self) -> &W {
+        &self.state.writer
+    }
+
     fn lookup_or_register<T: TraceEvent + 'static>(&mut self) -> io::Result<WireTypeId> {
         let rust_id = TypeId::of::<T>();
         for &(tid, wire_id) in &self.type_ids {
@@ -327,7 +332,7 @@ mod tests {
         enc.write_symbol_table(&[SymbolEntry {
             base_addr: 0x1000,
             size: 64,
-            symbol_id: 0,
+            symbol_id: crate::types::InternedString(0),
         }])
         .unwrap();
         let data = enc.finish();

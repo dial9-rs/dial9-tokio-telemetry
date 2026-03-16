@@ -1,4 +1,3 @@
-mod common;
 use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -15,9 +14,6 @@ fn do_sleep() {
 
 #[test]
 fn captures_lock_acquisition_stack() {
-    if common::is_ci() {
-        return;
-    }
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
     let sampler = Arc::new(Mutex::new(
         PerfSampler::new_per_thread(SamplerConfig {
@@ -80,9 +76,6 @@ fn captures_lock_acquisition_stack() {
 
 #[test]
 fn captures_sleep_stack() {
-    if common::is_ci() {
-        return;
-    }
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
     let sampler = Arc::new(Mutex::new(
         PerfSampler::new_per_thread(SamplerConfig {
