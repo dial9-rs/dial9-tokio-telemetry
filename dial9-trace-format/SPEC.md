@@ -38,6 +38,7 @@ Every frame begins with a 1-byte tag:
 | `0x03` | String Pool |
 | `0x04` | Symbol Table |
 | `0x05` | Timestamp Reset |
+| `0x06` | Proc Maps |
 
 Unknown tags **must** cause the decoder to stop (the stream cannot be advanced without knowing the frame size).
 
@@ -146,6 +147,30 @@ Resets the running timestamp base used for packed event timestamps. The encoder 
 Total: **9 bytes**.
 
 After decoding this frame, the decoder sets `timestamp_base_ns = timestamp_ns`. The next event's `timestamp_delta_ns` is relative to this new base.
+
+### Proc Maps Frame (`0x06`)
+
+Captures executable memory mappings from `/proc/self/maps` (or equivalent). Used for deferred symbolization: a background worker or offline tool can resolve raw stack frame addresses to symbol names using these mappings.
+
+Only executable (`r-xp`) mappings with file-backed paths are included.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| tag | u8 | `0x06` |
+| count | u32 | Number of entries |
+| entries | [ProcMapsEntry; count] | Mapping entries (see below) |
+
+Each **ProcMapsEntry**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| start | u64 | Start address of the mapping |
+| end | u64 | End address of the mapping |
+| file_offset | u64 | File offset of the mapping |
+| path_len | u32 | Length of path in bytes |
+| path | [u8; path_len] | UTF-8 file path (e.g. `/usr/bin/foo`) |
+
+Multiple proc maps frames may appear in a stream (e.g. one per segment). A symbolizer should use the mappings that were current when the stack frames were captured.
 
 ## Field Types
 
