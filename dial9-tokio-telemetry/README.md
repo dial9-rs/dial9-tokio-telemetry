@@ -199,7 +199,9 @@ See [TRACE_ANALYSIS_GUIDE.md](/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) fo
 
 ## S3 upload
 
-With the `worker-s3` feature, sealed trace segments are automatically gzip-compressed and uploaded to S3 by a background worker thread. The application process is unaffected — uploads happen asynchronously after segments are sealed.
+With the `worker-s3` feature, sealed trace segments are automatically gzip-compressed and uploaded to S3 by a background worker thread. The application process is unaffected: uploads happen asynchronously after segments are sealed.
+
+Only `bucket` and `service_name` are required. See [`S3Config`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/background_task/s3/struct.S3Config.html) and [`BackgroundTaskConfig`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/background_task/struct.BackgroundTaskConfig.html) for additional options.
 
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
@@ -216,10 +218,7 @@ let writer = RotatingWriter::new(
 
 let s3_config = S3Config::builder()
     .bucket("my-trace-bucket")
-    .prefix("traces")
     .service_name("my-service")
-    .instance_path("us-east-1/i-0abc123")
-    .boot_id("unique-boot-id")
     .build();
 
 let uploader_config = BackgroundTaskConfig::builder()
@@ -246,24 +245,11 @@ runtime.block_on(async {
 # fn main() {}
 ```
 
-Objects land at `s3://{bucket}/{prefix}/{date-time}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz` with metadata headers (`service`, `boot-id`, etc.) for quick inspection via `HeadObject`.
+Objects land at `s3://{bucket}/{prefix}/{YYYY-MM-DD}/{HHMM}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz`. The time bucket is the first key component after the prefix, enabling efficient incident correlation: `aws s3 ls s3://bucket/traces/2026-03-07/2030/` lists all traces from all services during that minute. The key layout can be fully customized via `S3Config::builder().key_fn(...)`.
 
-The `{date-time}` bucket (e.g. `2026-03-07/2030`) uses 1-minute windows and is the first key component after the prefix, enabling efficient incident correlation: `aws s3 ls s3://bucket/traces/2026-03-07/2030/` lists all traces from all services during that window.
+The worker requires `s3:PutObject` and `s3:HeadBucket` permissions.
 
-The worker uses exponential backoff if S3 is unreachable — it never crashes or affects the application. Symbolized files stay on disk in degraded mode and can be uploaded later.
-
-For explicit shutdown control with a timeout:
-
-```rust,no_run
-# use std::time::Duration;
-# use dial9_tokio_telemetry::telemetry::TracedRuntime;
-# fn example(guard: dial9_tokio_telemetry::telemetry::TelemetryGuard) {
-# let rt = tokio::runtime::Runtime::new().unwrap();
-# rt.block_on(async {
-guard.graceful_shutdown(Duration::from_secs(30)).await.expect("worker drained");
-# });
-# }
-```
+The worker uses a circuit breaker with exponential backoff if S3 is unreachable. It never crashes or blocks the application. Segments remain on disk when uploads fail and are retried on the next poll cycle. For explicit shutdown control, use `guard.graceful_shutdown(timeout)` instead of dropping the guard (which seals the final segment but does not wait for the worker to drain).
 
 ## Examples
 
