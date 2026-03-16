@@ -56,7 +56,7 @@ fn full_round_trip() {
         &cpu_id,
         &[
             FieldValue::Varint(1_000_100),
-            FieldValue::PooledString(thread_id.0),
+            FieldValue::PooledString(thread_id),
             FieldValue::StackFrames(frames.clone()),
         ],
     )
@@ -66,7 +66,7 @@ fn full_round_trip() {
     enc.write_symbol_table(&[SymbolEntry {
         base_addr: 0x5555_5555_0000,
         size: 0x2000,
-        symbol_id: sym_name_id.0,
+        symbol_id: sym_name_id,
     }])
     .unwrap();
 
@@ -83,14 +83,8 @@ fn full_round_trip() {
     assert!(matches!(&decoded[0], DecodedFrame::Schema(s) if s.name == "PollStart"));
     assert!(matches!(&decoded[1], DecodedFrame::Schema(s) if s.name == "CpuSample"));
 
-    assert_eq!(
-        dec.string_pool().get(&thread_id.0),
-        Some(&"worker-0".to_string())
-    );
-    assert_eq!(
-        dec.string_pool().get(&sym_name_id.0),
-        Some(&"my_function".to_string())
-    );
+    assert_eq!(dec.string_pool().get(thread_id), Some("worker-0"));
+    assert_eq!(dec.string_pool().get(sym_name_id), Some("my_function"));
 
     // Verify poll event
     if let DecodedFrame::Event { values, .. } = &decoded[3] {
@@ -101,7 +95,7 @@ fn full_round_trip() {
 
     // Verify cpu sample with stack frames
     if let DecodedFrame::Event { values, .. } = &decoded[4] {
-        assert_eq!(values[0], FieldValue::PooledString(thread_id.0));
+        assert_eq!(values[0], FieldValue::PooledString(thread_id));
         assert_eq!(values[1], FieldValue::StackFrames(frames));
     } else {
         panic!("expected event frame");
@@ -111,7 +105,7 @@ fn full_round_trip() {
     if let DecodedFrame::SymbolTable(entries) = &decoded[6] {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].base_addr, 0x5555_5555_0000);
-        assert_eq!(entries[0].symbol_id, sym_name_id.0);
+        assert_eq!(entries[0].symbol_id, sym_name_id);
     } else {
         panic!("expected symbol table frame");
     }
@@ -169,7 +163,7 @@ fn round_trip_all_field_types() {
         FieldValue::Bool(false),
         FieldValue::String("hello".to_string()),
         FieldValue::Bytes(vec![0xDE, 0xAD]),
-        FieldValue::PooledString(pool_id.0),
+        FieldValue::PooledString(pool_id),
         FieldValue::StackFrames(vec![0xAAAA, 0xBBBB, 0xCCCC]),
     ];
     enc.write_event(&tid, &values).unwrap();

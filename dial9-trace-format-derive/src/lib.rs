@@ -41,7 +41,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
         let field_name = field.ident.as_ref().unwrap();
         let ty = &field.ty;
 
-        // Skip the timestamp field in schema/encode/decode — it's in the event header
+        // Skip the timestamp field in schema/encode — it's in the event header
         if timestamp_field_name.as_ref() == Some(field_name) {
             continue;
         }
@@ -81,7 +81,18 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
         quote! {}
     };
 
-    // For the Ref struct, timestamp field is NOT included — it comes from the event header
+    // For the Ref struct, include the timestamp field if present — populated from the decode parameter
+    let ref_timestamp_field = if let Some(ref ts_field) = timestamp_field_name {
+        quote! { pub #ts_field: u64, }
+    } else {
+        quote! {}
+    };
+    let decode_timestamp_init = if let Some(ref ts_field) = timestamp_field_name {
+        quote! { #ts_field: timestamp_ns?, }
+    } else {
+        quote! {}
+    };
+
     let phantom_field =
         if fields.is_empty() || (fields.len() == 1 && timestamp_field_name.is_some()) {
             quote! { _marker: ::std::marker::PhantomData<&'a ()>, }
@@ -98,6 +109,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
     quote! {
         #[derive(Debug, Clone)]
         #vis struct #ref_name<'a> {
+            #ref_timestamp_field
             #(#ref_fields,)*
             #phantom_field
         }
@@ -115,8 +127,9 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
                 #(#encode_tokens)*
                 Ok(())
             }
-            fn decode<'a>(fields: &[::dial9_trace_format::types::FieldValueRef<'a>]) -> Option<Self::Ref<'a>> {
+            fn decode<'a>(timestamp_ns: Option<u64>, fields: &[::dial9_trace_format::types::FieldValueRef<'a>]) -> Option<Self::Ref<'a>> {
                 Some(#ref_name {
+                    #decode_timestamp_init
                     #(#decode_tokens,)*
                     #phantom_init
                 })

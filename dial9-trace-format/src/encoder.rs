@@ -104,6 +104,11 @@ impl<W: Write> Encoder<W> {
         self.state.writer
     }
 
+    /// Borrow the inner writer.
+    pub fn as_inner(&self) -> &W {
+        &self.state.writer
+    }
+
     /// Ensure a schema is registered with this encoder. Returns the wire type
     /// ID for this encoder's output stream.
     ///
@@ -410,7 +415,7 @@ mod tests {
         enc.write_symbol_table(&[SymbolEntry {
             base_addr: 0x1000,
             size: 64,
-            symbol_id: 0,
+            symbol_id: crate::types::InternedString(0),
         }])
         .unwrap();
         let data = enc.finish();

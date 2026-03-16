@@ -82,7 +82,7 @@ fn js_decodes_all_field_types() {
             FieldValue::Bool(true),
             FieldValue::String("world".to_string()),
             FieldValue::Bytes(vec![0xDE, 0xAD]),
-            FieldValue::PooledString(pool_id.0),
+            FieldValue::PooledString(pool_id),
             FieldValue::StackFrames(vec![0x1000, 0x0F00, 0x0E00]),
             FieldValue::Varint(999),
         ],
@@ -92,7 +92,7 @@ fn js_decodes_all_field_types() {
     enc.write_symbol_table(&[SymbolEntry {
         base_addr: 0x1000,
         size: 256,
-        symbol_id: pool_id.0,
+        symbol_id: pool_id,
     }])
     .unwrap();
 
@@ -116,16 +116,14 @@ fn js_decodes_all_field_types() {
     assert_eq!(vals["d_bool"], true);
     assert_eq!(vals["e_string"], "world");
     assert_eq!(vals["f_bytes"], serde_json::json!([0xDE, 0xAD]));
-    assert_eq!(vals["h_pooled"], pool_id.0);
+    assert_eq!(vals["h_pooled"], "hello");
     assert_eq!(vals["i_stack"], serde_json::json!(["4096", "3840", "3584"]));
     assert_eq!(vals["j_varint"], "999");
-
-    assert_eq!(json["stringPool"][pool_id.0.to_string()], "hello");
 
     let sym = &frames[3]["entries"][0];
     assert_eq!(sym["baseAddr"], "4096");
     assert_eq!(sym["size"], 256);
-    assert_eq!(sym["symbolId"], pool_id.0);
+    assert_eq!(sym["symbolName"], "hello");
 }
 
 #[test]

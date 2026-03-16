@@ -2,7 +2,6 @@
 //! TraceEvent::decode() into typed Ref structs, verify every field type,
 //! edge cases, multi-event streams, and interleaved string pools.
 
-use dial9_trace_format::codec::WireTypeId;
 use dial9_trace_format::decoder::{DecodedFrame, DecodedFrameRef, Decoder};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::types::{FieldType, FieldValueRef};
@@ -61,15 +60,17 @@ struct MultiPool {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Decode all ref frames, returning only events as (type_id, values) pairs.
-fn decode_events(data: &[u8]) -> (Decoder<'_>, Vec<(WireTypeId, Vec<FieldValueRef<'_>>)>) {
+fn decode_events(data: &[u8]) -> (Decoder<'_>, Vec<(Option<u64>, Vec<FieldValueRef<'_>>)>) {
     let mut dec = Decoder::new(data).unwrap();
     let mut events = Vec::new();
     for frame in dec.decode_all_ref() {
         if let DecodedFrameRef::Event {
-            type_id, values, ..
+            timestamp_ns,
+            values,
+            ..
         } = frame
         {
-            events.push((type_id, values));
+            events.push((timestamp_ns, values));
         }
     }
     (dec, events)
@@ -105,15 +106,15 @@ fn kitchen_sink_all_field_types() {
 
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all_ref();
-    let event = frames
+    let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { values, .. } => Some(values),
+            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
 
-    let decoded = KitchenSink::decode(event).unwrap();
+    let decoded = KitchenSink::decode(ts, event).unwrap();
 
     assert_eq!(decoded.a_u8, 255);
     assert_eq!(decoded.b_u16, 65535);
@@ -130,16 +131,10 @@ fn kitchen_sink_all_field_types() {
         vec![0x5555_5555_1234, 0x5555_5555_0a00, 0x5555_5555_0800]
     );
     let map_pairs: Vec<_> = decoded.l_map.iter().collect();
-    assert_eq!(
-        map_pairs,
-        vec![(&b"key1"[..], &b"val1"[..]), (&b"key2"[..], &b"val2"[..]),]
-    );
+    assert_eq!(map_pairs, vec![("key1", "val1"), ("key2", "val2"),]);
 
     // Verify pool was resolved
-    assert_eq!(
-        dec.string_pool().get(&interned.0),
-        Some(&"hello_pool".to_string())
-    );
+    assert_eq!(dec.string_pool().get(interned), Some("hello_pool"));
 }
 
 #[test]
@@ -167,15 +162,15 @@ fn kitchen_sink_zero_and_empty_values() {
 
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all_ref();
-    let event = frames
+    let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { values, .. } => Some(values),
+            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
 
-    let decoded = KitchenSink::decode(event).unwrap();
+    let decoded = KitchenSink::decode(ts, event).unwrap();
 
     assert_eq!(decoded.a_u8, 0);
     assert_eq!(decoded.b_u16, 0);
@@ -205,8 +200,8 @@ fn empty_struct_round_trip() {
 
     let (_, events) = decode_events(&data);
     assert_eq!(events.len(), 2);
-    for (_, values) in &events {
-        let decoded = Empty::decode(values).unwrap();
+    for (ts, values) in &events {
+        let decoded = Empty::decode(*ts, values).unwrap();
         let _ = decoded; // just verify it decodes
     }
 }
@@ -225,8 +220,8 @@ fn multi_event_stream_preserves_order() {
 
     let (_, events) = decode_events(&data);
     assert_eq!(events.len(), 100);
-    for (i, (_, values)) in events.iter().enumerate() {
-        let decoded = SingleVarint::decode(values).unwrap();
+    for (i, (ts, values)) in events.iter().enumerate() {
+        let decoded = SingleVarint::decode(*ts, values).unwrap();
         assert_eq!(decoded.v, i as u64);
     }
 }
@@ -256,8 +251,8 @@ fn interleaved_event_types() {
         .iter()
         .filter_map(|f| match f {
             DecodedFrameRef::Event {
-                type_id, values, ..
-            } => Some((*type_id, values)),
+                type_id, timestamp_ns, values, ..
+            } => Some((*type_id, *timestamp_ns, values)),
             _ => None,
         })
         .collect();
@@ -269,16 +264,16 @@ fn interleaved_event_types() {
     assert_ne!(varint_tid, strings_tid);
 
     for i in 0..20 {
-        let (tid, vals) = &events[i * 2];
+        let (tid, ts, vals) = &events[i * 2];
         assert_eq!(*tid, varint_tid);
-        let sv = SingleVarint::decode(vals).unwrap();
+        let sv = SingleVarint::decode(*ts, vals).unwrap();
         assert_eq!(sv.v, i as u64);
 
-        let (tid, vals) = &events[i * 2 + 1];
+        let (tid, ts, vals) = &events[i * 2 + 1];
         assert_eq!(*tid, strings_tid);
-        let ts = TwoStrings::decode(vals).unwrap();
-        assert_eq!(ts.a, format!("a{i}"));
-        assert_eq!(ts.b, format!("b{i}"));
+        let decoded = TwoStrings::decode(*ts, vals).unwrap();
+        assert_eq!(decoded.a, format!("a{i}"));
+        assert_eq!(decoded.b, format!("b{i}"));
     }
 }
 
@@ -320,32 +315,32 @@ fn interleaved_string_pools() {
     let events: Vec<_> = frames
         .iter()
         .filter_map(|f| match f {
-            DecodedFrameRef::Event { values, .. } => Some(values),
+            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .collect();
 
     assert_eq!(events.len(), 3);
 
-    let e0 = MultiPool::decode(events[0]).unwrap();
+    let e0 = MultiPool::decode(events[0].0, events[0].1).unwrap();
     assert_eq!(e0.x, id_a);
     assert_eq!(e0.y, id_a);
     assert_eq!(e0.z, id_a);
 
-    let e1 = MultiPool::decode(events[1]).unwrap();
+    let e1 = MultiPool::decode(events[1].0, events[1].1).unwrap();
     assert_eq!(e1.x, id_a);
     assert_eq!(e1.y, id_b);
     assert_eq!(e1.z, id_a);
 
-    let e2 = MultiPool::decode(events[2]).unwrap();
+    let e2 = MultiPool::decode(events[2].0, events[2].1).unwrap();
     assert_eq!(e2.x, id_c);
     assert_eq!(e2.y, id_b);
     assert_eq!(e2.z, id_a);
 
     // All pool entries resolved
-    assert_eq!(dec.string_pool().get(&id_a.0).unwrap(), "alpha");
-    assert_eq!(dec.string_pool().get(&id_b.0).unwrap(), "beta");
-    assert_eq!(dec.string_pool().get(&id_c.0).unwrap(), "gamma");
+    assert_eq!(dec.string_pool().get(id_a).unwrap(), "alpha");
+    assert_eq!(dec.string_pool().get(id_b).unwrap(), "beta");
+    assert_eq!(dec.string_pool().get(id_c).unwrap(), "gamma");
 }
 
 #[test]
@@ -368,15 +363,15 @@ fn string_pool_deduplication() {
 
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all_ref();
-    let event = frames
+    let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { values, .. } => Some(values),
+            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
 
-    let decoded = MultiPool::decode(event).unwrap();
+    let decoded = MultiPool::decode(ts, event).unwrap();
     assert_eq!(decoded.x, decoded.y); // same pool ID
     assert_ne!(decoded.x, decoded.z);
 }
@@ -411,15 +406,15 @@ fn stack_frames_edge_cases() {
 
         let mut dec = Decoder::new(&data).unwrap();
         let frames = dec.decode_all_ref();
-        let event = frames
+        let (ts, event) = frames
             .iter()
             .find_map(|f| match f {
-                DecodedFrameRef::Event { values, .. } => Some(values),
+                DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
                 _ => None,
             })
             .unwrap();
 
-        let decoded = FrameEvent::decode(event).unwrap();
+        let decoded = FrameEvent::decode(ts, event).unwrap();
         let decoded_addrs: Vec<u64> = decoded.frames.iter().collect();
         assert_eq!(&decoded_addrs, addrs, "failed for input {addrs:?}");
     }
@@ -450,15 +445,15 @@ fn f64_special_values_round_trip() {
 
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all_ref();
-    let event = frames
+    let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { values, .. } => Some(values),
+            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
 
-    let decoded = Floats::decode(event).unwrap();
+    let decoded = Floats::decode(ts, event).unwrap();
     assert_eq!(decoded.a, f64::INFINITY);
     assert_eq!(decoded.b, f64::NEG_INFINITY);
     assert!(decoded.c.is_sign_negative() && decoded.c == 0.0);
@@ -484,15 +479,15 @@ fn f64_nan_round_trip() {
 
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all_ref();
-    let event = frames
+    let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { values, .. } => Some(values),
+            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
 
-    let decoded = NanEvent::decode(event).unwrap();
+    let decoded = NanEvent::decode(ts, event).unwrap();
     assert!(decoded.v.is_nan());
 }
 
@@ -509,15 +504,15 @@ fn unicode_string_round_trip() {
 
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all_ref();
-    let event = frames
+    let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { values, .. } => Some(values),
+            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
 
-    let decoded = TwoStrings::decode(event).unwrap();
+    let decoded = TwoStrings::decode(ts, event).unwrap();
     assert_eq!(decoded.a, "日本語テスト 🎌");
     assert_eq!(decoded.b, "émojis: 🦀🔥💯 and ñ");
 }
@@ -542,15 +537,15 @@ fn large_bytes_field() {
 
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all_ref();
-    let event = frames
+    let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { values, .. } => Some(values),
+            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
 
-    let decoded = BlobEvent::decode(event).unwrap();
+    let decoded = BlobEvent::decode(ts, event).unwrap();
     assert_eq!(decoded.data.len(), 64 * 1024);
     assert!(decoded.data.iter().all(|&b| b == 0xAB));
 }
@@ -598,16 +593,16 @@ fn varint_boundary_values() {
     let (_, events) = decode_events(&data);
     assert_eq!(events.len(), 3);
 
-    let d0 = Boundaries::decode(&events[0].1).unwrap();
+    let d0 = Boundaries::decode(events[0].0, &events[0].1).unwrap();
     assert_eq!((d0.a, d0.b, d0.c, d0.d), (127, 128, 16383, 16384));
 
-    let d1 = Boundaries::decode(&events[1].1).unwrap();
+    let d1 = Boundaries::decode(events[1].0, &events[1].1).unwrap();
     assert_eq!(
         (d1.a, d1.b, d1.c, d1.d),
         (u8::MAX, u16::MAX, u32::MAX, u64::MAX)
     );
 
-    let d2 = Boundaries::decode(&events[2].1).unwrap();
+    let d2 = Boundaries::decode(events[2].0, &events[2].1).unwrap();
     assert_eq!((d2.a, d2.b, d2.c, d2.d), (0, 0, 0, 0));
 }
 
@@ -616,9 +611,9 @@ fn decode_wrong_field_count_returns_none() {
     // Manually construct a FieldValueRef slice that's too short
     let vals: Vec<FieldValueRef<'_>> = vec![FieldValueRef::Varint(1)];
     // TwoStrings expects 2 fields, giving it 1 should fail
-    assert!(TwoStrings::decode(&vals).is_none());
+    assert!(TwoStrings::decode(None, &vals).is_none());
     // Empty slice
-    assert!(SingleVarint::decode(&[]).is_none());
+    assert!(SingleVarint::decode(None, &[]).is_none());
 }
 
 #[test]
@@ -657,23 +652,23 @@ fn string_map_round_trip() {
     let (_, events) = decode_events(&data);
     assert_eq!(events.len(), 3);
 
-    let d0 = MapEvent::decode(&events[0].1).unwrap();
+    let d0 = MapEvent::decode(events[0].0, &events[0].1).unwrap();
     let pairs0: Vec<_> = d0.tags.iter().collect();
     assert_eq!(
         pairs0,
         vec![
-            (&b"env"[..], &b"prod"[..]),
-            (b"region".as_slice(), b"us-east-1".as_slice()),
-            (b"service".as_slice(), b"api-gateway".as_slice()),
+            ("env", "prod"),
+            ("region", "us-east-1"),
+            ("service", "api-gateway"),
         ]
     );
 
-    let d1 = MapEvent::decode(&events[1].1).unwrap();
+    let d1 = MapEvent::decode(events[1].0, &events[1].1).unwrap();
     assert_eq!(d1.tags.count(), 0);
 
-    let d2 = MapEvent::decode(&events[2].1).unwrap();
+    let d2 = MapEvent::decode(events[2].0, &events[2].1).unwrap();
     let pairs2: Vec<_> = d2.tags.iter().collect();
-    assert_eq!(pairs2, vec![("名前".as_bytes(), "テスト".as_bytes())]);
+    assert_eq!(pairs2, vec![("名前", "テスト")]);
 }
 
 #[test]
@@ -734,8 +729,11 @@ fn many_events_many_types_stress() {
         .iter()
         .filter_map(|f| match f {
             DecodedFrameRef::Event {
-                type_id, values, ..
-            } => Some((*type_id, values)),
+                type_id,
+                timestamp_ns,
+                values,
+                ..
+            } => Some((*type_id, *timestamp_ns, values)),
             _ => None,
         })
         .collect();
@@ -746,23 +744,24 @@ fn many_events_many_types_stress() {
     let b_name = TypeB::event_name();
     let c_name = TypeC::event_name();
 
-    for (idx, (tid, vals)) in events.iter().enumerate() {
+    for (idx, (tid, ts, vals)) in events.iter().enumerate() {
         let schema_name = &dec.registry().get(*tid).unwrap().name;
         match idx % 3 {
             0 => {
                 assert_eq!(schema_name, a_name);
-                let d = TypeA::decode(vals).unwrap();
+                let d = TypeA::decode(*ts, vals).unwrap();
+                assert_eq!(d.ts, idx as u64 * 1000);
                 assert_eq!(d.val, idx as u32);
             }
             1 => {
                 assert_eq!(schema_name, b_name);
-                let d = TypeB::decode(vals).unwrap();
+                let d = TypeB::decode(*ts, vals).unwrap();
                 assert_eq!(d.name, format!("ev{idx}"));
                 assert_eq!(d.flag, idx % 2 == 0);
             }
             2 => {
                 assert_eq!(schema_name, c_name);
-                let d = TypeC::decode(vals).unwrap();
+                let d = TypeC::decode(*ts, vals).unwrap();
                 assert!((d.x - idx as f64 * 0.1).abs() < f64::EPSILON);
                 assert!((d.y - -(idx as f64)).abs() < f64::EPSILON);
             }
@@ -832,7 +831,7 @@ fn encoder_new_to_with_preallocated_buffer() {
 
     let (_, events) = decode_events(&data);
     assert_eq!(events.len(), 1);
-    let decoded = SingleVarint::decode(&events[0].1).unwrap();
+    let decoded = SingleVarint::decode(events[0].0, &events[0].1).unwrap();
     assert_eq!(decoded.v, 42);
 }
 
@@ -882,7 +881,8 @@ fn derive_timestamp_round_trip() {
     assert_eq!(events.len(), timestamps.len());
     for (i, (ts, vals)) in events.iter().enumerate() {
         assert_eq!(*ts, Some(timestamps[i]), "timestamp mismatch at event {i}");
-        let decoded = Ev::decode(vals).unwrap();
+        let decoded = Ev::decode(*ts, vals).unwrap();
+        assert_eq!(decoded.timestamp_ns, timestamps[i]);
         assert_eq!(decoded.v, i as u64);
     }
 }
@@ -914,15 +914,69 @@ fn for_each_event_with_derive_types() {
 
     let mut dec = Decoder::new(&bytes).unwrap();
     let mut results = Vec::new();
-    dec.for_each_event(|_type_id, ts, fields| {
-        let decoded = Ev::decode(fields).unwrap();
-        results.push((ts, decoded.worker_id, decoded.name.to_string()));
+    dec.for_each_event(|ev| {
+        let decoded = Ev::decode(ev.timestamp_ns, ev.fields).unwrap();
+        results.push((
+            decoded.timestamp_ns,
+            decoded.worker_id,
+            decoded.name.to_string(),
+        ));
     })
     .unwrap();
 
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0], (Some(1_000), 0, "a".to_string()));
-    assert_eq!(results[1], (Some(2_000), 1, "b".to_string()));
+    assert_eq!(results[0], (1_000, 0, "a".to_string()));
+    assert_eq!(results[1], (2_000, 1, "b".to_string()));
+}
+
+#[test]
+fn for_each_event_resolves_interned_strings() {
+    #[derive(TraceEvent)]
+    struct TaskStart {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+        task_id: u64,
+        spawn_location: InternedString,
+    }
+
+    let mut enc = Encoder::new();
+    let loc_a = enc.intern_string("src/main.rs:42").unwrap();
+    let loc_b = enc.intern_string("src/lib.rs:10").unwrap();
+    enc.write(&TaskStart {
+        timestamp_ns: 1_000,
+        task_id: 1,
+        spawn_location: loc_a,
+    })
+    .unwrap();
+    enc.write(&TaskStart {
+        timestamp_ns: 2_000,
+        task_id: 2,
+        spawn_location: loc_b,
+    })
+    .unwrap();
+    enc.write(&TaskStart {
+        timestamp_ns: 3_000,
+        task_id: 3,
+        spawn_location: loc_a,
+    })
+    .unwrap();
+    let bytes = enc.finish();
+
+    let mut dec = Decoder::new(&bytes).unwrap();
+    let mut results = Vec::new();
+    dec.for_each_event(|ev| {
+        assert_eq!(ev.name, "TaskStart");
+        let decoded = TaskStart::decode(ev.timestamp_ns, ev.fields).unwrap();
+        // Resolve InternedString → &str via the string pool on RawEvent
+        let location = ev.string_pool.get(decoded.spawn_location).unwrap();
+        results.push((decoded.task_id, location.to_string()));
+    })
+    .unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0], (1, "src/main.rs:42".to_string()));
+    assert_eq!(results[1], (2, "src/lib.rs:10".to_string()));
+    assert_eq!(results[2], (3, "src/main.rs:42".to_string()));
 }
 
 // ── Tests moved from derive_test.rs (trait method + field type mapping) ─
