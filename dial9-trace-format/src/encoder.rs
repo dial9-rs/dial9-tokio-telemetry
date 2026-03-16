@@ -271,6 +271,10 @@ impl<W: Write> Encoder<W> {
         codec::encode_symbol_table(entries, &mut self.state.writer)
     }
 
+    pub fn write_proc_maps(&mut self, entries: &[codec::ProcMapsEntry]) -> io::Result<()> {
+        codec::encode_proc_maps(entries, &mut self.state.writer)
+    }
+
     /// Flush the underlying writer.
     pub fn flush(&mut self) -> io::Result<()> {
         self.state.writer.flush()

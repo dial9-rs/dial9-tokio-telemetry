@@ -21,6 +21,7 @@ pub const TAG_EVENT: u8 = 0x02;
 pub const TAG_STRING_POOL: u8 = 0x03;
 pub const TAG_SYMBOL_TABLE: u8 = 0x04;
 pub const TAG_TIMESTAMP_RESET: u8 = 0x05;
+pub const TAG_PROC_MAPS: u8 = 0x06;
 
 /// Maximum nanosecond delta that fits in a u24 (3 bytes).
 pub const MAX_TIMESTAMP_DELTA_NS: u64 = 0xFF_FFFF; // 16,777,215
@@ -52,6 +53,19 @@ pub struct SymbolEntry {
     pub symbol_id: InternedString,
 }
 
+/// A single executable memory mapping from `/proc/self/maps`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcMapsEntry {
+    /// Start address of the mapping.
+    pub start: u64,
+    /// End address of the mapping.
+    pub end: u64,
+    /// File offset of the mapping.
+    pub file_offset: u64,
+    /// Path to the mapped file (e.g. `/usr/bin/foo`).
+    pub path: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     Schema {
@@ -66,6 +80,7 @@ pub enum Frame {
     },
     StringPool(Vec<PoolEntry>),
     SymbolTable(Vec<SymbolEntry>),
+    ProcMaps(Vec<ProcMapsEntry>),
     TimestampReset(u64),
 }
 
@@ -74,6 +89,15 @@ pub enum Frame {
 pub struct PoolEntryRef<'a> {
     pub pool_id: u32,
     pub data: &'a [u8],
+}
+
+/// Zero-copy proc maps entry borrowing from the input buffer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcMapsEntryRef<'a> {
+    pub start: u64,
+    pub end: u64,
+    pub file_offset: u64,
+    pub path: &'a [u8],
 }
 
 /// Zero-copy frame that borrows from the input buffer.
@@ -90,6 +114,7 @@ pub enum FrameRef<'a> {
     },
     StringPool(Vec<PoolEntryRef<'a>>),
     SymbolTable(Vec<SymbolEntry>),
+    ProcMaps(Vec<ProcMapsEntryRef<'a>>),
     TimestampReset(u64),
 }
 
@@ -168,6 +193,20 @@ pub fn encode_symbol_table(entries: &[SymbolEntry], w: &mut impl Write) -> io::R
     Ok(())
 }
 
+pub fn encode_proc_maps(entries: &[ProcMapsEntry], w: &mut impl Write) -> io::Result<()> {
+    w.write_all(&[TAG_PROC_MAPS])?;
+    w.write_all(&(entries.len() as u32).to_le_bytes())?;
+    for e in entries {
+        w.write_all(&e.start.to_le_bytes())?;
+        w.write_all(&e.end.to_le_bytes())?;
+        w.write_all(&e.file_offset.to_le_bytes())?;
+        let path_bytes = e.path.as_bytes();
+        w.write_all(&(path_bytes.len() as u32).to_le_bytes())?;
+        w.write_all(path_bytes)?;
+    }
+    Ok(())
+}
+
 // --- Decoding ---
 
 pub fn decode_header(data: &[u8]) -> Option<u8> {
@@ -190,6 +229,7 @@ pub fn decode_frame<'s>(
         TAG_EVENT => decode_event_frame(data, schema_lookup, timestamp_base_ns),
         TAG_STRING_POOL => decode_string_pool_frame(data),
         TAG_SYMBOL_TABLE => decode_symbol_table_frame(data),
+        TAG_PROC_MAPS => decode_proc_maps_frame(data),
         TAG_TIMESTAMP_RESET => {
             let ts = u64::from_le_bytes(data.get(1..9)?.try_into().ok()?);
             Some((Frame::TimestampReset(ts), 9))
@@ -310,6 +350,32 @@ fn decode_symbol_table_frame(data: &[u8]) -> Option<(Frame, usize)> {
     Some((Frame::SymbolTable(entries), pos))
 }
 
+fn decode_proc_maps_frame(data: &[u8]) -> Option<(Frame, usize)> {
+    let mut pos = 1;
+    let count = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
+    pos += 4;
+    let mut entries = Vec::with_capacity(count.min((data.len() - pos) / 28));
+    for _ in 0..count {
+        let start = u64::from_le_bytes(data.get(pos..pos + 8)?.try_into().ok()?);
+        pos += 8;
+        let end = u64::from_le_bytes(data.get(pos..pos + 8)?.try_into().ok()?);
+        pos += 8;
+        let file_offset = u64::from_le_bytes(data.get(pos..pos + 8)?.try_into().ok()?);
+        pos += 8;
+        let path_len = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
+        pos += 4;
+        let path = String::from_utf8(data.get(pos..pos + path_len)?.to_vec()).ok()?;
+        pos += path_len;
+        entries.push(ProcMapsEntry {
+            start,
+            end,
+            file_offset,
+            path,
+        });
+    }
+    Some((Frame::ProcMaps(entries), pos))
+}
+
 // --- Zero-copy decoding ---
 
 /// Decode a single frame without allocating owned data for field values.
@@ -338,6 +404,7 @@ pub fn decode_frame_ref<'a, 's>(
                 _ => unreachable!(),
             }
         }
+        TAG_PROC_MAPS => decode_proc_maps_frame_ref(data),
         TAG_TIMESTAMP_RESET => {
             let ts = u64::from_le_bytes(data.get(1..9)?.try_into().ok()?);
             Some((FrameRef::TimestampReset(ts), 9))
@@ -395,6 +462,32 @@ fn decode_string_pool_frame_ref<'a>(data: &'a [u8]) -> Option<(FrameRef<'a>, usi
         entries.push(PoolEntryRef { pool_id, data: d });
     }
     Some((FrameRef::StringPool(entries), pos))
+}
+
+fn decode_proc_maps_frame_ref<'a>(data: &'a [u8]) -> Option<(FrameRef<'a>, usize)> {
+    let mut pos = 1;
+    let count = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
+    pos += 4;
+    let mut entries = Vec::with_capacity(count.min((data.len() - pos) / 28));
+    for _ in 0..count {
+        let start = u64::from_le_bytes(data.get(pos..pos + 8)?.try_into().ok()?);
+        pos += 8;
+        let end = u64::from_le_bytes(data.get(pos..pos + 8)?.try_into().ok()?);
+        pos += 8;
+        let file_offset = u64::from_le_bytes(data.get(pos..pos + 8)?.try_into().ok()?);
+        pos += 8;
+        let path_len = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
+        pos += 4;
+        let path = data.get(pos..pos + path_len)?;
+        pos += path_len;
+        entries.push(ProcMapsEntryRef {
+            start,
+            end,
+            file_offset,
+            path,
+        });
+    }
+    Some((FrameRef::ProcMaps(entries), pos))
 }
 
 #[cfg(test)]
@@ -627,5 +720,63 @@ mod tests {
     #[test]
     fn unknown_tag_returns_none() {
         assert!(decode_frame(&[0xFF], |_| None, 0).is_none());
+    }
+
+    // --- Proc maps frame tests ---
+
+    #[test]
+    fn proc_maps_round_trip() {
+        let entries = vec![
+            ProcMapsEntry {
+                start: 0x55a4b2c00000,
+                end: 0x55a4b2c05000,
+                file_offset: 0x1000,
+                path: "/usr/bin/foo".into(),
+            },
+            ProcMapsEntry {
+                start: 0x7f1234000000,
+                end: 0x7f1234100000,
+                file_offset: 0,
+                path: "/usr/lib/libbar.so".into(),
+            },
+        ];
+        let mut buf = Vec::new();
+        encode_proc_maps(&entries, &mut buf).unwrap();
+        assert_eq!(buf[0], TAG_PROC_MAPS);
+        let (frame, consumed) = decode_frame(&buf, |_| None, 0).unwrap();
+        assert_eq!(consumed, buf.len());
+        assert_eq!(frame, Frame::ProcMaps(entries));
+    }
+
+    #[test]
+    fn proc_maps_empty() {
+        let mut buf = Vec::new();
+        encode_proc_maps(&[], &mut buf).unwrap();
+        let (frame, _) = decode_frame(&buf, |_| None, 0).unwrap();
+        assert_eq!(frame, Frame::ProcMaps(vec![]));
+    }
+
+    #[test]
+    fn proc_maps_zero_copy_round_trip() {
+        let entries = vec![ProcMapsEntry {
+            start: 0x1000,
+            end: 0x2000,
+            file_offset: 0,
+            path: "/bin/test".into(),
+        }];
+        let mut buf = Vec::new();
+        encode_proc_maps(&entries, &mut buf).unwrap();
+        let (frame, consumed) = decode_frame_ref(&buf, |_| None, 0).unwrap();
+        assert_eq!(consumed, buf.len());
+        match frame {
+            FrameRef::ProcMaps(ref_entries) => {
+                assert_eq!(ref_entries.len(), 1);
+                assert_eq!(ref_entries[0].start, 0x1000);
+                assert_eq!(ref_entries[0].end, 0x2000);
+                assert_eq!(ref_entries[0].file_offset, 0);
+                assert_eq!(ref_entries[0].path, b"/bin/test");
+            }
+            _ => panic!("expected ProcMaps"),
+        }
     }
 }
