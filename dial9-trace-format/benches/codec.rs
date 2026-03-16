@@ -126,7 +126,7 @@ fn bench_decode(c: &mut Criterion) {
         b.iter(|| {
             let mut dec = Decoder::new(black_box(&data)).unwrap();
             let mut count = 0u64;
-            dec.for_each_event(|_type_id, _ts, _values| {
+            dec.for_each_event(|_ev| {
                 count += 1;
             })
             .unwrap();
