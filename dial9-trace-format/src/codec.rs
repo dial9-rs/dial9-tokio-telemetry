@@ -1,7 +1,7 @@
 // Frame encoding/decoding (header, schema, event, string pool, symbol table)
 
 use crate::schema::{FieldDef, SchemaEntry};
-use crate::types::{FieldType, FieldValue, FieldValueRef};
+use crate::types::{FieldType, FieldValue, FieldValueRef, InternedString};
 use std::io::{self, Write};
 
 /// Type ID as it appears on the wire (u16 in schema/event frame headers).
@@ -49,7 +49,7 @@ pub struct PoolEntry {
 pub struct SymbolEntry {
     pub base_addr: u64,
     pub size: u32,
-    pub symbol_id: u32,
+    pub symbol_id: InternedString,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,7 +163,7 @@ pub fn encode_symbol_table(entries: &[SymbolEntry], w: &mut impl Write) -> io::R
     for e in entries {
         w.write_all(&e.base_addr.to_le_bytes())?;
         w.write_all(&e.size.to_le_bytes())?;
-        w.write_all(&e.symbol_id.to_le_bytes())?;
+        w.write_all(&e.symbol_id.0.to_le_bytes())?;
     }
     Ok(())
 }
@@ -304,7 +304,7 @@ fn decode_symbol_table_frame(data: &[u8]) -> Option<(Frame, usize)> {
         entries.push(SymbolEntry {
             base_addr,
             size,
-            symbol_id,
+            symbol_id: InternedString(symbol_id),
         });
     }
     Some((Frame::SymbolTable(entries), pos))
@@ -600,12 +600,12 @@ mod tests {
             SymbolEntry {
                 base_addr: 0x1000,
                 size: 256,
-                symbol_id: 0,
+                symbol_id: InternedString(0),
             },
             SymbolEntry {
                 base_addr: 0x2000,
                 size: 128,
-                symbol_id: 1,
+                symbol_id: InternedString(1),
             },
         ];
         let mut buf = Vec::new();
