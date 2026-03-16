@@ -21,6 +21,12 @@ use std::time::Duration;
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Configuration for the in-process worker pipeline.
+///
+/// Only `trace_path` and `s3` are required. Optional fields:
+///
+/// - `poll_interval`: how often to check for sealed segments (default: 1 second)
+/// - `client`: pre-built `aws_sdk_s3::Client` for custom credentials or endpoints
+/// - `metrics_sink`: receives per-segment pipeline metrics (compression ratio, upload latency, etc.)
 #[derive(bon::Builder)]
 #[builder(on(String, into))]
 pub struct BackgroundTaskConfig {

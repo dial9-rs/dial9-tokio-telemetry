@@ -17,16 +17,6 @@ pub struct SealedSegment {
 }
 
 impl SealedSegment {
-    /// The file path of this sealed segment.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// The segment index (e.g. 3 for `trace.3.bin`).
-    pub fn index(&self) -> u32 {
-        self.index
-    }
-
     /// Segment creation time as epoch seconds, parsed from SegmentMetadata header.
     /// Falls back to file mtime if header parsing fails, then current time if mtime is unavailable.
     /// Returns `(epoch_secs, header_valid)`.
