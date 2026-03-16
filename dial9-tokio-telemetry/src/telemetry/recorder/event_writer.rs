@@ -45,7 +45,7 @@ impl EventWriter {
         {
             cpu.on_rotate();
         }
-        self.writer.write_atomic(&[raw])?;
+        self.writer.write_event(&raw)?;
         #[cfg(feature = "cpu-profiling")]
         if self.writer.take_rotated()
             && let Some(ref mut cpu) = self.cpu_flush
@@ -60,8 +60,11 @@ impl EventWriter {
     pub(crate) fn write_cpu_event(&mut self, data: &CpuSampleData) {
         if let Some(mut cpu) = self.cpu_flush.take() {
             let batch = cpu.collect_cpu_event_batch(data);
-            if let Err(e) = self.writer.write_atomic(&batch) {
-                tracing::warn!("failed to write CPU trace event: {e}");
+            for event in &batch {
+                if let Err(e) = self.writer.write_event(event) {
+                    tracing::warn!("failed to write CPU trace event: {e}");
+                    break;
+                }
             }
             if self.writer.take_rotated() {
                 cpu.on_rotate();
