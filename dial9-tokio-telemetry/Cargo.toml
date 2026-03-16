@@ -98,3 +98,7 @@ required-features = ["cpu-profiling"]
 [[example]]
 name = "s3_stress_test"
 required-features = ["worker-s3"]
+
+[[example]]
+name = "kernel_sched_events"
+required-features = ["cpu-profiling"]
