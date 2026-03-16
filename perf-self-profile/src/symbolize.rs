@@ -6,30 +6,34 @@ use std::fs;
 
 use crate::USER_ADDR_LIMIT;
 
-struct SymbolizerState {
-    symbolizer: Symbolizer,
-    /// Map from address range to (path, base_addr)
-    mappings: Vec<(u64, u64, String, u64)>,
+/// A single executable memory mapping parsed from `/proc/self/maps`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapsEntry {
+    /// Start address of the mapping.
+    pub start: u64,
+    /// End address of the mapping.
+    pub end: u64,
+    /// File offset of the mapping.
+    pub file_offset: u64,
+    /// Path to the mapped file.
+    pub path: String,
 }
 
-thread_local! {
-    static SYMBOLIZER: RefCell<Option<SymbolizerState>> = const { RefCell::new(None) };
+/// Read the current process's executable memory mappings from `/proc/self/maps`.
+///
+/// Returns only executable (`r-xp`) mappings with file-backed paths (starting with `/`).
+pub fn read_proc_maps() -> Vec<MapsEntry> {
+    parse_proc_maps(&fs::read_to_string("/proc/self/maps").unwrap_or_default())
 }
 
-fn parse_maps() -> Vec<(u64, u64, String, u64)> {
-    let maps = fs::read_to_string("/proc/self/maps").unwrap_or_default();
-    let mut result = Vec::new();
-
-    for line in maps.lines() {
-        if let Some(entry) = parse_maps_line(line) {
-            result.push(entry);
-        }
-    }
-
-    result
+/// Parse `/proc/self/maps` content into structured entries.
+///
+/// Filters to executable, file-backed mappings only.
+pub fn parse_proc_maps(maps_content: &str) -> Vec<MapsEntry> {
+    maps_content.lines().filter_map(parse_maps_line).collect()
 }
 
-fn parse_maps_line(line: &str) -> Option<(u64, u64, String, u64)> {
+fn parse_maps_line(line: &str) -> Option<MapsEntry> {
     let mut parts = line.split_whitespace();
     let addr_range = parts.next()?;
     let perms = parts.next()?;
@@ -47,9 +51,23 @@ fn parse_maps_line(line: &str) -> Option<(u64, u64, String, u64)> {
     let (start_str, end_str) = addr_range.split_once('-')?;
     let start = u64::from_str_radix(start_str, 16).ok()?;
     let end = u64::from_str_radix(end_str, 16).ok()?;
-    let offset = u64::from_str_radix(offset_str, 16).ok()?;
+    let file_offset = u64::from_str_radix(offset_str, 16).ok()?;
 
-    Some((start, end, path.to_string(), offset))
+    Some(MapsEntry {
+        start,
+        end,
+        file_offset,
+        path: path.to_string(),
+    })
+}
+
+struct SymbolizerState {
+    symbolizer: Symbolizer,
+    mappings: Vec<MapsEntry>,
+}
+
+thread_local! {
+    static SYMBOLIZER: RefCell<Option<SymbolizerState>> = const { RefCell::new(None) };
 }
 
 /// Source location information for a resolved symbol.
@@ -83,85 +101,91 @@ const EMPTY: SymbolInfo = SymbolInfo {
     offset: 0,
 };
 
-/// Resolve an instruction pointer to a symbol name.
+/// Resolve an instruction pointer to a symbol name using the current process's mappings.
 pub fn resolve_symbol(addr: u64) -> SymbolInfo {
     SYMBOLIZER.with(|cell| {
         let mut opt = cell.borrow_mut();
         if opt.is_none() {
             *opt = Some(SymbolizerState {
                 symbolizer: Symbolizer::new(),
-                mappings: parse_maps(),
+                mappings: read_proc_maps(),
             });
         }
         let state = opt.as_ref().unwrap();
+        resolve_symbol_with_maps(addr, &state.symbolizer, &state.mappings)
+    })
+}
 
-        // Kernel addresses are >= USER_ADDR_LIMIT
-        if addr >= USER_ADDR_LIMIT {
-            let src = source::Source::Kernel(source::Kernel {
-                kallsyms: blazesym::MaybeDefault::Default,
-                vmlinux: blazesym::MaybeDefault::None,
-                kaslr_offset: Some(0),
-                debug_syms: false,
-                _non_exhaustive: (),
-            });
-            if let Ok(results) = state.symbolizer.symbolize(&src, Input::AbsAddr(&[addr]))
+/// Resolve an instruction pointer using the provided mappings.
+///
+/// This is the core resolution logic, usable with captured (non-live) mappings
+/// for offline/background symbolization.
+pub fn resolve_symbol_with_maps(
+    addr: u64,
+    symbolizer: &Symbolizer,
+    mappings: &[MapsEntry],
+) -> SymbolInfo {
+    // Kernel addresses are >= USER_ADDR_LIMIT
+    if addr >= USER_ADDR_LIMIT {
+        let src = source::Source::Kernel(source::Kernel {
+            kallsyms: blazesym::MaybeDefault::Default,
+            vmlinux: blazesym::MaybeDefault::None,
+            kaslr_offset: Some(0),
+            debug_syms: false,
+            _non_exhaustive: (),
+        });
+        if let Ok(results) = symbolizer.symbolize(&src, Input::AbsAddr(&[addr]))
+            && !results.is_empty()
+            && let Some(sym) = results[0].as_sym()
+        {
+            return SymbolInfo {
+                name: Some(sym.name.to_string()),
+                base_addr: sym.addr,
+                code_info: None,
+                offset: addr.saturating_sub(sym.addr),
+            };
+        }
+        // TODO: code_info should be available from kernel DWARF debug symbols
+        return SymbolInfo {
+            name: Some(format!("[kernel] {:#x}", addr)),
+            base_addr: addr,
+            code_info: None,
+            offset: 0,
+        };
+    }
+
+    for entry in mappings {
+        if addr >= entry.start && addr < entry.end {
+            let offset = addr - entry.start + entry.file_offset;
+            let src = source::Source::Elf(source::Elf::new(&entry.path));
+            if let Ok(results) = symbolizer.symbolize(&src, Input::FileOffset(&[offset]))
                 && !results.is_empty()
                 && let Some(sym) = results[0].as_sym()
             {
                 return SymbolInfo {
                     name: Some(sym.name.to_string()),
                     base_addr: sym.addr,
-                    code_info: None,
+                    code_info: sym.code_info.as_ref().map(|c| {
+                        let file = match &c.dir {
+                            Some(dir) => dir
+                                .join(c.file.as_ref() as &std::path::Path)
+                                .to_string_lossy()
+                                .into_owned(),
+                            None => c.file.to_string_lossy().into_owned(),
+                        };
+                        CodeInfo {
+                            file,
+                            line: c.line,
+                            column: c.column,
+                        }
+                    }),
                     offset: addr.saturating_sub(sym.addr),
                 };
             }
-            // TODO: code_info should be available from kernel DWARF debug symbols
-            return SymbolInfo {
-                name: Some(format!("[kernel] {:#x}", addr)),
-                base_addr: addr,
-                code_info: None,
-                offset: 0,
-            };
+            break;
         }
-
-        // Find which mapping contains this address
-        for (start, end, path, file_offset) in &state.mappings {
-            if addr >= *start && addr < *end {
-                let offset = addr - start + file_offset;
-                let src = source::Source::Elf(source::Elf::new(path));
-                if let Ok(results) = state
-                    .symbolizer
-                    .symbolize(&src, Input::FileOffset(&[offset]))
-                    && !results.is_empty()
-                    && let Some(sym) = results[0].as_sym()
-                {
-                    // TODO: can we refactor this to borrow symbols?
-                    return SymbolInfo {
-                        name: Some(sym.name.to_string()),
-                        base_addr: sym.addr,
-                        code_info: sym.code_info.as_ref().map(|c| {
-                            let file = match &c.dir {
-                                Some(dir) => dir
-                                    .join(c.file.as_ref() as &std::path::Path)
-                                    .to_string_lossy()
-                                    .into_owned(),
-                                None => c.file.to_string_lossy().into_owned(),
-                            };
-                            CodeInfo {
-                                file,
-                                line: c.line,
-                                column: c.column,
-                            }
-                        }),
-                        offset: addr.saturating_sub(sym.addr),
-                    };
-                }
-                break;
-            }
-        }
-
-        EMPTY
-    })
+    }
+    EMPTY
 }
 
 #[cfg(test)]
@@ -171,11 +195,11 @@ mod tests {
     #[test]
     fn parse_maps_line_executable() {
         let line = "55a4b2c00000-55a4b2c05000 r-xp 00001000 08:01 1234 /usr/bin/foo";
-        let (start, end, path, offset) = parse_maps_line(line).unwrap();
-        assert_eq!(start, 0x55a4b2c00000);
-        assert_eq!(end, 0x55a4b2c05000);
-        assert_eq!(path, "/usr/bin/foo");
-        assert_eq!(offset, 0x1000);
+        let entry = parse_maps_line(line).unwrap();
+        assert_eq!(entry.start, 0x55a4b2c00000);
+        assert_eq!(entry.end, 0x55a4b2c05000);
+        assert_eq!(entry.path, "/usr/bin/foo");
+        assert_eq!(entry.file_offset, 0x1000);
     }
 
     #[test]
@@ -219,5 +243,18 @@ mod tests {
         assert!(parse_maps_line("garbage").is_none());
         assert!(parse_maps_line("").is_none());
         assert!(parse_maps_line("not-hex r-xp 00000000 08:01 1234 /foo").is_none());
+    }
+
+    #[test]
+    fn parse_proc_maps_filters_correctly() {
+        let content = "\
+55a4b2c00000-55a4b2c05000 r-xp 00001000 08:01 1234 /usr/bin/foo
+7f1234000000-7f1234001000 r--p 00000000 08:01 1234 /usr/lib/foo.so
+7f1234100000-7f1234200000 r-xp 00000000 08:01 5678 /usr/lib/libbar.so
+7ffd12300000-7ffd12321000 r-xp 00000000 00:00 0 [vdso]";
+        let entries = parse_proc_maps(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "/usr/bin/foo");
+        assert_eq!(entries[1].path, "/usr/lib/libbar.so");
     }
 }

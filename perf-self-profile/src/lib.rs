@@ -55,4 +55,6 @@ pub const USER_ADDR_LIMIT: u64 = 0x8000_0000_0000_0000;
 compile_error!("perf-self-profile: USER_ADDR_LIMIT not defined for this architecture");
 
 pub use sampler::{EventSource, PerfSampler, Sample, SamplerConfig};
-pub use symbolize::resolve_symbol;
+pub use symbolize::{CodeInfo, MapsEntry, SymbolInfo};
+pub use symbolize::{parse_proc_maps, read_proc_maps};
+pub use symbolize::{resolve_symbol, resolve_symbol_with_maps};
