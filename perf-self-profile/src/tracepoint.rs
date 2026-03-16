@@ -110,14 +110,13 @@ impl TracepointDef {
                 id = rest.trim().parse::<u32>().map_err(|e| {
                     io::Error::new(io::ErrorKind::InvalidData, format!("bad ID: {e}"))
                 })?;
-            } else if let Some(rest) = trimmed.strip_prefix("field:") {
-                if let Some(field) = parse_field_line(rest) {
+            } else if let Some(rest) = trimmed.strip_prefix("field:")
+                && let Some(field) = parse_field_line(rest) {
                     // Skip common fields (kernel bookkeeping).
                     if !field.name.starts_with("common_") {
                         fields.push(field);
                     }
                 }
-            }
         }
 
         if name.is_empty() {
@@ -184,7 +183,7 @@ impl TracepointDef {
     pub fn to_trace_format_fields(&self) -> Vec<FieldDef> {
         self.fields
             .iter()
-            .map(|f| kernel_field_to_trace_format(f))
+            .map(kernel_field_to_trace_format)
             .collect()
     }
 
