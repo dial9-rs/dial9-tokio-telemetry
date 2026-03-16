@@ -389,7 +389,8 @@ impl<'a> Decoder<'a> {
                     self.pos += 9;
                 }
                 _ => {
-                    // Use next_frame_ref for non-event frames (schema, pool, symbol table, reset)
+                    // Use next_frame_ref for non-event frames (schema, pool, symbol table)
+                    // `next_frame_ref` will update the decoder state as we read the frames (e.g. the pooled strings)
                     match self.next_frame_ref() {
                         Ok(Some(_)) => {}
                         Ok(None) => {
