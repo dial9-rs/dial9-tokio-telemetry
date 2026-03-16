@@ -26,6 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
 dial9-perf-self-profile = { workspace = true, optional = true }
+dial9-trace-format = { workspace = true, features = ["serde"] }
 tracing = "0.1.44"
 hostname = "0.4"
 bon = "3"
