@@ -7,10 +7,11 @@ use perf_event_data::Record;
 use perf_event_data::endian::Little;
 use perf_event_data::parse::{ParseConfig, Parser};
 use perf_event_open_sys::bindings::{
-    PERF_CONTEXT_MAX, PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_SW_CONTEXT_SWITCHES,
-    PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK, PERF_FLAG_FD_CLOEXEC, PERF_SAMPLE_CALLCHAIN,
-    PERF_SAMPLE_CPU, PERF_SAMPLE_IP, PERF_SAMPLE_PERIOD, PERF_SAMPLE_TID, PERF_SAMPLE_TIME,
-    PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE, perf_event_attr,
+    PERF_CONTEXT_MAX as PERF_CONTEXT_START_MARKER, PERF_COUNT_HW_CPU_CYCLES,
+    PERF_COUNT_SW_CONTEXT_SWITCHES, PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK,
+    PERF_FLAG_FD_CLOEXEC, PERF_SAMPLE_CALLCHAIN, PERF_SAMPLE_CPU, PERF_SAMPLE_IP,
+    PERF_SAMPLE_PERIOD, PERF_SAMPLE_TID, PERF_SAMPLE_TIME, PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE,
+    perf_event_attr,
 };
 
 use crate::USER_ADDR_LIMIT;
@@ -370,17 +371,8 @@ impl PerfSampler {
                 let sample = match parsed {
                     Record::Sample(s) => {
                         let include_kernel = self.include_kernel;
-                        let callchain = s
-                            .callchain()
-                            .unwrap_or(&[])
-                            .iter()
-                            .copied()
-                            .filter(|&a| {
-                                a != 0
-                                    && a < PERF_CONTEXT_MAX
-                                    && (include_kernel || a < USER_ADDR_LIMIT)
-                            })
-                            .collect();
+                        let callchain =
+                            filter_callchain(s.callchain().unwrap_or(&[]), include_kernel);
                         Sample {
                             ip: s.ip().unwrap_or(0),
                             pid: s.pid().unwrap_or(0),
@@ -431,6 +423,17 @@ impl PerfSampler {
     }
 }
 
+/// Filter a raw perf callchain, removing zero addresses, perf context markers
+/// (PERF_CONTEXT_KERNEL, PERF_CONTEXT_USER, etc.), and optionally kernel addresses.
+fn filter_callchain(raw: &[u64], include_kernel: bool) -> Vec<u64> {
+    raw.iter()
+        .copied()
+        .filter(|&a| {
+            a != 0 && a < PERF_CONTEXT_START_MARKER && (include_kernel || a < USER_ADDR_LIMIT)
+        })
+        .collect()
+}
+
 /// Get the list of online CPU indices from /sys/devices/system/cpu/online.
 /// Format is like "0-7" or "0-3,5,7-11".
 fn get_online_cpus() -> io::Result<Vec<i32>> {
@@ -474,5 +477,40 @@ mod tests {
         for w in cpus.windows(2) {
             assert!(w[0] < w[1], "expected sorted unique CPUs, got {:?}", cpus);
         }
+    }
+
+    #[test]
+    fn filter_callchain_removes_zeros_and_context_markers() {
+        let raw = [0, 0x1000, PERF_CONTEXT_START_MARKER, 0x2000, 0];
+        let result = filter_callchain(&raw, false);
+        assert_eq!(result, vec![0x1000, 0x2000]);
+    }
+
+    #[test]
+    fn filter_callchain_excludes_kernel_addrs_when_not_included() {
+        let kernel_addr = USER_ADDR_LIMIT + 0x1000;
+        let user_addr = 0x5555_0000_1000u64;
+        let raw = [user_addr, kernel_addr];
+        assert_eq!(filter_callchain(&raw, false), vec![user_addr]);
+    }
+
+    #[test]
+    fn filter_callchain_includes_kernel_addrs_when_included() {
+        let kernel_addr = USER_ADDR_LIMIT + 0x1000;
+        let user_addr = 0x5555_0000_1000u64;
+        let raw = [user_addr, kernel_addr];
+        assert_eq!(filter_callchain(&raw, true), vec![user_addr, kernel_addr]);
+    }
+
+    #[test]
+    fn filter_callchain_rejects_all_context_markers() {
+        // PERF_CONTEXT_HV, PERF_CONTEXT_KERNEL, etc. are all >= PERF_CONTEXT_START_MARKER
+        let markers = [
+            PERF_CONTEXT_START_MARKER,
+            PERF_CONTEXT_START_MARKER + 1,
+            u64::MAX,
+            u64::MAX - 128,
+        ];
+        assert!(filter_callchain(&markers, true).is_empty());
     }
 }

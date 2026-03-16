@@ -109,6 +109,7 @@ pub fn resolve_symbol(addr: u64) -> SymbolInfo {
                     offset: addr.saturating_sub(sym.addr),
                 };
             }
+            // TODO: code_info should be available from kernel DWARF debug symbols
             return SymbolInfo {
                 name: Some(format!("[kernel] {:#x}", addr)),
                 base_addr: addr,

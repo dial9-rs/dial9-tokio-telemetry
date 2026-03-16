@@ -45,6 +45,7 @@
 //!   ...
 //!   start_thread
 
+use dial9_perf_self_profile::USER_ADDR_LIMIT;
 use dial9_tokio_telemetry::telemetry::{
     CpuSampleSource, RotatingWriter, SchedEventConfig, TelemetryEvent, TraceReader, TracedRuntime,
 };
@@ -59,12 +60,14 @@ async fn blocking_task(id: usize) {
 }
 
 fn main() {
-    let trace_path = "kernel_sched_trace.bin";
+    let trace_dir = "example-traces";
+    std::fs::create_dir_all(trace_dir).unwrap();
+    let trace_path = format!("{trace_dir}/kernel_sched_trace.bin");
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
-    let writer = RotatingWriter::single_file(trace_path).unwrap();
+    let writer = RotatingWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_sched_events(SchedEventConfig {
@@ -86,7 +89,7 @@ fn main() {
 
     // Read back and print callchains
     eprintln!("\n=== Reading trace from {trace_path} ===");
-    let mut reader = TraceReader::new(trace_path).unwrap();
+    let mut reader = TraceReader::new(&trace_path).unwrap();
     reader.read_header().unwrap();
     let events = reader.read_all().unwrap();
 
@@ -115,11 +118,7 @@ fn main() {
                         .get(addr)
                         .cloned()
                         .unwrap_or_else(|| format!("{:#x}", addr));
-                    if name.starts_with("[kernel]")
-                        || name.contains("schedule")
-                        || name.contains("futex")
-                        || name.contains("nanosleep")
-                    {
+                    if *addr >= USER_ADDR_LIMIT {
                         has_kernel_symbols = true;
                     }
                     eprintln!("  {name}");
