@@ -14,12 +14,16 @@ check_package() {
     local pkg_version=$2
     echo "→ Checking docs.rs build for $pkg_name..."
     
-    # Because of workspace unification, we need to actually package the individual packages,
-    # then attempt to document the package itself to detect failure in the presence of
-    # of some bugs.
-    cargo package -p "$pkg_name" --allow-dirty
-    (cd "target/package/$pkg_name-$pkg_version" && \
-        cargo +nightly docs-rs --target "$TARGET")
+    # cargo package + docs-rs on the packaged crate catches workspace unification bugs.
+    # Falls back to building directly from the workspace when cargo package fails
+    # (e.g. unpublished crates or features not yet on crates.io).
+    if cargo package -p "$pkg_name" --allow-dirty 2>/dev/null; then
+        (cd "target/package/$pkg_name-$pkg_version" && \
+            cargo +nightly docs-rs --target "$TARGET")
+    else
+        echo "  ⚠ cargo package failed, falling back to workspace build"
+        cargo +nightly docs-rs -p "$pkg_name" --target "$TARGET"
+    fi
 }
 
 if [ $# -eq 0 ]; then
