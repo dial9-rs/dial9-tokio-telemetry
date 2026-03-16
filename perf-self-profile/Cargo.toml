@@ -1,10 +1,10 @@
 [package]
 name = "dial9-perf-self-profile"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
+repository.workspace = true
 description = "Minimal self-profiling via Linux perf_event_open with frame-pointer-based stack traces"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/rcoh/dial9-tokio-telemetry"
 
 [package.metadata.docs.rs]
 rustc-args = ["-C", "force-frame-pointers=yes"]

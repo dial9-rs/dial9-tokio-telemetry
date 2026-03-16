@@ -31,6 +31,10 @@ let _ = ...
 
 - Always run `cargo nextest run` to run tests
 
+## Pre-commit checks
+
+- You MUST run `cargo fmt --check` and `cargo clippy --all-targets --all-features` before every commit. Both must be clean.
+
 ## Demo Trace
 
 If you modify the trace format (event structure, encoding, parser, etc.), you MUST regenerate the demo trace:
