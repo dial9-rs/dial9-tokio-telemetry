@@ -10,7 +10,7 @@ use dial9_trace_format::codec::SymbolEntry;
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::{Encoder, Schema};
 use dial9_trace_format::schema::FieldDef;
-use dial9_trace_format::types::{FieldType, FieldValue};
+use dial9_trace_format::types::{FieldType, FieldValue, InternedString};
 
 /// Varint boundary values that stress LEB128 encoding edges.
 const VARINT_INTERESTING: [u64; 8] = [
@@ -66,7 +66,7 @@ fn gen_value(ft: FuzzFieldType, u: &mut Unstructured) -> arbitrary::Result<Field
             let len: usize = u.int_in_range(0..=32)?;
             FieldValue::Bytes(u.bytes(len)?.to_vec())
         }
-        FuzzFieldType::PooledString => FieldValue::PooledString(u.int_in_range(0..=50)?),
+        FuzzFieldType::PooledString => FieldValue::PooledString(InternedString::from_raw(u.int_in_range(0..=50)?)),
         FuzzFieldType::StackFrames => {
             let count: usize = u.int_in_range(0..=8)?;
             let mut addrs = Vec::with_capacity(count);
@@ -207,7 +207,7 @@ fuzz_target!(|data: &[u8]| {
                 enc.write_symbol_table(&[SymbolEntry {
                     base_addr: sym.base_addr,
                     size: sym.size,
-                    symbol_id: sym.symbol_id,
+                    symbol_id: InternedString::from_raw(sym.symbol_id),
                 }]).unwrap();
             }
         }

@@ -109,7 +109,11 @@ fn kitchen_sink_all_field_types() {
     let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
+            DecodedFrameRef::Event {
+                timestamp_ns,
+                values,
+                ..
+            } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
@@ -165,7 +169,11 @@ fn kitchen_sink_zero_and_empty_values() {
     let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
+            DecodedFrameRef::Event {
+                timestamp_ns,
+                values,
+                ..
+            } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
@@ -251,7 +259,10 @@ fn interleaved_event_types() {
         .iter()
         .filter_map(|f| match f {
             DecodedFrameRef::Event {
-                type_id, timestamp_ns, values, ..
+                type_id,
+                timestamp_ns,
+                values,
+                ..
             } => Some((*type_id, *timestamp_ns, values)),
             _ => None,
         })
@@ -315,7 +326,11 @@ fn interleaved_string_pools() {
     let events: Vec<_> = frames
         .iter()
         .filter_map(|f| match f {
-            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
+            DecodedFrameRef::Event {
+                timestamp_ns,
+                values,
+                ..
+            } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .collect();
@@ -366,7 +381,11 @@ fn string_pool_deduplication() {
     let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
+            DecodedFrameRef::Event {
+                timestamp_ns,
+                values,
+                ..
+            } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
@@ -409,7 +428,11 @@ fn stack_frames_edge_cases() {
         let (ts, event) = frames
             .iter()
             .find_map(|f| match f {
-                DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
+                DecodedFrameRef::Event {
+                    timestamp_ns,
+                    values,
+                    ..
+                } => Some((*timestamp_ns, values)),
                 _ => None,
             })
             .unwrap();
@@ -448,7 +471,11 @@ fn f64_special_values_round_trip() {
     let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
+            DecodedFrameRef::Event {
+                timestamp_ns,
+                values,
+                ..
+            } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
@@ -482,7 +509,11 @@ fn f64_nan_round_trip() {
     let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
+            DecodedFrameRef::Event {
+                timestamp_ns,
+                values,
+                ..
+            } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
@@ -507,7 +538,11 @@ fn unicode_string_round_trip() {
     let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
+            DecodedFrameRef::Event {
+                timestamp_ns,
+                values,
+                ..
+            } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();
@@ -540,7 +575,11 @@ fn large_bytes_field() {
     let (ts, event) = frames
         .iter()
         .find_map(|f| match f {
-            DecodedFrameRef::Event { timestamp_ns, values, .. } => Some((*timestamp_ns, values)),
+            DecodedFrameRef::Event {
+                timestamp_ns,
+                values,
+                ..
+            } => Some((*timestamp_ns, values)),
             _ => None,
         })
         .unwrap();

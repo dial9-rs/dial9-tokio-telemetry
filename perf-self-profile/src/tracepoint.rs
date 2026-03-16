@@ -111,12 +111,13 @@ impl TracepointDef {
                     io::Error::new(io::ErrorKind::InvalidData, format!("bad ID: {e}"))
                 })?;
             } else if let Some(rest) = trimmed.strip_prefix("field:")
-                && let Some(field) = parse_field_line(rest) {
-                    // Skip common fields (kernel bookkeeping).
-                    if !field.name.starts_with("common_") {
-                        fields.push(field);
-                    }
+                && let Some(field) = parse_field_line(rest)
+            {
+                // Skip common fields (kernel bookkeeping).
+                if !field.name.starts_with("common_") {
+                    fields.push(field);
                 }
+            }
         }
 
         if name.is_empty() {
