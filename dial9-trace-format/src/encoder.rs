@@ -263,14 +263,17 @@ impl<W: Write> Encoder<W> {
         Ok(crate::types::InternedString(id))
     }
 
+    /// Write a string pool frame with interned string entries.
     pub fn write_string_pool(&mut self, entries: &[PoolEntry]) -> io::Result<()> {
         codec::encode_string_pool(entries, &mut self.state.writer)
     }
 
+    /// Write a symbol table frame mapping address ranges to interned symbol names.
     pub fn write_symbol_table(&mut self, entries: &[SymbolEntry]) -> io::Result<()> {
         codec::encode_symbol_table(entries, &mut self.state.writer)
     }
 
+    /// Write a proc maps frame containing executable memory mappings.
     pub fn write_proc_maps(&mut self, entries: &[codec::ProcMapsEntry]) -> io::Result<()> {
         codec::encode_proc_maps(entries, &mut self.state.writer)
     }

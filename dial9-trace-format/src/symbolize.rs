@@ -1,0 +1,255 @@
+//! Offline symbolizer: resolves raw stack frame addresses in a trace using
+//! captured `/proc/self/maps` data.
+//!
+//! Reads a trace containing `ProcMaps` and `StackFrames` fields, resolves
+//! addresses via blazesym, and appends `StringPool` + `SymbolTable` frames.
+
+use crate::codec::SymbolEntry;
+use crate::decoder::{DecodedFrameRef, Decoder};
+use crate::types::{FieldValueRef, InternedString};
+use blazesym::symbolize::Symbolizer;
+use dial9_perf_self_profile::MapsEntry;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::io::{self, Write};
+
+/// Symbolize a trace: read the input, resolve addresses from `ProcMaps` +
+/// `StackFrames` data, and write the original trace plus `StringPool` +
+/// `SymbolTable` frames to the output.
+///
+/// The input trace is copied verbatim to the output, with symbol data appended.
+pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> {
+    let mut maps: Vec<MapsEntry> = Vec::new();
+    let mut addresses: BTreeSet<u64> = BTreeSet::new();
+
+    let mut decoder = Decoder::new(input)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
+
+    // Single pass: collect ProcMaps entries and StackFrames addresses.
+    while let Ok(Some(frame)) = decoder.next_frame_ref() {
+        match frame {
+            DecodedFrameRef::ProcMaps(entries) => {
+                for e in entries {
+                    let path = std::str::from_utf8(e.path)
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 proc maps path")
+                        })?
+                        .to_string();
+                    maps.push(MapsEntry {
+                        start: e.start,
+                        end: e.end,
+                        file_offset: e.file_offset,
+                        path,
+                    });
+                }
+            }
+            DecodedFrameRef::Event { values, .. } => {
+                for field in &values {
+                    if let FieldValueRef::StackFrames(frames) = field {
+                        for addr in frames.iter() {
+                            if addr != 0 {
+                                addresses.insert(addr);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if addresses.is_empty() || maps.is_empty() {
+        output.write_all(input)?;
+        return Ok(());
+    }
+
+    // Resolve symbols.
+    let symbolizer = Symbolizer::new();
+    let mut pool_entries: Vec<crate::codec::PoolEntry> = Vec::new();
+    let mut symbol_entries: Vec<SymbolEntry> = Vec::new();
+    let mut string_to_id: HashMap<String, u32> = HashMap::new();
+    let mut seen_base_addrs: HashSet<u64> = HashSet::new();
+    let mut next_pool_id: u32 = 0;
+
+    for &addr in &addresses {
+        let info = dial9_perf_self_profile::resolve_symbol_with_maps(addr, &symbolizer, &maps);
+        let Some(name) = info.name else { continue };
+        if !seen_base_addrs.insert(info.base_addr) {
+            continue;
+        }
+
+        let pool_id = *string_to_id.entry(name.clone()).or_insert_with(|| {
+            let id = next_pool_id;
+            next_pool_id += 1;
+            pool_entries.push(crate::codec::PoolEntry {
+                pool_id: id,
+                data: name.into_bytes(),
+            });
+            id
+        });
+
+        symbol_entries.push(SymbolEntry {
+            base_addr: info.base_addr,
+            size: 0, // unknown; blazesym doesn't provide function size
+            symbol_id: InternedString(pool_id),
+        });
+    }
+
+    // Write: original trace verbatim + string pool + symbol table.
+    output.write_all(input)?;
+    if !pool_entries.is_empty() {
+        crate::codec::encode_string_pool(&pool_entries, output)?;
+    }
+    if !symbol_entries.is_empty() {
+        crate::codec::encode_symbol_table(&symbol_entries, output)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::ProcMapsEntry;
+    use crate::decoder::Decoder;
+    use crate::encoder::Encoder;
+    use crate::schema::FieldDef;
+    use crate::types::{FieldType, FieldValue};
+
+    #[test]
+    fn symbolize_empty_trace() {
+        let enc = Encoder::new();
+        let input = enc.finish();
+        let mut output = Vec::new();
+        symbolize_trace(&input, &mut output).unwrap();
+        assert_eq!(input, output);
+    }
+
+    #[test]
+    fn symbolize_no_proc_maps_copies_verbatim() {
+        struct Ev;
+        let mut enc = Encoder::new();
+        enc.register_schema_for::<Ev>(
+            "Ev",
+            vec![FieldDef {
+                name: "frames".into(),
+                field_type: FieldType::StackFrames,
+            }],
+        )
+        .unwrap();
+        enc.write_event_for::<Ev>(&[FieldValue::StackFrames(vec![0x1000])])
+            .unwrap();
+        let input = enc.finish();
+        let mut output = Vec::new();
+        symbolize_trace(&input, &mut output).unwrap();
+        assert_eq!(input, output);
+    }
+
+    #[test]
+    fn symbolize_no_stack_frames_copies_verbatim() {
+        let mut enc = Encoder::new();
+        enc.write_proc_maps(&[ProcMapsEntry {
+            start: 0x1000,
+            end: 0x2000,
+            file_offset: 0,
+            path: "/bin/test".into(),
+        }])
+        .unwrap();
+        let input = enc.finish();
+        let mut output = Vec::new();
+        symbolize_trace(&input, &mut output).unwrap();
+        assert_eq!(input, output);
+    }
+
+    #[test]
+    fn symbolize_unresolvable_addresses_produces_valid_trace() {
+        struct Ev;
+        let mut enc = Encoder::new();
+        enc.register_schema_for::<Ev>(
+            "Ev",
+            vec![FieldDef {
+                name: "frames".into(),
+                field_type: FieldType::StackFrames,
+            }],
+        )
+        .unwrap();
+        enc.write_event_for::<Ev>(&[FieldValue::StackFrames(vec![0x55a4b2c01000])])
+            .unwrap();
+        enc.write_proc_maps(&[ProcMapsEntry {
+            start: 0x55a4b2c00000,
+            end: 0x55a4b2c05000,
+            file_offset: 0x1000,
+            path: "/nonexistent/binary".into(),
+        }])
+        .unwrap();
+        let input = enc.finish();
+
+        let mut output = Vec::new();
+        symbolize_trace(&input, &mut output).unwrap();
+
+        // Output must be a valid trace regardless of whether symbols resolved.
+        assert!(output.len() >= input.len());
+        let mut dec = Decoder::new(&output).unwrap();
+        let frames = dec.decode_all();
+        assert!(frames.len() >= 3); // schema + event + proc_maps at minimum
+    }
+
+    /// Symbolize a real address from the current binary to verify the
+    /// end-to-end flow produces StringPool + SymbolTable frames.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symbolize_real_address_produces_symbol_table() {
+        // Use the address of this test function itself.
+        let addr = symbolize_real_address_produces_symbol_table as *const () as u64;
+        let maps = dial9_perf_self_profile::read_proc_maps();
+        assert!(
+            maps.iter().any(|m| addr >= m.start && addr < m.end),
+            "test function address {addr:#x} not found in any mapping"
+        );
+
+        let proc_maps: Vec<ProcMapsEntry> = maps
+            .iter()
+            .map(|m| ProcMapsEntry {
+                start: m.start,
+                end: m.end,
+                file_offset: m.file_offset,
+                path: m.path.clone(),
+            })
+            .collect();
+
+        struct Ev;
+        let mut enc = Encoder::new();
+        enc.register_schema_for::<Ev>(
+            "Ev",
+            vec![FieldDef {
+                name: "frames".into(),
+                field_type: FieldType::StackFrames,
+            }],
+        )
+        .unwrap();
+        enc.write_event_for::<Ev>(&[FieldValue::StackFrames(vec![addr])])
+            .unwrap();
+        enc.write_proc_maps(&proc_maps).unwrap();
+        let input = enc.finish();
+
+        let mut output = Vec::new();
+        symbolize_trace(&input, &mut output).unwrap();
+
+        // Output should be larger (symbol data appended).
+        assert!(
+            output.len() > input.len(),
+            "expected symbol data to be appended"
+        );
+
+        // Decode and verify we got StringPool + SymbolTable frames.
+        let mut dec = Decoder::new(&output).unwrap();
+        let frames = dec.decode_all();
+        let has_string_pool = frames
+            .iter()
+            .any(|f| matches!(f, crate::decoder::DecodedFrame::StringPool(_)));
+        let has_symbol_table = frames
+            .iter()
+            .any(|f| matches!(f, crate::decoder::DecodedFrame::SymbolTable(_)));
+        assert!(has_string_pool, "expected StringPool frame in output");
+        assert!(has_symbol_table, "expected SymbolTable frame in output");
+    }
+}

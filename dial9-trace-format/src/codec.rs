@@ -193,6 +193,7 @@ pub fn encode_symbol_table(entries: &[SymbolEntry], w: &mut impl Write) -> io::R
     Ok(())
 }
 
+/// Encode a proc maps frame containing executable memory mappings.
 pub fn encode_proc_maps(entries: &[ProcMapsEntry], w: &mut impl Write) -> io::Result<()> {
     w.write_all(&[TAG_PROC_MAPS])?;
     w.write_all(&(entries.len() as u32).to_le_bytes())?;
