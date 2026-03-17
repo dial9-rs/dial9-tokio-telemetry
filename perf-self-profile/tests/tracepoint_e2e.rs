@@ -1,5 +1,3 @@
-mod common;
-
 use dial9_perf_self_profile::tracepoint::TracepointDef;
 use dial9_perf_self_profile::{PerfSampler, SamplerConfig};
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
@@ -11,11 +9,6 @@ use dial9_trace_format::types::FieldValue;
 /// dial9-trace-format, decode, and verify fields.
 #[test]
 fn tracepoint_sched_switch_e2e() {
-    if common::is_ci() {
-        eprintln!("skipping tracepoint e2e in CI");
-        return;
-    }
-
     // 1. Parse the kernel format file (includes tracepoint ID)
     let tp = match TracepointDef::from_event("sched", "sched_switch") {
         Ok(tp) => tp,
