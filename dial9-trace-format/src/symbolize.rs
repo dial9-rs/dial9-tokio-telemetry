@@ -124,27 +124,29 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
     let mut next_pool_id: u32 = 0;
 
     for &addr in &addresses {
-        let info = dial9_perf_self_profile::resolve_symbol_with_maps(addr, &symbolizer, &maps);
-        let Some(name) = info.name else { continue };
-        if !seen_base_addrs.insert(info.base_addr) {
-            continue;
-        }
+        let symbols = dial9_perf_self_profile::resolve_symbols_with_maps(addr, &symbolizer, &maps);
+        for info in symbols {
+            let Some(name) = info.name else { continue };
+            if !seen_base_addrs.insert(info.base_addr) {
+                continue;
+            }
 
-        let pool_id = *string_to_id.entry(name.clone()).or_insert_with(|| {
-            let id = next_pool_id;
-            next_pool_id += 1;
-            pool_entries.push(crate::codec::PoolEntry {
-                pool_id: id,
-                data: name.into_bytes(),
+            let pool_id = *string_to_id.entry(name.clone()).or_insert_with(|| {
+                let id = next_pool_id;
+                next_pool_id += 1;
+                pool_entries.push(crate::codec::PoolEntry {
+                    pool_id: id,
+                    data: name.into_bytes(),
+                });
+                id
             });
-            id
-        });
 
-        symbol_entries.push(SymbolEntry {
-            base_addr: info.base_addr,
-            size: 0, // unknown; blazesym doesn't provide function size
-            symbol_id: InternedString(pool_id),
-        });
+            symbol_entries.push(SymbolEntry {
+                base_addr: info.base_addr,
+                size: 0, // unknown; blazesym doesn't provide function size
+                symbol_id: InternedString(pool_id),
+            });
+        }
     }
 
     // Write: original trace verbatim + string pool + symbol table.

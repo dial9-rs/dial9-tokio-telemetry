@@ -118,13 +118,32 @@ pub fn resolve_symbol(addr: u64) -> SymbolInfo {
 
 /// Resolve an instruction pointer using the provided mappings.
 ///
-/// This is the core resolution logic, usable with captured (non-live) mappings
-/// for offline/background symbolization.
+/// Returns the outermost symbol only. For inlined function support, use
+/// [`resolve_symbols_with_maps`].
 pub fn resolve_symbol_with_maps(
     addr: u64,
     symbolizer: &Symbolizer,
     mappings: &[MapsEntry],
 ) -> SymbolInfo {
+    resolve_symbols_with_maps(addr, symbolizer, mappings)
+        .into_iter()
+        .next()
+        .unwrap_or(EMPTY)
+}
+
+/// Resolve an instruction pointer to all symbols at that address, including
+/// inlined functions.
+///
+/// Returns symbols from outermost to innermost. For a non-inlined call this
+/// returns a single entry. For an address inside `f -> g (inlined) -> h (inlined)`,
+/// returns `[f, g, h]`.
+///
+/// Returns an empty vec if the address cannot be resolved.
+pub fn resolve_symbols_with_maps(
+    addr: u64,
+    symbolizer: &Symbolizer,
+    mappings: &[MapsEntry],
+) -> Vec<SymbolInfo> {
     // Kernel addresses are >= USER_ADDR_LIMIT
     if addr >= USER_ADDR_LIMIT {
         let src = source::Source::Kernel(source::Kernel {
@@ -138,20 +157,19 @@ pub fn resolve_symbol_with_maps(
             && !results.is_empty()
             && let Some(sym) = results[0].as_sym()
         {
-            return SymbolInfo {
+            return vec![SymbolInfo {
                 name: Some(sym.name.to_string()),
                 base_addr: sym.addr,
                 code_info: None,
                 offset: addr.saturating_sub(sym.addr),
-            };
+            }];
         }
-        // TODO: code_info should be available from kernel DWARF debug symbols
-        return SymbolInfo {
+        return vec![SymbolInfo {
             name: Some(format!("[kernel] {:#x}", addr)),
             base_addr: addr,
             code_info: None,
             offset: 0,
-        };
+        }];
     }
 
     for entry in mappings {
@@ -162,30 +180,44 @@ pub fn resolve_symbol_with_maps(
                 && !results.is_empty()
                 && let Some(sym) = results[0].as_sym()
             {
-                return SymbolInfo {
+                let mut symbols = Vec::with_capacity(1 + sym.inlined.len());
+                symbols.push(SymbolInfo {
                     name: Some(sym.name.to_string()),
                     base_addr: sym.addr,
-                    code_info: sym.code_info.as_ref().map(|c| {
-                        let file = match &c.dir {
-                            Some(dir) => dir
-                                .join(c.file.as_ref() as &std::path::Path)
-                                .to_string_lossy()
-                                .into_owned(),
-                            None => c.file.to_string_lossy().into_owned(),
-                        };
-                        CodeInfo {
-                            file,
-                            line: c.line,
-                            column: c.column,
-                        }
-                    }),
+                    code_info: convert_code_info(sym.code_info.as_deref()),
                     offset: addr.saturating_sub(sym.addr),
-                };
+                });
+                for inlined in sym.inlined.iter() {
+                    symbols.push(SymbolInfo {
+                        name: Some(inlined.name.to_string()),
+                        base_addr: sym.addr,
+                        code_info: convert_code_info(inlined.code_info.as_ref()),
+                        offset: addr.saturating_sub(sym.addr),
+                    });
+                }
+                return symbols;
             }
             break;
         }
     }
-    EMPTY
+    Vec::new()
+}
+
+fn convert_code_info(c: Option<&blazesym::symbolize::CodeInfo<'_>>) -> Option<CodeInfo> {
+    c.map(|c| {
+        let file = match &c.dir {
+            Some(dir) => dir
+                .join(c.file.as_ref() as &std::path::Path)
+                .to_string_lossy()
+                .into_owned(),
+            None => c.file.to_string_lossy().into_owned(),
+        };
+        CodeInfo {
+            file,
+            line: c.line,
+            column: c.column,
+        }
+    })
 }
 
 #[cfg(test)]
