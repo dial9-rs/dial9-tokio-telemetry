@@ -50,7 +50,6 @@
 
 use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
-use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::types::{EventEncoder, FieldType, FieldValueRef};
 use dial9_trace_format::{InternedString, StackFrames, TraceEvent, TraceField};
 use std::io::{self, Read, Write};
@@ -1588,193 +1587,328 @@ mod tests {
 #[cfg(test)]
 mod v2_tests {
     use super::*;
-    use crate::telemetry::events::CpuSampleSource;
-    use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
+    use crate::telemetry::events::{
+        CallframeDefData, CpuSampleData, CpuSampleSource, RawEvent,
+    };
+    use crate::telemetry::task_metadata::TaskId;
+    use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+    use tempfile::TempDir;
 
-    fn roundtrip_v2(event: &TelemetryEvent) -> TelemetryEvent {
-        let mut enc = Encoder::new();
-        write_event_v2(&mut enc, event).unwrap();
-        let bytes = enc.finish();
-        let events = decode_events_v2(&bytes).unwrap();
-        assert_eq!(events.len(), 1, "expected 1 event, got {}", events.len());
-        events.into_iter().next().unwrap()
+    /// Write RawEvents through RotatingWriter, read back as TelemetryEvents.
+    fn roundtrip_raw(events: &[RawEvent]) -> Vec<TelemetryEvent> {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.bin");
+        let mut writer = RotatingWriter::single_file(&path).unwrap();
+        for e in events {
+            writer.write_event(e).unwrap();
+        }
+        writer.flush().unwrap();
+        let data = std::fs::read(&path).unwrap();
+        decode_events_v2(&data).unwrap()
     }
 
-    /// Pre-interns a string so InternedString pool#1 resolves on decode.
-    fn roundtrip_v2_with_intern(event: &TelemetryEvent, intern: &str) -> TelemetryEvent {
-        let mut enc = Encoder::new();
-        enc.intern_string(intern).unwrap();
-        write_event_v2(&mut enc, event).unwrap();
-        let bytes = enc.finish();
-        let events = decode_events_v2(&bytes).unwrap();
+    /// Write one RawEvent, return the single decoded runtime event (skipping metadata).
+    fn roundtrip_one(event: RawEvent) -> TelemetryEvent {
+        let events = roundtrip_raw(&[event]);
         assert_eq!(events.len(), 1, "expected 1 event, got {}", events.len());
         events.into_iter().next().unwrap()
     }
 
     #[test]
+    #[track_caller]
     fn poll_start_roundtrip() {
-        let event = TelemetryEvent::PollStart {
+        let loc = std::panic::Location::caller();
+        let decoded = roundtrip_one(RawEvent::PollStart {
             timestamp_nanos: 123_456_000,
             worker_id: 3,
             worker_local_queue_depth: 17,
             task_id: TaskId::from_u32(42),
-            spawn_loc_id: SpawnLocationId(0),
-        };
-        assert_eq!(roundtrip_v2_with_intern(&event, "test_loc"), event);
+            location: loc,
+        });
+        match decoded {
+            TelemetryEvent::PollStart {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                task_id,
+                ..
+            } => {
+                assert_eq!(timestamp_nanos, 123_456_000);
+                assert_eq!(worker_id, 3);
+                assert_eq!(worker_local_queue_depth, 17);
+                assert_eq!(task_id, TaskId::from_u32(42));
+            }
+            other => panic!("expected PollStart, got {other:?}"),
+        }
     }
 
     #[test]
     fn poll_end_roundtrip() {
-        let event = TelemetryEvent::PollEnd {
+        let decoded = roundtrip_one(RawEvent::PollEnd {
             timestamp_nanos: 999_000,
             worker_id: 1,
-        };
-        assert_eq!(roundtrip_v2(&event), event);
+        });
+        assert_eq!(
+            decoded,
+            TelemetryEvent::PollEnd {
+                timestamp_nanos: 999_000,
+                worker_id: 1,
+            }
+        );
     }
 
     #[test]
     fn worker_park_roundtrip() {
-        let event = TelemetryEvent::WorkerPark {
+        let decoded = roundtrip_one(RawEvent::WorkerPark {
             timestamp_nanos: 5_000_000_000,
             worker_id: 7,
             worker_local_queue_depth: 200,
             cpu_time_nanos: 1_234_567_000,
-        };
-        assert_eq!(roundtrip_v2(&event), event);
+        });
+        assert_eq!(
+            decoded,
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos: 5_000_000_000,
+                worker_id: 7,
+                worker_local_queue_depth: 200,
+                cpu_time_nanos: 1_234_567_000,
+            }
+        );
     }
 
     #[test]
     fn worker_unpark_roundtrip() {
-        let event = TelemetryEvent::WorkerUnpark {
+        let decoded = roundtrip_one(RawEvent::WorkerUnpark {
             timestamp_nanos: 1_000_000,
             worker_id: 2,
             worker_local_queue_depth: 55,
             cpu_time_nanos: 999_000,
             sched_wait_delta_nanos: 42_000,
-        };
-        assert_eq!(roundtrip_v2(&event), event);
+        });
+        assert_eq!(
+            decoded,
+            TelemetryEvent::WorkerUnpark {
+                timestamp_nanos: 1_000_000,
+                worker_id: 2,
+                worker_local_queue_depth: 55,
+                cpu_time_nanos: 999_000,
+                sched_wait_delta_nanos: 42_000,
+            }
+        );
     }
 
     #[test]
     fn queue_sample_roundtrip() {
-        let event = TelemetryEvent::QueueSample {
+        let decoded = roundtrip_one(RawEvent::QueueSample {
             timestamp_nanos: 10_000_000_000,
             global_queue_depth: 128,
-        };
-        assert_eq!(roundtrip_v2(&event), event);
+        });
+        assert_eq!(
+            decoded,
+            TelemetryEvent::QueueSample {
+                timestamp_nanos: 10_000_000_000,
+                global_queue_depth: 128,
+            }
+        );
     }
 
     #[test]
+    #[track_caller]
     fn task_spawn_roundtrip() {
-        let event = TelemetryEvent::TaskSpawn {
+        let loc = std::panic::Location::caller();
+        let decoded = roundtrip_one(RawEvent::TaskSpawn {
             timestamp_nanos: 5_000_000,
             task_id: TaskId::from_u32(99),
-            spawn_loc_id: SpawnLocationId(0),
-        };
-        assert_eq!(roundtrip_v2_with_intern(&event, "test_loc"), event);
+            location: loc,
+        });
+        match decoded {
+            TelemetryEvent::TaskSpawn {
+                timestamp_nanos,
+                task_id,
+                ..
+            } => {
+                assert_eq!(timestamp_nanos, 5_000_000);
+                assert_eq!(task_id, TaskId::from_u32(99));
+            }
+            other => panic!("expected TaskSpawn, got {other:?}"),
+        }
     }
 
     #[test]
     fn task_terminate_roundtrip() {
-        let event = TelemetryEvent::TaskTerminate {
+        let decoded = roundtrip_one(RawEvent::TaskTerminate {
             timestamp_nanos: 5_000_000,
             task_id: TaskId::from_u32(42),
-        };
-        assert_eq!(roundtrip_v2(&event), event);
+        });
+        assert_eq!(
+            decoded,
+            TelemetryEvent::TaskTerminate {
+                timestamp_nanos: 5_000_000,
+                task_id: TaskId::from_u32(42),
+            }
+        );
     }
 
     #[test]
     fn cpu_sample_roundtrip() {
-        let event = TelemetryEvent::CpuSample {
+        let decoded = roundtrip_one(RawEvent::CpuSample(Box::new(CpuSampleData {
             timestamp_nanos: 1_000_000,
             worker_id: 0,
             tid: 12345,
             source: CpuSampleSource::CpuProfile,
             callchain: vec![0x5555_1234, 0x5555_0a00],
-        };
-        assert_eq!(roundtrip_v2(&event), event);
+            thread_name: None,
+        })));
+        assert_eq!(
+            decoded,
+            TelemetryEvent::CpuSample {
+                timestamp_nanos: 1_000_000,
+                worker_id: 0,
+                tid: 12345,
+                source: CpuSampleSource::CpuProfile,
+                callchain: vec![0x5555_1234, 0x5555_0a00],
+            }
+        );
     }
 
     #[test]
     fn callframe_def_roundtrip() {
-        let event = TelemetryEvent::CallframeDef {
+        let decoded = roundtrip_one(RawEvent::CallframeDef(Box::new(CallframeDefData {
             address: 0x5555_1234,
             symbol: "my_crate::my_function".to_string(),
             location: Some("src/lib.rs:42".to_string()),
-        };
-        assert_eq!(roundtrip_v2(&event), event);
+        })));
+        assert_eq!(
+            decoded,
+            TelemetryEvent::CallframeDef {
+                address: 0x5555_1234,
+                symbol: "my_crate::my_function".to_string(),
+                location: Some("src/lib.rs:42".to_string()),
+            }
+        );
     }
 
     #[test]
     fn callframe_def_no_location_roundtrip() {
-        let event = TelemetryEvent::CallframeDef {
+        let decoded = roundtrip_one(RawEvent::CallframeDef(Box::new(CallframeDefData {
             address: 0x5555_1234,
             symbol: "my_crate::my_function".to_string(),
             location: None,
-        };
-        assert_eq!(roundtrip_v2(&event), event);
+        })));
+        // Writer maps None → "<no location>", decoder passes it through as Some.
+        assert_eq!(
+            decoded,
+            TelemetryEvent::CallframeDef {
+                address: 0x5555_1234,
+                symbol: "my_crate::my_function".to_string(),
+                location: Some("<no location>".to_string()),
+            }
+        );
     }
 
     #[test]
     fn wake_event_roundtrip() {
-        let event = TelemetryEvent::WakeEvent {
+        let decoded = roundtrip_one(RawEvent::WakeEvent {
             timestamp_nanos: 5_000_000,
             waker_task_id: TaskId::from_u32(10),
             woken_task_id: TaskId::from_u32(20),
             target_worker: 3,
-        };
-        assert_eq!(roundtrip_v2(&event), event);
+        });
+        assert_eq!(
+            decoded,
+            TelemetryEvent::WakeEvent {
+                timestamp_nanos: 5_000_000,
+                waker_task_id: TaskId::from_u32(10),
+                woken_task_id: TaskId::from_u32(20),
+                target_worker: 3,
+            }
+        );
     }
 
     #[test]
     fn segment_metadata_roundtrip() {
-        let event = TelemetryEvent::SegmentMetadata {
-            timestamp_nanos: 0,
-            entries: vec![
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.bin");
+        let mut writer = RotatingWriter::single_file(&path).unwrap();
+        writer
+            .set_segment_metadata(vec![
                 ("service".into(), "checkout-api".into()),
                 ("host".into(), "i-0abc123".into()),
-            ],
-        };
-        assert_eq!(roundtrip_v2(&event), event);
+            ])
+            .unwrap();
+        writer.flush().unwrap();
+
+        let data = std::fs::read(&path).unwrap();
+        let events = decode_events_v2(&data).unwrap();
+        let meta = events
+            .iter()
+            .find_map(|e| match e {
+                TelemetryEvent::SegmentMetadata { entries, .. } => Some(entries.clone()),
+                _ => None,
+            })
+            .expect("expected SegmentMetadata event");
+        assert_eq!(
+            meta,
+            vec![
+                ("service".to_string(), "checkout-api".to_string()),
+                ("host".to_string(), "i-0abc123".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn segment_metadata_empty_roundtrip() {
-        let event = TelemetryEvent::SegmentMetadata {
-            timestamp_nanos: 0,
-            entries: vec![],
-        };
-        assert_eq!(roundtrip_v2(&event), event);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.bin");
+        let mut writer = RotatingWriter::single_file(&path).unwrap();
+        writer.set_segment_metadata(vec![]).unwrap();
+        writer.flush().unwrap();
+
+        let data = std::fs::read(&path).unwrap();
+        let events = decode_events_v2(&data).unwrap();
+        let meta = events
+            .iter()
+            .find_map(|e| match e {
+                TelemetryEvent::SegmentMetadata { entries, .. } => Some(entries.clone()),
+                _ => None,
+            })
+            .expect("expected SegmentMetadata event");
+        assert!(meta.is_empty());
     }
 
     #[test]
+    #[track_caller]
     fn mixed_event_stream() {
-        let events = vec![
-            TelemetryEvent::TaskSpawn {
+        let loc = std::panic::Location::caller();
+        let raw_events = vec![
+            RawEvent::TaskSpawn {
                 timestamp_nanos: 500_000,
                 task_id: TaskId::from_u32(100),
-                spawn_loc_id: SpawnLocationId(0),
+                location: loc,
             },
-            TelemetryEvent::PollStart {
+            RawEvent::PollStart {
                 timestamp_nanos: 1_000_000,
                 worker_id: 0,
                 worker_local_queue_depth: 3,
                 task_id: TaskId::from_u32(100),
-                spawn_loc_id: SpawnLocationId(0),
+                location: loc,
             },
-            TelemetryEvent::PollEnd {
+            RawEvent::PollEnd {
                 timestamp_nanos: 2_000_000,
                 worker_id: 0,
             },
         ];
 
-        let mut enc = Encoder::new();
-        enc.intern_string("src/main.rs:10:1").unwrap();
-        for e in &events {
-            write_event_v2(&mut enc, e).unwrap();
-        }
-        let bytes = enc.finish();
-        let decoded = decode_events_v2(&bytes).unwrap();
-        assert_eq!(decoded, events);
+        let decoded = roundtrip_raw(&raw_events);
+        assert_eq!(decoded.len(), 3);
+        assert!(matches!(decoded[0], TelemetryEvent::TaskSpawn { .. }));
+        assert!(matches!(decoded[1], TelemetryEvent::PollStart { .. }));
+        assert!(matches!(
+            decoded[2],
+            TelemetryEvent::PollEnd {
+                timestamp_nanos: 2_000_000,
+                worker_id: 0,
+            }
+        ));
     }
 }
