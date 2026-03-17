@@ -118,11 +118,6 @@ struct String8 {
     len: u8,
 }
 
-struct S0;
-struct S1;
-struct S2;
-struct S3;
-
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
     let input: FuzzInput = match u.arbitrary() {
