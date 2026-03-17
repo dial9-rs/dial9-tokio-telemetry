@@ -80,7 +80,6 @@ for frame in dec.decode_all() {
             println!("{name} @ {timestamp_ns:?}: {values:?}");
         }
         DecodedFrame::StringPool(entries) => println!("{} pool entries", entries.len()),
-        DecodedFrame::SymbolTable(entries) => println!("{} symbols", entries.len()),
     }
 }
 ```
@@ -136,17 +135,26 @@ let id = enc.intern_string("my_function");
 
 ### Symbol table
 
-For CPU profile stack frame symbolization, attach a symbol table mapping address ranges to symbol names:
+For CPU profile stack frame symbolization, attach symbol data as schema-based events:
 
 ```rust
 use dial9_trace_format::encoder::Encoder;
-use dial9_trace_format::codec::SymbolEntry;
+use dial9_trace_format::schema::FieldDef;
+use dial9_trace_format::types::{FieldType, FieldValue};
 
+struct SymEntry;
 let mut enc = Encoder::new();
-let name_id = enc.intern_string("my_function");
-enc.write_symbol_table(&[
-    SymbolEntry { base_addr: 0x1000, size: 256, symbol_id: name_id },
-]);
+let name_id = enc.intern_string("my_function").unwrap();
+enc.register_schema_for::<SymEntry>("SymbolTableEntry", vec![
+    FieldDef { name: "base_addr".into(), field_type: FieldType::Varint },
+    FieldDef { name: "size".into(), field_type: FieldType::Varint },
+    FieldDef { name: "symbol_name".into(), field_type: FieldType::PooledString },
+]).unwrap();
+enc.write_event_for::<SymEntry>(&[
+    FieldValue::Varint(0x1000),
+    FieldValue::Varint(256),
+    FieldValue::PooledString(name_id),
+]).unwrap();
 ```
 
 ### JavaScript reader

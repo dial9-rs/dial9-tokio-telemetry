@@ -9,14 +9,10 @@ publish = false
 
 [features]
 serde = ["dep:serde"]
-# Offline symbolization of stack frame addresses. Linux only.
-symbolize = ["dep:dial9-perf-self-profile", "dep:blazesym"]
 
 [dependencies]
 dial9-trace-format-derive = { workspace = true }
 serde = { version = "1", optional = true }
-dial9-perf-self-profile = { workspace = true, optional = true }
-blazesym = { version = "0.2", optional = true }
 
 [dev-dependencies]
 serde_json = "1"

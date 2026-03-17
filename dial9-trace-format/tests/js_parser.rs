@@ -1,6 +1,6 @@
 //! Integration test: encode a trace in Rust, decode it with the JS reader, compare results.
 
-use dial9_trace_format::codec::SymbolEntry;
+use dial9_trace_format::codec::{self, WireTypeId};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
@@ -89,21 +89,52 @@ fn js_decodes_all_field_types() {
     )
     .unwrap();
 
-    enc.write_symbol_table(&[SymbolEntry {
-        base_addr: 0x1000,
-        size: 256,
-        symbol_id: pool_id,
-    }])
+    let mut data = enc.finish();
+
+    // Append symbol table as untimestamped schema-based events via low-level codec.
+    let sym_tid = WireTypeId(100);
+    codec::encode_schema(
+        sym_tid,
+        &dial9_trace_format::schema::SchemaEntry {
+            name: "SymbolTableEntry".into(),
+            has_timestamp: false,
+            fields: vec![
+                FieldDef {
+                    name: "base_addr".into(),
+                    field_type: FieldType::Varint,
+                },
+                FieldDef {
+                    name: "size".into(),
+                    field_type: FieldType::Varint,
+                },
+                FieldDef {
+                    name: "symbol_name".into(),
+                    field_type: FieldType::PooledString,
+                },
+            ],
+        },
+        &mut data,
+    )
+    .unwrap();
+    codec::encode_event(
+        sym_tid,
+        None,
+        &[
+            FieldValue::Varint(0x1000),
+            FieldValue::Varint(256),
+            FieldValue::PooledString(pool_id),
+        ],
+        &mut data,
+    )
     .unwrap();
 
-    let data = enc.finish();
     let json = js_decode(&data);
 
     assert_eq!(json["version"], 1);
 
     let frames = json["frames"].as_array().unwrap();
-    // schema + string_pool + event + symbol_table = 4
-    assert_eq!(frames.len(), 4);
+    // schema(AllTypes) + string_pool + event + schema(SymbolTableEntry) + symbol_event = 5
+    assert_eq!(frames.len(), 5);
 
     assert_eq!(frames[0]["type"], "schema");
     assert_eq!(frames[0]["name"], "AllTypes");
@@ -120,10 +151,10 @@ fn js_decodes_all_field_types() {
     assert_eq!(vals["i_stack"], serde_json::json!(["4096", "3840", "3584"]));
     assert_eq!(vals["j_varint"], "999");
 
-    let sym = &frames[3]["entries"][0];
-    assert_eq!(sym["baseAddr"], "4096");
-    assert_eq!(sym["size"], 256);
-    assert_eq!(sym["symbolName"], "hello");
+    let sym = &frames[4]["values"];
+    assert_eq!(sym["base_addr"], "4096");
+    assert_eq!(sym["size"], "256");
+    assert_eq!(sym["symbol_name"], "hello");
 }
 
 #[test]

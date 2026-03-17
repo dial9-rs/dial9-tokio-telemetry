@@ -1,7 +1,7 @@
 // Frame encoding/decoding (header, schema, event, string pool, symbol table)
 
 use crate::schema::{FieldDef, SchemaEntry};
-use crate::types::{FieldType, FieldValue, FieldValueRef, InternedString};
+use crate::types::{FieldType, FieldValue, FieldValueRef};
 use std::io::{self, Write};
 
 /// Type ID as it appears on the wire (u16 in schema/event frame headers).
@@ -19,9 +19,7 @@ pub const HEADER_SIZE: usize = 5;
 pub const TAG_SCHEMA: u8 = 0x01;
 pub const TAG_EVENT: u8 = 0x02;
 pub const TAG_STRING_POOL: u8 = 0x03;
-pub const TAG_SYMBOL_TABLE: u8 = 0x04;
 pub const TAG_TIMESTAMP_RESET: u8 = 0x05;
-// Tag 0x06 was legacy ProcMaps (removed; now a schema-based event).
 
 /// Maximum nanosecond delta that fits in a u24 (3 bytes).
 pub const MAX_TIMESTAMP_DELTA_NS: u64 = 0xFF_FFFF; // 16,777,215
@@ -47,13 +45,6 @@ pub struct PoolEntry {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SymbolEntry {
-    pub base_addr: u64,
-    pub size: u32,
-    pub symbol_id: InternedString,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     Schema {
         type_id: WireTypeId,
@@ -66,7 +57,6 @@ pub enum Frame {
         values: Vec<FieldValue>,
     },
     StringPool(Vec<PoolEntry>),
-    SymbolTable(Vec<SymbolEntry>),
     TimestampReset(u64),
 }
 
@@ -90,7 +80,6 @@ pub enum FrameRef<'a> {
         values: Vec<FieldValueRef<'a>>,
     },
     StringPool(Vec<PoolEntryRef<'a>>),
-    SymbolTable(Vec<SymbolEntry>),
     TimestampReset(u64),
 }
 
@@ -158,17 +147,6 @@ pub fn encode_string_pool(entries: &[PoolEntry], w: &mut impl Write) -> io::Resu
     Ok(())
 }
 
-pub fn encode_symbol_table(entries: &[SymbolEntry], w: &mut impl Write) -> io::Result<()> {
-    w.write_all(&[TAG_SYMBOL_TABLE])?;
-    w.write_all(&(entries.len() as u32).to_le_bytes())?;
-    for e in entries {
-        w.write_all(&e.base_addr.to_le_bytes())?;
-        w.write_all(&e.size.to_le_bytes())?;
-        w.write_all(&e.symbol_id.0.to_le_bytes())?;
-    }
-    Ok(())
-}
-
 // --- Decoding ---
 
 pub fn decode_header(data: &[u8]) -> Option<u8> {
@@ -190,7 +168,6 @@ pub fn decode_frame<'s>(
         TAG_SCHEMA => decode_schema_frame(data),
         TAG_EVENT => decode_event_frame(data, schema_lookup, timestamp_base_ns),
         TAG_STRING_POOL => decode_string_pool_frame(data),
-        TAG_SYMBOL_TABLE => decode_symbol_table_frame(data),
         TAG_TIMESTAMP_RESET => {
             let ts = u64::from_le_bytes(data.get(1..9)?.try_into().ok()?);
             Some((Frame::TimestampReset(ts), 9))
@@ -290,27 +267,6 @@ fn decode_string_pool_frame(data: &[u8]) -> Option<(Frame, usize)> {
     Some((Frame::StringPool(entries), pos))
 }
 
-fn decode_symbol_table_frame(data: &[u8]) -> Option<(Frame, usize)> {
-    let mut pos = 1;
-    let count = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
-    pos += 4;
-    let mut entries = Vec::with_capacity(count.min((data.len() - pos) / 16));
-    for _ in 0..count {
-        let base_addr = u64::from_le_bytes(data.get(pos..pos + 8)?.try_into().ok()?);
-        pos += 8;
-        let size = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?);
-        pos += 4;
-        let symbol_id = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?);
-        pos += 4;
-        entries.push(SymbolEntry {
-            base_addr,
-            size,
-            symbol_id: InternedString(symbol_id),
-        });
-    }
-    Some((Frame::SymbolTable(entries), pos))
-}
-
 // --- Zero-copy decoding ---
 
 /// Decode a single frame without allocating owned data for field values.
@@ -332,13 +288,6 @@ pub fn decode_frame_ref<'a, 's>(
         }
         TAG_EVENT => decode_event_frame_ref(data, schema_lookup, timestamp_base_ns),
         TAG_STRING_POOL => decode_string_pool_frame_ref(data),
-        TAG_SYMBOL_TABLE => {
-            let (frame, consumed) = decode_symbol_table_frame(data)?;
-            match frame {
-                Frame::SymbolTable(e) => Some((FrameRef::SymbolTable(e), consumed)),
-                _ => unreachable!(),
-            }
-        }
         TAG_TIMESTAMP_RESET => {
             let ts = u64::from_le_bytes(data.get(1..9)?.try_into().ok()?);
             Some((FrameRef::TimestampReset(ts), 9))
@@ -591,38 +540,6 @@ mod tests {
         encode_string_pool(&[], &mut buf).unwrap();
         let (frame, _) = decode_frame(&buf, |_| None, 0).unwrap();
         assert_eq!(frame, Frame::StringPool(vec![]));
-    }
-
-    // --- Symbol table frame tests ---
-
-    #[test]
-    fn symbol_table_round_trip() {
-        let entries = vec![
-            SymbolEntry {
-                base_addr: 0x1000,
-                size: 256,
-                symbol_id: InternedString(0),
-            },
-            SymbolEntry {
-                base_addr: 0x2000,
-                size: 128,
-                symbol_id: InternedString(1),
-            },
-        ];
-        let mut buf = Vec::new();
-        encode_symbol_table(&entries, &mut buf).unwrap();
-        assert_eq!(buf[0], TAG_SYMBOL_TABLE);
-        let (frame, consumed) = decode_frame(&buf, |_| None, 0).unwrap();
-        assert_eq!(consumed, buf.len());
-        assert_eq!(frame, Frame::SymbolTable(entries));
-    }
-
-    #[test]
-    fn symbol_table_empty() {
-        let mut buf = Vec::new();
-        encode_symbol_table(&[], &mut buf).unwrap();
-        let (frame, _) = decode_frame(&buf, |_| None, 0).unwrap();
-        assert_eq!(frame, Frame::SymbolTable(vec![]));
     }
 
     #[test]

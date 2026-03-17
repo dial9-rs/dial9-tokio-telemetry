@@ -1,7 +1,7 @@
 // High-level encoder API
 
 use crate::TraceEvent;
-use crate::codec::{self, PoolEntry, SymbolEntry, WireTypeId};
+use crate::codec::{self, PoolEntry, WireTypeId};
 use crate::schema::{SchemaEntry, SchemaRegistry};
 use crate::types::{EncodeState, EventEncoder};
 use std::any::TypeId;
@@ -263,14 +263,8 @@ impl<W: Write> Encoder<W> {
         Ok(crate::types::InternedString(id))
     }
 
-    /// Write a string pool frame with interned string entries.
     pub fn write_string_pool(&mut self, entries: &[PoolEntry]) -> io::Result<()> {
         codec::encode_string_pool(entries, &mut self.state.writer)
-    }
-
-    /// Write a symbol table frame mapping address ranges to interned symbol names.
-    pub fn write_symbol_table(&mut self, entries: &[SymbolEntry]) -> io::Result<()> {
-        codec::encode_symbol_table(entries, &mut self.state.writer)
     }
 
     /// Flush the underlying writer.
@@ -423,19 +417,6 @@ mod tests {
         let id3 = enc.intern_string("world").unwrap();
         assert_eq!(id1, id2);
         assert_ne!(id1, id3);
-    }
-
-    #[test]
-    fn encoder_write_symbol_table() {
-        let mut enc = Encoder::new();
-        enc.write_symbol_table(&[SymbolEntry {
-            base_addr: 0x1000,
-            size: 64,
-            symbol_id: crate::types::InternedString(0),
-        }])
-        .unwrap();
-        let data = enc.finish();
-        assert!(data.len() > 5);
     }
 
     #[test]

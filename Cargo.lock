@@ -1445,9 +1445,7 @@ dependencies = [
 name = "dial9-trace-format"
 version = "0.1.1"
 dependencies = [
- "blazesym",
  "criterion",
- "dial9-perf-self-profile",
  "dial9-trace-format-derive",
  "flate2",
  "serde",

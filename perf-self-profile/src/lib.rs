@@ -37,6 +37,7 @@
 //! });
 //! ```
 
+pub mod offline_symbolize;
 mod ring_buffer;
 mod sampler;
 mod symbolize;
