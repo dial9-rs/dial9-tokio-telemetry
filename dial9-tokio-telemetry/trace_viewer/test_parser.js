@@ -91,6 +91,16 @@ function main() {
     }
     console.log(`✓ CPU sample count matches: ${rustCpuSamples}`);
 
+    // Check spawn locations are resolved on PollStart events
+    const pollStarts = trace.events.filter(e => e.eventType === 0);
+    const withSpawnLoc = pollStarts.filter(e => e.spawnLoc !== null);
+    console.log(`\nSpawn locations: ${withSpawnLoc.length}/${pollStarts.length} PollStart events have spawnLoc`);
+    if (pollStarts.length > 0 && withSpawnLoc.length === 0) {
+        console.log("✗ No PollStart events have spawn locations resolved — field name mismatch?");
+        process.exit(1);
+    }
+    console.log("✓ Spawn locations resolved");
+
     // Spot-check: compare first few runtime events field-by-field
     let spotErrors = 0;
     const jsIdx = { i: 0 };

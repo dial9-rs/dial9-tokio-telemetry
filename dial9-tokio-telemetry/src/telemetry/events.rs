@@ -1,6 +1,7 @@
-use crate::telemetry::{cpu_profile::ThreadName, format::WorkerId, task_metadata::TaskId};
+use crate::telemetry::{format::WorkerId, task_metadata::TaskId};
 use dial9_trace_format::InternedString;
 use serde::Serialize;
+use std::sync::Arc;
 
 /// Role of a thread known to the telemetry system.
 #[cfg(feature = "cpu-profiling")]
@@ -27,6 +28,19 @@ impl CpuSampleSource {
             1 => Self::SchedEvent,
             _ => Self::CpuProfile,
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadName(Arc<str>);
+
+impl ThreadName {
+    pub fn new(name: String) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
     }
 }
 
@@ -408,7 +422,7 @@ mod tests {
     fn test_telemetry_event_timestamp() {
         let poll_start = TelemetryEvent::PollStart {
             timestamp_nanos: 1000,
-            worker_id: WorkerId::from(0usize),
+            worker_id: 0,
             worker_local_queue_depth: 2,
             task_id: UNKNOWN_TASK_ID,
             spawn_loc: UNKNOWN_SPAWN_LOC,
@@ -417,7 +431,7 @@ mod tests {
 
         let poll_end = TelemetryEvent::PollEnd {
             timestamp_nanos: 2000,
-            worker_id: WorkerId::from(1usize),
+            worker_id: 1,
         };
         assert_eq!(poll_end.timestamp_nanos(), Some(2000));
 
@@ -439,12 +453,12 @@ mod tests {
     fn test_telemetry_event_worker_id() {
         let poll_start = TelemetryEvent::PollStart {
             timestamp_nanos: 1000,
-            worker_id: WorkerId::from(3usize),
+            worker_id: 3,
             worker_local_queue_depth: 0,
             task_id: UNKNOWN_TASK_ID,
             spawn_loc: UNKNOWN_SPAWN_LOC,
         };
-        assert_eq!(poll_start.worker_id(), Some(WorkerId::from(3usize)));
+        assert_eq!(poll_start.worker_id(), Some(3));
 
         let queue_sample = TelemetryEvent::QueueSample {
             timestamp_nanos: 1000,
@@ -457,7 +471,7 @@ mod tests {
     fn test_is_runtime_event() {
         let poll_start = TelemetryEvent::PollStart {
             timestamp_nanos: 1000,
-            worker_id: WorkerId::from(0usize),
+            worker_id: 0,
             worker_local_queue_depth: 0,
             task_id: UNKNOWN_TASK_ID,
             spawn_loc: UNKNOWN_SPAWN_LOC,
@@ -483,13 +497,13 @@ mod tests {
     fn test_telemetry_event_creation() {
         let event = TelemetryEvent::PollStart {
             timestamp_nanos: 1000,
-            worker_id: WorkerId::from(0usize),
+            worker_id: 0,
             worker_local_queue_depth: 2,
             task_id: UNKNOWN_TASK_ID,
             spawn_loc: UNKNOWN_SPAWN_LOC,
         };
         assert_eq!(event.timestamp_nanos(), Some(1000));
-        assert_eq!(event.worker_id(), Some(WorkerId::from(0usize)));
+        assert_eq!(event.worker_id(), Some(0));
     }
 
     #[test]

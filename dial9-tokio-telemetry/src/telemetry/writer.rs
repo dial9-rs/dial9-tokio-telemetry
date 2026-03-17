@@ -16,7 +16,6 @@ pub trait TraceWriter: Send {
     fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()>;
     fn flush(&mut self) -> std::io::Result<()>;
     /// Returns true if the writer rotated to a new file since the last call to this method.
-    /// Used by the flush path to know when to re-emit SpawnLocationDefs.
     fn take_rotated(&mut self) -> bool {
         false
     }

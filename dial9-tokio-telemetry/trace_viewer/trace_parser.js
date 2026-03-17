@@ -52,8 +52,8 @@
 
             switch (frame.name) {
                 case 'PollStartEvent': {
-                    // spawn_loc_id is a PooledString, already resolved to the string
-                    const spawnLoc = v.spawn_loc_id || null;
+                    // spawn_loc is a PooledString, already resolved to the string
+                    const spawnLoc = v.spawn_loc || null;
                     if (spawnLoc) spawnLocations.set(spawnLoc, spawnLoc);
                     const taskId = num(v.task_id);
                     if (taskId && spawnLoc && !taskSpawnLocs.has(taskId)) {
@@ -102,7 +102,7 @@
                     break;
                 case 'TaskSpawnEvent': {
                     const taskId = num(v.task_id);
-                    const spawnLoc = v.spawn_loc_id || null;
+                    const spawnLoc = v.spawn_loc || null;
                     if (spawnLoc) spawnLocations.set(spawnLoc, spawnLoc);
                     taskSpawnLocs.set(taskId, spawnLoc);
                     taskSpawnTimes.set(taskId, ts);

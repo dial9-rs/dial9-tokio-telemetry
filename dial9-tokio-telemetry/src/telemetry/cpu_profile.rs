@@ -68,19 +68,6 @@ pub(crate) struct CpuProfiler {
     tid_to_name: HashMap<u32, ThreadName>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ThreadName(Arc<str>);
-
-impl ThreadName {
-    pub fn new(name: String) -> Self {
-        Self(name.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.0.as_ref()
-    }
-}
-
 impl CpuProfiler {
     pub fn start(config: CpuProfilingConfig, trace_start_mono_ns: u64) -> io::Result<Self> {
         let sampler = PerfSampler::start(SamplerConfig {
