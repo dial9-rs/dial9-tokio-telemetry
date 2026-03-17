@@ -9,9 +9,6 @@
 //!
 //! Requirements:
 //!   - perf_event_paranoid ≤ 1:  sudo sysctl kernel.perf_event_paranoid=1
-//!   - For kernel symbol names:  run as root (or CAP_SYS_ADMIN) so blazesym
-//!     can read KASLR-adjusted addresses from /proc/kallsyms.
-//!     Without root, kernel frames show as "[kernel] 0x..." addresses.
 //!
 //! Example output (nanosleep descheduling a tokio worker):
 //!
@@ -45,7 +42,6 @@
 //!   ...
 //!   start_thread
 
-use dial9_perf_self_profile::USER_ADDR_LIMIT;
 use dial9_tokio_telemetry::telemetry::{
     CpuSampleSource, RotatingWriter, SchedEventConfig, TelemetryEvent, TraceReader, TracedRuntime,
 };
@@ -95,7 +91,6 @@ fn main() {
 
     let mut printed = 0;
     let mut total_samples = 0;
-    let mut has_kernel_symbols = false;
 
     for event in &events {
         if let TelemetryEvent::CpuSample {
@@ -118,9 +113,6 @@ fn main() {
                         .get(addr)
                         .cloned()
                         .unwrap_or_else(|| format!("{:#x}", addr));
-                    if *addr >= USER_ADDR_LIMIT {
-                        has_kernel_symbols = true;
-                    }
                     eprintln!("  {name}");
                 }
             }
@@ -130,7 +122,5 @@ fn main() {
     eprintln!("\nTotal sched event samples: {total_samples}");
     if total_samples == 0 {
         eprintln!("No samples! Check: sudo sysctl kernel.perf_event_paranoid=1");
-    } else if !has_kernel_symbols {
-        eprintln!("Kernel frames show as raw addresses. For symbol names, run as root.");
     }
 }

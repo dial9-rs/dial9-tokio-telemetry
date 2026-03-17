@@ -137,7 +137,7 @@
                     break;
                 }
                 case 'CallframeDefEvent': {
-                    const addrKey = "0x" + num(v.address).toString(16);
+                    const addrKey = "0x" + BigInt(v.address).toString(16);
                     callframeSymbols.set(addrKey, {
                         symbol: v.symbol, location: v.location || null,
                     });

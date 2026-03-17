@@ -97,7 +97,13 @@ pub fn resolve_symbol(addr: u64) -> SymbolInfo {
 
         // Kernel addresses are >= USER_ADDR_LIMIT
         if addr >= USER_ADDR_LIMIT {
-            let src = source::Source::Kernel(source::Kernel::default());
+            let src = source::Source::Kernel(source::Kernel {
+                kallsyms: blazesym::MaybeDefault::Default,
+                vmlinux: blazesym::MaybeDefault::None,
+                kaslr_offset: Some(0),
+                debug_syms: false,
+                _non_exhaustive: (),
+            });
             if let Ok(results) = state.symbolizer.symbolize(&src, Input::AbsAddr(&[addr]))
                 && !results.is_empty()
                 && let Some(sym) = results[0].as_sym()
@@ -188,6 +194,24 @@ mod tests {
     fn parse_maps_line_anon() {
         let line = "7f1234000000-7f1234001000 r-xp 00000000 00:00 0";
         assert!(parse_maps_line(line).is_none());
+    }
+
+    #[test]
+    fn resolve_kernel_symbol_returns_name() {
+        // Pick a well-known kernel symbol from /proc/kallsyms
+        let kallsyms = fs::read_to_string("/proc/kallsyms").unwrap_or_default();
+        let entry = kallsyms
+            .lines()
+            .find(|l| {
+                let mut parts = l.split_whitespace();
+                parts.next(); // addr
+                parts.next(); // type
+                parts.next() == Some("schedule")
+            })
+            .expect("schedule not found in kallsyms");
+        let addr = u64::from_str_radix(entry.split_whitespace().next().unwrap(), 16).unwrap();
+        let info = resolve_symbol(addr);
+        assert_eq!(info.name.as_deref(), Some("schedule"));
     }
 
     #[test]
