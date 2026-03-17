@@ -28,8 +28,7 @@ pub struct StackFrames(pub Vec<u64>);
 
 /// An interned string reference (pool ID). Created by [`Encoder::intern_string`].
 /// On the wire this is a `PooledString` (u32 LE).
-/// TODO: intern string should not implement default
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InternedString(pub(crate) u32);
 
 #[cfg(feature = "serde")]

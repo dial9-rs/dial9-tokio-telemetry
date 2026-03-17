@@ -227,4 +227,4 @@ if (typeof require !== 'undefined' && require.main === module) {
   console.log(json);
 }
 
-module.exports = { TraceDecoder, FieldType };
+if (typeof module !== 'undefined') module.exports = { TraceDecoder, FieldType };
