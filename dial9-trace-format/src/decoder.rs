@@ -406,6 +406,41 @@ impl<'a> Decoder<'a> {
         }
         Ok(())
     }
+
+    /// Returns an iterator that yields only [`DecodedFrameRef::Event`] variants,
+    /// silently consuming schema, string-pool, and symbol-table frames
+    /// (while still updating internal decoder state).
+    pub fn events(&mut self) -> EventIter<'_, 'a> {
+        EventIter { decoder: self }
+    }
+}
+
+impl<'a> Iterator for Decoder<'a> {
+    type Item = Result<DecodedFrameRef<'a>, DecodeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_frame_ref().transpose()
+    }
+}
+
+/// Iterator that yields only [`DecodedFrameRef::Event`] frames,
+/// consuming non-event frames to keep decoder state up to date.
+pub struct EventIter<'d, 'a> {
+    decoder: &'d mut Decoder<'a>,
+}
+
+impl<'d, 'a> Iterator for EventIter<'d, 'a> {
+    type Item = Result<DecodedFrameRef<'a>, DecodeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.decoder.next()? {
+                Ok(frame @ DecodedFrameRef::Event { .. }) => return Some(Ok(frame)),
+                Ok(_) => continue, // schema, string pool, symbol table — skip
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -510,5 +545,124 @@ mod tests {
     #[test]
     fn bad_header_returns_none() {
         assert!(Decoder::new(&[0x00, 0x00, 0x00, 0x00, 1]).is_none());
+    }
+
+    #[test]
+    fn iterator_yields_all_frames() {
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        for i in 0..3u64 {
+            enc.write_event(
+                &schema,
+                &[FieldValue::Varint(i * 1000), FieldValue::Varint(i)],
+            )
+            .unwrap();
+        }
+        let data = enc.finish();
+
+        let dec = Decoder::new(&data).unwrap();
+        let frames: Vec<_> = dec.collect::<Result<Vec<_>, _>>().unwrap();
+        // 1 schema + 3 events
+        assert_eq!(frames.len(), 4);
+        assert!(matches!(frames[0], DecodedFrameRef::Schema(_)));
+        assert!(matches!(frames[1], DecodedFrameRef::Event { .. }));
+    }
+
+    #[test]
+    fn iterator_early_termination() {
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        for i in 0..10u64 {
+            enc.write_event(
+                &schema,
+                &[FieldValue::Varint(i * 1000), FieldValue::Varint(i)],
+            )
+            .unwrap();
+        }
+        let data = enc.finish();
+
+        let mut dec = Decoder::new(&data).unwrap();
+        // Take just 2 frames (schema + first event), don't decode the rest
+        let first_two: Vec<_> = dec.by_ref().take(2).collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(first_two.len(), 2);
+        // Decoder should still have remaining data
+        let next = dec.next();
+        assert!(next.is_some());
+    }
+
+    #[test]
+    fn events_iterator_skips_schema() {
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
+        )
+        .unwrap();
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(2_000), FieldValue::Varint(99)],
+        )
+        .unwrap();
+        let data = enc.finish();
+
+        let mut dec = Decoder::new(&data).unwrap();
+        let events: Vec<_> = dec.events().collect::<Result<Vec<_>, _>>().unwrap();
+        // Only events, no schema frame
+        assert_eq!(events.len(), 2);
+        for ev in &events {
+            assert!(matches!(ev, DecodedFrameRef::Event { .. }));
+        }
+    }
+
+    #[test]
+    fn events_iterator_first_event_only() {
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        for i in 0..5u64 {
+            enc.write_event(
+                &schema,
+                &[FieldValue::Varint(i * 1000), FieldValue::Varint(i)],
+            )
+            .unwrap();
+        }
+        let data = enc.finish();
+
+        let mut dec = Decoder::new(&data).unwrap();
+        // Get just the first event — schema is consumed internally
+        let first = dec.events().next().unwrap().unwrap();
+        assert!(matches!(first, DecodedFrameRef::Event { .. }));
     }
 }

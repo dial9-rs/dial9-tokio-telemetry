@@ -3,10 +3,6 @@
 //! Finds `.bin` files produced by `RotatingWriter` rename-on-seal,
 //! ignoring `.active` files that are still being written.
 
-use crate::telemetry::events::TelemetryEvent;
-use crate::telemetry::format;
-use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// A sealed trace segment ready for processing.
@@ -17,53 +13,62 @@ pub struct SealedSegment {
 }
 
 impl SealedSegment {
-    /// Segment creation time as epoch seconds, parsed from SegmentMetadata header.
-    /// Falls back to file mtime if header parsing fails, then current time if mtime is unavailable.
-    /// Returns `(epoch_secs, header_valid)`.
-    pub(crate) fn creation_epoch_secs(&self) -> (u64, bool) {
-        // First try to parse timestamp from SegmentMetadata header
-        if let Ok(timestamp_nanos) = self.parse_segment_timestamp() {
-            return (timestamp_nanos / 1_000_000_000, true);
-        }
-
-        // Fall back to file mtime
-        let secs = std::fs::metadata(&self.path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or_else(|| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            });
-        (secs, false)
+    /// The file path of this sealed segment.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
-    /// Parse the timestamp from the SegmentMetadata header in the segment file.
-    /// Returns the timestamp in nanoseconds if successful.
-    fn parse_segment_timestamp(&self) -> std::io::Result<u64> {
-        let file = File::open(&self.path)?;
-        let mut reader = BufReader::new(file);
+    /// The segment index (e.g. 3 for `trace.3.bin`).
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+}
 
-        // Read and validate header
-        let (_magic, _version) = format::read_header(&mut reader)?;
+/// Segment creation time as epoch seconds, parsed from SegmentMetadata header.
+/// Returns `(epoch_secs, true)` if the header was valid, or falls back to
+/// file mtime / current time with `(epoch_secs, false)`.
+pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
+    if let Some(ts) = parse_segment_timestamp(data) {
+        return (ts / 1_000_000_000, true);
+    }
+    let secs = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        });
+    (secs, false)
+}
 
-        // Try to read the first event, which should be SegmentMetadata
-        if let Some(event) = format::read_event(&mut reader)?
-            && let TelemetryEvent::SegmentMetadata {
-                timestamp_nanos, ..
-            } = event
+/// Parse the timestamp (nanos) from the first SegmentMetadata event in a trace segment.
+fn parse_segment_timestamp(data: &[u8]) -> Option<u64> {
+    use dial9_trace_format::decoder::{DecodedFrameRef, Decoder};
+
+    let mut dec = Decoder::new(data)?;
+    let mut events_seen = 0;
+    while let Ok(Some(frame)) = dec.next_frame_ref() {
+        if let DecodedFrameRef::Event {
+            type_id,
+            timestamp_ns,
+            ..
+        } = frame
         {
-            return Ok(timestamp_nanos);
+            events_seen += 1;
+            let name = dec.registry().get(type_id).map(|s| s.name.as_str())?;
+            if name == "SegmentMetadataEvent" {
+                return timestamp_ns;
+            }
+            if events_seen >= 10 {
+                return None;
+            }
         }
-
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "No SegmentMetadata found at start of segment",
-        ))
     }
+    None
 }
 
 /// Find sealed `.bin` segments in `dir`, sorted oldest-first by index.
@@ -180,12 +185,8 @@ mod tests {
         writer.write_event(&event).unwrap();
         writer.flush().unwrap();
 
-        let segment = SealedSegment {
-            path: base.clone(),
-            index: 0,
-        };
-
-        let timestamp_nanos = segment.parse_segment_timestamp().unwrap();
+        let data = std::fs::read(&base).unwrap();
+        let timestamp_nanos = parse_segment_timestamp(&data).unwrap();
 
         let now_nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -219,12 +220,8 @@ mod tests {
         writer.write_event(&event).unwrap();
         writer.flush().unwrap();
 
-        let segment = SealedSegment {
-            path: base.clone(),
-            index: 0,
-        };
-
-        let (epoch_secs, header_valid) = segment.creation_epoch_secs();
+        let data = std::fs::read(&base).unwrap();
+        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &base);
         check!(header_valid);
         let expected_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -234,6 +231,23 @@ mod tests {
         let diff = expected_secs.abs_diff(epoch_secs);
 
         check!(diff < 60);
+    }
+
+    #[test]
+    fn test_creation_epoch_secs_invalid_data_falls_back() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("trace.0.bin");
+        std::fs::write(&path, b"not a valid trace").unwrap();
+
+        let data = std::fs::read(&path).unwrap();
+        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &path);
+        check!(!header_valid);
+        // Should fall back to mtime, which should be recent
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        check!(now.abs_diff(epoch_secs) < 60);
     }
 
     #[test]

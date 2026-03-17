@@ -384,7 +384,7 @@ impl WorkerLoop {
                 }
             };
 
-            let (epoch_secs, header_valid) = segment.creation_epoch_secs();
+            let (epoch_secs, header_valid) = sealed::creation_epoch_secs(&bytes, &segment.path);
 
             let metrics = SegmentProcessMetrics {
                 total_time: Timer::start_now(),
