@@ -319,6 +319,9 @@ impl PerfSampler {
             | PERF_SAMPLE_TIME as u64
             | PERF_SAMPLE_CPU as u64
             | PERF_SAMPLE_PERIOD as u64
+            // PERF_SAMPLE_RAW includes the tracepoint's raw event data (field
+            // values) in each sample. Only tracepoints produce meaningful raw
+            // data; CPU and context-switch sources have nothing to attach.
             | if matches!(config.event_source, EventSource::Tracepoint(_)) {
                 PERF_SAMPLE_RAW as u64
             } else {

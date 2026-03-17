@@ -364,17 +364,23 @@ struct CpuSample {
 }
 #[derive(TraceEvent)]
 struct SpawnLocationDef {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
     spawn_loc_id: u16,
     location: String,
 }
 #[derive(TraceEvent)]
 struct CallframeDef {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
     address: u64,
     symbol: String,
     location: String,
 }
 #[derive(TraceEvent)]
 struct ThreadNameDef {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
     tid: u32,
     name: String,
 }
@@ -483,6 +489,7 @@ fn convert_events(events: &[OldEvent]) -> Vec<NewEvent> {
             }),
             OldEvent::SpawnLocationDef { id, location } => {
                 NewEvent::SpawnLocationDef(SpawnLocationDef {
+                    timestamp_ns: 0,
                     spawn_loc_id: *id,
                     location: location.clone(),
                 })
@@ -492,11 +499,13 @@ fn convert_events(events: &[OldEvent]) -> Vec<NewEvent> {
                 symbol,
                 location,
             } => NewEvent::CallframeDef(CallframeDef {
+                timestamp_ns: 0,
                 address: *address,
                 symbol: symbol.clone(),
                 location: location.clone().unwrap_or_default(),
             }),
             OldEvent::ThreadNameDef { tid, name } => NewEvent::ThreadNameDef(ThreadNameDef {
+                timestamp_ns: 0,
                 tid: *tid,
                 name: name.clone(),
             }),

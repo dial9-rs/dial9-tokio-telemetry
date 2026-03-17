@@ -72,7 +72,7 @@ mod tests {
         let id = reg.next_type_id();
         let entry = SchemaEntry {
             name: "PollStart".into(),
-            has_timestamp: false,
+            has_timestamp: true,
             fields: vec![
                 FieldDef {
                     name: "timestamp_ns".into(),
@@ -95,7 +95,7 @@ mod tests {
         let id = reg.next_type_id();
         let entry = SchemaEntry {
             name: "A".into(),
-            has_timestamp: false,
+            has_timestamp: true,
             fields: vec![],
         };
         reg.register(id, entry.clone()).unwrap();
@@ -110,7 +110,7 @@ mod tests {
             id,
             SchemaEntry {
                 name: "A".into(),
-                has_timestamp: false,
+                has_timestamp: true,
                 fields: vec![],
             },
         )
@@ -120,7 +120,7 @@ mod tests {
                 id,
                 SchemaEntry {
                     name: "B".into(),
-                    has_timestamp: false,
+                    has_timestamp: true,
                     fields: vec![]
                 }
             )
@@ -136,7 +136,7 @@ mod tests {
             id1,
             SchemaEntry {
                 name: "A".into(),
-                has_timestamp: false,
+                has_timestamp: true,
                 fields: vec![],
             },
         )
@@ -146,7 +146,7 @@ mod tests {
             id2,
             SchemaEntry {
                 name: "B".into(),
-                has_timestamp: false,
+                has_timestamp: true,
                 fields: vec![],
             },
         )

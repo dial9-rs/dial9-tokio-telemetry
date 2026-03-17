@@ -21,11 +21,8 @@ impl ::dial9_trace_format::TraceEvent for PollStart {
             field_type : < u64 as ::dial9_trace_format::TraceField > ::field_type(), }
         ]
     }
-    fn timestamp(&self) -> Option<u64> {
-        Some(self.timestamp_ns)
-    }
-    fn has_timestamp() -> bool {
-        true
+    fn timestamp(&self) -> u64 {
+        self.timestamp_ns
     }
     fn encode_fields<W: ::std::io::Write>(
         &self,

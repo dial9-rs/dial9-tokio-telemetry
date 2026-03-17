@@ -126,6 +126,12 @@ impl TracepointDef {
                 "format file missing 'name:' line",
             ));
         }
+        if id == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "format file missing or zero 'ID:' line",
+            ));
+        }
 
         Ok(TracepointDef { name, id, fields })
     }
@@ -152,6 +158,7 @@ impl TracepointDef {
 
             if field.is_dynamic {
                 // __data_loc: 4 bytes at field.offset encode (offset << 16) | length
+                // TODO: from_ne_bytes assumes little-endian layout — not portable to big-endian.
                 let loc =
                     u32::from_ne_bytes(raw[field.offset..field.offset + 4].try_into().unwrap());
                 let data_off = (loc >> 16) as usize;
@@ -354,6 +361,7 @@ fn extract_field_value(bytes: &[u8], size: usize, signed: bool, field_type: &str
         return RawFieldValue::Str(s);
     }
 
+    // TODO: from_ne_bytes assumes little-endian layout — not portable to big-endian.
     match (size, signed) {
         (1, false) => RawFieldValue::U8(bytes[0]),
         (1, true) => RawFieldValue::I8(bytes[0] as i8),

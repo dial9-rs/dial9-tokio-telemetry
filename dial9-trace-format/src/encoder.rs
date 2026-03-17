@@ -18,7 +18,12 @@ use std::sync::Arc;
 ///
 /// `Schema` is cheap to clone (internally `Arc`-backed).
 #[derive(Clone, Debug)]
-pub struct Schema(Arc<SchemaEntry>);
+pub struct Schema {
+    entry: Arc<SchemaEntry>,
+    /// Pre-computed `Arc<str>` of the schema name, used as a cheap HashMap key
+    /// (clone is a pointer bump instead of a String allocation).
+    name_key: Arc<str>,
+}
 
 impl Schema {
     /// Create a schema handle without an encoder.
@@ -26,21 +31,25 @@ impl Schema {
     /// The schema will be lazily registered the first time it is passed to
     /// [`Encoder::write_event`].
     pub fn new(name: &str, fields: Vec<crate::schema::FieldDef>) -> Self {
-        Self(Arc::new(SchemaEntry {
-            name: name.to_string(),
-            has_timestamp: true,
-            fields,
-        }))
+        let name_key: Arc<str> = Arc::from(name);
+        Self {
+            entry: Arc::new(SchemaEntry {
+                name: name.to_string(),
+                has_timestamp: true,
+                fields,
+            }),
+            name_key,
+        }
     }
 
     /// Schema name.
     pub fn name(&self) -> &str {
-        &self.0.name
+        &self.entry.name
     }
 
     /// Schema field definitions.
     pub fn fields(&self) -> &[crate::schema::FieldDef] {
-        &self.0.fields
+        &self.entry.fields
     }
 }
 
@@ -48,7 +57,7 @@ impl Schema {
 /// `TypeId` (derive macro path).
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum SchemaKey {
-    Name(String),
+    Name(Arc<str>),
     RustType(TypeId),
 }
 
@@ -115,10 +124,10 @@ impl<W: Write> Encoder<W> {
     /// Idempotent if the schema matches. Errors if a different schema was
     /// already registered under the same name.
     fn ensure_registered(&mut self, schema: &Schema) -> io::Result<WireTypeId> {
-        let key = SchemaKey::Name(schema.name().to_string());
+        let key = SchemaKey::Name(Arc::clone(&schema.name_key));
         if let Some(&wire_id) = self.schema_ids.get(&key) {
             let existing = self.registry.get(wire_id).unwrap();
-            if *existing == *schema.0 {
+            if *existing == *schema.entry {
                 return Ok(wire_id);
             }
             return Err(io::Error::new(
@@ -130,9 +139,9 @@ impl<W: Write> Encoder<W> {
             ));
         }
         let id = self.registry.next_type_id();
-        codec::encode_schema(id, &schema.0, &mut self.state.writer)?;
+        codec::encode_schema(id, &schema.entry, &mut self.state.writer)?;
         self.registry
-            .register(id, (*schema.0).clone())
+            .register(id, (*schema.entry).clone())
             .expect("schema registration failed");
         self.schema_ids.insert(key, id);
         Ok(id)
@@ -173,7 +182,7 @@ impl<W: Write> Encoder<W> {
         use crate::types::FieldValue;
 
         let type_id = self.ensure_registered(schema)?;
-        let expected_fields = schema.0.fields.len();
+        let expected_fields = schema.entry.fields.len();
 
         let ts_ns = match values.first() {
             Some(FieldValue::Varint(ns)) => *ns,
@@ -222,7 +231,7 @@ impl<W: Write> Encoder<W> {
             self.schema_ids.insert(key, id);
             id
         };
-        let ts_ns = event.timestamp().expect("TraceEvent must have a timestamp");
+        let ts_ns = event.timestamp();
         let ts_delta = self.state.encode_timestamp_delta(ts_ns)?;
         self.state.writer.write_all(&[codec::TAG_EVENT])?;
         self.state.writer.write_all(&tid.0.to_le_bytes())?;
