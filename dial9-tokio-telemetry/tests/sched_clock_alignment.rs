@@ -68,7 +68,8 @@ fn sched_event_timestamps_align_with_wall_clock() {
         .iter()
         .filter_map(|e| match e {
             RawEvent::CpuSample(data)
-                if data.source == CpuSampleSource::SchedEvent && data.worker_id < num_workers =>
+                if data.source == CpuSampleSource::SchedEvent
+                    && data.worker_id.as_u64() < num_workers as u64 =>
             {
                 Some(data.timestamp_nanos)
             }

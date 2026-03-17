@@ -664,6 +664,7 @@ mod tests {
     #[test]
     fn test_spawn_locations_resolve_after_rotation() {
         use crate::telemetry::analysis::TraceReader;
+        use crate::telemetry::format::WorkerId;
 
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path().join("trace");
@@ -695,7 +696,7 @@ mod tests {
             .unwrap();
             ew.write_raw_event(RawEvent::PollStart {
                 timestamp_nanos: (i as u64 + 1) * 1000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 task_id,
                 location: loc,
@@ -751,19 +752,17 @@ mod tests {
     mod rotation_proptest {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
-        use crate::telemetry::events::{
-            CpuSampleData, CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER,
-        };
+        use crate::telemetry::events::{CpuSampleData, CpuSampleSource, TelemetryEvent};
+        use crate::telemetry::format::WorkerId;
         use crate::telemetry::task_metadata::TaskId;
         use crate::telemetry::writer::RotatingWriter;
         use cpu_flush_state::CpuFlushState;
         use proptest::prelude::*;
-        use std::collections::HashSet;
 
         #[derive(Debug, Clone)]
         enum FlushOp {
             CpuSample {
-                worker_id: usize,
+                worker_id: WorkerId,
                 tid: u32,
                 callchain: Vec<u64>,
             },
@@ -781,7 +780,11 @@ mod tests {
                 )
                     .prop_map(|(is_worker, tid, callchain)| {
                         FlushOp::CpuSample {
-                            worker_id: if is_worker { 0 } else { UNKNOWN_WORKER },
+                            worker_id: if is_worker {
+                                WorkerId::from(0usize)
+                            } else {
+                                WorkerId::UNKNOWN
+                            },
                             tid,
                             callchain,
                         }
@@ -845,7 +848,7 @@ mod tests {
                     let task_id = TaskId::from_u32(*timestamp as u32);
                     let raw = RawEvent::PollStart {
                         timestamp_nanos: *timestamp,
-                        worker_id: 0,
+                        worker_id: WorkerId::from(0usize),
                         worker_local_queue_depth: 0,
                         task_id,
                         location: loc,
@@ -892,7 +895,7 @@ mod tests {
                             callchain,
                             ..
                         } => {
-                            if *worker_id == UNKNOWN_WORKER {
+                            if *worker_id == WorkerId::UNKNOWN {
                                 // Thread name tracking is handled by the string pool now;
                                 // just verify callframe symbols resolve.
                             }

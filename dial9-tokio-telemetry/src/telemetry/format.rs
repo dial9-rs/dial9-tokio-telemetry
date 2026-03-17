@@ -2,7 +2,44 @@ use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
 use crate::telemetry::task_metadata::TaskId;
 use dial9_trace_format::types::{EventEncoder, FieldType, FieldValueRef};
 use dial9_trace_format::{InternedString, StackFrames, TraceEvent, TraceField};
+use serde::Serialize;
+use std::fmt;
 use std::io::{self, Write};
+
+// ── WorkerId newtype ────────────────────────────────────────────────────────
+
+/// Identifies a Tokio worker thread. Wraps a `u64` encoded as a varint on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Default)]
+pub struct WorkerId(pub(crate) u64);
+
+impl WorkerId {
+    /// Sentinel for events from non-worker threads.
+    pub const UNKNOWN: WorkerId = WorkerId(255);
+    /// Sentinel for events from tokio's blocking thread pool.
+    pub const BLOCKING: WorkerId = WorkerId(254);
+
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<usize> for WorkerId {
+    fn from(v: usize) -> Self {
+        WorkerId(v as u64)
+    }
+}
+
+impl From<u8> for WorkerId {
+    fn from(v: u8) -> Self {
+        WorkerId(v as u64)
+    }
+}
+
+impl fmt::Display for WorkerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 // ── dial9-trace-format: TraceField impls ────────────────────────────────────
 
@@ -38,7 +75,6 @@ impl TraceField for CpuSampleSource {
     }
 }
 
-pub struct WorkerId(pub(crate) u64);
 impl TraceField for WorkerId {
     type Ref<'a> = WorkerId;
 
@@ -64,7 +100,7 @@ impl TraceField for WorkerId {
 pub struct PollStartEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
-    pub worker_id: u16,
+    pub worker_id: WorkerId,
     pub local_queue: u8,
     pub task_id: TaskId,
     pub spawn_loc: InternedString,
@@ -74,14 +110,14 @@ pub struct PollStartEvent {
 pub struct PollEndEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
-    pub worker_id: u8,
+    pub worker_id: WorkerId,
 }
 
 #[derive(TraceEvent)]
 pub struct WorkerParkEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
-    pub worker_id: u8,
+    pub worker_id: WorkerId,
     pub local_queue: u8,
     pub cpu_time_ns: u64,
 }
@@ -90,7 +126,7 @@ pub struct WorkerParkEvent {
 pub struct WorkerUnparkEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
-    pub worker_id: u8,
+    pub worker_id: WorkerId,
     pub local_queue: u8,
     pub cpu_time_ns: u64,
     pub sched_wait_ns: u64,
@@ -122,8 +158,7 @@ pub struct TaskTerminateEvent {
 pub struct CpuSampleEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
-    // todo: change this to u64 which is encoded as a varint
-    pub worker_id: u8,
+    pub worker_id: WorkerId,
     pub tid: u32,
     pub source: CpuSampleSource,
     pub thread_name: InternedString,
@@ -270,24 +305,24 @@ impl From<TelemetryEventRef<'_>> for TelemetryEvent {
         match r {
             TelemetryEventRef::PollStart(e) => TelemetryEvent::PollStart {
                 timestamp_nanos: e.timestamp_ns,
-                worker_id: e.worker_id as usize,
+                worker_id: e.worker_id,
                 worker_local_queue_depth: e.local_queue as usize,
                 task_id: e.task_id,
                 spawn_loc: e.spawn_loc,
             },
             TelemetryEventRef::PollEnd(e) => TelemetryEvent::PollEnd {
                 timestamp_nanos: e.timestamp_ns,
-                worker_id: e.worker_id as usize,
+                worker_id: e.worker_id,
             },
             TelemetryEventRef::WorkerPark(e) => TelemetryEvent::WorkerPark {
                 timestamp_nanos: e.timestamp_ns,
-                worker_id: e.worker_id as usize,
+                worker_id: e.worker_id,
                 worker_local_queue_depth: e.local_queue as usize,
                 cpu_time_nanos: e.cpu_time_ns,
             },
             TelemetryEventRef::WorkerUnpark(e) => TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: e.timestamp_ns,
-                worker_id: e.worker_id as usize,
+                worker_id: e.worker_id,
                 worker_local_queue_depth: e.local_queue as usize,
                 cpu_time_nanos: e.cpu_time_ns,
                 sched_wait_delta_nanos: e.sched_wait_ns,
@@ -307,7 +342,7 @@ impl From<TelemetryEventRef<'_>> for TelemetryEvent {
             },
             TelemetryEventRef::CpuSample(e) => TelemetryEvent::CpuSample {
                 timestamp_nanos: e.timestamp_ns,
-                worker_id: e.worker_id as usize,
+                worker_id: e.worker_id,
                 tid: e.tid,
                 source: e.source,
                 callchain: e.callchain.iter().collect(),

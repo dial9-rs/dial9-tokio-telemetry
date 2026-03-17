@@ -2,7 +2,8 @@ use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::collector::CentralCollector;
 #[cfg(feature = "cpu-profiling")]
 use crate::telemetry::events::ThreadRole;
-use crate::telemetry::events::{RawEvent, SchedStat, UNKNOWN_WORKER};
+use crate::telemetry::events::{RawEvent, SchedStat};
+use crate::telemetry::format::WorkerId;
 use crate::telemetry::task_metadata::TaskId;
 use arc_swap::ArcSwap;
 use std::cell::Cell;
@@ -72,7 +73,7 @@ pub(super) fn resolve_worker_id(
     })
 }
 
-/// Get the current worker ID as u8 (255 if unknown). Used by Traced waker.
+/// Get the current worker ID (UNKNOWN if not a worker). Used by Traced waker.
 pub(crate) fn current_worker_id(metrics: &ArcSwap<Option<RuntimeMetrics>>) -> u8 {
     match resolve_worker_id(metrics, None) {
         Some(id) if id <= 254 => id as u8,
@@ -166,7 +167,7 @@ impl SharedState {
             };
         RawEvent::PollStart {
             timestamp_nanos: self.start_time.elapsed().as_nanos() as u64,
-            worker_id: worker_id.unwrap_or(UNKNOWN_WORKER),
+            worker_id: worker_id.map(WorkerId::from).unwrap_or(WorkerId::UNKNOWN),
             worker_local_queue_depth,
             task_id,
             location,
@@ -177,7 +178,7 @@ impl SharedState {
         let worker_id = resolve_worker_id(&self.metrics, Some(self));
         RawEvent::PollEnd {
             timestamp_nanos: self.start_time.elapsed().as_nanos() as u64,
-            worker_id: worker_id.unwrap_or(UNKNOWN_WORKER),
+            worker_id: worker_id.map(WorkerId::from).unwrap_or(WorkerId::UNKNOWN),
         }
     }
 
@@ -196,7 +197,7 @@ impl SharedState {
         }
         RawEvent::WorkerPark {
             timestamp_nanos: self.start_time.elapsed().as_nanos() as u64,
-            worker_id: worker_id.unwrap_or(UNKNOWN_WORKER),
+            worker_id: worker_id.map(WorkerId::from).unwrap_or(WorkerId::UNKNOWN),
             worker_local_queue_depth,
             cpu_time_nanos,
         }
@@ -220,7 +221,7 @@ impl SharedState {
         };
         RawEvent::WorkerUnpark {
             timestamp_nanos: self.start_time.elapsed().as_nanos() as u64,
-            worker_id: worker_id.unwrap_or(UNKNOWN_WORKER),
+            worker_id: worker_id.map(WorkerId::from).unwrap_or(WorkerId::UNKNOWN),
             worker_local_queue_depth,
             cpu_time_nanos,
             sched_wait_delta_nanos,

@@ -278,7 +278,7 @@ impl RotatingWriter {
                     Self::intern_location(&mut self.encoder, &mut self.location_cache, location)?;
                 self.encoder.write(&PollStartEvent {
                     timestamp_ns: *timestamp_nanos,
-                    worker_id: *worker_id as u16,
+                    worker_id: *worker_id,
                     local_queue: *worker_local_queue_depth as u8,
                     task_id: *task_id,
                     spawn_loc,
@@ -289,7 +289,7 @@ impl RotatingWriter {
                 worker_id,
             } => self.encoder.write(&PollEndEvent {
                 timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id as u8,
+                worker_id: *worker_id,
             }),
             RawEvent::WorkerPark {
                 timestamp_nanos,
@@ -298,7 +298,7 @@ impl RotatingWriter {
                 cpu_time_nanos,
             } => self.encoder.write(&WorkerParkEvent {
                 timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id as u8,
+                worker_id: *worker_id,
                 local_queue: *worker_local_queue_depth as u8,
                 cpu_time_ns: *cpu_time_nanos,
             }),
@@ -310,7 +310,7 @@ impl RotatingWriter {
                 sched_wait_delta_nanos,
             } => self.encoder.write(&WorkerUnparkEvent {
                 timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id as u8,
+                worker_id: *worker_id,
                 local_queue: *worker_local_queue_depth as u8,
                 cpu_time_ns: *cpu_time_nanos,
                 sched_wait_ns: *sched_wait_delta_nanos,
@@ -361,7 +361,7 @@ impl RotatingWriter {
 
                 self.encoder.write(&CpuSampleEvent {
                     timestamp_ns: data.timestamp_nanos,
-                    worker_id: data.worker_id as u8,
+                    worker_id: data.worker_id,
                     tid: data.tid,
                     source: data.source,
                     thread_name,
@@ -443,7 +443,7 @@ mod tests {
     fn park_event() -> RawEvent {
         RawEvent::WorkerPark {
             timestamp_nanos: 1000,
-            worker_id: 0,
+            worker_id: crate::telemetry::format::WorkerId::from(0usize),
             worker_local_queue_depth: 2,
             cpu_time_nanos: 0,
         }
@@ -779,19 +779,19 @@ mod tests {
         let events = [
             RawEvent::WorkerPark {
                 timestamp_nanos: 1000,
-                worker_id: 0,
+                worker_id: crate::telemetry::format::WorkerId::from(0usize),
                 worker_local_queue_depth: 2,
                 cpu_time_nanos: 0,
             },
             RawEvent::WorkerPark {
                 timestamp_nanos: 2000,
-                worker_id: 1,
+                worker_id: crate::telemetry::format::WorkerId::from(1usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
             },
             RawEvent::WorkerUnpark {
                 timestamp_nanos: 3000,
-                worker_id: 0,
+                worker_id: crate::telemetry::format::WorkerId::from(0usize),
                 worker_local_queue_depth: 2,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 0,

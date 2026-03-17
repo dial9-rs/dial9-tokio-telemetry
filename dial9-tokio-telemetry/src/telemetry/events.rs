@@ -1,19 +1,6 @@
-use crate::telemetry::{cpu_profile::ThreadName, task_metadata::TaskId};
+use crate::telemetry::{cpu_profile::ThreadName, format::WorkerId, task_metadata::TaskId};
 use dial9_trace_format::InternedString;
 use serde::Serialize;
-
-/// Sentinel worker_id for events from non-worker threads (encoded as u8 on the wire).
-///
-/// Collides with a real worker index if the runtime has 255 worker threads.
-/// In practice this only affects very large machines; a future wire-format change
-/// (e.g. u16 worker index) would remove the limitation.
-pub const UNKNOWN_WORKER: usize = 255;
-
-/// Sentinel worker_id for events from tokio's blocking thread pool (encoded as u8 on the wire).
-///
-/// Same collision caveat as [`UNKNOWN_WORKER`]: collides with worker index 254 on machines
-/// with ≥254 runtime worker threads.
-pub const BLOCKING_WORKER: usize = 254;
 
 /// Role of a thread known to the telemetry system.
 #[cfg(feature = "cpu-profiling")]
@@ -59,7 +46,7 @@ pub enum TelemetryEvent {
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
         #[serde(rename = "worker")]
-        worker_id: usize,
+        worker_id: WorkerId,
         #[serde(rename = "local_q")]
         worker_local_queue_depth: usize,
         task_id: TaskId,
@@ -69,13 +56,13 @@ pub enum TelemetryEvent {
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
         #[serde(rename = "worker")]
-        worker_id: usize,
+        worker_id: WorkerId,
     },
     WorkerPark {
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
         #[serde(rename = "worker")]
-        worker_id: usize,
+        worker_id: WorkerId,
         #[serde(rename = "local_q")]
         worker_local_queue_depth: usize,
         /// Thread CPU time (nanos) from CLOCK_THREAD_CPUTIME_ID.
@@ -86,7 +73,7 @@ pub enum TelemetryEvent {
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
         #[serde(rename = "worker")]
-        worker_id: usize,
+        worker_id: WorkerId,
         #[serde(rename = "local_q")]
         worker_local_queue_depth: usize,
         /// Thread CPU time (nanos) from CLOCK_THREAD_CPUTIME_ID.
@@ -118,7 +105,7 @@ pub enum TelemetryEvent {
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
         #[serde(rename = "worker")]
-        worker_id: usize,
+        worker_id: WorkerId,
         /// OS thread ID that was sampled.
         tid: u32,
         /// What triggered this sample.
@@ -195,7 +182,7 @@ impl TelemetryEvent {
     }
 
     /// Returns the worker ID, if this event type is associated with a worker.
-    pub fn worker_id(&self) -> Option<usize> {
+    pub fn worker_id(&self) -> Option<WorkerId> {
         match self {
             TelemetryEvent::PollStart { worker_id, .. }
             | TelemetryEvent::PollEnd { worker_id, .. }
@@ -226,24 +213,24 @@ impl TelemetryEvent {
 pub enum RawEvent {
     PollStart {
         timestamp_nanos: u64,
-        worker_id: usize,
+        worker_id: WorkerId,
         worker_local_queue_depth: usize,
         task_id: crate::telemetry::task_metadata::TaskId,
         location: &'static std::panic::Location<'static>,
     },
     PollEnd {
         timestamp_nanos: u64,
-        worker_id: usize,
+        worker_id: WorkerId,
     },
     WorkerPark {
         timestamp_nanos: u64,
-        worker_id: usize,
+        worker_id: WorkerId,
         worker_local_queue_depth: usize,
         cpu_time_nanos: u64,
     },
     WorkerUnpark {
         timestamp_nanos: u64,
-        worker_id: usize,
+        worker_id: WorkerId,
         worker_local_queue_depth: usize,
         cpu_time_nanos: u64,
         sched_wait_delta_nanos: u64,
@@ -278,7 +265,7 @@ pub enum RawEvent {
 #[derive(Debug, Clone)]
 pub struct CpuSampleData {
     pub timestamp_nanos: u64,
-    pub worker_id: usize,
+    pub worker_id: WorkerId,
     pub tid: u32,
     pub thread_name: Option<ThreadName>,
     pub source: CpuSampleSource,
@@ -421,7 +408,7 @@ mod tests {
     fn test_telemetry_event_timestamp() {
         let poll_start = TelemetryEvent::PollStart {
             timestamp_nanos: 1000,
-            worker_id: 0,
+            worker_id: WorkerId::from(0usize),
             worker_local_queue_depth: 2,
             task_id: UNKNOWN_TASK_ID,
             spawn_loc: UNKNOWN_SPAWN_LOC,
@@ -430,7 +417,7 @@ mod tests {
 
         let poll_end = TelemetryEvent::PollEnd {
             timestamp_nanos: 2000,
-            worker_id: 1,
+            worker_id: WorkerId::from(1usize),
         };
         assert_eq!(poll_end.timestamp_nanos(), Some(2000));
 
@@ -452,12 +439,12 @@ mod tests {
     fn test_telemetry_event_worker_id() {
         let poll_start = TelemetryEvent::PollStart {
             timestamp_nanos: 1000,
-            worker_id: 3,
+            worker_id: WorkerId::from(3usize),
             worker_local_queue_depth: 0,
             task_id: UNKNOWN_TASK_ID,
             spawn_loc: UNKNOWN_SPAWN_LOC,
         };
-        assert_eq!(poll_start.worker_id(), Some(3));
+        assert_eq!(poll_start.worker_id(), Some(WorkerId::from(3usize)));
 
         let queue_sample = TelemetryEvent::QueueSample {
             timestamp_nanos: 1000,
@@ -470,7 +457,7 @@ mod tests {
     fn test_is_runtime_event() {
         let poll_start = TelemetryEvent::PollStart {
             timestamp_nanos: 1000,
-            worker_id: 0,
+            worker_id: WorkerId::from(0usize),
             worker_local_queue_depth: 0,
             task_id: UNKNOWN_TASK_ID,
             spawn_loc: UNKNOWN_SPAWN_LOC,
@@ -496,13 +483,13 @@ mod tests {
     fn test_telemetry_event_creation() {
         let event = TelemetryEvent::PollStart {
             timestamp_nanos: 1000,
-            worker_id: 0,
+            worker_id: WorkerId::from(0usize),
             worker_local_queue_depth: 2,
             task_id: UNKNOWN_TASK_ID,
             spawn_loc: UNKNOWN_SPAWN_LOC,
         };
         assert_eq!(event.timestamp_nanos(), Some(1000));
-        assert_eq!(event.worker_id(), Some(0));
+        assert_eq!(event.worker_id(), Some(WorkerId::from(0usize)));
     }
 
     #[test]

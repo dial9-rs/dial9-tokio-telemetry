@@ -12,24 +12,24 @@ use std::io::{BufWriter, Write};
 enum FatEvent {
     PollStart {
         timestamp_ns: u64,
-        worker: usize,
+        worker: u64,
         local_q: usize,
         task_id: u64,
         spawn_location: Option<String>,
     },
     PollEnd {
         timestamp_ns: u64,
-        worker: usize,
+        worker: u64,
     },
     WorkerPark {
         timestamp_ns: u64,
-        worker: usize,
+        worker: u64,
         local_q: usize,
         cpu_ns: u64,
     },
     WorkerUnpark {
         timestamp_ns: u64,
-        worker: usize,
+        worker: u64,
         local_q: usize,
         cpu_ns: u64,
         sched_wait_ns: u64,
@@ -40,7 +40,7 @@ enum FatEvent {
     },
     CpuSample {
         timestamp_ns: u64,
-        worker: usize,
+        worker: u64,
         source: String,
         callchain: Vec<String>,
     },
@@ -97,7 +97,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             spawn_loc,
         } => Some(FatEvent::PollStart {
             timestamp_ns: *timestamp_nanos,
-            worker: *worker_id,
+            worker: worker_id.as_u64(),
             local_q: *worker_local_queue_depth,
             task_id: task_id.to_u64(),
             spawn_location: reader.spawn_locations.get(spawn_loc).cloned(),
@@ -107,7 +107,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             worker_id,
         } => Some(FatEvent::PollEnd {
             timestamp_ns: *timestamp_nanos,
-            worker: *worker_id,
+            worker: worker_id.as_u64(),
         }),
         TelemetryEvent::WorkerPark {
             timestamp_nanos,
@@ -116,7 +116,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             cpu_time_nanos,
         } => Some(FatEvent::WorkerPark {
             timestamp_ns: *timestamp_nanos,
-            worker: *worker_id,
+            worker: worker_id.as_u64(),
             local_q: *worker_local_queue_depth,
             cpu_ns: *cpu_time_nanos,
         }),
@@ -128,7 +128,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             sched_wait_delta_nanos,
         } => Some(FatEvent::WorkerUnpark {
             timestamp_ns: *timestamp_nanos,
-            worker: *worker_id,
+            worker: worker_id.as_u64(),
             local_q: *worker_local_queue_depth,
             cpu_ns: *cpu_time_nanos,
             sched_wait_ns: *sched_wait_delta_nanos,
@@ -148,7 +148,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             ..
         } => Some(FatEvent::CpuSample {
             timestamp_ns: *timestamp_nanos,
-            worker: *worker_id,
+            worker: worker_id.as_u64(),
             source: format!("{:?}", source),
             callchain: callchain
                 .iter()

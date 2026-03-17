@@ -45,7 +45,7 @@ fn sched_events_capture_context_switches() {
         .iter()
         .filter(|e| {
             matches!(e, RawEvent::CpuSample(data)
-            if data.worker_id < num_workers && data.source == CpuSampleSource::SchedEvent)
+            if data.worker_id.as_u64() < num_workers as u64 && data.source == CpuSampleSource::SchedEvent)
         })
         .collect();
     assert!(

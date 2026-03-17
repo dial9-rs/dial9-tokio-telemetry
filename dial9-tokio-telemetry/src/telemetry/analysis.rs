@@ -1,5 +1,5 @@
 use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
-use crate::telemetry::format::{self, TelemetryEventRef};
+use crate::telemetry::format::{self, TelemetryEventRef, WorkerId};
 use crate::telemetry::task_metadata::TaskId;
 use dial9_trace_format::InternedString;
 use dial9_trace_format::decoder::{Decoder, StringPool};
@@ -173,7 +173,7 @@ pub struct SpawnLocationStats {
 pub struct TraceAnalysis {
     pub total_events: usize,
     pub duration_ns: u64,
-    pub worker_stats: HashMap<usize, WorkerStats>,
+    pub worker_stats: HashMap<WorkerId, WorkerStats>,
     pub max_global_queue: usize,
     pub avg_global_queue: f64,
     /// Per-spawn-location statistics (only populated when task tracking is enabled).
@@ -207,10 +207,10 @@ fn lookup_global_queue_depth(timeline: &[(u64, usize)], timestamp: u64) -> usize
 }
 
 pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
-    let mut worker_stats: HashMap<usize, WorkerStats> = HashMap::new();
-    let mut poll_starts: HashMap<usize, u64> = HashMap::new();
+    let mut worker_stats: HashMap<WorkerId, WorkerStats> = HashMap::new();
+    let mut poll_starts: HashMap<WorkerId, u64> = HashMap::new();
     // Track spawn_loc at PollStart for computing per-location poll time at PollEnd
-    let mut poll_start_locs: HashMap<usize, InternedString> = HashMap::new();
+    let mut poll_start_locs: HashMap<WorkerId, InternedString> = HashMap::new();
     let mut spawn_location_stats: HashMap<InternedString, SpawnLocationStats> = HashMap::new();
     let mut max_global_queue = 0;
     let mut global_queue_sum = 0u64;
@@ -359,7 +359,7 @@ pub fn compute_wake_to_poll_delays(events: &[TelemetryEvent]) -> Vec<u64> {
 /// An active period between WorkerUnpark and WorkerPark, with scheduling ratio.
 #[derive(Debug)]
 pub struct ActivePeriod {
-    pub worker_id: usize,
+    pub worker_id: WorkerId,
     pub start_ns: u64,
     pub end_ns: u64,
     /// CPU time consumed during this active period (nanos).
@@ -372,7 +372,7 @@ pub struct ActivePeriod {
 pub fn compute_active_periods(events: &[TelemetryEvent]) -> Vec<ActivePeriod> {
     let mut periods = Vec::new();
     // Track (wall_ns, cpu_ns) at unpark
-    let mut unpark_state: HashMap<usize, (u64, u64)> = HashMap::new();
+    let mut unpark_state: HashMap<WorkerId, (u64, u64)> = HashMap::new();
 
     for event in events {
         match event {
@@ -473,10 +473,10 @@ pub fn print_analysis(analysis: &TraceAnalysis, spawn_locations: &HashMap<Intern
 ///
 /// Uses the global queue sample timeline to look up the queue depth at unpark time,
 /// since global_queue_depth is only recorded on QueueSample events.
-pub fn detect_idle_workers(events: &[TelemetryEvent]) -> Vec<(usize, u64, usize)> {
+pub fn detect_idle_workers(events: &[TelemetryEvent]) -> Vec<(WorkerId, u64, usize)> {
     let global_queue_timeline = build_global_queue_timeline(events);
     let mut idle_periods = Vec::new();
-    let mut worker_park_times: HashMap<usize, u64> = HashMap::new();
+    let mut worker_park_times: HashMap<WorkerId, u64> = HashMap::new();
 
     for event in events {
         match event {
@@ -511,7 +511,7 @@ pub fn detect_idle_workers(events: &[TelemetryEvent]) -> Vec<(usize, u64, usize)
 /// A poll that exceeded the given duration threshold.
 #[derive(Debug)]
 pub struct LongPoll {
-    pub worker_id: usize,
+    pub worker_id: WorkerId,
     pub start_ns: u64,
     pub end_ns: u64,
     pub duration_ns: u64,
@@ -525,7 +525,7 @@ pub struct LongPoll {
 /// time range, and task metadata (when task tracking is enabled).
 pub fn detect_long_polls(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<LongPoll> {
     let mut long_polls = Vec::new();
-    let mut poll_starts: HashMap<usize, (u64, TaskId, InternedString)> = HashMap::new();
+    let mut poll_starts: HashMap<WorkerId, (u64, TaskId, InternedString)> = HashMap::new();
 
     for event in events {
         match event {
@@ -565,7 +565,7 @@ pub fn detect_long_polls(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<Lo
 /// A park period where the OS scheduler delayed the worker thread.
 #[derive(Debug)]
 pub struct SchedDelay {
-    pub worker_id: usize,
+    pub worker_id: WorkerId,
     pub park_ns: u64,
     pub unpark_ns: u64,
     pub sched_wait_ns: u64,
@@ -577,7 +577,7 @@ pub struct SchedDelay {
 /// runnable but not scheduled by the OS during the preceding park.
 pub fn detect_sched_delays(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<SchedDelay> {
     let mut delays = Vec::new();
-    let mut park_times: HashMap<usize, u64> = HashMap::new();
+    let mut park_times: HashMap<WorkerId, u64> = HashMap::new();
 
     for event in events {
         match event {
@@ -614,7 +614,7 @@ pub fn detect_sched_delays(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<
 /// A wake-to-poll scheduling delay that exceeded a threshold.
 #[derive(Debug)]
 pub struct WakeDelay {
-    pub worker_id: usize,
+    pub worker_id: WorkerId,
     pub wake_ns: u64,
     pub poll_ns: u64,
     pub delay_ns: u64,
@@ -678,7 +678,7 @@ pub fn detect_wake_delays(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<W
 /// A poll that had CPU or scheduler samples collected during its execution.
 #[derive(Debug)]
 pub struct SampledPoll {
-    pub worker_id: usize,
+    pub worker_id: WorkerId,
     pub start_ns: u64,
     pub end_ns: u64,
     pub task_id: TaskId,
@@ -692,7 +692,7 @@ pub struct SampledPoll {
 /// same worker.
 pub fn detect_sampled_polls(events: &[TelemetryEvent]) -> Vec<SampledPoll> {
     struct PollSpan {
-        worker_id: usize,
+        worker_id: WorkerId,
         start_ns: u64,
         end_ns: u64,
         task_id: TaskId,
@@ -703,7 +703,7 @@ pub fn detect_sampled_polls(events: &[TelemetryEvent]) -> Vec<SampledPoll> {
 
     // First pass: build poll spans per worker
     let mut polls: Vec<PollSpan> = Vec::new();
-    let mut poll_starts: HashMap<usize, (u64, TaskId, InternedString)> = HashMap::new();
+    let mut poll_starts: HashMap<WorkerId, (u64, TaskId, InternedString)> = HashMap::new();
 
     for event in events {
         match event {
@@ -781,6 +781,7 @@ pub fn detect_sampled_polls(events: &[TelemetryEvent]) -> Vec<SampledPoll> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::format::WorkerId;
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
     use dial9_trace_format::InternedString;
     const UNKNOWN_SPAWN_LOC: InternedString = InternedString::from_raw(0);
@@ -798,7 +799,7 @@ mod tests {
         let events = vec![
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 3,
                 task_id: UNKNOWN_TASK_ID,
                 spawn_loc: UNKNOWN_SPAWN_LOC,
@@ -809,7 +810,7 @@ mod tests {
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 3_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
         ];
         let analysis = analyze_trace(&events);
@@ -824,18 +825,18 @@ mod tests {
         let events = vec![
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 10,
                 task_id: UNKNOWN_TASK_ID,
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
         ];
         let analysis = analyze_trace(&events);
-        let stats = analysis.worker_stats.get(&0).unwrap();
+        let stats = analysis.worker_stats.get(&WorkerId::from(0usize)).unwrap();
         assert_eq!(stats.max_local_queue, 10);
     }
 
@@ -862,7 +863,7 @@ mod tests {
             },
             TelemetryEvent::WorkerPark {
                 timestamp_nanos: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
             },
@@ -872,7 +873,7 @@ mod tests {
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 6_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 0,
@@ -880,7 +881,7 @@ mod tests {
         ];
         let idle = detect_idle_workers(&events);
         assert_eq!(idle.len(), 1);
-        assert_eq!(idle[0].0, 0); // worker_id
+        assert_eq!(idle[0].0, WorkerId::from(0usize)); // worker_id
         assert_eq!(idle[0].1, 4_000_000); // idle duration
         assert_eq!(idle[0].2, 20); // global queue depth at unpark
     }
@@ -890,30 +891,30 @@ mod tests {
         let events = vec![
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 task_id: TaskId::from_u32(1),
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 3_000_000, // 2ms poll
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
             TelemetryEvent::PollStart {
                 timestamp_nanos: 4_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 task_id: TaskId::from_u32(2),
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 4_500_000, // 0.5ms poll
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
         ];
         let long = detect_long_polls(&events, 1_000_000); // 1ms threshold
         assert_eq!(long.len(), 1);
-        assert_eq!(long[0].worker_id, 0);
+        assert_eq!(long[0].worker_id, WorkerId::from(0usize));
         assert_eq!(long[0].duration_ns, 2_000_000);
         assert_eq!(long[0].task_id, TaskId::from_u32(1));
     }
@@ -923,14 +924,14 @@ mod tests {
         let events = vec![
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 task_id: UNKNOWN_TASK_ID,
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 1_500_000, // 0.5ms
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
         ];
         let long = detect_long_polls(&events, 1_000_000);
@@ -942,32 +943,32 @@ mod tests {
         let events = vec![
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 task_id: TaskId::from_u32(1),
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_000_000,
-                worker_id: 1,
+                worker_id: WorkerId::from(1usize),
                 worker_local_queue_depth: 0,
                 task_id: TaskId::from_u32(2),
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 5_000_000, // 4ms
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 8_000_000, // 7ms
-                worker_id: 1,
+                worker_id: WorkerId::from(1usize),
             },
         ];
         let long = detect_long_polls(&events, 1_000_000);
         assert_eq!(long.len(), 2);
-        assert_eq!(long[0].worker_id, 0);
+        assert_eq!(long[0].worker_id, WorkerId::from(0usize));
         assert_eq!(long[0].duration_ns, 4_000_000);
-        assert_eq!(long[1].worker_id, 1);
+        assert_eq!(long[1].worker_id, WorkerId::from(1usize));
         assert_eq!(long[1].duration_ns, 7_000_000);
     }
 
@@ -976,13 +977,13 @@ mod tests {
         let events = vec![
             TelemetryEvent::WorkerPark {
                 timestamp_nanos: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 5_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 200_000, // 200us
@@ -990,7 +991,7 @@ mod tests {
         ];
         let delays = detect_sched_delays(&events, 100_000); // 100us threshold
         assert_eq!(delays.len(), 1);
-        assert_eq!(delays[0].worker_id, 0);
+        assert_eq!(delays[0].worker_id, WorkerId::from(0usize));
         assert_eq!(delays[0].sched_wait_ns, 200_000);
         assert_eq!(delays[0].park_ns, 1_000_000);
         assert_eq!(delays[0].unpark_ns, 5_000_000);
@@ -1001,13 +1002,13 @@ mod tests {
         let events = vec![
             TelemetryEvent::WorkerPark {
                 timestamp_nanos: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 50_000, // 50us
@@ -1022,26 +1023,26 @@ mod tests {
         let events = vec![
             TelemetryEvent::WorkerPark {
                 timestamp_nanos: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
             },
             TelemetryEvent::WorkerPark {
                 timestamp_nanos: 1_000_000,
-                worker_id: 1,
+                worker_id: WorkerId::from(1usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 3_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 500_000, // 500us
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 4_000_000,
-                worker_id: 1,
+                worker_id: WorkerId::from(1usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 10_000, // 10us - below threshold
@@ -1049,7 +1050,7 @@ mod tests {
         ];
         let delays = detect_sched_delays(&events, 100_000);
         assert_eq!(delays.len(), 1);
-        assert_eq!(delays[0].worker_id, 0);
+        assert_eq!(delays[0].worker_id, WorkerId::from(0usize));
     }
 
     #[test]
@@ -1064,21 +1065,21 @@ mod tests {
             },
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_500_000, // 500us delay
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 task_id: task,
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 1_600_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
         ];
         let delays = detect_wake_delays(&events, 100_000); // 100us threshold
         assert_eq!(delays.len(), 1);
         assert_eq!(delays[0].delay_ns, 500_000);
         assert_eq!(delays[0].task_id, task);
-        assert_eq!(delays[0].worker_id, 0);
+        assert_eq!(delays[0].worker_id, WorkerId::from(0usize));
     }
 
     #[test]
@@ -1093,14 +1094,14 @@ mod tests {
             },
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_050_000, // 50us delay
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 task_id: task,
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 1_100_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
         ];
         let delays = detect_wake_delays(&events, 100_000);
@@ -1119,14 +1120,14 @@ mod tests {
             },
             TelemetryEvent::PollStart {
                 timestamp_nanos: 2_000_000_000, // over 1s cap
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 task_id: task,
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 2_000_100_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
         ];
         let delays = detect_wake_delays(&events, 100_000);
@@ -1138,28 +1139,28 @@ mod tests {
         let events = vec![
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 task_id: TaskId::from_u32(1),
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::CpuSample {
                 timestamp_nanos: 1_500_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 tid: 100,
                 source: CpuSampleSource::CpuProfile,
                 callchain: vec![],
             },
             TelemetryEvent::CpuSample {
                 timestamp_nanos: 1_800_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 tid: 100,
                 source: CpuSampleSource::SchedEvent,
                 callchain: vec![],
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
         ];
         let sampled = detect_sampled_polls(&events);
@@ -1174,14 +1175,14 @@ mod tests {
         let events = vec![
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 task_id: UNKNOWN_TASK_ID,
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
         ];
         let sampled = detect_sampled_polls(&events);
@@ -1193,18 +1194,18 @@ mod tests {
         let events = vec![
             TelemetryEvent::PollStart {
                 timestamp_nanos: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 task_id: UNKNOWN_TASK_ID,
                 spawn_loc: UNKNOWN_SPAWN_LOC,
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
             },
             TelemetryEvent::CpuSample {
                 timestamp_nanos: 3_000_000, // after poll ended
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 tid: 100,
                 source: CpuSampleSource::CpuProfile,
                 callchain: vec![],
@@ -1223,13 +1224,13 @@ mod tests {
             },
             TelemetryEvent::WorkerPark {
                 timestamp_nanos: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 6_000_000,
-                worker_id: 0,
+                worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 0,

@@ -166,7 +166,7 @@ mod tests {
 
         let event = RawEvent::WorkerPark {
             timestamp_nanos: 1000000000,
-            worker_id: 0,
+            worker_id: crate::telemetry::format::WorkerId::from(0usize),
             worker_local_queue_depth: 0,
             cpu_time_nanos: 0,
         };
@@ -201,7 +201,7 @@ mod tests {
 
         let event = RawEvent::WorkerPark {
             timestamp_nanos: 1000000000,
-            worker_id: 0,
+            worker_id: crate::telemetry::format::WorkerId::from(0usize),
             worker_local_queue_depth: 0,
             cpu_time_nanos: 0,
         };

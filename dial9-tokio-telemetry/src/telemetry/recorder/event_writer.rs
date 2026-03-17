@@ -2,7 +2,9 @@
 use super::shared_state::SharedState;
 use crate::telemetry::events::RawEvent;
 #[cfg(feature = "cpu-profiling")]
-use crate::telemetry::events::{BLOCKING_WORKER, CpuSampleData, ThreadRole, UNKNOWN_WORKER};
+use crate::telemetry::events::{CpuSampleData, ThreadRole};
+#[cfg(feature = "cpu-profiling")]
+use crate::telemetry::format::WorkerId;
 use crate::telemetry::writer::TraceWriter;
 
 #[cfg(feature = "cpu-profiling")]
@@ -66,11 +68,11 @@ impl EventWriter {
         // Snapshot thread_roles once per flush cycle.
         let roles = shared.thread_roles.lock().unwrap().clone();
 
-        let resolve = |tid: u32| -> usize {
+        let resolve = |tid: u32| -> WorkerId {
             match roles.get(&tid) {
-                Some(ThreadRole::Worker(id)) => *id,
-                Some(ThreadRole::Blocking) => BLOCKING_WORKER,
-                None => UNKNOWN_WORKER,
+                Some(ThreadRole::Worker(id)) => WorkerId::from(*id),
+                Some(ThreadRole::Blocking) => WorkerId::BLOCKING,
+                None => WorkerId::UNKNOWN,
             }
         };
 

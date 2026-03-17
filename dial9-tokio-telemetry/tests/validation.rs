@@ -1,4 +1,5 @@
 use assert2::check;
+use dial9_tokio_telemetry::telemetry::format::WorkerId;
 use dial9_tokio_telemetry::telemetry::{TelemetryEvent, TraceAnalysis};
 use std::collections::HashSet;
 use std::time::Duration;
@@ -41,7 +42,7 @@ pub fn validate_trace_matches_metrics(
     eprintln!("  total_events={}", analysis.total_events);
     eprintln!("  duration_ns={}", analysis.duration_ns);
     for (w, metrics_poll) in metrics_polls.iter().enumerate().take(num_workers) {
-        if let Some(stats) = analysis.worker_stats.get(&w) {
+        if let Some(stats) = analysis.worker_stats.get(&WorkerId::from(w)) {
             eprintln!(
                 "  worker {}: polls={}, parks={}, unparks={}, poll_time_ns={}",
                 w, stats.poll_count, stats.park_count, stats.unpark_count, stats.total_poll_time_ns,
@@ -54,7 +55,7 @@ pub fn validate_trace_matches_metrics(
         }
     }
     // Check for UNKNOWN_WORKER (255) events
-    if let Some(stats) = analysis.worker_stats.get(&255) {
+    if let Some(stats) = analysis.worker_stats.get(&WorkerId::UNKNOWN) {
         eprintln!(
             "  ⚠️  UNKNOWN_WORKER (255): polls={}, parks={}, unparks={}, poll_time_ns={}",
             stats.poll_count, stats.park_count, stats.unpark_count, stats.total_poll_time_ns
@@ -89,10 +90,10 @@ pub fn validate_trace_matches_metrics(
     // 2. Every active worker present in trace
     let trace_has_all_active = active_workers
         .iter()
-        .all(|w| analysis.worker_stats.contains_key(w));
+        .all(|w| analysis.worker_stats.contains_key(&WorkerId::from(*w)));
     let missing: Vec<_> = active_workers
         .iter()
-        .filter(|w| !analysis.worker_stats.contains_key(w))
+        .filter(|w| !analysis.worker_stats.contains_key(&WorkerId::from(**w)))
         .collect();
     check!(
         trace_has_all_active,
@@ -104,7 +105,7 @@ pub fn validate_trace_matches_metrics(
     let poll_mismatches: Vec<_> = active_workers
         .iter()
         .filter_map(|&w| {
-            analysis.worker_stats.get(&w).and_then(|s| {
+            analysis.worker_stats.get(&WorkerId::from(w)).and_then(|s| {
                 let trace = s.poll_count as i64;
                 let tokio = metrics_polls[w] as i64;
                 let diff = (trace - tokio).abs();
@@ -139,7 +140,7 @@ pub fn validate_trace_matches_metrics(
     let park_mismatches: Vec<_> = active_workers
         .iter()
         .filter_map(|&w| {
-            analysis.worker_stats.get(&w).and_then(|s| {
+            analysis.worker_stats.get(&WorkerId::from(w)).and_then(|s| {
                 let trace = s.park_count as i64;
                 let tokio = metrics_parks[w] as i64;
                 let diff = (trace - tokio).abs();
@@ -163,7 +164,7 @@ pub fn validate_trace_matches_metrics(
     let park_unpark_violations: Vec<_> = active_workers
         .iter()
         .filter_map(|&w| {
-            analysis.worker_stats.get(&w).and_then(|s| {
+            analysis.worker_stats.get(&WorkerId::from(w)).and_then(|s| {
                 let diff = (s.park_count as i64 - s.unpark_count as i64).abs();
                 if diff <= 1 {
                     None
@@ -185,9 +186,9 @@ pub fn validate_trace_matches_metrics(
     for (idx, event) in events.iter().enumerate() {
         if let Some(ts) = event.timestamp_nanos()
             && let Some(wid) = event.worker_id()
-            && wid < num_workers
+            && wid.as_u64() < num_workers as u64
         {
-            if let Some(prev) = last_ts[wid]
+            if let Some(prev) = last_ts[wid.as_u64() as usize]
                 && ts < prev
             {
                 violations.push((idx, wid, prev, ts));
@@ -195,7 +196,7 @@ pub fn validate_trace_matches_metrics(
                     break;
                 }
             }
-            last_ts[wid] = Some(ts);
+            last_ts[wid.as_u64() as usize] = Some(ts);
         }
     }
     check!(

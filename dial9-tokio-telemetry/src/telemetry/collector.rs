@@ -43,7 +43,7 @@ mod tests {
     fn poll_end() -> RawEvent {
         RawEvent::PollEnd {
             timestamp_nanos: 1000,
-            worker_id: 0,
+            worker_id: crate::telemetry::format::WorkerId::from(0usize),
         }
     }
 
