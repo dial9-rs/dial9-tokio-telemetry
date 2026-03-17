@@ -4,7 +4,7 @@
 (function(exports) {
     'use strict';
 
-    const MAX_EVENTS = 2_000_000;
+    const MAX_EVENTS = 2_000_000; // cap parsed events to keep UI responsive
 
     function getTraceDecoder() {
         if (typeof require !== 'undefined') {
@@ -16,7 +16,7 @@
         throw new Error('TraceDecoder not found. Load decode.js before trace_parser.js');
     }
 
-    /** Parse a string/bigint/number to a JS number. */
+    /** Parse a string/bigint/number to a JS number */
     function num(v) {
         if (typeof v === 'number') return v;
         if (typeof v === 'string') return Number(v);
@@ -26,7 +26,8 @@
 
     /**
      * Parse a dial9-trace-format binary trace buffer.
-     * Returns the same shape the viewer expects.
+     * @param {ArrayBuffer} buffer - The binary trace data
+     * @returns {Object} Parsed trace with events, metadata, and CPU samples
      */
     function parseTrace(buffer) {
         const TD = getTraceDecoder();
@@ -179,6 +180,11 @@
         return parts.slice(meaningful - 3).join('::');
     }
 
+    /**
+     * Try to build a docs.rs source link from a location path containing a crate-version segment.
+     * Matches any path like: .../hyper-0.14.28/src/client/connect/http.rs:474
+     * Returns URL string or null.
+     */
     function _docsRsUrl(location) {
         if (!location) return null;
         const m = location.match(/\/([a-z][a-z0-9_-]*)-(\d+\.\d+[^/]*)\/(.+?)(?::(\d+))?$/);
@@ -191,12 +197,23 @@
         return url;
     }
 
+    /**
+     * Extract just the filename from a location string.
+     * e.g. "/home/user/.cargo/registry/src/.../hyper-0.14.28/src/client/connect/http.rs:474" → "http.rs"
+     */
     function _fileName(location) {
         if (!location) return null;
         const m = location.match(/([^/]+\.rs)(?::\d+)?$/);
         return m ? m[1] : null;
     }
 
+    /**
+     * Format a stack frame for human-readable display.
+     * Accepts either a resolved frame object or a raw address + callframeSymbols map.
+     * @param {{symbol: string, location: string|null}|string} frame - Resolved frame or address string
+     * @param {Map<string, {symbol: string, location: string|null}>} [callframeSymbols] - Required when frame is an address string
+     * @returns {{text: string, docsUrl: string|null}}
+     */
     function formatFrame(frame, callframeSymbols) {
         if (typeof frame === 'string') {
             if (!callframeSymbols) throw new Error('formatFrame requires callframeSymbols when given an address string');
@@ -227,6 +244,12 @@
         return { text: result, docsUrl: _docsRsUrl(location) };
     }
 
+    /**
+     * Resolve a callchain (array of address strings) to frame objects.
+     * @param {string[]} callchain - Address strings like "0x55cc6d053893"
+     * @param {Map<string, {symbol: string, location: string|null}>} callframeSymbols
+     * @returns {{symbol: string, location: string|null}[]}
+     */
     function symbolizeChain(callchain, callframeSymbols) {
         return callchain.map(addr => {
             const entry = callframeSymbols.get(addr);
@@ -236,6 +259,12 @@
         });
     }
 
+    /**
+     * Deduplicate CPU/sched samples by symbolized stack trace.
+     * @param {Object[]} samples - Array of {callchain, ...} sample objects
+     * @param {Map} callframeSymbols
+     * @returns {{count: number, frames: Object[], leaf: string, leafRaw: string}[]}
+     */
     function deduplicateSamples(samples, callframeSymbols) {
         const groups = new Map();
         for (const sample of samples) {
@@ -253,6 +282,7 @@
         return [...groups.values()].sort((a, b) => b.count - a.count);
     }
 
+    // Export for both browser and Node.js
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = { parseTrace, formatFrame, symbolizeChain, deduplicateSamples };
     } else {
