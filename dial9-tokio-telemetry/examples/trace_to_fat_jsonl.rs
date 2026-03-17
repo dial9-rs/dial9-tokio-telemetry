@@ -14,7 +14,7 @@ enum FatEvent {
         timestamp_ns: u64,
         worker: usize,
         local_q: usize,
-        task_id: u32,
+        task_id: u64,
         spawn_location: Option<String>,
     },
     PollEnd {
@@ -46,8 +46,8 @@ enum FatEvent {
     },
     WakeEvent {
         timestamp_ns: u64,
-        waker_task_id: u32,
-        woken_task_id: u32,
+        waker_task_id: u64,
+        woken_task_id: u64,
         target_worker: u8,
     },
 }
@@ -99,7 +99,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             timestamp_ns: *timestamp_nanos,
             worker: *worker_id,
             local_q: *worker_local_queue_depth,
-            task_id: task_id.to_u32(),
+            task_id: task_id.to_u64(),
             spawn_location: reader.spawn_locations.get(spawn_loc).cloned(),
         }),
         TelemetryEvent::PollEnd {
@@ -168,8 +168,8 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             target_worker,
         } => Some(FatEvent::WakeEvent {
             timestamp_ns: *timestamp_nanos,
-            waker_task_id: waker_task_id.to_u32(),
-            woken_task_id: woken_task_id.to_u32(),
+            waker_task_id: waker_task_id.to_u64(),
+            woken_task_id: woken_task_id.to_u64(),
             target_worker: *target_worker,
         }),
         TelemetryEvent::TaskSpawn { .. }

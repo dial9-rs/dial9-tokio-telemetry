@@ -233,7 +233,7 @@ impl TelemetryHandle {
         tokio::spawn(async move {
             let task_id = tokio::task::try_id()
                 .map(TaskId::from)
-                .unwrap_or(TaskId::from_u32(0));
+                .unwrap_or(TaskId::default());
             crate::traced::Traced::new(future, traced_handle, task_id).await
         })
     }

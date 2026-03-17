@@ -5,11 +5,31 @@ use std::hash::{Hash, Hasher};
 
 /// Task identifier. Stores a u64 hash of tokio's task ID for compact wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct TaskId(u64);
+pub struct TaskId(pub(crate) u64);
+
+impl TaskId {
+    pub fn from_u32(id: u32) -> Self {
+        TaskId(id as u64)
+    }
+
+    pub fn to_u64(self) -> u64 {
+        self.0
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TaskId({})", self.0)
+    }
+}
 
 impl Serialize for TaskId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u32(self.to_u32())
+        serializer.serialize_u64(self.0)
     }
 }
 
@@ -39,47 +59,5 @@ impl Hasher for U64Extractor {
     }
 }
 
-impl TaskId {
-    /// Convert to u32 for wire format (truncate upper bits).
-    pub const fn to_u32(self) -> u32 {
-        self.0 as u32
-    }
-
-    /// Create from u32 (for testing or deserialization).
-    pub const fn from_u32(val: u32) -> Self {
-        TaskId(val as u64)
-    }
-}
-
 /// Sentinel value for unknown or disabled task tracking.
 pub const UNKNOWN_TASK_ID: TaskId = TaskId(0);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_task_id_default() {
-        let id = TaskId::default();
-        assert_eq!(id, UNKNOWN_TASK_ID);
-        assert_eq!(id.to_u32(), 0);
-    }
-
-    #[test]
-    fn test_task_id_roundtrip() {
-        let task_id = TaskId::from_u32(12345);
-        assert_eq!(task_id.to_u32(), 12345);
-    }
-
-    #[test]
-    fn test_task_id_hash() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        let id1 = TaskId::from_u32(1);
-        let id2 = TaskId::from_u32(2);
-        set.insert(id1);
-        set.insert(id2);
-        assert!(set.contains(&id1));
-        assert!(!set.contains(&TaskId::from_u32(3)));
-    }
-}

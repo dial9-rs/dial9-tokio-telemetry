@@ -9,14 +9,14 @@ use std::io::{self, Write};
 impl TraceField for TaskId {
     type Ref<'a> = TaskId;
     fn field_type() -> FieldType {
-        FieldType::U32
+        FieldType::Varint
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
-        enc.write_u32(self.to_u32())
+        enc.write_u64(self.0)
     }
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
         match val {
-            FieldValueRef::Varint(v) => Some(TaskId::from_u32(*v as u32)),
+            FieldValueRef::Varint(v) => Some(TaskId(*v)),
             _ => None,
         }
     }
@@ -33,6 +33,26 @@ impl TraceField for CpuSampleSource {
     fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
         match val {
             FieldValueRef::Varint(v) => Some(CpuSampleSource::from_u8(*v as u8)),
+            _ => None,
+        }
+    }
+}
+
+pub struct WorkerId(pub(crate) u64);
+impl TraceField for WorkerId {
+    type Ref<'a> = WorkerId;
+
+    fn field_type() -> FieldType {
+        FieldType::Varint
+    }
+
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_u64(self.0)
+    }
+
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val {
+            FieldValueRef::Varint(v) => Some(WorkerId(*v)),
             _ => None,
         }
     }
