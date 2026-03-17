@@ -48,25 +48,20 @@ fn main() {
         );
     }
 
-    // Build task_id → spawn_loc_id from PollStart events (more complete than TaskSpawn alone)
-    let mut task_locs: HashMap<u32, u16> = HashMap::new();
+    // Build task_id → spawn_loc from PollStart events (more complete than TaskSpawn alone)
+    let mut task_locs: HashMap<u32, dial9_tokio_telemetry::telemetry::InternedString> =
+        HashMap::new();
     for e in &events {
         if let TelemetryEvent::PollStart {
-            task_id,
-            spawn_loc_id,
-            ..
+            task_id, spawn_loc, ..
         } = e
         {
-            task_locs
-                .entry(task_id.to_u32())
-                .or_insert(spawn_loc_id.as_u16());
+            task_locs.entry(task_id.to_u32()).or_insert(*spawn_loc);
         }
     }
     // Also include TaskSpawn mappings from the reader
-    for (task_id, spawn_loc_id) in &reader.task_spawn_locs {
-        task_locs
-            .entry(task_id.to_u32())
-            .or_insert(spawn_loc_id.as_u16());
+    for (task_id, spawn_loc) in &reader.task_spawn_locs {
+        task_locs.entry(task_id.to_u32()).or_insert(*spawn_loc);
     }
 
     // Count wakes by waker spawn location
@@ -79,11 +74,11 @@ fn main() {
             if id == 0 {
                 *wakes_by_loc.entry(Some("<non-task context>")).or_default() += 1;
                 resolved += 1;
-            } else if let Some(loc_id) = task_locs.get(&id) {
-                let loc = reader
-                    .spawn_locations
-                    .get(&dial9_tokio_telemetry::telemetry::SpawnLocationId::from_u16(*loc_id));
-                *wakes_by_loc.entry(loc.map(|s| s.as_str())).or_default() += 1;
+            } else if let Some(loc) = task_locs.get(&id) {
+                let loc_name = reader.spawn_locations.get(loc);
+                *wakes_by_loc
+                    .entry(loc_name.map(|s| s.as_str()))
+                    .or_default() += 1;
                 resolved += 1;
             } else {
                 unresolved += 1;
@@ -115,15 +110,13 @@ fn main() {
             println!("    0x{:08x} ({}) — {} wakes", id, id, count);
         }
         println!("  Known task IDs (sample):");
-        for (id, loc_id) in task_locs.iter().take(5) {
-            let loc = reader
-                .spawn_locations
-                .get(&dial9_tokio_telemetry::telemetry::SpawnLocationId::from_u16(*loc_id));
+        for (id, loc) in task_locs.iter().take(5) {
+            let loc_name = reader.spawn_locations.get(loc);
             println!(
                 "    0x{:08x} ({}) — {}",
                 id,
                 id,
-                loc.map(|s| s.as_str()).unwrap_or("?")
+                loc_name.map(|s| s.as_str()).unwrap_or("?")
             );
         }
         println!(

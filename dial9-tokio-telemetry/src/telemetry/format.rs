@@ -1,5 +1,5 @@
 use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
-use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
+use crate::telemetry::task_metadata::TaskId;
 use dial9_trace_format::types::{EventEncoder, FieldType, FieldValueRef};
 use dial9_trace_format::{InternedString, StackFrames, TraceEvent, TraceField};
 use std::io::{self, Write};
@@ -47,7 +47,7 @@ pub struct PollStartEvent {
     pub worker_id: u16,
     pub local_queue: u8,
     pub task_id: TaskId,
-    pub spawn_loc_id: InternedString,
+    pub spawn_loc: InternedString,
 }
 
 #[derive(TraceEvent)]
@@ -88,7 +88,7 @@ pub struct TaskSpawnEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     pub task_id: TaskId,
-    pub spawn_loc_id: InternedString,
+    pub spawn_loc: InternedString,
 }
 
 #[derive(TraceEvent)]
@@ -102,6 +102,7 @@ pub struct TaskTerminateEvent {
 pub struct CpuSampleEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
+    // todo: change this to u64 which is encoded as a varint
     pub worker_id: u8,
     pub tid: u32,
     pub source: CpuSampleSource,
@@ -244,9 +245,6 @@ pub fn decode_ref<'a>(
 }
 
 /// Convert a zero-copy `TelemetryEventRef` into an owned `TelemetryEvent`.
-///
-/// `SpawnLocationId` is reconstructed from `InternedString` raw id. This is a
-/// temporary bridge until Task 2 replaces `SpawnLocationId` with `InternedString`.
 impl From<TelemetryEventRef<'_>> for TelemetryEvent {
     fn from(r: TelemetryEventRef<'_>) -> Self {
         match r {
@@ -255,7 +253,7 @@ impl From<TelemetryEventRef<'_>> for TelemetryEvent {
                 worker_id: e.worker_id as usize,
                 worker_local_queue_depth: e.local_queue as usize,
                 task_id: e.task_id,
-                spawn_loc_id: SpawnLocationId(e.spawn_loc_id.raw_id() as u16),
+                spawn_loc: e.spawn_loc,
             },
             TelemetryEventRef::PollEnd(e) => TelemetryEvent::PollEnd {
                 timestamp_nanos: e.timestamp_ns,
@@ -281,7 +279,7 @@ impl From<TelemetryEventRef<'_>> for TelemetryEvent {
             TelemetryEventRef::TaskSpawn(e) => TelemetryEvent::TaskSpawn {
                 timestamp_nanos: e.timestamp_ns,
                 task_id: e.task_id,
-                spawn_loc_id: SpawnLocationId(e.spawn_loc_id.raw_id() as u16),
+                spawn_loc: e.spawn_loc,
             },
             TelemetryEventRef::TaskTerminate(e) => TelemetryEvent::TaskTerminate {
                 timestamp_nanos: e.timestamp_ns,

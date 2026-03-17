@@ -723,16 +723,18 @@ mod tests {
             let path = file.to_str().unwrap();
             let mut reader = TraceReader::new(path).unwrap();
 
-            for (spawn_loc_id, loc) in &reader.spawn_locations {
+            for (spawn_loc, loc) in &reader.spawn_locations {
                 assert!(
                     loc.contains(':'),
-                    "location should be file:line:col, got {loc:?} for {spawn_loc_id:?}"
+                    "location should be file:line:col, got {loc:?} for {spawn_loc:?}"
                 );
             }
 
-            for (task_id, spawn_loc_id) in &reader.task_spawn_locs {
-                reader.spawn_locations.get(spawn_loc_id).unwrap_or_else(|| {
-                    panic!("file {path:?}: task {task_id:?} spawn_loc_id {spawn_loc_id:?} has no definition")
+            for (task_id, spawn_loc) in &reader.task_spawn_locs {
+                reader.spawn_locations.get(spawn_loc).unwrap_or_else(|| {
+                    panic!(
+                        "file {path:?}: task {task_id:?} spawn_loc {spawn_loc:?} has no definition"
+                    )
                 });
             }
 
@@ -752,7 +754,7 @@ mod tests {
         use crate::telemetry::events::{
             CpuSampleData, CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER,
         };
-        use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
+        use crate::telemetry::task_metadata::TaskId;
         use crate::telemetry::writer::RotatingWriter;
         use cpu_flush_state::CpuFlushState;
         use proptest::prelude::*;
@@ -878,10 +880,10 @@ mod tests {
 
                 for ev in &reader.events {
                     match ev {
-                        TelemetryEvent::PollStart { spawn_loc_id, .. } => {
+                        TelemetryEvent::PollStart { spawn_loc, .. } => {
                             assert!(
-                                spawn_locs.contains_key(spawn_loc_id),
-                                "{path_str}: PollStart references spawn_loc_id {spawn_loc_id:?} but no definition in this file. Defs: {spawn_locs:?}"
+                                spawn_locs.contains_key(spawn_loc),
+                                "{path_str}: PollStart references spawn_loc {spawn_loc:?} but no definition in this file. Defs: {spawn_locs:?}"
                             );
                             total_raw += 1;
                         }

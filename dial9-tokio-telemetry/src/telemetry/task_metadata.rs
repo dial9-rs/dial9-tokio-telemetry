@@ -51,31 +51,8 @@ impl TaskId {
     }
 }
 
-/// Spawn location identifier. Maps to a spawn location string via lookup table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct SpawnLocationId(pub u16);
-
-impl Serialize for SpawnLocationId {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u16(self.as_u16())
-    }
-}
-
-impl SpawnLocationId {
-    pub const fn as_u16(self) -> u16 {
-        self.0
-    }
-
-    pub const fn from_u16(val: u16) -> Self {
-        SpawnLocationId(val)
-    }
-}
-
 /// Sentinel value for unknown or disabled task tracking.
 pub const UNKNOWN_TASK_ID: TaskId = TaskId(0);
-
-/// Sentinel value for unknown or disabled spawn location tracking.
-pub const UNKNOWN_SPAWN_LOCATION_ID: SpawnLocationId = SpawnLocationId(0);
 
 #[cfg(test)]
 mod tests {
@@ -86,13 +63,6 @@ mod tests {
         let id = TaskId::default();
         assert_eq!(id, UNKNOWN_TASK_ID);
         assert_eq!(id.to_u32(), 0);
-    }
-
-    #[test]
-    fn test_spawn_location_id_default() {
-        let id = SpawnLocationId::default();
-        assert_eq!(id.as_u16(), 0);
-        assert_eq!(id, UNKNOWN_SPAWN_LOCATION_ID);
     }
 
     #[test]
@@ -111,21 +81,5 @@ mod tests {
         set.insert(id2);
         assert!(set.contains(&id1));
         assert!(!set.contains(&TaskId::from_u32(3)));
-    }
-
-    #[test]
-    fn test_spawn_location_id_hash() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(SpawnLocationId(1));
-        set.insert(SpawnLocationId(2));
-        assert!(set.contains(&SpawnLocationId(1)));
-        assert!(!set.contains(&SpawnLocationId(3)));
-    }
-
-    #[test]
-    fn test_spawn_location_id_roundtrip() {
-        let id = SpawnLocationId::from_u16(42);
-        assert_eq!(id.as_u16(), 42);
     }
 }

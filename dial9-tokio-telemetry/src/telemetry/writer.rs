@@ -274,14 +274,14 @@ impl RotatingWriter {
                 task_id,
                 location,
             } => {
-                let spawn_loc_id =
+                let spawn_loc =
                     Self::intern_location(&mut self.encoder, &mut self.location_cache, location)?;
                 self.encoder.write(&PollStartEvent {
                     timestamp_ns: *timestamp_nanos,
                     worker_id: *worker_id as u16,
                     local_queue: *worker_local_queue_depth as u8,
                     task_id: *task_id,
-                    spawn_loc_id,
+                    spawn_loc,
                 })
             }
             RawEvent::PollEnd {
@@ -327,12 +327,12 @@ impl RotatingWriter {
                 task_id,
                 location,
             } => {
-                let spawn_loc_id =
+                let spawn_loc =
                     Self::intern_location(&mut self.encoder, &mut self.location_cache, location)?;
                 self.encoder.write(&TaskSpawnEvent {
                     timestamp_ns: *timestamp_nanos,
                     task_id: *task_id,
-                    spawn_loc_id,
+                    spawn_loc,
                 })
             }
             RawEvent::TaskTerminate {

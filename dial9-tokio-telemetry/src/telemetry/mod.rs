@@ -19,7 +19,8 @@ pub use analysis::{
 pub use cpu_profile::CpuProfilingConfig;
 #[cfg(feature = "cpu-profiling")]
 pub use cpu_profile::SchedEventConfig;
+pub use dial9_trace_format::InternedString;
 pub use events::{CallframeDefData, CpuSampleData, CpuSampleSource, SchedStat, TelemetryEvent};
 pub use recorder::{TelemetryGuard, TelemetryHandle, TracedRuntime, TracedRuntimeBuilder};
-pub use task_metadata::{SpawnLocationId, TaskId, UNKNOWN_SPAWN_LOCATION_ID, UNKNOWN_TASK_ID};
+pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
 pub use writer::{NullWriter, RotatingWriter, TraceWriter};
