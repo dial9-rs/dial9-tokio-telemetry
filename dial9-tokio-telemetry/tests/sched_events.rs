@@ -6,7 +6,7 @@ mod common;
 #[test]
 fn sched_events_capture_context_switches() {
     use dial9_tokio_telemetry::telemetry::events::CpuSampleSource;
-    use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
+    use dial9_tokio_telemetry::telemetry::events::RawEvent;
     use dial9_tokio_telemetry::telemetry::{SchedEventConfig, TracedRuntime};
     use std::time::Duration;
 
@@ -44,8 +44,8 @@ fn sched_events_capture_context_switches() {
     let worker_samples: Vec<_> = events
         .iter()
         .filter(|e| {
-            matches!(e, TelemetryEvent::CpuSample { worker_id, source, .. }
-            if *worker_id < num_workers && *source == CpuSampleSource::SchedEvent)
+            matches!(e, RawEvent::CpuSample(data)
+            if data.worker_id < num_workers && data.source == CpuSampleSource::SchedEvent)
         })
         .collect();
     assert!(
@@ -57,8 +57,8 @@ fn sched_events_capture_context_switches() {
     let cpu_profile_samples = events
         .iter()
         .filter(|e| {
-            matches!(e, TelemetryEvent::CpuSample { source, .. }
-            if *source == CpuSampleSource::CpuProfile)
+            matches!(e, RawEvent::CpuSample(data)
+            if data.source == CpuSampleSource::CpuProfile)
         })
         .count();
     assert_eq!(cpu_profile_samples, 0, "should have no CpuProfile samples");
@@ -67,9 +67,7 @@ fn sched_events_capture_context_switches() {
     let callframes: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            TelemetryEvent::CallframeDef {
-                symbol, location, ..
-            } => Some((symbol.as_str(), location.as_deref())),
+            RawEvent::CallframeDef(data) => Some((data.symbol.as_str(), data.location.as_deref())),
             _ => None,
         })
         .collect();

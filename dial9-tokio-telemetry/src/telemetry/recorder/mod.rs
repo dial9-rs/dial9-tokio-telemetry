@@ -1,6 +1,5 @@
 mod cpu_flush_state;
 mod event_writer;
-pub(crate) mod flush_state;
 mod shared_state;
 
 pub(crate) use shared_state::SharedState;
@@ -334,7 +333,6 @@ impl Drop for TelemetryGuard {
 }
 
 pub struct TracedRuntimeBuilder {
-    enabled: bool,
     task_tracking_enabled: bool,
     #[cfg(feature = "cpu-profiling")]
     cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
@@ -346,28 +344,6 @@ pub struct TracedRuntimeBuilder {
 }
 
 impl TracedRuntimeBuilder {
-    /// Set to `false` to build a plain runtime with no telemetry
-    /// installed and a dummy [`TelemetryGuard`]. Defaults to `true`.
-    ///
-    /// Unlike [`TelemetryGuard::enable`]/[`TelemetryGuard::disable`]
-    /// (which toggle recording at runtime), this controls whether
-    /// telemetry hooks and threads are installed at all.
-    ///
-    /// ```no_run
-    /// # use dial9_tokio_telemetry::telemetry::writer::NullWriter;
-    /// # use dial9_tokio_telemetry::telemetry::recorder::TracedRuntime;
-    /// let enabled = std::env::var("ENABLE_DIAL9").is_ok();
-    /// let builder = tokio::runtime::Builder::new_multi_thread();
-    /// let (runtime, guard) = TracedRuntime::builder()
-    ///     .install(enabled)
-    ///     .build_and_start(builder, NullWriter)?;
-    /// # Ok::<(), std::io::Error>(())
-    /// ```
-    pub fn install(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
-        self
-    }
-
     pub fn with_task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking_enabled = enabled;
         self
@@ -407,26 +383,6 @@ impl TracedRuntimeBuilder {
         self
     }
 
-    /// Build a plain runtime with a dummy guard.
-    fn build_disabled(
-        mut builder: tokio::runtime::Builder,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        use crate::telemetry::writer::NullWriter;
-        let runtime = builder.build()?;
-        let shared = Arc::new(SharedState::new(Instant::now()));
-        let recorder = Arc::new(Mutex::new(TelemetryRecorder {
-            shared: shared.clone(),
-            event_writer: EventWriter::new(Box::new(NullWriter)),
-        }));
-        let guard = TelemetryGuard {
-            handle: TelemetryHandle { shared, recorder },
-            stop: Arc::new(AtomicBool::new(true)),
-            flush_thread: None,
-            worker: None,
-        };
-        Ok((runtime, guard))
-    }
-
     /// Build the traced runtime. Recording starts **disabled** — call
     /// [`TelemetryGuard::enable`] to begin, or use
     /// [`build_and_start`](Self::build_and_start).
@@ -435,9 +391,6 @@ impl TracedRuntimeBuilder {
         mut builder: tokio::runtime::Builder,
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        if !self.enabled {
-            return Self::build_disabled(builder);
-        }
         let start_instant = Instant::now();
         #[cfg(feature = "cpu-profiling")]
         let start_mono_ns = crate::telemetry::cpu_profile::clock_monotonic_ns();
@@ -567,7 +520,6 @@ pub struct TracedRuntime;
 impl TracedRuntime {
     pub fn builder() -> TracedRuntimeBuilder {
         TracedRuntimeBuilder {
-            enabled: true,
             task_tracking_enabled: false,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
@@ -587,7 +539,6 @@ impl TracedRuntime {
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
-            enabled: true,
             task_tracking_enabled: false,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
@@ -609,7 +560,6 @@ impl TracedRuntime {
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder {
-            enabled: true,
             task_tracking_enabled: false,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
@@ -626,9 +576,6 @@ impl TracedRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::writer::NullWriter;
-    use flush_state::FlushState;
-    use smallvec::SmallVec;
     use std::panic::Location;
 
     #[test]
@@ -662,43 +609,6 @@ mod tests {
         // No flush thread or worker to join
         assert!(guard.flush_thread.is_none());
         assert!(guard.worker.is_none());
-    }
-
-    #[test]
-    fn test_flush_state_intern() {
-        let mut fs = FlushState::new();
-        #[track_caller]
-        fn get_loc() -> &'static Location<'static> {
-            Location::caller()
-        }
-        let loc = get_loc();
-        let id1 = fs.intern(loc);
-        let id2 = fs.intern(loc);
-        assert_eq!(id1, id2);
-        assert_ne!(id1.as_u16(), 0);
-    }
-
-    #[test]
-    fn test_flush_state_on_rotate_clears_emitted() {
-        let mut fs = FlushState::new();
-        #[track_caller]
-        fn get_loc() -> &'static Location<'static> {
-            Location::caller()
-        }
-        let loc = get_loc();
-        let id = fs.intern(loc);
-        let mut defs = SmallVec::new();
-        fs.collect_def(id, &mut defs);
-        assert_eq!(defs.len(), 1);
-        // Second collect_def should not emit again
-        let mut defs2 = SmallVec::new();
-        fs.collect_def(id, &mut defs2);
-        assert_eq!(defs2.len(), 0);
-        // After rotation, should re-emit
-        fs.on_rotate();
-        let mut defs3 = SmallVec::new();
-        fs.collect_def(id, &mut defs3);
-        assert_eq!(defs3.len(), 1);
     }
 
     #[test]

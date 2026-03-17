@@ -1,13 +1,12 @@
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::{InternedString, StackFrames};
 
-use crate::telemetry::events::{RawEvent, TelemetryEvent};
+use crate::telemetry::events::RawEvent;
 use crate::telemetry::format::{
     CallframeDefEvent, CpuSampleEvent, PollEndEvent, PollStartEvent, QueueSampleEvent,
     SegmentMetadataEvent, TaskSpawnEvent, TaskTerminateEvent, WakeEventEvent, WorkerParkEvent,
     WorkerUnparkEvent,
 };
-use crate::telemetry::recorder::flush_state::FlushState;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::BufWriter;
@@ -56,49 +55,6 @@ impl TraceWriter for NullWriter {
     }
 }
 
-/// Resolves [`RawEvent`]s into [`TelemetryEvent`]s by interning spawn locations.
-///
-/// This is useful for custom [`TraceWriter`] implementations (e.g. in tests)
-/// that need to convert raw events into their wire format. The resolver tracks
-/// which spawn-location definitions have been emitted and re-emits them as
-/// needed.
-///
-/// Call [`on_rotate`](Self::on_rotate) when the writer rotates to a new file
-/// so that definitions are re-emitted in the new file.
-pub struct EventResolver {
-    inner: FlushState,
-}
-
-impl Default for EventResolver {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl EventResolver {
-    /// Create a new resolver with empty interning state.
-    pub fn new() -> Self {
-        Self {
-            inner: FlushState::new(),
-        }
-    }
-
-    /// Resolve a [`RawEvent`] into one or more [`TelemetryEvent`]s.
-    ///
-    /// For events that reference a spawn location, this returns the
-    /// `SpawnLocationDef` (if not yet emitted in the current file) followed
-    /// by the event itself.
-    pub fn resolve(&mut self, raw: &RawEvent) -> smallvec::SmallVec<[TelemetryEvent; 3]> {
-        self.inner.resolve(raw)
-    }
-
-    /// Notify the resolver that the writer rotated to a new file.
-    /// The next reference to any spawn location will re-emit its definition.
-    pub fn on_rotate(&mut self) {
-        self.inner.on_rotate();
-    }
-}
-
 /// A writer that rotates trace files to bound disk usage.
 ///
 /// - `max_file_size`: rotate to a new file when the current file exceeds this size
@@ -119,12 +75,8 @@ pub struct RotatingWriter {
     next_index: u32,
     /// Set when we've hit the total size cap; silently drops further events.
     stopped: bool,
-    /// Set to true when a rotation occurs; cleared by `take_rotated`.
-    rotated: bool,
     /// Optional metadata written at the start of each segment.
     segment_metadata: Option<Vec<(String, String)>>,
-    /// Interning state for spawn locations.
-    flush_state: FlushState,
     /// Cache from Location → formatted string, to avoid
     /// reformatting on every event.
     location_cache: HashMap<std::panic::Location<'static>, String>,
@@ -154,9 +106,7 @@ impl RotatingWriter {
             encoder,
             next_index: 1,
             stopped: false,
-            rotated: false,
             segment_metadata: None,
-            flush_state: FlushState::new(),
             location_cache: HashMap::new(),
         })
     }
@@ -189,9 +139,7 @@ impl RotatingWriter {
             encoder: Encoder::new_to(writer)?,
             next_index: 1,
             stopped: false,
-            rotated: false,
             segment_metadata: None,
-            flush_state: FlushState::new(),
             location_cache: HashMap::new(),
         })
     }
@@ -246,8 +194,6 @@ impl RotatingWriter {
         self.encoder = Encoder::new_to(writer)?;
         self.active_path = new_path;
         self.write_segment_metadata()?;
-        self.rotated = true;
-        self.flush_state.on_rotate();
 
         tracing::info!(
             segment_index = self.next_index - 1,
@@ -268,9 +214,10 @@ impl RotatingWriter {
         while self.total_size() > self.max_total_size && !self.closed_files.is_empty() {
             if let Some((path, _size)) = self.closed_files.pop_front()
                 && let Err(e) = fs::remove_file(&path)
-                    && e.kind() != std::io::ErrorKind::NotFound {
-                        tracing::warn!("failed to evict old trace segment {}: {e}", path.display());
-                    }
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("failed to evict old trace segment {}: {e}", path.display());
+            }
         }
         // If even the current file alone exceeds total budget, stop writing.
         if self.total_size() > self.max_total_size {
@@ -436,10 +383,6 @@ impl TraceWriter for RotatingWriter {
         Ok(())
     }
 
-    fn take_rotated(&mut self) -> bool {
-        std::mem::replace(&mut self.rotated, false)
-    }
-
     fn seal(&mut self) -> std::io::Result<()> {
         self.flush()?;
         // Rename .active → .bin for the current segment (if it has .active suffix)
@@ -459,7 +402,7 @@ impl TraceWriter for RotatingWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::format;
+    use crate::telemetry::{TelemetryEvent, format};
     use std::io::Read;
     use tempfile::TempDir;
 

@@ -18,7 +18,7 @@ mod common;
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
     use dial9_tokio_telemetry::telemetry::events::{
-        CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER,
+        CpuSampleSource, RawEvent, UNKNOWN_WORKER,
     };
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
     use std::sync::{Arc, Mutex};
@@ -74,12 +74,9 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     let cpu_samples: Vec<(u64, usize)> = events
         .iter()
         .filter_map(|e| match e {
-            TelemetryEvent::CpuSample {
-                timestamp_nanos,
-                worker_id,
-                source: CpuSampleSource::CpuProfile,
-                ..
-            } => Some((*timestamp_nanos, *worker_id)),
+            RawEvent::CpuSample(data) if data.source == CpuSampleSource::CpuProfile => {
+                Some((data.timestamp_nanos, data.worker_id))
+            }
             _ => None,
         })
         .collect();
@@ -99,14 +96,14 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
         let mut open: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
         for event in events.iter() {
             match event {
-                TelemetryEvent::PollStart {
+                RawEvent::PollStart {
                     timestamp_nanos,
                     worker_id,
                     ..
                 } => {
                     open.insert(*worker_id, *timestamp_nanos);
                 }
-                TelemetryEvent::PollEnd {
+                RawEvent::PollEnd {
                     timestamp_nanos,
                     worker_id,
                 } => {
@@ -260,7 +257,7 @@ fn burn_cpu(duration: std::time::Duration) {
 #[test]
 fn thread_name_attribution_for_external_and_blocking_threads() {
     use dial9_tokio_telemetry::telemetry::events::{
-        BLOCKING_WORKER, TelemetryEvent, UNKNOWN_WORKER,
+        BLOCKING_WORKER, RawEvent, UNKNOWN_WORKER,
     };
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
     use std::time::Duration;
@@ -310,16 +307,21 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
 
     let events = events.lock().unwrap();
 
-    // ── Collect ThreadNameDef events ─────────────────────────────────────
+    // ── Collect thread names from CpuSample events ─────────────────────
     let thread_defs: Vec<(u32, &str)> = events
         .iter()
         .filter_map(|e| match e {
-            TelemetryEvent::ThreadNameDef { tid, name } => Some((*tid, name.as_str())),
+            RawEvent::CpuSample(data) => {
+                data.thread_name.as_ref().map(|name| (data.tid, name.as_str()))
+            }
             _ => None,
         })
         .collect();
 
-    eprintln!("ThreadNameDef events: {thread_defs:?}");
+    // Deduplicate for display
+    let unique_defs: std::collections::HashMap<u32, &str> =
+        thread_defs.iter().copied().collect();
+    eprintln!("Thread names from CpuSample events: {unique_defs:?}");
 
     // ── Verify the external thread name appears ──────────────────────────
     let ext_def = thread_defs
@@ -327,7 +329,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .find(|(_, name)| *name == "my-ext-thread");
     assert!(
         ext_def.is_some(),
-        "expected ThreadNameDef for 'my-ext-thread', got: {thread_defs:?}"
+        "expected CpuSample with thread_name 'my-ext-thread', got: {unique_defs:?}"
     );
     let ext_tid = ext_def.unwrap().0;
 
@@ -338,14 +340,14 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .find(|(_, name)| name.starts_with("test-traced-run"));
     assert!(
         blocking_def.is_some(),
-        "expected ThreadNameDef for a tokio blocking thread (test-traced-run), got: {thread_defs:?}"
+        "expected CpuSample with thread_name starting with 'test-traced-run', got: {unique_defs:?}"
     );
     let blocking_tid = blocking_def.unwrap().0;
 
     // ── Verify CpuSamples exist for both tids with UNKNOWN_WORKER ────────
     let ext_samples: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::CpuSample { tid, worker_id, .. } if *tid == ext_tid && *worker_id == UNKNOWN_WORKER))
+        .filter(|e| matches!(e, RawEvent::CpuSample(data) if data.tid == ext_tid && data.worker_id == UNKNOWN_WORKER))
         .collect();
     eprintln!(
         "CPU samples for ext thread (tid={ext_tid}): {}",
@@ -358,7 +360,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
 
     let blocking_samples: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::CpuSample { tid, worker_id, .. } if *tid == blocking_tid && *worker_id == BLOCKING_WORKER))
+        .filter(|e| matches!(e, RawEvent::CpuSample(data) if data.tid == blocking_tid && data.worker_id == BLOCKING_WORKER))
         .collect();
     eprintln!(
         "CPU samples for blocking thread (tid={blocking_tid}): {}",
