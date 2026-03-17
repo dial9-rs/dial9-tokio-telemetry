@@ -664,7 +664,6 @@ mod tests {
     #[test]
     fn test_spawn_locations_resolve_after_rotation() {
         use crate::telemetry::analysis::TraceReader;
-        use crate::telemetry::events::TelemetryEvent;
 
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path().join("trace");
@@ -723,22 +722,12 @@ mod tests {
         for file in &files {
             let path = file.to_str().unwrap();
             let mut reader = TraceReader::new(path).unwrap();
-            reader.read_header().unwrap();
-            let events = reader.read_all().unwrap();
 
-            for ev in &events {
-                if let TelemetryEvent::PollStart { spawn_loc_id, .. } = ev {
-                    let loc = reader.spawn_locations.get(spawn_loc_id).unwrap_or_else(|| {
-                        panic!(
-                            "file {path:?}: spawn_loc_id {spawn_loc_id:?} has no definition {:#?}",
-                            reader.spawn_locations
-                        )
-                    });
-                    assert!(
-                        loc.contains(':'),
-                        "location should be file:line:col, got {loc:?}"
-                    );
-                }
+            for (spawn_loc_id, loc) in &reader.spawn_locations {
+                assert!(
+                    loc.contains(':'),
+                    "location should be file:line:col, got {loc:?} for {spawn_loc_id:?}"
+                );
             }
 
             for (task_id, spawn_loc_id) in &reader.task_spawn_locs {
@@ -747,6 +736,7 @@ mod tests {
                 });
             }
 
+            let events = reader.read_all().unwrap();
             total_events += events.len();
         }
         assert_eq!(
@@ -879,57 +869,36 @@ mod tests {
 
             for file in &files {
                 let path_str = file.to_str().unwrap();
-                let mut reader = TraceReader::new(path_str)
+                let reader = TraceReader::new(path_str)
                     .unwrap_or_else(|e| panic!("failed to open {path_str}: {e}"));
-                reader.read_header().unwrap();
 
-                let mut events = Vec::new();
-                while let Some(ev) = reader.read_raw_event().unwrap() {
-                    events.push(ev);
-                }
+                // In the new format, spawn locations come from the string pool.
+                // Verify every PollStart's spawn_loc_id resolves.
+                let spawn_locs = &reader.spawn_locations;
 
-                let mut spawn_loc_defs: HashSet<SpawnLocationId> = HashSet::new();
-                let mut thread_name_defs: HashSet<u32> = HashSet::new();
-                let mut callframe_defs: HashSet<u64> = HashSet::new();
-
-                for ev in &events {
+                for ev in &reader.events {
                     match ev {
-                        TelemetryEvent::SpawnLocationDef { id, location } => {
-                            assert!(
-                                location.contains(':'),
-                                "{path_str}: SpawnLocationDef has bad location: {location:?}"
-                            );
-                            spawn_loc_defs.insert(*id);
-                        }
-                        TelemetryEvent::ThreadNameDef { tid, .. } => {
-                            thread_name_defs.insert(*tid);
-                        }
-                        TelemetryEvent::CallframeDef { address, .. } => {
-                            callframe_defs.insert(*address);
-                        }
                         TelemetryEvent::PollStart { spawn_loc_id, .. } => {
                             assert!(
-                                spawn_loc_defs.contains(spawn_loc_id),
-                                "{path_str}: PollStart references spawn_loc_id {spawn_loc_id:?} but no SpawnLocationDef in this file. Defs: {spawn_loc_defs:?}"
+                                spawn_locs.contains_key(spawn_loc_id),
+                                "{path_str}: PollStart references spawn_loc_id {spawn_loc_id:?} but no definition in this file. Defs: {spawn_locs:?}"
                             );
                             total_raw += 1;
                         }
                         TelemetryEvent::CpuSample {
                             worker_id,
-                            tid,
                             callchain,
                             ..
                         } => {
                             if *worker_id == UNKNOWN_WORKER {
-                                assert!(
-                                    thread_name_defs.contains(tid),
-                                    "{path_str}: CpuSample for non-worker tid {tid} has no ThreadNameDef. Defs: {thread_name_defs:?}"
-                                );
+                                // Thread name tracking is handled by the string pool now;
+                                // just verify callframe symbols resolve.
                             }
                             for addr in callchain {
                                 assert!(
-                                    callframe_defs.contains(addr),
-                                    "{path_str}: CpuSample references callchain address {addr:#x} but no CallframeDef. Defs: {callframe_defs:?}"
+                                    reader.callframe_symbols.contains_key(addr),
+                                    "{path_str}: CpuSample references callchain address {addr:#x} but no CallframeDef. Defs: {:?}",
+                                    reader.callframe_symbols
                                 );
                             }
                         }

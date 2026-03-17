@@ -1,13 +1,21 @@
 use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
-use crate::telemetry::format;
+use crate::telemetry::format::{self, TelemetryEventRef};
 use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
+use dial9_trace_format::decoder::{Decoder, StringPool};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufReader, Result};
+use std::io::Result;
 
+/// Reads a trace file written in the `dial9-trace-format` binary format.
+///
+/// Decodes the entire file eagerly and populates lookup tables for spawn
+/// locations (from the string pool), task→spawn-location mappings, callframe
+/// symbols, thread names, and segment metadata.
 pub struct TraceReader {
-    reader: BufReader<File>,
-    /// Spawn location definitions accumulated during reading.
+    /// All decoded events (including metadata like TaskSpawn).
+    pub events: Vec<TelemetryEvent>,
+    pos: usize,
+    /// Spawn location strings keyed by `SpawnLocationId` (derived from
+    /// `InternedString` raw IDs in the string pool).
     pub spawn_locations: HashMap<SpawnLocationId, String>,
     /// Task ID → spawn location ID mapping built from TaskSpawn events.
     pub task_spawn_locs: HashMap<TaskId, SpawnLocationId>,
@@ -21,80 +29,102 @@ pub struct TraceReader {
 
 impl TraceReader {
     pub fn new(path: &str) -> Result<Self> {
-        let file = File::open(path)?;
+        let data = std::fs::read(path)?;
+        let mut dec = Decoder::new(&data).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid trace header")
+        })?;
+
+        let mut ref_events = Vec::new();
+        dec.for_each_event(|ev| {
+            if let Some(ev) = format::decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
+                ref_events.push(ev);
+            }
+        })
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+
+        let string_pool = dec.string_pool();
+
+        let mut spawn_locations = HashMap::new();
+        let mut task_spawn_locs = HashMap::new();
+        let mut callframe_symbols = HashMap::new();
+        let mut thread_names = HashMap::new();
+        let mut segment_metadata = Vec::new();
+
+        // Build spawn_locations from the string pool: every interned string
+        // that was used as a spawn_loc_id gets an entry.
+        for ev in &ref_events {
+            match ev {
+                TelemetryEventRef::PollStart(e) => {
+                    populate_spawn_loc(&mut spawn_locations, e.spawn_loc_id, string_pool);
+                }
+                TelemetryEventRef::TaskSpawn(e) => {
+                    let loc_id = SpawnLocationId(e.spawn_loc_id.raw_id() as u16);
+                    populate_spawn_loc(&mut spawn_locations, e.spawn_loc_id, string_pool);
+                    task_spawn_locs.insert(e.task_id, loc_id);
+                }
+                TelemetryEventRef::CallframeDef(e) => {
+                    callframe_symbols.insert(e.address, e.symbol.to_string());
+                }
+                TelemetryEventRef::SegmentMetadata(e) => {
+                    segment_metadata = e.entries.iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect();
+                }
+                _ => {}
+            }
+        }
+
+        // Thread names come from CpuSample events' thread_name field
+        for ev in &ref_events {
+            if let TelemetryEventRef::CpuSample(e) = ev {
+                if let Some(name) = string_pool.get(e.thread_name) {
+                    if name != "<no thread name>" {
+                        thread_names.insert(e.tid, name.to_string());
+                    }
+                }
+            }
+        }
+
+        let events: Vec<TelemetryEvent> = ref_events.into_iter().map(TelemetryEvent::from).collect();
+
         Ok(Self {
-            reader: BufReader::new(file),
-            spawn_locations: HashMap::new(),
-            task_spawn_locs: HashMap::new(),
-            callframe_symbols: HashMap::new(),
-            thread_names: HashMap::new(),
-            segment_metadata: Vec::new(),
+            events,
+            pos: 0,
+            spawn_locations,
+            task_spawn_locs,
+            callframe_symbols,
+            thread_names,
+            segment_metadata,
         })
     }
 
+    /// No-op for compatibility. The new format header is consumed during `new()`.
     pub fn read_header(&mut self) -> Result<(String, u32)> {
-        format::read_header(&mut self.reader)
+        Ok(("D9TF".to_string(), 1))
     }
 
-    /// Read the next event without filtering — returns all events including
-    /// metadata records (SpawnLocationDef, TaskSpawn, CallframeDef).
-    /// Still accumulates metadata into lookup tables as a side effect.
+    /// Read the next event without filtering.
     pub fn read_raw_event(&mut self) -> Result<Option<TelemetryEvent>> {
-        let event = format::read_event(&mut self.reader)?;
-        match &event {
-            Some(TelemetryEvent::SpawnLocationDef { id, location }) => {
-                self.spawn_locations.insert(*id, location.clone());
-            }
-            Some(TelemetryEvent::TaskSpawn {
-                task_id,
-                spawn_loc_id,
-                ..
-            }) => {
-                self.task_spawn_locs.insert(*task_id, *spawn_loc_id);
-            }
-            Some(TelemetryEvent::CallframeDef {
-                address, symbol, ..
-            }) => {
-                self.callframe_symbols.insert(*address, symbol.clone());
-            }
-            Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
-                self.thread_names.insert(*tid, name.clone());
-            }
-            Some(TelemetryEvent::SegmentMetadata { entries, .. }) => {
-                self.segment_metadata = entries.clone();
-            }
-            _ => {}
+        if self.pos >= self.events.len() {
+            return Ok(None);
         }
-        Ok(event)
+        let ev = self.events[self.pos].clone();
+        self.pos += 1;
+        Ok(Some(ev))
     }
 
-    /// Read the next runtime telemetry event, automatically accumulating
-    /// SpawnLocationDef and TaskSpawn metadata records.
+    /// Read the next runtime telemetry event, skipping metadata-only records.
     pub fn read_event(&mut self) -> Result<Option<TelemetryEvent>> {
         loop {
-            match format::read_event(&mut self.reader)? {
+            match self.read_raw_event()? {
                 None => return Ok(None),
-                Some(TelemetryEvent::SpawnLocationDef { id, location }) => {
-                    self.spawn_locations.insert(id, location);
-                }
-                Some(TelemetryEvent::TaskSpawn {
-                    task_id,
-                    spawn_loc_id,
-                    ..
-                }) => {
-                    self.task_spawn_locs.insert(task_id, spawn_loc_id);
-                }
-                Some(TelemetryEvent::CallframeDef {
-                    address, symbol, ..
-                }) => {
-                    self.callframe_symbols.insert(address, symbol);
-                }
-                Some(TelemetryEvent::ThreadNameDef { tid, name }) => {
-                    self.thread_names.insert(tid, name);
-                }
-                Some(TelemetryEvent::SegmentMetadata { entries, .. }) => {
-                    self.segment_metadata = entries;
-                }
+                Some(
+                    TelemetryEvent::SpawnLocationDef { .. }
+                    | TelemetryEvent::TaskSpawn { .. }
+                    | TelemetryEvent::CallframeDef { .. }
+                    | TelemetryEvent::ThreadNameDef { .. }
+                    | TelemetryEvent::SegmentMetadata { .. },
+                ) => continue,
                 Some(e) => return Ok(Some(e)),
             }
         }
@@ -102,10 +132,23 @@ impl TraceReader {
 
     pub fn read_all(&mut self) -> Result<Vec<TelemetryEvent>> {
         let mut events = Vec::new();
-        while let Some(event) = self.read_event()? {
-            events.push(event);
+        while let Some(e) = self.read_event()? {
+            events.push(e);
         }
         Ok(events)
+    }
+}
+
+fn populate_spawn_loc(
+    map: &mut HashMap<SpawnLocationId, String>,
+    interned: dial9_trace_format::InternedString,
+    pool: &StringPool,
+) {
+    let id = SpawnLocationId(interned.raw_id() as u16);
+    if !map.contains_key(&id) {
+        if let Some(s) = pool.get(interned) {
+            map.insert(id, s.to_string());
+        }
     }
 }
 

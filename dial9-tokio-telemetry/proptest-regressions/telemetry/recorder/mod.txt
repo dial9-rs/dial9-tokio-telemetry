@@ -6,3 +6,5 @@
 # everyone who runs the test benefits from these saved cases.
 cc b3217ab71249bb1564914a81448f8eb1e11ac5057d6ab3e52cf95d45787cbaaa # shrinks to rounds = [FlushRound { cpu_ops: [], raw_ops: [PollStart { location_idx: 0 }] }], max_file_size = 88
 cc d6611fe6adf9fd82f368cac0262f1a0b3e24a361a9b1d4c99b233d64724661dd # shrinks to rounds = [FlushRound { cpu_ops: [], raw_ops: [PollStart { location_idx: 0 }, PollStart { location_idx: 1 }, PollStart { location_idx: 0 }] }], max_file_size = 151
+cc 0be4d428451bcbb6e8551022ed07083398722007d81bd511efbda5ca90963fba # shrinks to rounds = [FlushRound { cpu_ops: [CpuSample { worker_id: 255, tid: 0, callchain: [0, 1] }], raw_ops: [] }], max_file_size = 60
+cc 5b79ee4f007dbc85ac20d66cbf71725890680cf551bdfeadeb4bbbf5ef9cf2c4 # shrinks to rounds = [FlushRound { cpu_ops: [CpuSample { worker_id: 255, tid: 0, callchain: [7] }], raw_ops: [PollStart { location_idx: 0 }] }, FlushRound { cpu_ops: [CpuSample { worker_id: 255, tid: 0, callchain: [7] }], raw_ops: [] }], max_file_size = 218

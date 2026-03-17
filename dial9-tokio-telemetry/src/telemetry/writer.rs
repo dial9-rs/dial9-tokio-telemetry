@@ -25,6 +25,14 @@ pub trait TraceWriter: Send {
     fn seal(&mut self) -> std::io::Result<()> {
         self.flush()
     }
+    /// Write a batch of events atomically — rotation is deferred until after
+    /// the entire batch, so all events land in the same file.
+    fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
+        for event in events {
+            self.write_event(event)?;
+        }
+        Ok(())
+    }
 }
 
 impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
@@ -39,6 +47,9 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     }
     fn seal(&mut self) -> std::io::Result<()> {
         (**self).seal()
+    }
+    fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
+        (**self).write_event_batch(events)
     }
 }
 
@@ -75,6 +86,8 @@ pub struct RotatingWriter {
     next_index: u32,
     /// Set when we've hit the total size cap; silently drops further events.
     stopped: bool,
+    /// Set after rotation; cleared by `take_rotated()`.
+    did_rotate: bool,
     /// Optional metadata written at the start of each segment.
     segment_metadata: Option<Vec<(String, String)>>,
     /// Cache from Location → formatted string, to avoid
@@ -106,6 +119,7 @@ impl RotatingWriter {
             encoder,
             next_index: 1,
             stopped: false,
+            did_rotate: false,
             segment_metadata: None,
             location_cache: HashMap::new(),
         })
@@ -139,6 +153,7 @@ impl RotatingWriter {
             encoder: Encoder::new_to(writer)?,
             next_index: 1,
             stopped: false,
+            did_rotate: false,
             segment_metadata: None,
             location_cache: HashMap::new(),
         })
@@ -193,6 +208,7 @@ impl RotatingWriter {
         let writer = BufWriter::new(file);
         self.encoder = Encoder::new_to(writer)?;
         self.active_path = new_path;
+        self.did_rotate = true;
         self.write_segment_metadata()?;
 
         tracing::info!(
@@ -243,6 +259,13 @@ impl RotatingWriter {
     /// the complete logical unit (defs + event) is written, so they always
     /// land in the same file.
     fn write_resolved(&mut self, event: &RawEvent) -> std::io::Result<()> {
+        self.write_resolved_no_rotate(event)?;
+        self.maybe_rotate()?;
+        Ok(())
+    }
+
+    /// Write a resolved event without triggering rotation.
+    fn write_resolved_no_rotate(&mut self, event: &RawEvent) -> std::io::Result<()> {
         match event {
             RawEvent::PollStart {
                 timestamp_nanos,
@@ -357,7 +380,6 @@ impl RotatingWriter {
                     .to_string(),
             }),
         }?;
-        self.maybe_rotate()?;
         Ok(())
     }
 
@@ -376,11 +398,23 @@ impl TraceWriter for RotatingWriter {
         self.write_resolved(event)
     }
 
+    fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
+        for event in events {
+            self.write_resolved_no_rotate(event)?;
+        }
+        self.maybe_rotate()?;
+        Ok(())
+    }
+
     fn flush(&mut self) -> std::io::Result<()> {
         if !self.stopped {
             self.encoder.flush()?;
         }
         Ok(())
+    }
+
+    fn take_rotated(&mut self) -> bool {
+        std::mem::take(&mut self.did_rotate)
     }
 
     fn seal(&mut self) -> std::io::Result<()> {
