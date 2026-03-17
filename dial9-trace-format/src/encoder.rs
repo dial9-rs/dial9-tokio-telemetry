@@ -90,7 +90,7 @@ impl Encoder<Vec<u8>> {
 
     /// Consume the encoder and return the encoded bytes.
     pub fn finish(self) -> Vec<u8> {
-        self.state.writer
+        self.state.writer.into_inner()
     }
 }
 
@@ -110,12 +110,17 @@ impl<W: Write> Encoder<W> {
 
     /// Consume the encoder and return the inner writer.
     pub fn into_inner(self) -> W {
-        self.state.writer
+        self.state.writer.into_inner()
     }
 
     /// Borrow the inner writer.
     pub fn as_inner(&self) -> &W {
-        &self.state.writer
+        self.state.writer.inner()
+    }
+
+    /// Total bytes written through this encoder (including the file header).
+    pub fn bytes_written(&self) -> u64 {
+        self.state.writer.bytes_written()
     }
 
     /// Ensure a schema is registered with this encoder. Returns the wire type

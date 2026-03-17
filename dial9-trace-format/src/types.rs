@@ -28,6 +28,7 @@ pub struct StackFrames(pub Vec<u64>);
 
 /// An interned string reference (pool ID). Created by [`Encoder::intern_string`].
 /// On the wire this is a `PooledString` (u32 LE).
+/// TODO: intern string should not implement default
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct InternedString(pub(crate) u32);
 
@@ -439,10 +440,55 @@ impl<'a> Iterator for StringMapIter<'a> {
 
 impl ExactSizeIterator for StringMapIter<'_> {}
 
+/// A writer wrapper that counts bytes written through it.
+pub(crate) struct CountingWriter<W> {
+    inner: W,
+    bytes_written: u64,
+}
+
+impl<W> CountingWriter<W> {
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            bytes_written: 0,
+        }
+    }
+
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+
+    pub fn into_inner(self) -> W {
+        self.inner
+    }
+
+    pub fn inner(&self) -> &W {
+        &self.inner
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.bytes_written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.inner.write_all(buf)?;
+        self.bytes_written += buf.len() as u64;
+        Ok(())
+    }
+}
+
 /// Encoding state: carries the output writer and timestamp base for delta encoding.
 /// Used internally by [`EventEncoder`] and [`crate::encoder::Encoder`].
 pub(crate) struct EncodeState<W: Write> {
-    pub(crate) writer: W,
+    pub(crate) writer: CountingWriter<W>,
     /// Current timestamp base (set by TimestampReset frames).
     pub(crate) timestamp_base_ns: u64,
 }
@@ -450,7 +496,7 @@ pub(crate) struct EncodeState<W: Write> {
 impl<W: Write> EncodeState<W> {
     pub fn new(writer: W) -> Self {
         Self {
-            writer,
+            writer: CountingWriter::new(writer),
             timestamp_base_ns: 0,
         }
     }

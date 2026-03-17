@@ -45,6 +45,7 @@ impl CpuFlushState {
     pub(super) fn collect_cpu_event_batch(&mut self, data: &CpuSampleData) -> Vec<RawEvent> {
         let mut batch = Vec::new();
         if !self.thread_name_emitted_this_file.contains(&data.tid) {
+            // TODO: clean up thread names
             if let Some(name) = self.thread_name_intern.get(&data.tid) {
                 batch.push(RawEvent::ThreadNameDef(Box::new(ThreadNameDefData {
                     tid: data.tid,
