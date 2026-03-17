@@ -1,5 +1,5 @@
 //! Verify that sched event timestamps (from perf) align with wall-clock
-//! timestamps from `Instant::now()` (CLOCK_MONOTONIC).
+//! timestamps from `clock_monotonic_ns()` (CLOCK_MONOTONIC).
 //!
 //! We spawn async tasks that call `std::thread::sleep` for known durations,
 //! recording wall-clock timestamps around each sleep. Sched events (context
@@ -12,7 +12,7 @@ mod common;
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn sched_event_timestamps_align_with_wall_clock() {
-    use dial9_tokio_telemetry::telemetry::events::{CpuSampleSource, RawEvent};
+    use dial9_tokio_telemetry::telemetry::events::{clock_monotonic_ns, CpuSampleSource, RawEvent};
     use dial9_tokio_telemetry::telemetry::{SchedEventConfig, TracedRuntime};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -30,24 +30,23 @@ fn sched_event_timestamps_align_with_wall_clock() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    // Use the guard's start_time so we're in the same clock domain as trace timestamps.
-    let trace_start = guard.start_time();
+    // All timestamps are now absolute CLOCK_MONOTONIC nanoseconds.
+    let _trace_start = guard.start_time();
     let sleep_windows: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let sleep_duration = Duration::from_millis(50);
+    let sleep_duration = Duration::from_micros(50);
     let num_sleeps = 4;
 
     runtime.block_on(async {
         // Space out sleeps so windows don't overlap
         for i in 0..num_sleeps {
             let windows = sleep_windows.clone();
-            let ts = trace_start;
             tokio::spawn(async move {
                 // Stagger starts so sleeps don't all overlap
                 tokio::time::sleep(Duration::from_millis(i * 100)).await;
-                let before = ts.elapsed().as_nanos() as u64;
+                let before = clock_monotonic_ns();
                 std::thread::sleep(sleep_duration);
-                let after = ts.elapsed().as_nanos() as u64;
+                let after = clock_monotonic_ns();
                 windows.lock().unwrap().push((before, after));
             })
             .await
@@ -121,12 +120,12 @@ fn sched_event_timestamps_align_with_wall_clock() {
     }
 
     // Verify no sched events have wildly wrong timestamps (would indicate clock mismatch).
-    // All sched events should be within the total test duration.
-    let test_duration_ns = trace_start.elapsed().as_nanos() as u64;
+    // All sched events should be after trace start and before now.
+    let now = clock_monotonic_ns();
     for &t in &sched_timestamps {
         assert!(
-            t <= test_duration_ns + slack_ns,
-            "sched event timestamp {t}ns exceeds test duration {test_duration_ns}ns — \
+            t <= now + slack_ns,
+            "sched event timestamp {t}ns exceeds current time {now}ns — \
              likely clock domain mismatch (CLOCK_MONOTONIC_RAW vs CLOCK_MONOTONIC)"
         );
     }

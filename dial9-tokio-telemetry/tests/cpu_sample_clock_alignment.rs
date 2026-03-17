@@ -17,7 +17,7 @@ mod common;
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
-    use dial9_tokio_telemetry::telemetry::events::{CpuSampleSource, RawEvent};
+    use dial9_tokio_telemetry::telemetry::events::{clock_monotonic_ns, CpuSampleSource, RawEvent};
     use dial9_tokio_telemetry::telemetry::format::WorkerId;
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
     use std::sync::{Arc, Mutex};
@@ -37,8 +37,8 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    // Use the guard's start_time so we're in the same clock domain as trace timestamps.
-    let trace_start = guard.start_time();
+    // All timestamps are now absolute CLOCK_MONOTONIC nanoseconds.
+    let _trace_start = guard.start_time();
     let burn_windows: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Pattern: 150ms sleep → 80ms burn → 150ms sleep, repeated sequentially.
@@ -47,12 +47,11 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     runtime.block_on(async {
         for _ in 0..3u64 {
             let windows = burn_windows.clone();
-            let ts = trace_start;
             tokio::spawn(async move {
                 std::thread::sleep(Duration::from_millis(150));
-                let before = ts.elapsed().as_nanos() as u64;
+                let before = clock_monotonic_ns();
                 burn_cpu(Duration::from_millis(80));
-                let after = ts.elapsed().as_nanos() as u64;
+                let after = clock_monotonic_ns();
                 std::thread::sleep(Duration::from_millis(150));
                 windows.lock().unwrap().push((before, after));
             })
@@ -222,11 +221,11 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     );
 
     // ── All samples must lie within the total test duration ───────────────
-    let test_duration_ns = trace_start.elapsed().as_nanos() as u64;
+    let now = clock_monotonic_ns();
     for &t in &cpu_ts {
         assert!(
-            t <= test_duration_ns + slack_ns,
-            "CPU sample timestamp {t}ns exceeds test duration {test_duration_ns}ns"
+            t <= now + slack_ns,
+            "CPU sample timestamp {t}ns exceeds current time {now}ns"
         );
     }
 }

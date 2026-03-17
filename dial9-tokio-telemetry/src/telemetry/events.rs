@@ -330,6 +330,29 @@ pub fn thread_cpu_time_nanos() -> u64 {
     0
 }
 
+/// Read `CLOCK_MONOTONIC` in nanoseconds. Used as the single time base for
+/// all trace timestamps (poll events, CPU samples, sched events).
+#[cfg(target_os = "linux")]
+pub fn clock_monotonic_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    }
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn clock_monotonic_ns() -> u64 {
+    // Fallback: use Instant. This is fine for non-Linux where perf isn't available.
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
+
 /// Per-thread scheduler stats from `/proc/<pid>/task/<tid>/schedstat`.
 /// Fields: run_time_ns wait_time_ns timeslices
 #[derive(Debug, Clone, Copy, Default)]

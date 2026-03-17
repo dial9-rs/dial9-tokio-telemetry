@@ -26,7 +26,7 @@ pub struct TelemetryRecorder {
 impl TelemetryRecorder {
     pub fn new(writer: impl TraceWriter + 'static) -> Self {
         Self {
-            shared: Arc::new(SharedState::new(Instant::now())),
+            shared: Arc::new(SharedState::new(crate::telemetry::events::clock_monotonic_ns())),
             event_writer: EventWriter::new(Box::new(writer)),
         }
     }
@@ -65,9 +65,9 @@ impl TelemetryRecorder {
         builder: &mut tokio::runtime::Builder,
         writer: Box<dyn TraceWriter>,
         task_tracking_enabled: bool,
-        start_time: Instant,
+        start_time_ns: u64,
     ) -> Arc<Mutex<Self>> {
-        let shared = Arc::new(SharedState::new(start_time));
+        let shared = Arc::new(SharedState::new(start_time_ns));
         let recorder = Arc::new(Mutex::new(Self {
             shared: shared.clone(),
             event_writer: EventWriter::new(writer),
@@ -104,7 +104,7 @@ impl TelemetryRecorder {
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
                 s5.record_event(RawEvent::TaskSpawn {
-                    timestamp_nanos: s5.start_time.elapsed().as_nanos() as u64,
+                    timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
                     task_id,
                     location,
                 });
@@ -113,7 +113,7 @@ impl TelemetryRecorder {
             builder.on_task_terminate(move |meta| {
                 let task_id = TaskId::from(meta.id());
                 s6.record_event(RawEvent::TaskTerminate {
-                    timestamp_nanos: s6.start_time.elapsed().as_nanos() as u64,
+                    timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
                     task_id,
                 });
             });
@@ -256,8 +256,8 @@ impl TelemetryGuard {
         self.handle.clone()
     }
 
-    pub fn start_time(&self) -> Instant {
-        self.handle.shared.start_time
+    pub fn start_time(&self) -> u64 {
+        self.handle.shared.start_time_ns
     }
 
     pub fn enable(&self) {
@@ -410,7 +410,7 @@ impl TracedRuntimeBuilder {
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         use crate::telemetry::writer::NullWriter;
         let runtime = builder.build()?;
-        let shared = Arc::new(SharedState::new(Instant::now()));
+        let shared = Arc::new(SharedState::new(crate::telemetry::events::clock_monotonic_ns()));
         let recorder = Arc::new(Mutex::new(TelemetryRecorder {
             shared: shared.clone(),
             event_writer: EventWriter::new(Box::new(NullWriter)),
@@ -435,25 +435,23 @@ impl TracedRuntimeBuilder {
         if !self.enabled {
             return Self::build_disabled(builder);
         }
-        let start_instant = Instant::now();
-        #[cfg(feature = "cpu-profiling")]
-        let start_mono_ns = crate::telemetry::cpu_profile::clock_monotonic_ns();
+        let start_mono_ns = crate::telemetry::events::clock_monotonic_ns();
 
         #[cfg(feature = "cpu-profiling")]
         let sampler = self
             .cpu_profiling_config
-            .map(|config| crate::telemetry::cpu_profile::CpuProfiler::start(config, start_mono_ns));
+            .map(|config| crate::telemetry::cpu_profile::CpuProfiler::start(config));
 
         #[cfg(feature = "cpu-profiling")]
         let sched = self
             .sched_event_config
-            .map(|config| crate::telemetry::cpu_profile::SchedProfiler::new(config, start_mono_ns));
+            .map(|config| crate::telemetry::cpu_profile::SchedProfiler::new(config));
 
         let recorder = TelemetryRecorder::install(
             &mut builder,
             Box::new(writer),
             self.task_tracking_enabled,
-            start_instant,
+            start_mono_ns,
         );
 
         #[cfg(feature = "cpu-profiling")]
