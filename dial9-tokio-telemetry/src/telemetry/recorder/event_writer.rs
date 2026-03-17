@@ -1,27 +1,24 @@
-use super::flush_state::FlushState;
 #[cfg(feature = "cpu-profiling")]
 use super::shared_state::SharedState;
 use crate::telemetry::events::RawEvent;
 #[cfg(feature = "cpu-profiling")]
-use crate::telemetry::events::{BLOCKING_WORKER, TelemetryEvent, ThreadRole, UNKNOWN_WORKER};
-use crate::telemetry::writer::{TraceWriter, WriteAtomicResult};
+use crate::telemetry::events::{BLOCKING_WORKER, CpuSampleData, ThreadRole, UNKNOWN_WORKER};
+use crate::telemetry::writer::TraceWriter;
 
 #[cfg(feature = "cpu-profiling")]
 use super::cpu_flush_state::CpuFlushState;
 
 /// Intermediate layer between the recorder and the raw `TraceWriter`.
 ///
-/// Owns the writer, spawn-location interning (`FlushState`), CPU-profiling
-/// interning state (`CpuFlushState`), and the CPU profiler itself. Its API is
-/// roughly:
+/// Owns the writer, CPU-profiling interning state (`CpuFlushState`), and the
+/// CPU profiler itself. Its API is roughly:
 ///
-/// - `write_raw_event(raw)` — intern locations, handle rotation, write atomically
-/// - `write_cpu_event(event)` — intern CPU defs, handle rotation, write atomically
+/// - `write_raw_event(raw)` — write event through the writer
+/// - `write_cpu_event(event)` — intern CPU defs, write atomically
 /// - `flush_cpu(shared)` — drain CPU/sched profilers into the trace via `write_cpu_event`
 /// - `flush()` — flush the underlying writer
 pub(crate) struct EventWriter {
     pub(super) writer: Box<dyn TraceWriter>,
-    pub(super) flush_state: FlushState,
     #[cfg(feature = "cpu-profiling")]
     pub(super) cpu_flush: Option<CpuFlushState>,
     #[cfg(feature = "cpu-profiling")]
@@ -32,7 +29,6 @@ impl EventWriter {
     pub(crate) fn new(writer: Box<dyn TraceWriter>) -> Self {
         Self {
             writer,
-            flush_state: FlushState::new(),
             #[cfg(feature = "cpu-profiling")]
             cpu_flush: None,
             #[cfg(feature = "cpu-profiling")]
@@ -40,67 +36,35 @@ impl EventWriter {
         }
     }
 
-    fn handle_rotation(&mut self) {
-        self.flush_state.on_rotate();
+    /// Write a RawEvent through the writer.
+    pub(crate) fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
+        // Check if a previous write caused rotation so CPU state can be reset.
         #[cfg(feature = "cpu-profiling")]
-        if let Some(ref mut cpu) = self.cpu_flush {
+        if self.writer.take_rotated()
+            && let Some(ref mut cpu) = self.cpu_flush
+        {
             cpu.on_rotate();
         }
+        self.writer.write_atomic(&[raw])?;
+        #[cfg(feature = "cpu-profiling")]
+        if self.writer.take_rotated()
+            && let Some(ref mut cpu) = self.cpu_flush
+        {
+            cpu.on_rotate();
+        }
+        Ok(())
     }
 
-    /// Convert a RawEvent to wire format, interning locations as needed.
-    pub(crate) fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<WriteAtomicResult> {
-        if self.writer.take_rotated() {
-            self.handle_rotation();
-        }
-        let events = self.flush_state.resolve(raw);
-        match self.writer.write_atomic(&events)? {
-            WriteAtomicResult::Written => Ok(WriteAtomicResult::Written),
-            WriteAtomicResult::OversizedBatch => Ok(WriteAtomicResult::OversizedBatch),
-            WriteAtomicResult::Rotated => {
-                let was_rotated = self.writer.take_rotated();
-                debug_assert!(
-                    was_rotated,
-                    "write atomic returned Rotated, but take_rotated() was false"
-                );
-                self.handle_rotation();
-                let events = self.flush_state.resolve(raw);
-                match self.writer.write_atomic(&events)? {
-                    r @ (WriteAtomicResult::Written | WriteAtomicResult::OversizedBatch) => Ok(r),
-                    WriteAtomicResult::Rotated => {
-                        tracing::error!(
-                            "double failed to write events after rotation — this is a bug, disabling"
-                        );
-                        Ok(WriteAtomicResult::Rotated)
-                    }
-                }
-            }
-        }
-    }
-
-    /// Write a single CPU event, emitting any necessary defs first and handling
-    /// file rotation.
-    ///
-    /// This is the single entry point for all CPU event writing — both the
-    /// profiler drain path ([`flush_cpu`](Self::flush_cpu)) and direct callers
-    /// go through here.
+    /// Write a single CPU event, emitting any necessary defs first.
     #[cfg(feature = "cpu-profiling")]
-    pub(crate) fn write_cpu_event(&mut self, event: &TelemetryEvent) {
+    pub(crate) fn write_cpu_event(&mut self, data: &CpuSampleData) {
         if let Some(mut cpu) = self.cpu_flush.take() {
-            let batch = cpu.collect_cpu_event_batch(event);
-            match self.writer.write_atomic(&batch) {
-                Ok(WriteAtomicResult::Rotated) => {
-                    debug_assert!(
-                        self.writer.take_rotated(),
-                        "write_atomic returned Rotated but take_rotated is false"
-                    );
-                    self.flush_state.on_rotate();
-                    cpu.on_rotate();
-                    let batch = cpu.collect_cpu_event_batch(event);
-                    let _ = self.writer.write_atomic(&batch);
-                }
-                Ok(WriteAtomicResult::Written | WriteAtomicResult::OversizedBatch) => {}
-                Err(_) => {}
+            let batch = cpu.collect_cpu_event_batch(data);
+            if let Err(e) = self.writer.write_atomic(&batch) {
+                tracing::warn!("failed to write CPU trace event: {e}");
+            }
+            if self.writer.take_rotated() {
+                cpu.on_rotate();
             }
             self.cpu_flush = Some(cpu);
         }
@@ -129,14 +93,14 @@ impl EventWriter {
                 {
                     cpu.thread_name_intern.insert(raw.tid, name.to_string());
                 }
-                let event = TelemetryEvent::CpuSample {
+                let data = CpuSampleData {
                     timestamp_nanos: raw.timestamp_nanos,
                     worker_id,
                     tid: raw.tid,
                     source: raw.source,
                     callchain: raw.callchain,
                 };
-                self.write_cpu_event(&event);
+                self.write_cpu_event(&data);
             });
             self.cpu_profiler = Some(profiler);
         }
@@ -145,14 +109,14 @@ impl EventWriter {
             let mut shared_profiler = shared.sched_profiler.lock().unwrap();
             if let Some(ref mut profiler) = *shared_profiler {
                 profiler.drain(|raw| {
-                    let event = TelemetryEvent::CpuSample {
+                    let data = CpuSampleData {
                         timestamp_nanos: raw.timestamp_nanos,
                         worker_id: resolve(raw.tid),
                         tid: raw.tid,
                         source: raw.source,
                         callchain: raw.callchain,
                     };
-                    self.write_cpu_event(&event);
+                    self.write_cpu_event(&data);
                 });
             }
         }

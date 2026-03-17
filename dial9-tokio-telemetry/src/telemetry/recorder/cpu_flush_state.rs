@@ -1,5 +1,5 @@
 #[cfg(feature = "cpu-profiling")]
-use crate::telemetry::events::TelemetryEvent;
+use crate::telemetry::events::{CallframeDefData, CpuSampleData, RawEvent, ThreadNameDefData};
 #[cfg(feature = "cpu-profiling")]
 use std::collections::{HashMap, HashSet};
 
@@ -41,27 +41,20 @@ impl CpuFlushState {
         self.thread_name_emitted_this_file.clear();
     }
 
-    /// Collect the prerequisite def events for a CPU event, updating per-file tracking sets.
-    pub(super) fn collect_cpu_event_batch(
-        &mut self,
-        event: &TelemetryEvent,
-    ) -> Vec<TelemetryEvent> {
+    /// Collect the prerequisite def events for a CPU sample, updating per-file tracking sets.
+    pub(super) fn collect_cpu_event_batch(&mut self, data: &CpuSampleData) -> Vec<RawEvent> {
         let mut batch = Vec::new();
-        if let TelemetryEvent::CpuSample { tid, .. } = event
-            && !self.thread_name_emitted_this_file.contains(tid)
-        {
-            if let Some(name) = self.thread_name_intern.get(tid) {
-                batch.push(TelemetryEvent::ThreadNameDef {
-                    tid: *tid,
+        if !self.thread_name_emitted_this_file.contains(&data.tid) {
+            if let Some(name) = self.thread_name_intern.get(&data.tid) {
+                batch.push(RawEvent::ThreadNameDef(Box::new(ThreadNameDefData {
+                    tid: data.tid,
                     name: name.clone(),
-                });
+                })));
             }
-            self.thread_name_emitted_this_file.insert(*tid);
+            self.thread_name_emitted_this_file.insert(data.tid);
         }
-        if self.inline_callframe_symbols
-            && let TelemetryEvent::CpuSample { callchain, .. } = event
-        {
-            for &addr in callchain {
+        if self.inline_callframe_symbols {
+            for &addr in &data.callchain {
                 if !self.callframe_emitted_this_file.contains(&addr) {
                     self.callframe_intern.entry(addr).or_insert_with(|| {
                         let sym = dial9_perf_self_profile::resolve_symbol(addr);
@@ -73,16 +66,16 @@ impl CpuFlushState {
                         (symbol, location)
                     });
                     let (symbol, location) = self.callframe_intern[&addr].clone();
-                    batch.push(TelemetryEvent::CallframeDef {
+                    batch.push(RawEvent::CallframeDef(Box::new(CallframeDefData {
                         address: addr,
                         symbol,
                         location,
-                    });
+                    })));
                     self.callframe_emitted_this_file.insert(addr);
                 }
             }
         }
-        batch.push(event.clone());
+        batch.push(RawEvent::CpuSample(Box::new(data.clone())));
         batch
     }
 }

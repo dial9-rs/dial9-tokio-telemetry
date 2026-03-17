@@ -1,5 +1,5 @@
-use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
-use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
+use dial9_tokio_telemetry::telemetry::events::{RawEvent, TelemetryEvent};
+use dial9_tokio_telemetry::telemetry::writer::{EventResolver, TraceWriter};
 use std::sync::{Arc, Mutex};
 
 /// A [`TraceWriter`] that accumulates all events into a shared `Vec`.
@@ -13,24 +13,29 @@ use std::sync::{Arc, Mutex};
 /// // ... build runtime with writer ...
 /// let captured = events.lock().unwrap();
 /// ```
-pub struct CapturingWriter(Arc<Mutex<Vec<TelemetryEvent>>>);
+pub struct CapturingWriter {
+    events: Arc<Mutex<Vec<TelemetryEvent>>>,
+    resolver: EventResolver,
+}
 
 impl CapturingWriter {
     /// Create a new writer and return a handle to the shared event buffer.
     pub fn new() -> (Self, Arc<Mutex<Vec<TelemetryEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
-        (Self(events.clone()), events)
+        (
+            Self {
+                events: events.clone(),
+                resolver: EventResolver::new(),
+            },
+            events,
+        )
     }
 }
 
 impl TraceWriter for CapturingWriter {
-    fn write_event(&mut self, event: &TelemetryEvent) -> std::io::Result<()> {
-        self.0.lock().unwrap().push(event.clone());
-        Ok(())
-    }
-
-    fn write_batch(&mut self, events: &[TelemetryEvent]) -> std::io::Result<()> {
-        self.0.lock().unwrap().extend_from_slice(events);
+    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
+        let resolved = self.resolver.resolve(event);
+        self.events.lock().unwrap().extend(resolved);
         Ok(())
     }
 
