@@ -7,7 +7,6 @@ const TAG_EVENT = 0x02;
 const TAG_STRING_POOL = 0x03;
 const TAG_SYMBOL_TABLE = 0x04;
 const TAG_TIMESTAMP_RESET = 0x05;
-const TAG_PROC_MAPS = 0x06;
 
 const FieldType = {
   I64: 1, F64: 2, Bool: 3, String: 4,
@@ -111,7 +110,6 @@ class TraceDecoder {
       case TAG_EVENT: return this._decodeEvent();
       case TAG_STRING_POOL: return this._decodeStringPool();
       case TAG_SYMBOL_TABLE: return this._decodeSymbolTable();
-      case TAG_PROC_MAPS: return this._decodeProcMaps();
       case TAG_TIMESTAMP_RESET: {
         const lo = this._view.getUint32(this._pos, true);
         const hi = this._view.getUint32(this._pos + 4, true);
@@ -211,21 +209,6 @@ class TraceDecoder {
     return { type: 'symbol_table', entries };
   }
 
-  _decodeProcMaps() {
-    const count = this._view.getUint32(this._pos, true); this._pos += 4;
-    const entries = [];
-    const td = new TextDecoder();
-    for (let i = 0; i < count; i++) {
-      const start = this._view.getBigUint64(this._pos, true); this._pos += 8;
-      const end = this._view.getBigUint64(this._pos, true); this._pos += 8;
-      const fileOffset = this._view.getBigUint64(this._pos, true); this._pos += 8;
-      const pathLen = this._view.getUint32(this._pos, true); this._pos += 4;
-      const path = td.decode(new Uint8Array(this._view.buffer, this._view.byteOffset + this._pos, pathLen));
-      this._pos += pathLen;
-      entries.push({ start: start.toString(), end: end.toString(), fileOffset: fileOffset.toString(), path });
-    }
-    return { type: 'proc_maps', entries };
-  }
 }
 
 // --- CLI: decode a file and print JSON ---
