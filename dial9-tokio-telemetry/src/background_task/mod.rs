@@ -95,10 +95,14 @@ impl BackgroundTaskConfig {
 #[derive(Debug)]
 pub(crate) struct SegmentData {
     /// Original sealed segment (path, index).
+    // dead if s3 is not enabled
+    #[allow(unused)]
     pub(crate) segment: sealed::SealedSegment,
     /// The payload bytes (raw, symbolized, compressed, etc.).
+    #[allow(unused)]
     pub(crate) bytes: Vec<u8>,
     /// Metadata accumulated by processors. Keyed by convention.
+    #[allow(unused)]
     pub(crate) metadata: HashMap<String, String>,
     /// Metrics guard — processors can record metrics; flushed on drop.
     pub(crate) metrics: SegmentProcessMetricsGuard,

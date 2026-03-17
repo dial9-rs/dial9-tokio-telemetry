@@ -115,9 +115,7 @@ impl SharedState {
     }
 
     pub(crate) fn create_wake_event(&self, woken_task_id: TaskId) -> RawEvent {
-        let waker_task_id = tokio::task::try_id()
-            .map(TaskId::from)
-            .unwrap_or(TaskId::default());
+        let waker_task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
         let target_worker = current_worker_id(&self.metrics);
         RawEvent::WakeEvent {
             timestamp_nanos: self.timestamp_nanos(),

@@ -77,12 +77,11 @@ impl TraceReader {
 
         // Thread names come from CpuSample events' thread_name field
         for ev in &ref_events {
-            if let TelemetryEventRef::CpuSample(e) = ev {
-                if let Some(name) = string_pool.get(e.thread_name) {
-                    if name != "<no thread name>" {
-                        thread_names.insert(e.tid, name.to_string());
-                    }
-                }
+            if let TelemetryEventRef::CpuSample(e) = ev
+                && let Some(name) = string_pool.get(e.thread_name)
+                && name != "<no thread name>"
+            {
+                thread_names.insert(e.tid, name.to_string());
             }
         }
 
@@ -145,10 +144,10 @@ fn populate_spawn_loc(
     interned: dial9_trace_format::InternedString,
     pool: &StringPool,
 ) {
-    if !map.contains_key(&interned) {
-        if let Some(s) = pool.get(interned) {
-            map.insert(interned, s.to_string());
-        }
+    if !map.contains_key(&interned)
+        && let Some(s) = pool.get(interned)
+    {
+        map.insert(interned, s.to_string());
     }
 }
 

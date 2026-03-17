@@ -4,11 +4,10 @@
 //! configurable frequency. The flush thread drains raw samples; the caller
 //! (EventWriter) maps OS thread IDs to worker IDs via SharedState.thread_roles.
 
-use crate::telemetry::events::CpuSampleSource;
+use crate::telemetry::events::{CpuSampleSource, ThreadName};
 use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
 use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
 
 /// Read the thread name from `/proc/self/task/<tid>/comm`.
 /// Returns `None` if the file can't be read.
