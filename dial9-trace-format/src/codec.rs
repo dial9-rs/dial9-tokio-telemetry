@@ -19,6 +19,7 @@ pub const HEADER_SIZE: usize = 5;
 pub const TAG_SCHEMA: u8 = 0x01;
 pub const TAG_EVENT: u8 = 0x02;
 pub const TAG_STRING_POOL: u8 = 0x03;
+// Tags 0x04 and 0x06 are reserved (formerly SymbolTable and ProcMaps, now schema-based events).
 pub const TAG_TIMESTAMP_RESET: u8 = 0x05;
 
 /// Maximum nanosecond delta that fits in a u24 (3 bytes).

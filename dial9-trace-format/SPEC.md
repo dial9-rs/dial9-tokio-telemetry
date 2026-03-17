@@ -36,6 +36,7 @@ Every frame begins with a 1-byte tag:
 | `0x01` | Schema |
 | `0x02` | Event |
 | `0x03` | String Pool |
+| `0x04` | *(reserved)* |
 | `0x05` | Timestamp Reset |
 
 Unknown tags **must** cause the decoder to stop (the stream cannot be advanced without knowing the frame size).
