@@ -157,12 +157,22 @@ pub fn resolve_symbols_with_maps(
             && !results.is_empty()
             && let Some(sym) = results[0].as_sym()
         {
-            return vec![SymbolInfo {
+            let mut symbols = Vec::with_capacity(1 + sym.inlined.len());
+            symbols.push(SymbolInfo {
                 name: Some(sym.name.to_string()),
                 base_addr: sym.addr,
-                code_info: None,
+                code_info: convert_code_info(sym.code_info.as_deref()),
                 offset: addr.saturating_sub(sym.addr),
-            }];
+            });
+            for inlined in sym.inlined.iter() {
+                symbols.push(SymbolInfo {
+                    name: Some(inlined.name.to_string()),
+                    base_addr: sym.addr,
+                    code_info: convert_code_info(inlined.code_info.as_ref()),
+                    offset: addr.saturating_sub(sym.addr),
+                });
+            }
+            return symbols;
         }
         return vec![SymbolInfo {
             name: Some(format!("[kernel] {:#x}", addr)),
