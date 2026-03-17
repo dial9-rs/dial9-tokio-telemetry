@@ -63,11 +63,13 @@ pub fn encode_proc_maps(
     Ok(())
 }
 
-/// Symbolize a trace: read the input, resolve addresses from `ProcMapsEntry`
-/// events and `StackFrames` data, and write the original trace plus
-/// `SymbolTableEntry` events to the output.
+/// Symbolize a trace: read `input` for `ProcMapsEntry` events and `StackFrames`
+/// fields, resolve addresses via blazesym, and write only the new
+/// `SymbolTableEntry` frames (with a `StringPool`) to `output`.
 ///
-/// The input trace is copied verbatim to the output, with symbol data appended.
+/// The caller is responsible for the original trace data. In the typical
+/// file-based workflow, open the trace file in append mode and pass it as
+/// `output` so symbols are appended in place without copying.
 pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> {
     let proc_maps_name = ProcMapsEntry::event_name();
 
@@ -111,7 +113,6 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
     }
 
     if addresses.is_empty() || maps.is_empty() {
-        output.write_all(input)?;
         return Ok(());
     }
 
@@ -145,9 +146,7 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
         }
     }
 
-    // Write: original trace verbatim, then append symbol data.
-    output.write_all(input)?;
-
+    // Append symbol data.
     if !symbol_events.is_empty() {
         codec::encode_string_pool(&pool_entries, output)?;
 
@@ -201,11 +200,11 @@ mod tests {
         let input = Encoder::new().finish();
         let mut output = Vec::new();
         symbolize_trace(&input, &mut output).unwrap();
-        assert_eq!(input, output);
+        assert!(output.is_empty());
     }
 
     #[test]
-    fn symbolize_no_proc_maps_copies_verbatim() {
+    fn symbolize_no_proc_maps_writes_nothing() {
         let mut buf = Encoder::new().finish();
         let schema = SchemaEntry {
             name: "Ev".into(),
@@ -227,11 +226,11 @@ mod tests {
 
         let mut output = Vec::new();
         symbolize_trace(&buf, &mut output).unwrap();
-        assert_eq!(buf, output);
+        assert!(output.is_empty());
     }
 
     #[test]
-    fn symbolize_no_stack_frames_copies_verbatim() {
+    fn symbolize_no_stack_frames_writes_nothing() {
         let input = make_encoder_with_proc_maps(&[MapsEntry {
             start: 0x1000,
             end: 0x2000,
@@ -240,7 +239,7 @@ mod tests {
         }]);
         let mut output = Vec::new();
         symbolize_trace(&input, &mut output).unwrap();
-        assert_eq!(input, output);
+        assert!(output.is_empty());
     }
 
     #[test]
@@ -277,8 +276,10 @@ mod tests {
 
         let mut output = Vec::new();
         symbolize_trace(&buf, &mut output).unwrap();
-        assert!(output.len() >= buf.len());
-        let mut dec = Decoder::new(&output).unwrap();
+        // Unresolvable addresses produce no symbol events
+        let mut combined = buf.clone();
+        combined.extend_from_slice(&output);
+        let mut dec = Decoder::new(&combined).unwrap();
         let frames = dec.decode_all();
         assert!(frames.len() >= 4);
     }
@@ -310,13 +311,12 @@ mod tests {
         let mut output = Vec::new();
         symbolize_trace(&buf, &mut output).unwrap();
 
-        assert!(
-            output.len() > buf.len(),
-            "expected symbol data to be appended"
-        );
+        assert!(!output.is_empty(), "expected symbol data to be written");
 
         let symbol_table_name = SymbolTableEntry::event_name();
-        let mut dec = Decoder::new(&output).unwrap();
+        let mut combined = buf.clone();
+        combined.extend_from_slice(&output);
+        let mut dec = Decoder::new(&combined).unwrap();
         let frames = dec.decode_all();
         let has_string_pool = frames
             .iter()

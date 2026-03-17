@@ -9,7 +9,7 @@ Adds the building blocks for moving symbolization off the flush thread and into 
 This PR adds:
 
 1. `ProcMapsEntry` and `SymbolTableEntry` event types defined with `derive(TraceEvent)` in `perf-self-profile`, using the existing schema/event system rather than dedicated wire frame types. Any decoder that understands schemas automatically handles them without custom parsing code.
-2. An offline `symbolize_trace()` function in `perf-self-profile` that reads a trace with `ProcMapsEntry` events and `StackFrames` fields, resolves addresses via blazesym (including inlined functions), and appends `SymbolTableEntry` events to the output.
+2. An offline `symbolize_trace()` function in `perf-self-profile` that reads a trace with `ProcMapsEntry` events and `StackFrames` fields, resolves addresses via blazesym (including inlined functions), and writes only the new `SymbolTableEntry` frames to the output. The caller controls how the original trace and symbol data are combined (e.g. by opening the file in append mode).
 3. `resolve_symbols_with_maps()` in `perf-self-profile`, which returns all symbols at an address including inlined callees (the existing `resolve_symbol_with_maps` delegates to it for backwards compatibility). Both userspace and kernel paths handle inlined functions.
 
 Does not change the telemetry crate or `TOKIOTRC` format. Wiring into the background worker pipeline and format migration are follow-up work.

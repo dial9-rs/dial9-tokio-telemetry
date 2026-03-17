@@ -55,8 +55,8 @@ pub const USER_ADDR_LIMIT: u64 = 0x8000_0000_0000_0000;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("perf-self-profile: USER_ADDR_LIMIT not defined for this architecture");
 
+pub use offline_symbolize::{ProcMapsEntry, SymbolTableEntry};
 pub use sampler::{EventSource, PerfSampler, Sample, SamplerConfig};
 pub use symbolize::{CodeInfo, MapsEntry, SymbolInfo};
 pub use symbolize::{parse_proc_maps, read_proc_maps};
 pub use symbolize::{resolve_symbol, resolve_symbol_with_maps, resolve_symbols_with_maps};
-pub use offline_symbolize::{ProcMapsEntry, SymbolTableEntry};
