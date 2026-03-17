@@ -1,9 +1,10 @@
 ---
 source: dial9-trace-format-derive/src/lib.rs
-expression: "expand_to_string(quote! { struct EmptyEvent {} })"
+expression: "expand_to_string(quote!\n{ struct EmptyEvent { #[traceevent(timestamp)] timestamp_ns: u64, } })"
 ---
 #[derive(Debug, Clone)]
 struct EmptyEventRef<'a> {
+    pub timestamp_ns: u64,
     _marker: ::std::marker::PhantomData<&'a ()>,
 }
 impl ::dial9_trace_format::TraceEvent for EmptyEvent {
@@ -13,6 +14,9 @@ impl ::dial9_trace_format::TraceEvent for EmptyEvent {
     }
     fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
         vec![]
+    }
+    fn timestamp(&self) -> u64 {
+        self.timestamp_ns
     }
     fn encode_fields<W: ::std::io::Write>(
         &self,
@@ -25,6 +29,7 @@ impl ::dial9_trace_format::TraceEvent for EmptyEvent {
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
     ) -> Option<Self::Ref<'a>> {
         Some(EmptyEventRef {
+            timestamp_ns: timestamp_ns?,
             _marker: ::std::marker::PhantomData,
         })
     }

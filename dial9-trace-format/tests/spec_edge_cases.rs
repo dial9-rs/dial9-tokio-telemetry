@@ -286,65 +286,29 @@ fn symbol_table_max_address() {
 
 // --- Multi-frame ordering ---
 
-struct Ev0;
-struct Ev1;
-struct Ev2;
-struct Ev3;
-struct Ev4;
-
 #[test]
 fn multiple_schemas_then_events() {
     let mut enc = Encoder::new();
-    enc.register_schema_for::<Ev0>(
-        "Ev0",
-        vec![FieldDef {
-            name: "v".into(),
-            field_type: FieldType::Varint,
-        }],
-    )
-    .unwrap();
-    enc.register_schema_for::<Ev1>(
-        "Ev1",
-        vec![FieldDef {
-            name: "v".into(),
-            field_type: FieldType::Varint,
-        }],
-    )
-    .unwrap();
-    enc.register_schema_for::<Ev2>(
-        "Ev2",
-        vec![FieldDef {
-            name: "v".into(),
-            field_type: FieldType::Varint,
-        }],
-    )
-    .unwrap();
-    enc.register_schema_for::<Ev3>(
-        "Ev3",
-        vec![FieldDef {
-            name: "v".into(),
-            field_type: FieldType::Varint,
-        }],
-    )
-    .unwrap();
-    enc.register_schema_for::<Ev4>(
-        "Ev4",
-        vec![FieldDef {
-            name: "v".into(),
-            field_type: FieldType::Varint,
-        }],
-    )
-    .unwrap();
-    enc.write_event_for::<Ev0>(&[FieldValue::Varint(0)])
+    let fields = vec![FieldDef {
+        name: "v".into(),
+        field_type: FieldType::Varint,
+    }];
+    let schemas: Vec<_> = (0..5)
+        .map(|i| {
+            enc.register_schema(&format!("Ev{i}"), fields.clone())
+                .unwrap()
+        })
+        .collect();
+    for (i, s) in schemas.iter().enumerate() {
+        enc.write_event(
+            s,
+            &[
+                FieldValue::Varint(i as u64 * 1000),
+                FieldValue::Varint(i as u64),
+            ],
+        )
         .unwrap();
-    enc.write_event_for::<Ev1>(&[FieldValue::Varint(1)])
-        .unwrap();
-    enc.write_event_for::<Ev2>(&[FieldValue::Varint(2)])
-        .unwrap();
-    enc.write_event_for::<Ev3>(&[FieldValue::Varint(3)])
-        .unwrap();
-    enc.write_event_for::<Ev4>(&[FieldValue::Varint(4)])
-        .unwrap();
+    }
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all();
@@ -357,25 +321,30 @@ fn multiple_schemas_then_events() {
     }
 }
 
-struct PoolEv;
-
 #[test]
 fn interleaved_pool_and_events() {
     let mut enc = Encoder::new();
-    enc.register_schema_for::<PoolEv>(
-        "Ev",
-        vec![FieldDef {
-            name: "s".into(),
-            field_type: FieldType::PooledString,
-        }],
+    let schema = enc
+        .register_schema(
+            "Ev",
+            vec![FieldDef {
+                name: "s".into(),
+                field_type: FieldType::PooledString,
+            }],
+        )
+        .unwrap();
+    let id0 = enc.intern_string("first").unwrap();
+    enc.write_event(
+        &schema,
+        &[FieldValue::Varint(1_000), FieldValue::PooledString(id0)],
     )
     .unwrap();
-    let id0 = enc.intern_string("first").unwrap();
-    enc.write_event_for::<PoolEv>(&[FieldValue::PooledString(id0)])
-        .unwrap();
     let id1 = enc.intern_string("second").unwrap();
-    enc.write_event_for::<PoolEv>(&[FieldValue::PooledString(id1)])
-        .unwrap();
+    enc.write_event(
+        &schema,
+        &[FieldValue::Varint(2_000), FieldValue::PooledString(id1)],
+    )
+    .unwrap();
     let data = enc.finish();
 
     let mut dec = Decoder::new(&data).unwrap();

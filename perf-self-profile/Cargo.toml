@@ -14,5 +14,6 @@ all-features = true
 [dependencies]
 libc = "0.2"
 blazesym = "0.2"
+dial9-trace-format = { workspace = true }
 perf-event-data = "0.1.8"
 perf-event-open-sys2 = "5.0.6"

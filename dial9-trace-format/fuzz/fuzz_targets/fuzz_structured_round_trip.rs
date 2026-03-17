@@ -8,9 +8,9 @@ use libfuzzer_sys::fuzz_target;
 
 use dial9_trace_format::codec::SymbolEntry;
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
-use dial9_trace_format::encoder::Encoder;
+use dial9_trace_format::encoder::{Encoder, Schema};
 use dial9_trace_format::schema::FieldDef;
-use dial9_trace_format::types::{FieldType, FieldValue};
+use dial9_trace_format::types::{FieldType, FieldValue, InternedString};
 
 /// Varint boundary values that stress LEB128 encoding edges.
 const VARINT_INTERESTING: [u64; 8] = [
@@ -66,7 +66,7 @@ fn gen_value(ft: FuzzFieldType, u: &mut Unstructured) -> arbitrary::Result<Field
             let len: usize = u.int_in_range(0..=32)?;
             FieldValue::Bytes(u.bytes(len)?.to_vec())
         }
-        FuzzFieldType::PooledString => FieldValue::PooledString(u.int_in_range(0..=50)?),
+        FuzzFieldType::PooledString => FieldValue::PooledString(InternedString::from_raw(u.int_in_range(0..=50)?)),
         FuzzFieldType::StackFrames => {
             let count: usize = u.int_in_range(0..=8)?;
             let mut addrs = Vec::with_capacity(count);
@@ -104,7 +104,6 @@ struct FuzzInput {
 
 #[derive(Arbitrary, Debug)]
 struct FuzzSchema {
-    has_timestamp: bool,
     fields: Vec<FuzzFieldType>,
 }
 
@@ -128,11 +127,6 @@ struct FuzzSymbol {
     symbol_id: u32,
 }
 
-struct S0;
-struct S1;
-struct S2;
-struct S3;
-
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
     let input: FuzzInput = match u.arbitrary() {
@@ -141,11 +135,11 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Clamp schemas: 1–4, 0–8 fields each (allow empty schemas now)
-    let schemas: Vec<&FuzzSchema> = input.schemas.iter().take(4).collect();
-    if schemas.is_empty() {
+    let fuzz_schemas: Vec<&FuzzSchema> = input.schemas.iter().take(4).collect();
+    if fuzz_schemas.is_empty() {
         return;
     }
-    for s in &schemas {
+    for s in &fuzz_schemas {
         if s.fields.len() > 8 {
             return;
         }
@@ -159,23 +153,12 @@ fuzz_target!(|data: &[u8]| {
     // --- Encode ---
     let mut enc = Encoder::new();
 
-    let register_fns: [fn(&mut Encoder, &str, bool, Vec<FieldDef>); 4] = [
-        |e, n, ts, f| { e.register_schema_for_with_timestamp::<S0>(n, ts, f).unwrap(); },
-        |e, n, ts, f| { e.register_schema_for_with_timestamp::<S1>(n, ts, f).unwrap(); },
-        |e, n, ts, f| { e.register_schema_for_with_timestamp::<S2>(n, ts, f).unwrap(); },
-        |e, n, ts, f| { e.register_schema_for_with_timestamp::<S3>(n, ts, f).unwrap(); },
-    ];
-    let write_fns: [fn(&mut Encoder, &[FieldValue]); 4] = [
-        |e, v| { e.write_event_for::<S0>(v).unwrap(); },
-        |e, v| { e.write_event_for::<S1>(v).unwrap(); },
-        |e, v| { e.write_event_for::<S2>(v).unwrap(); },
-        |e, v| { e.write_event_for::<S3>(v).unwrap(); },
-    ];
+    let names = ["S0", "S1", "S2", "S3"];
+    let mut schemas: Vec<Schema> = Vec::new();
 
-    // Register all schemas upfront (encoder requires this before events)
-    let mut schema_has_ts = Vec::new();
-    for (i, schema) in schemas.iter().enumerate() {
-        let fields: Vec<FieldDef> = schema
+    // Register all schemas upfront
+    for (i, fuzz_schema) in fuzz_schemas.iter().enumerate() {
+        let fields: Vec<FieldDef> = fuzz_schema
             .fields
             .iter()
             .enumerate()
@@ -184,9 +167,7 @@ fuzz_target!(|data: &[u8]| {
                 field_type: ft.to_field_type(),
             })
             .collect();
-        let names = ["S0", "S1", "S2", "S3"];
-        schema_has_ts.push(schema.has_timestamp);
-        register_fns[i](&mut enc, names[i], schema.has_timestamp, fields);
+        schemas.push(enc.register_schema(names[i], fields).unwrap());
     }
 
     // Execute actions in fuzz-determined interleaved order
@@ -194,9 +175,9 @@ fuzz_target!(|data: &[u8]| {
     for action in &actions {
         match action {
             FuzzAction::Event { schema_idx } => {
-                let idx = (*schema_idx as usize) % schemas.len();
-                let schema = &schemas[idx];
-                let values: Vec<FieldValue> = match schema
+                let idx = (*schema_idx as usize) % fuzz_schemas.len();
+                let fuzz_schema = &fuzz_schemas[idx];
+                let values: Vec<FieldValue> = match fuzz_schema
                     .fields
                     .iter()
                     .map(|ft| gen_value(*ft, &mut u))
@@ -205,22 +186,17 @@ fuzz_target!(|data: &[u8]| {
                     Ok(v) => v,
                     Err(_) => return,
                 };
-                if schema_has_ts[idx] {
-                    // Generate a timestamp and prepend it
-                    let ts: u64 = match u.arbitrary() {
-                        Ok(v) => v,
-                        Err(_) => return,
-                    };
-                    // Clamp to reasonable range to avoid overflow in delta math
-                    let ts = ts % (1u64 << 48);
-                    let mut all_values = vec![FieldValue::Varint(ts)];
-                    all_values.extend(values.clone());
-                    write_fns[idx](&mut enc, &all_values);
-                    expected_events.push((idx, Some(ts), values));
-                } else {
-                    write_fns[idx](&mut enc, &values);
-                    expected_events.push((idx, None, values));
-                }
+                // Generate a timestamp and prepend it
+                let ts: u64 = match u.arbitrary() {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                // Clamp to reasonable range to avoid overflow in delta math
+                let ts = ts % (1u64 << 48);
+                let mut all_values = vec![FieldValue::Varint(ts)];
+                all_values.extend(values.clone());
+                enc.write_event(&schemas[idx], &all_values).unwrap();
+                expected_events.push((idx, Some(ts), values));
             }
             FuzzAction::PoolString(ps) => {
                 let len = (ps.len % 8) as usize;
@@ -231,7 +207,7 @@ fuzz_target!(|data: &[u8]| {
                 enc.write_symbol_table(&[SymbolEntry {
                     base_addr: sym.base_addr,
                     size: sym.size,
-                    symbol_id: sym.symbol_id,
+                    symbol_id: InternedString::from_raw(sym.symbol_id),
                 }]).unwrap();
             }
         }

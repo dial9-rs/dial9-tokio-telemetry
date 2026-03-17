@@ -40,6 +40,7 @@
 mod ring_buffer;
 mod sampler;
 mod symbolize;
+pub mod tracepoint;
 
 /// Upper bound of userspace virtual addresses. Addresses at or above this limit
 /// are kernel addresses.

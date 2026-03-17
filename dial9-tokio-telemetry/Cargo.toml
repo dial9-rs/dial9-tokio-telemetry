@@ -43,7 +43,7 @@ task-dump = ["tokio/taskdump"]
 worker-s3 = ["dep:aws-sdk-s3-transfer-manager", "dep:aws-sdk-s3", "dep:aws-config", "dep:flate2", "dep:time"]
 
 [dev-dependencies]
-assert2 = "0.3"
+assert2 = { workspace = true }
 criterion = "0.5"
 clap = { version = "4", features = ["derive"] }
 hdrhistogram = "7"

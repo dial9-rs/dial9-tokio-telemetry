@@ -10,8 +10,8 @@ use perf_event_open_sys::bindings::{
     PERF_CONTEXT_MAX as PERF_CONTEXT_START_MARKER, PERF_COUNT_HW_CPU_CYCLES,
     PERF_COUNT_SW_CONTEXT_SWITCHES, PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK,
     PERF_FLAG_FD_CLOEXEC, PERF_SAMPLE_CALLCHAIN, PERF_SAMPLE_CPU, PERF_SAMPLE_IP,
-    PERF_SAMPLE_PERIOD, PERF_SAMPLE_TID, PERF_SAMPLE_TIME, PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE,
-    perf_event_attr,
+    PERF_SAMPLE_PERIOD, PERF_SAMPLE_RAW, PERF_SAMPLE_TID, PERF_SAMPLE_TIME, PERF_TYPE_HARDWARE,
+    PERF_TYPE_SOFTWARE, PERF_TYPE_TRACEPOINT, perf_event_attr,
 };
 
 use crate::USER_ADDR_LIMIT;
@@ -32,6 +32,11 @@ pub enum EventSource {
     /// Captures the stack at the moment the thread is descheduled, revealing
     /// what code path led to the thread going off-CPU (e.g. mutex, I/O, preemption).
     SwContextSwitches,
+    /// A kernel tracepoint, identified by its tracepoint ID.
+    ///
+    /// The ID comes from `/sys/kernel/debug/tracing/events/<subsystem>/<event>/id`.
+    /// Samples include raw tracepoint data accessible via [`Sample::raw`].
+    Tracepoint(u32),
 }
 
 /// Configuration for the sampler.
@@ -75,6 +80,9 @@ pub struct Sample {
     /// First entry is the instruction pointer (leaf), rest are return addresses.
     /// Kernel context markers and hypervisor frames are filtered out.
     pub callchain: Vec<u64>,
+    /// Raw tracepoint data, present only for [`EventSource::Tracepoint`] events.
+    /// Parse with [`TracepointDef::extract_fields`](crate::tracepoint::TracepointDef::extract_fields).
+    pub raw: Option<Vec<u8>>,
 }
 
 struct PerfEvent {
@@ -188,7 +196,10 @@ impl PerfSampler {
     pub fn start_for_pid(pid: i32, config: SamplerConfig) -> io::Result<Self> {
         let mut attr = Self::build_attr(&config)?;
 
-        let is_event_based = matches!(config.event_source, EventSource::SwContextSwitches);
+        let is_event_based = matches!(
+            config.event_source,
+            EventSource::SwContextSwitches | EventSource::Tracepoint(_)
+        );
         let mut events = Vec::new();
 
         if is_event_based {
@@ -293,16 +304,31 @@ impl PerfSampler {
                 attr.type_ = PERF_TYPE_SOFTWARE;
                 attr.config = PERF_COUNT_SW_CONTEXT_SWITCHES as u64;
             }
+            EventSource::Tracepoint(id) => {
+                attr.type_ = PERF_TYPE_TRACEPOINT;
+                attr.config = id as u64;
+            }
         }
 
-        let is_event_based = matches!(config.event_source, EventSource::SwContextSwitches);
+        let is_event_based = matches!(
+            config.event_source,
+            EventSource::SwContextSwitches | EventSource::Tracepoint(_)
+        );
 
         attr.sample_type = PERF_SAMPLE_IP as u64
             | PERF_SAMPLE_CALLCHAIN as u64
             | PERF_SAMPLE_TID as u64
             | PERF_SAMPLE_TIME as u64
             | PERF_SAMPLE_CPU as u64
-            | PERF_SAMPLE_PERIOD as u64;
+            | PERF_SAMPLE_PERIOD as u64
+            // PERF_SAMPLE_RAW includes the tracepoint's raw event data (field
+            // values) in each sample. Only tracepoints produce meaningful raw
+            // data; CPU and context-switch sources have nothing to attach.
+            | if matches!(config.event_source, EventSource::Tracepoint(_)) {
+                PERF_SAMPLE_RAW as u64
+            } else {
+                0
+            };
 
         // Use CLOCK_MONOTONIC so perf timestamps are in the same clock domain
         // as Rust's `Instant::now()`. Without this, perf defaults to
@@ -381,6 +407,7 @@ impl PerfSampler {
                             cpu: s.cpu().unwrap_or(0),
                             period: s.period().unwrap_or(0),
                             callchain,
+                            raw: s.raw().map(|r| r.to_vec()),
                         }
                     }
                     _ => return,

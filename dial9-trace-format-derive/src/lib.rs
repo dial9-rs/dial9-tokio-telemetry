@@ -69,17 +69,13 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
 
     let timestamp_impl = if let Some(ref ts_field) = timestamp_field_name {
         quote! {
-            fn timestamp(&self) -> Option<u64> { Some(self.#ts_field) }
+            fn timestamp(&self) -> u64 { self.#ts_field }
         }
     } else {
-        quote! {}
+        panic!("TraceEvent requires a field marked with #[traceevent(timestamp)]");
     };
 
-    let has_timestamp_impl = if timestamp_field_name.is_some() {
-        quote! { fn has_timestamp() -> bool { true } }
-    } else {
-        quote! {}
-    };
+    let has_timestamp_impl = quote! {};
 
     // For the Ref struct, include the timestamp field if present — populated from the decode parameter
     let ref_timestamp_field = if let Some(ref ts_field) = timestamp_field_name {
@@ -162,6 +158,7 @@ mod tests {
     fn simple_event() {
         assert_snapshot!(expand_to_string(quote! {
             struct SimpleEvent {
+                #[traceevent(timestamp)]
                 timestamp_ns: u64,
                 value: u32,
             }
@@ -171,7 +168,10 @@ mod tests {
     #[test]
     fn empty_event() {
         assert_snapshot!(expand_to_string(quote! {
-            struct EmptyEvent {}
+            struct EmptyEvent {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+            }
         }));
     }
 
@@ -179,6 +179,8 @@ mod tests {
     fn all_field_types() {
         assert_snapshot!(expand_to_string(quote! {
             struct AllFieldTypes {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
                 a_u8: u8,
                 b_u16: u16,
                 c_u32: u32,

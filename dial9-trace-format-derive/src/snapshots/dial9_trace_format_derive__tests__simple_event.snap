@@ -1,10 +1,10 @@
 ---
 source: dial9-trace-format-derive/src/lib.rs
-expression: "expand_to_string(quote!\n{ struct SimpleEvent { timestamp_ns: u64, value: u32, } })"
+expression: "expand_to_string(quote!\n{\n    struct SimpleEvent\n    { #[traceevent(timestamp)] timestamp_ns: u64, value: u32, }\n})"
 ---
 #[derive(Debug, Clone)]
 struct SimpleEventRef<'a> {
-    pub timestamp_ns: <u64 as ::dial9_trace_format::TraceField>::Ref<'a>,
+    pub timestamp_ns: u64,
     pub value: <u32 as ::dial9_trace_format::TraceField>::Ref<'a>,
 }
 impl ::dial9_trace_format::TraceEvent for SimpleEvent {
@@ -14,17 +14,17 @@ impl ::dial9_trace_format::TraceEvent for SimpleEvent {
     }
     fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
         vec![
-            ::dial9_trace_format::schema::FieldDef { name : "timestamp_ns".to_string(),
-            field_type : < u64 as ::dial9_trace_format::TraceField > ::field_type(), },
             ::dial9_trace_format::schema::FieldDef { name : "value".to_string(),
             field_type : < u32 as ::dial9_trace_format::TraceField > ::field_type(), }
         ]
+    }
+    fn timestamp(&self) -> u64 {
+        self.timestamp_ns
     }
     fn encode_fields<W: ::std::io::Write>(
         &self,
         enc: &mut ::dial9_trace_format::EventEncoder<'_, W>,
     ) -> ::std::io::Result<()> {
-        <u64 as ::dial9_trace_format::TraceField>::encode(&self.timestamp_ns, enc)?;
         <u32 as ::dial9_trace_format::TraceField>::encode(&self.value, enc)?;
         Ok(())
     }
@@ -33,11 +33,9 @@ impl ::dial9_trace_format::TraceEvent for SimpleEvent {
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
     ) -> Option<Self::Ref<'a>> {
         Some(SimpleEventRef {
-            timestamp_ns: <u64 as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(0usize)?,
-            )?,
+            timestamp_ns: timestamp_ns?,
             value: <u32 as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(1usize)?,
+                fields.get(0usize)?,
             )?,
         })
     }

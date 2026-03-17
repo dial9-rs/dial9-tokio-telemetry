@@ -6,6 +6,20 @@
 
 **Low-overhead runtime telemetry for Tokio.** Records poll timing, worker park/unpark, wake events, queue depths, and (on Linux) CPU profile samples into a compact binary trace format. Traces can be analyzed offline to find long polls, scheduling delays, idle workers, and CPU hotspots.
 
+## Prerequisites
+
+This crate requires Tokio's unstable APIs for runtime hooks and worker metrics. Add the following to your project's `.cargo/config.toml`:
+
+```toml
+# .cargo/config.toml
+[build]
+rustflags = ["--cfg", "tokio_unstable"]
+```
+
+Without this flag, compilation will fail with errors about missing methods on `tokio::runtime::Builder` and `RuntimeMetrics`.
+
+## Quick start
+
 ```rust
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 
@@ -128,12 +142,12 @@ This pulls in [`dial9-perf-self-profile`](/perf-self-profile) for `perf_event_op
 
 #### Requirements
 
-**Frame pointers**: CPU profile stack traces rely on frame-pointer-based unwinding. Compile your application with frame pointers enabled, otherwise stack traces will be truncated or missing:
+**Frame pointers**: CPU profile stack traces rely on frame-pointer-based unwinding. Compile your application with frame pointers enabled, otherwise stack traces will be truncated or missing. Combine this with the required `tokio_unstable` flag:
 
 ```toml
 # .cargo/config.toml
 [build]
-rustflags = ["-C", "force-frame-pointers=yes"]
+rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 ```
 
 **`perf_event_paranoid`**: CPU profiling features require `perf_event_paranoid` ≤ 2 for sampling, and ≤ 1 for scheduler event tracking (`with_sched_events`):

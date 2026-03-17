@@ -27,12 +27,10 @@ pub trait TraceEvent {
     fn field_defs() -> Vec<FieldDef>;
     /// Whether this event type carries a packed timestamp in the event header.
     fn has_timestamp() -> bool {
-        false
+        true
     }
-    /// Return the event's timestamp in nanoseconds, if it has one.
-    fn timestamp(&self) -> Option<u64> {
-        None
-    }
+    /// Return the event's timestamp in nanoseconds.
+    fn timestamp(&self) -> u64;
     /// Encode this event's non-timestamp fields into the encoder.
     fn encode_fields<W: std::io::Write>(
         &self,

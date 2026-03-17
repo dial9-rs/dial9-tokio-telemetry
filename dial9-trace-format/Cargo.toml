@@ -11,7 +11,7 @@ publish = false
 serde = ["dep:serde"]
 
 [dependencies]
-dial9-trace-format-derive = { version = "0.1.1", path = "../dial9-trace-format-derive" }
+dial9-trace-format-derive = { workspace = true }
 serde = { version = "1", optional = true }
 
 [dev-dependencies]

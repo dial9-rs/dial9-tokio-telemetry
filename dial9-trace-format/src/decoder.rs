@@ -415,8 +415,6 @@ mod tests {
     use crate::schema::FieldDef;
     use crate::types::{FieldType, FieldValue};
 
-    struct Ev;
-
     #[test]
     fn decode_empty_stream() {
         let enc = Encoder::new();
@@ -429,7 +427,7 @@ mod tests {
     #[test]
     fn decode_schema_frame() {
         let mut enc = Encoder::new();
-        enc.register_schema_for::<Ev>(
+        enc.register_schema(
             "Ev",
             vec![FieldDef {
                 name: "v".into(),
@@ -446,16 +444,20 @@ mod tests {
     #[test]
     fn decode_event_after_schema() {
         let mut enc = Encoder::new();
-        enc.register_schema_for::<Ev>(
-            "Ev",
-            vec![FieldDef {
-                name: "v".into(),
-                field_type: FieldType::Varint,
-            }],
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
         )
         .unwrap();
-        enc.write_event_for::<Ev>(&[FieldValue::Varint(42)])
-            .unwrap();
         let data = enc.finish();
 
         let mut dec = Decoder::new(&data).unwrap();
@@ -482,16 +484,21 @@ mod tests {
     #[test]
     fn decode_multiple_events() {
         let mut enc = Encoder::new();
-        enc.register_schema_for::<Ev>(
-            "Ev",
-            vec![FieldDef {
-                name: "v".into(),
-                field_type: FieldType::Varint,
-            }],
-        )
-        .unwrap();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
         for i in 0..10u64 {
-            enc.write_event_for::<Ev>(&[FieldValue::Varint(i)]).unwrap();
+            enc.write_event(
+                &schema,
+                &[FieldValue::Varint(i * 1000), FieldValue::Varint(i)],
+            )
+            .unwrap();
         }
         let data = enc.finish();
 

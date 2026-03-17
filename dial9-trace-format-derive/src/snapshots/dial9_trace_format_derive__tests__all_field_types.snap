@@ -1,9 +1,10 @@
 ---
 source: dial9-trace-format-derive/src/lib.rs
-expression: "expand_to_string(quote!\n{\n    struct AllFieldTypes\n    {\n        a_u8: u8, b_u16: u16, c_u32: u32, d_u64: u64, e_i64: i64, f_f64: f64,\n        g_bool: bool, h_string: String, i_bytes: Vec<u8>, j_interned:\n        InternedString, k_frames: StackFrames, l_map: Vec<(String, String)>,\n    }\n})"
+expression: "expand_to_string(quote!\n{\n    struct AllFieldTypes\n    {\n        #[traceevent(timestamp)] timestamp_ns: u64, a_u8: u8, b_u16: u16,\n        c_u32: u32, d_u64: u64, e_i64: i64, f_f64: f64, g_bool: bool,\n        h_string: String, i_bytes: Vec<u8>, j_interned: InternedString,\n        k_frames: StackFrames, l_map: Vec<(String, String)>,\n    }\n})"
 ---
 #[derive(Debug, Clone)]
 struct AllFieldTypesRef<'a> {
+    pub timestamp_ns: u64,
     pub a_u8: <u8 as ::dial9_trace_format::TraceField>::Ref<'a>,
     pub b_u16: <u16 as ::dial9_trace_format::TraceField>::Ref<'a>,
     pub c_u32: <u32 as ::dial9_trace_format::TraceField>::Ref<'a>,
@@ -52,6 +53,9 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
             ::dial9_trace_format::TraceField > ::field_type(), }
         ]
     }
+    fn timestamp(&self) -> u64 {
+        self.timestamp_ns
+    }
     fn encode_fields<W: ::std::io::Write>(
         &self,
         enc: &mut ::dial9_trace_format::EventEncoder<'_, W>,
@@ -80,6 +84,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
     ) -> Option<Self::Ref<'a>> {
         Some(AllFieldTypesRef {
+            timestamp_ns: timestamp_ns?,
             a_u8: <u8 as ::dial9_trace_format::TraceField>::decode_ref(
                 fields.get(0usize)?,
             )?,
