@@ -17,9 +17,7 @@ mod common;
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
-    use dial9_tokio_telemetry::telemetry::events::{
-        CpuSampleSource, RawEvent, UNKNOWN_WORKER,
-    };
+    use dial9_tokio_telemetry::telemetry::events::{CpuSampleSource, RawEvent, UNKNOWN_WORKER};
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -256,9 +254,7 @@ fn burn_cpu(duration: std::time::Duration) {
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn thread_name_attribution_for_external_and_blocking_threads() {
-    use dial9_tokio_telemetry::telemetry::events::{
-        BLOCKING_WORKER, RawEvent, UNKNOWN_WORKER,
-    };
+    use dial9_tokio_telemetry::telemetry::events::{BLOCKING_WORKER, RawEvent, UNKNOWN_WORKER};
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
     use std::time::Duration;
 
@@ -311,16 +307,16 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     let thread_defs: Vec<(u32, &str)> = events
         .iter()
         .filter_map(|e| match e {
-            RawEvent::CpuSample(data) => {
-                data.thread_name.as_ref().map(|name| (data.tid, name.as_str()))
-            }
+            RawEvent::CpuSample(data) => data
+                .thread_name
+                .as_ref()
+                .map(|name| (data.tid, name.as_str())),
             _ => None,
         })
         .collect();
 
     // Deduplicate for display
-    let unique_defs: std::collections::HashMap<u32, &str> =
-        thread_defs.iter().copied().collect();
+    let unique_defs: std::collections::HashMap<u32, &str> = thread_defs.iter().copied().collect();
     eprintln!("Thread names from CpuSample events: {unique_defs:?}");
 
     // ── Verify the external thread name appears ──────────────────────────

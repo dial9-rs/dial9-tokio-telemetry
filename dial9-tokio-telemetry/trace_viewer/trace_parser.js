@@ -1,272 +1,156 @@
-// trace_parser.js - Binary trace parser for TOKIOTRC format
+// trace_parser.js - Binary trace parser using dial9-trace-format decoder
 // Can be used in browser or Node.js
 
 (function(exports) {
     'use strict';
 
-    const MAX_EVENTS = 2_000_000; // cap parsed events to keep UI responsive
+    const MAX_EVENTS = 2_000_000;
+
+    function getTraceDecoder() {
+        if (typeof require !== 'undefined') {
+            const path = require('path');
+            return require(path.resolve(__dirname, 'decode.js')).TraceDecoder;
+        }
+        // Browser: decode.js must be loaded before this script
+        if (typeof TraceDecoder !== 'undefined') return TraceDecoder;
+        throw new Error('TraceDecoder not found. Load decode.js before trace_parser.js');
+    }
+
+    /** Parse a string/bigint/number to a JS number. */
+    function num(v) {
+        if (typeof v === 'number') return v;
+        if (typeof v === 'string') return Number(v);
+        if (typeof v === 'bigint') return Number(v);
+        return 0;
+    }
 
     /**
-     * Parse a TOKIOTRC binary trace buffer
-     * @param {ArrayBuffer} buffer - The binary trace data
-     * @returns {Object} Parsed trace with events, metadata, and CPU samples
+     * Parse a dial9-trace-format binary trace buffer.
+     * Returns the same shape the viewer expects.
      */
     function parseTrace(buffer) {
-        const view = new DataView(buffer);
-        let off = 0;
-        const magic = String.fromCharCode(
-            ...new Uint8Array(buffer, 0, 8),
-        );
-        off += 8;
-        const version = view.getUint32(off, true);
-        off += 4;
-        if (magic !== "TOKIOTRC")
-            throw new Error("Not a TOKIOTRC file (got: " + magic + ")");
-        if (version < 8 || version > 17) {
-            console.warn(`Expected version 8-17, got ${version}. Some data may be missing.`);
-        }
-        const hasCpuTime = version >= 5;
-        const hasSchedWait = version >= 6;
-        const hasTaskTracking = version >= 7;
+        const TD = getTraceDecoder();
+        const dec = new TD(buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer);
+        if (!dec.decodeHeader()) throw new Error('Invalid trace header');
+        const frames = dec.decodeAll();
 
         const events = [];
-        const spawnLocations = new Map(); // SpawnLocationId (number) → string
-        const taskSpawnLocs = new Map();  // taskId (number) → SpawnLocationId (number)
-        const taskSpawnTimes = new Map(); // taskId (number) → timestamp (nanoseconds)
-        const taskTerminateTimes = new Map(); // taskId (number) → timestamp (nanoseconds)
-        const callframeSymbols = new Map(); // address (bigint as string) → symbol name
-        const cpuSamples = []; // {timestamp, workerId, tid, source, callchain: [addr strings]}
-        const threadNames = new Map(); // tid (number) → thread name (string)
-        const decoder = new TextDecoder();
-        
-        while (off < buffer.byteLength && events.length < MAX_EVENTS) {
-            if (off + 1 > buffer.byteLength) break;
-            const wireCode = view.getUint8(off);
-            off += 1;
+        const spawnLocations = new Map(); // string → string (identity, for compat)
+        const taskSpawnLocs = new Map();  // taskId → spawn location string
+        const taskSpawnTimes = new Map();
+        const taskTerminateTimes = new Map();
+        const callframeSymbols = new Map();
+        const cpuSamples = [];
+        const threadNames = new Map();
 
-            // SpawnLocationDef and TaskSpawn have no timestamp — handle before reading ts
-            if (wireCode === 5) {
-                if (off + 4 > buffer.byteLength) break;
-                const spawnLocId = view.getUint16(off, true); off += 2;
-                const strLen = view.getUint16(off, true); off += 2;
-                if (off + strLen > buffer.byteLength) break;
-                spawnLocations.set(spawnLocId, decoder.decode(new Uint8Array(buffer, off, strLen)));
-                off += strLen;
-                continue;
-            }
-            if (wireCode === 6) {
-                // TaskSpawn: timestamp_us(4) + task_id(4) + spawn_loc_id(2)
-                if (off + 10 > buffer.byteLength) break;
-                const timestampUs = view.getUint32(off, true); off += 4;
-                const taskId = view.getUint32(off, true); off += 4;
-                const spawnLocId = view.getUint16(off, true); off += 2;
-                taskSpawnLocs.set(taskId, spawnLocId);
-                taskSpawnTimes.set(taskId, timestampUs * 1000);
-                continue;
-            }
-            if (wireCode === 7) {
-                // WakeEvent: timestamp_us(4) + waker_task_id(4) + woken_task_id(4) + target_worker(1)
-                if (off + 13 > buffer.byteLength) break;
-                const timestampUs = view.getUint32(off, true); off += 4;
-                const wakerTaskId = view.getUint32(off, true); off += 4;
-                const wokenTaskId = view.getUint32(off, true); off += 4;
-                const targetWorker = view.getUint8(off); off += 1;
-                // Store wake event
-                events.push({
-                    eventType: 9, // WakeEvent
-                    timestamp: timestampUs * 1000,
-                    workerId: targetWorker,
-                    wakerTaskId,
-                    wokenTaskId,
-                    targetWorker,
-                    globalQueue: 0, localQueue: 0, cpuTime: 0, schedWait: 0,
-                    taskId: 0, spawnLocId: 0, spawnLoc: null,
-                });
-                continue;
-            }
-            if (wireCode === 8) {
-                // CpuSample: timestamp_us(4) + worker_id(1) + tid(4) + source(1) + num_frames(1) + frames(N*8)
-                if (off + 11 > buffer.byteLength) break;
-                const tsUs = view.getUint32(off, true); off += 4;
-                const wid = view.getUint8(off); off += 1;
-                const tid = view.getUint32(off, true); off += 4;
-                const src = view.getUint8(off); off += 1; // 0=CpuProfile, 1=SchedEvent
-                const nf = view.getUint8(off); off += 1;
-                if (off + nf * 8 > buffer.byteLength) break;
-                const chain = [];
-                for (let i = 0; i < nf; i++) {
-                    const lo = view.getUint32(off, true);
-                    const hi = view.getUint32(off + 4, true);
-                    off += 8;
-                    chain.push("0x" + (hi * 0x100000000 + lo).toString(16));
-                }
-                cpuSamples.push({ timestamp: tsUs * 1000, workerId: wid, tid, source: src, callchain: chain });
-                continue;
-            }
+        for (const frame of frames) {
+            if (events.length >= MAX_EVENTS) break;
+            if (frame.type !== 'event') continue;
+            const v = frame.values;
+            const ts = num(frame.timestamp_ns);
 
-            if (wireCode === 9) {
-                // CallframeDef: address(8) + symbol_len(2) + symbol_bytes(N) + location_len(2) + location_bytes(M)
-                if (off + 10 > buffer.byteLength) break;
-                const lo = view.getUint32(off, true);
-                const hi = view.getUint32(off + 4, true);
-                off += 8;
-                const addrKey = "0x" + (hi * 0x100000000 + lo).toString(16);
-                
-                // Read symbol
-                const symbolLen = view.getUint16(off, true); off += 2;
-                if (off + symbolLen > buffer.byteLength) break;
-                const symbol = decoder.decode(new Uint8Array(buffer, off, symbolLen));
-                off += symbolLen;
-                
-                // Read optional location
-                if (off + 2 > buffer.byteLength) break;
-                const locationLen = view.getUint16(off, true); off += 2;
-                let location = null;
-                if (locationLen !== 0xFFFF) {
-                    if (off + locationLen > buffer.byteLength) break;
-                    location = decoder.decode(new Uint8Array(buffer, off, locationLen));
-                    off += locationLen;
-                }
-                
-                // Store symbol and location separately
-                callframeSymbols.set(addrKey, { symbol, location });
-                continue;
-            }
-
-            if (wireCode === 10) {
-                // ThreadNameDef: tid(4) + string_len(2) + string_bytes(N)
-                if (off + 6 > buffer.byteLength) break;
-                const tid = view.getUint32(off, true); off += 4;
-                const strLen = view.getUint16(off, true); off += 2;
-                if (off + strLen > buffer.byteLength) break;
-                threadNames.set(tid, decoder.decode(new Uint8Array(buffer, off, strLen)));
-                off += strLen;
-                continue;
-            }
-
-            if (wireCode === 11) {
-                // SegmentMetadata: num_entries(2) + (key_len(2) + key + val_len(2) + val)*
-                if (off + 2 > buffer.byteLength) break;
-                const numEntries = view.getUint16(off, true); off += 2;
-                let truncated = false;
-                for (let i = 0; i < numEntries; i++) {
-                    if (off + 2 > buffer.byteLength) { truncated = true; break; }
-                    const kLen = view.getUint16(off, true); off += 2;
-                    if (off + kLen > buffer.byteLength) { truncated = true; break; }
-                    off += kLen; // skip key
-                    if (off + 2 > buffer.byteLength) { truncated = true; break; }
-                    const vLen = view.getUint16(off, true); off += 2;
-                    if (off + vLen > buffer.byteLength) { truncated = true; break; }
-                    off += vLen; // skip value
-                }
-                if (truncated) break; // break outer loop
-                // TODO(#68): Store metadata entries for display in the viewer (service name, host, etc.)
-                continue;
-            }
-
-            if (wireCode === 172) {
-                // TaskTerminate: timestamp_us(4) + task_id(4)
-                if (off + 8 > buffer.byteLength) break;
-                const timestampUs = view.getUint32(off, true); off += 4;
-                const taskId = view.getUint32(off, true); off += 4;
-                taskTerminateTimes.set(taskId, timestampUs * 1000);
-                continue;
-            }
-
-            if (wireCode > 11 && wireCode !== 172) break; // unknown code
-
-            // All regular codes have a 4-byte timestamp next
-            if (off + 4 > buffer.byteLength) break;
-            const timestampUs = view.getUint32(off, true);
-            off += 4;
-            const timestamp = timestampUs * 1000;
-
-            let eventType,
-                workerId = 0,
-                globalQueue = 0,
-                localQueue = 0,
-                cpuTime = 0,
-                schedWait = 0,
-                taskId = 0,
-                spawnLocId = 0;
-            switch (wireCode) {
-                case 0: // PollStart
-                    if (hasTaskTracking) {
-                        // v8: worker(1) + lq(1) + task_id(4) + spawn_loc_id(2) = 8
-                        if (off + 8 > buffer.byteLength) break;
-                        eventType = 0;
-                        workerId = view.getUint8(off); off += 1;
-                        localQueue = view.getUint8(off); off += 1;
-                        taskId = view.getUint32(off, true); off += 4;
-                        spawnLocId = view.getUint16(off, true); off += 2;
-                    } else {
-                        if (off + 1 > buffer.byteLength) break;
-                        eventType = 0;
-                        workerId = view.getUint8(off); off += 1;
+            switch (frame.name) {
+                case 'PollStartEvent': {
+                    // spawn_loc_id is a PooledString, already resolved to the string
+                    const spawnLoc = v.spawn_loc_id || null;
+                    if (spawnLoc) spawnLocations.set(spawnLoc, spawnLoc);
+                    const taskId = num(v.task_id);
+                    if (taskId && spawnLoc && !taskSpawnLocs.has(taskId)) {
+                        taskSpawnLocs.set(taskId, spawnLoc);
                     }
+                    events.push({
+                        eventType: 0, timestamp: ts,
+                        workerId: num(v.worker_id), localQueue: num(v.local_queue),
+                        globalQueue: 0, cpuTime: 0, schedWait: 0,
+                        taskId, spawnLocId: spawnLoc, spawnLoc,
+                    });
                     break;
-                case 1: // PollEnd
-                    if (off + 1 > buffer.byteLength) break;
-                    eventType = 1;
-                    workerId = view.getUint8(off); off += 1;
+                }
+                case 'PollEndEvent':
+                    events.push({
+                        eventType: 1, timestamp: ts, workerId: num(v.worker_id),
+                        globalQueue: 0, localQueue: 0, cpuTime: 0, schedWait: 0,
+                        taskId: 0, spawnLocId: null, spawnLoc: null,
+                    });
                     break;
-                case 2: { // WorkerPark
-                    const need = hasCpuTime ? 6 : 2;
-                    if (off + need > buffer.byteLength) break;
-                    eventType = 2;
-                    workerId = view.getUint8(off); off += 1;
-                    localQueue = view.getUint8(off); off += 1;
-                    if (hasCpuTime) {
-                        cpuTime = view.getUint32(off, true) * 1000; off += 4;
+                case 'WorkerParkEvent':
+                    events.push({
+                        eventType: 2, timestamp: ts,
+                        workerId: num(v.worker_id), localQueue: num(v.local_queue),
+                        cpuTime: num(v.cpu_time_ns),
+                        globalQueue: 0, schedWait: 0,
+                        taskId: 0, spawnLocId: null, spawnLoc: null,
+                    });
+                    break;
+                case 'WorkerUnparkEvent':
+                    events.push({
+                        eventType: 3, timestamp: ts,
+                        workerId: num(v.worker_id), localQueue: num(v.local_queue),
+                        cpuTime: num(v.cpu_time_ns), schedWait: num(v.sched_wait_ns),
+                        globalQueue: 0,
+                        taskId: 0, spawnLocId: null, spawnLoc: null,
+                    });
+                    break;
+                case 'QueueSampleEvent':
+                    events.push({
+                        eventType: 4, timestamp: ts,
+                        globalQueue: num(v.global_queue),
+                        workerId: 0, localQueue: 0, cpuTime: 0, schedWait: 0,
+                        taskId: 0, spawnLocId: null, spawnLoc: null,
+                    });
+                    break;
+                case 'TaskSpawnEvent': {
+                    const taskId = num(v.task_id);
+                    const spawnLoc = v.spawn_loc_id || null;
+                    if (spawnLoc) spawnLocations.set(spawnLoc, spawnLoc);
+                    taskSpawnLocs.set(taskId, spawnLoc);
+                    taskSpawnTimes.set(taskId, ts);
+                    break;
+                }
+                case 'TaskTerminateEvent':
+                    taskTerminateTimes.set(num(v.task_id), ts);
+                    break;
+                case 'WakeEventEvent':
+                    events.push({
+                        eventType: 9, timestamp: ts,
+                        workerId: num(v.target_worker),
+                        wakerTaskId: num(v.waker_task_id),
+                        wokenTaskId: num(v.woken_task_id),
+                        targetWorker: num(v.target_worker),
+                        globalQueue: 0, localQueue: 0, cpuTime: 0, schedWait: 0,
+                        taskId: 0, spawnLocId: null, spawnLoc: null,
+                    });
+                    break;
+                case 'CpuSampleEvent': {
+                    const chain = (v.callchain || []).map(addr =>
+                        "0x" + BigInt(addr).toString(16));
+                    cpuSamples.push({
+                        timestamp: ts, workerId: num(v.worker_id),
+                        tid: num(v.tid), source: num(v.source), callchain: chain,
+                    });
+                    // thread_name is a PooledString, already resolved
+                    const tn = v.thread_name;
+                    if (tn && tn !== '<no thread name>') {
+                        threadNames.set(num(v.tid), tn);
                     }
                     break;
                 }
-                case 3: { // WorkerUnpark
-                    const need = hasCpuTime ? (hasSchedWait ? 10 : 6) : 2;
-                    if (off + need > buffer.byteLength) break;
-                    eventType = 3;
-                    workerId = view.getUint8(off); off += 1;
-                    localQueue = view.getUint8(off); off += 1;
-                    if (hasCpuTime) {
-                        cpuTime = view.getUint32(off, true) * 1000; off += 4;
-                    }
-                    if (hasSchedWait) {
-                        schedWait = view.getUint32(off, true); off += 4;
-                    }
+                case 'CallframeDefEvent': {
+                    const addrKey = "0x" + num(v.address).toString(16);
+                    callframeSymbols.set(addrKey, {
+                        symbol: v.symbol, location: v.location || null,
+                    });
                     break;
                 }
-                case 4: // QueueSample
-                    if (off + 1 > buffer.byteLength) break;
-                    eventType = 4;
-                    globalQueue = view.getUint8(off); off += 1;
-                    break;
             }
-            // Also build taskSpawnLocs from PollStart (covers tasks without TaskSpawn events)
-            if (eventType === 0 && taskId && spawnLocId && !taskSpawnLocs.has(taskId)) {
-                taskSpawnLocs.set(taskId, spawnLocId);
-            }
-            events.push({
-                eventType, timestamp, workerId,
-                globalQueue, localQueue, cpuTime, schedWait,
-                taskId, spawnLocId,
-                spawnLoc: spawnLocations.get(spawnLocId) ?? null,
-            });
         }
-        return { 
-            magic, 
-            version, 
-            events, 
-            truncated: events.length >= MAX_EVENTS, 
-            hasCpuTime, 
-            hasSchedWait, 
-            hasTaskTracking, 
-            spawnLocations, 
-            taskSpawnLocs, 
-            taskSpawnTimes,
-            cpuSamples, 
-            callframeSymbols,
-            threadNames,
-            taskTerminateTimes
+
+        return {
+            magic: 'D9TF', version: dec.version, events,
+            truncated: events.length >= MAX_EVENTS,
+            hasCpuTime: true, hasSchedWait: true, hasTaskTracking: true,
+            spawnLocations, taskSpawnLocs, taskSpawnTimes,
+            cpuSamples, callframeSymbols, threadNames, taskTerminateTimes,
         };
     }
 
@@ -295,11 +179,6 @@
         return parts.slice(meaningful - 3).join('::');
     }
 
-    /**
-     * Try to build a docs.rs source link from a location path containing a crate-version segment.
-     * Matches any path like: .../hyper-0.14.28/src/client/connect/http.rs:474
-     * Returns URL string or null.
-     */
     function _docsRsUrl(location) {
         if (!location) return null;
         const m = location.match(/\/([a-z][a-z0-9_-]*)-(\d+\.\d+[^/]*)\/(.+?)(?::(\d+))?$/);
@@ -312,28 +191,15 @@
         return url;
     }
 
-    /**
-     * Extract just the filename from a location string.
-     * e.g. "/home/user/.cargo/registry/src/.../hyper-0.14.28/src/client/connect/http.rs:474" → "http.rs"
-     */
     function _fileName(location) {
         if (!location) return null;
         const m = location.match(/([^/]+\.rs)(?::\d+)?$/);
         return m ? m[1] : null;
     }
 
-    /**
-     * Format a stack frame for human-readable display.
-     * Accepts either a resolved frame object or a raw address + callframeSymbols map.
-     * @param {{symbol: string, location: string|null}|string} frame - Resolved frame or address string
-     * @param {Map<string, {symbol: string, location: string|null}>} [callframeSymbols] - Required when frame is an address string
-     * @returns {{text: string, docsUrl: string|null}}
-     */
     function formatFrame(frame, callframeSymbols) {
         if (typeof frame === 'string') {
-            if (!callframeSymbols) {
-                throw new Error('formatFrame requires callframeSymbols when given an address string');
-            }
+            if (!callframeSymbols) throw new Error('formatFrame requires callframeSymbols when given an address string');
             const entry = callframeSymbols.get(frame);
             if (!entry) return { text: frame || '(unknown)', docsUrl: null };
             frame = entry;
@@ -342,16 +208,13 @@
         if (!sym || sym.startsWith('0x')) return { text: sym || '(unknown)', docsUrl: null };
 
         let result = sym;
-
         const traitImplMatch = result.match(/^<(.+?) as (.+?)>::(.+)$/);
         if (traitImplMatch) {
             let [, implType, trait_, method] = traitImplMatch;
             const shortType = _lastSeg(_stripBoringGenerics(implType));
-            if (shortType.length <= 2) {
-                result = `${_lastSeg(_stripBoringGenerics(trait_))}::${method}`;
-            } else {
-                result = `${shortType}::${method}`;
-            }
+            result = shortType.length <= 2
+                ? `${_lastSeg(_stripBoringGenerics(trait_))}::${method}`
+                : `${shortType}::${method}`;
         } else if (result.includes('::')) {
             result = _shortenPath(_stripBoringGenerics(result));
         }
@@ -364,12 +227,6 @@
         return { text: result, docsUrl: _docsRsUrl(location) };
     }
 
-    /**
-     * Resolve a callchain (array of address strings) to frame objects.
-     * @param {string[]} callchain - Address strings like "0x55cc6d053893"
-     * @param {Map<string, {symbol: string, location: string|null}>} callframeSymbols
-     * @returns {{symbol: string, location: string|null}[]}
-     */
     function symbolizeChain(callchain, callframeSymbols) {
         return callchain.map(addr => {
             const entry = callframeSymbols.get(addr);
@@ -379,12 +236,6 @@
         });
     }
 
-    /**
-     * Deduplicate CPU/sched samples by symbolized stack trace.
-     * @param {Object[]} samples - Array of {callchain, ...} sample objects
-     * @param {Map} callframeSymbols
-     * @returns {{count: number, frames: Object[], leaf: string, leafRaw: string}[]}
-     */
     function deduplicateSamples(samples, callframeSymbols) {
         const groups = new Map();
         for (const sample of samples) {
@@ -392,8 +243,7 @@
             const key = frames.map(f => f.symbol).join('\0');
             if (!groups.has(key)) {
                 groups.set(key, {
-                    count: 0,
-                    frames,
+                    count: 0, frames,
                     leaf: frames[0] ? formatFrame(frames[0]).text : '(unknown)',
                     leafRaw: frames[0] ? frames[0].symbol : '',
                 });
@@ -403,7 +253,6 @@
         return [...groups.values()].sort((a, b) => b.count - a.count);
     }
 
-    // Export for both browser and Node.js
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = { parseTrace, formatFrame, symbolizeChain, deduplicateSamples };
     } else {

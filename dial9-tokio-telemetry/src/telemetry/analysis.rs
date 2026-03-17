@@ -66,7 +66,9 @@ impl TraceReader {
                     callframe_symbols.insert(e.address, e.symbol.to_string());
                 }
                 TelemetryEventRef::SegmentMetadata(e) => {
-                    segment_metadata = e.entries.iter()
+                    segment_metadata = e
+                        .entries
+                        .iter()
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .collect();
                 }
@@ -85,7 +87,8 @@ impl TraceReader {
             }
         }
 
-        let events: Vec<TelemetryEvent> = ref_events.into_iter().map(TelemetryEvent::from).collect();
+        let events: Vec<TelemetryEvent> =
+            ref_events.into_iter().map(TelemetryEvent::from).collect();
 
         Ok(Self {
             events,
