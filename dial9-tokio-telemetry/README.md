@@ -6,6 +6,20 @@
 
 **Low-overhead runtime telemetry for Tokio.** Records poll timing, worker park/unpark, wake events, queue depths, and (on Linux) CPU profile samples into a compact binary trace format. Traces can be analyzed offline to find long polls, scheduling delays, idle workers, and CPU hotspots.
 
+## Prerequisites
+
+This crate requires Tokio's unstable APIs for runtime hooks and worker metrics. Add the following to your project's `.cargo/config.toml`:
+
+```toml
+# .cargo/config.toml
+[build]
+rustflags = ["--cfg", "tokio_unstable"]
+```
+
+Without this flag, compilation will fail with errors about missing methods on `tokio::runtime::Builder` and `RuntimeMetrics`.
+
+## Quick start
+
 ```rust
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 
@@ -128,12 +142,12 @@ This pulls in [`dial9-perf-self-profile`](/perf-self-profile) for `perf_event_op
 
 #### Requirements
 
-**Frame pointers**: CPU profile stack traces rely on frame-pointer-based unwinding. Compile your application with frame pointers enabled, otherwise stack traces will be truncated or missing:
+**Frame pointers**: CPU profile stack traces rely on frame-pointer-based unwinding. Compile your application with frame pointers enabled, otherwise stack traces will be truncated or missing. Combine this with the required `tokio_unstable` flag:
 
 ```toml
 # .cargo/config.toml
 [build]
-rustflags = ["-C", "force-frame-pointers=yes"]
+rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 ```
 
 **`perf_event_paranoid`**: CPU profiling features require `perf_event_paranoid` ≤ 2 for sampling, and ≤ 1 for scheduler event tracking (`with_sched_events`):
@@ -199,7 +213,9 @@ See [TRACE_ANALYSIS_GUIDE.md](/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) fo
 
 ## S3 upload
 
-With the `worker-s3` feature, sealed trace segments are automatically gzip-compressed and uploaded to S3 by a background worker thread. The application process is unaffected — uploads happen asynchronously after segments are sealed.
+With the `worker-s3` feature, sealed trace segments are automatically gzip-compressed and uploaded to S3 by a background worker thread. The application process is unaffected: uploads happen asynchronously after segments are sealed.
+
+Only `bucket` and `service_name` are required. See [`S3Config`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/background_task/s3/struct.S3Config.html) and [`BackgroundTaskConfig`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/background_task/struct.BackgroundTaskConfig.html) for additional options.
 
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
@@ -216,10 +232,7 @@ let writer = RotatingWriter::new(
 
 let s3_config = S3Config::builder()
     .bucket("my-trace-bucket")
-    .prefix("traces")
     .service_name("my-service")
-    .instance_path("us-east-1/i-0abc123")
-    .boot_id("unique-boot-id")
     .build();
 
 let uploader_config = BackgroundTaskConfig::builder()
@@ -246,24 +259,11 @@ runtime.block_on(async {
 # fn main() {}
 ```
 
-Objects land at `s3://{bucket}/{prefix}/{date-time}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz` with metadata headers (`service`, `boot-id`, etc.) for quick inspection via `HeadObject`.
+By default (customizable via `S3Config::builder().key_fn(...)`), objects land at `s3://{bucket}/{prefix}/{YYYY-MM-DD}/{HHMM}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz`. The time bucket is the first key component after the prefix, enabling efficient incident correlation: `aws s3 ls s3://bucket/traces/2026-03-07/2030/` lists all traces from all services during that minute.
 
-The `{date-time}` bucket (e.g. `2026-03-07/2030`) uses 1-minute windows and is the first key component after the prefix, enabling efficient incident correlation: `aws s3 ls s3://bucket/traces/2026-03-07/2030/` lists all traces from all services during that window.
+The worker requires `s3:PutObject` and `s3:HeadBucket` permissions.
 
-The worker uses exponential backoff if S3 is unreachable — it never crashes or affects the application. Symbolized files stay on disk in degraded mode and can be uploaded later.
-
-For explicit shutdown control with a timeout:
-
-```rust,no_run
-# use std::time::Duration;
-# use dial9_tokio_telemetry::telemetry::TracedRuntime;
-# fn example(guard: dial9_tokio_telemetry::telemetry::TelemetryGuard) {
-# let rt = tokio::runtime::Runtime::new().unwrap();
-# rt.block_on(async {
-guard.graceful_shutdown(Duration::from_secs(30)).await.expect("worker drained");
-# });
-# }
-```
+The worker uses a circuit breaker with exponential backoff if S3 is unreachable. It never crashes or blocks the application. Segments remain on disk when uploads fail and are retried on the next poll cycle. For explicit shutdown control, use `guard.graceful_shutdown(timeout)` instead of dropping the guard (which seals the final segment but does not wait for the worker to drain).
 
 ## Examples
 

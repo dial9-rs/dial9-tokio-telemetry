@@ -4,6 +4,8 @@ use blazesym::symbolize::{Input, Symbolizer, source};
 use std::cell::RefCell;
 use std::fs;
 
+use crate::USER_ADDR_LIMIT;
+
 struct SymbolizerState {
     symbolizer: Symbolizer,
     /// Map from address range to (path, base_addr)
@@ -92,6 +94,29 @@ pub fn resolve_symbol(addr: u64) -> SymbolInfo {
             });
         }
         let state = opt.as_ref().unwrap();
+
+        // Kernel addresses are >= USER_ADDR_LIMIT
+        if addr >= USER_ADDR_LIMIT {
+            let src = source::Source::Kernel(source::Kernel::default());
+            if let Ok(results) = state.symbolizer.symbolize(&src, Input::AbsAddr(&[addr]))
+                && !results.is_empty()
+                && let Some(sym) = results[0].as_sym()
+            {
+                return SymbolInfo {
+                    name: Some(sym.name.to_string()),
+                    base_addr: sym.addr,
+                    code_info: None,
+                    offset: addr.saturating_sub(sym.addr),
+                };
+            }
+            // TODO: code_info should be available from kernel DWARF debug symbols
+            return SymbolInfo {
+                name: Some(format!("[kernel] {:#x}", addr)),
+                base_addr: addr,
+                code_info: None,
+                offset: 0,
+            };
+        }
 
         // Find which mapping contains this address
         for (start, end, path, file_offset) in &state.mappings {

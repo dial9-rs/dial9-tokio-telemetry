@@ -17,7 +17,9 @@ mod common;
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
-    use dial9_tokio_telemetry::telemetry::events::{CpuSampleSource, TelemetryEvent};
+    use dial9_tokio_telemetry::telemetry::events::{
+        CpuSampleSource, TelemetryEvent, UNKNOWN_WORKER,
+    };
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -83,11 +85,6 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
         .collect();
 
     let cpu_ts: Vec<u64> = cpu_samples.iter().map(|&(t, _)| t).collect();
-
-    if common::is_ci() {
-        eprintln!("we don't actually capture sample events in CI");
-        return;
-    }
 
     assert!(!cpu_ts.is_empty(), "expected CPU profile samples");
 
@@ -185,7 +182,12 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
             // Every sample that falls inside this burn window must come from
             // `expected_worker`.  A sample from a different worker would mean
             // the profiler mis-attributed the sample.
+            // Skip UNKNOWN_WORKER (255) samples — on CI the profiler can fire
+            // before the thread-to-worker mapping is visible.
             for &(t, w) in &in_window {
+                if w == UNKNOWN_WORKER {
+                    continue;
+                }
                 assert_eq!(
                     w, expected_worker,
                     "burn window {i}: CPU sample at {t}ns was attributed to worker \
@@ -305,11 +307,6 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
 
     drop(runtime);
     drop(guard);
-
-    if common::is_ci() {
-        eprintln!("on CI, this test can run, but we don't get these events");
-        return;
-    }
 
     let events = events.lock().unwrap();
 
