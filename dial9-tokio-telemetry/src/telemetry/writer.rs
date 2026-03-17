@@ -128,8 +128,6 @@ pub struct RotatingWriter {
     /// Cache from Location → formatted string, to avoid
     /// reformatting on every event.
     location_cache: HashMap<std::panic::Location<'static>, String>,
-    /// Cache from tid → thread name, populated by ThreadNameDef events.
-    thread_name_cache: HashMap<u32, String>,
 }
 
 impl RotatingWriter {
@@ -160,7 +158,6 @@ impl RotatingWriter {
             segment_metadata: None,
             flush_state: FlushState::new(),
             location_cache: HashMap::new(),
-            thread_name_cache: HashMap::new(),
         })
     }
 
@@ -196,7 +193,6 @@ impl RotatingWriter {
             segment_metadata: None,
             flush_state: FlushState::new(),
             location_cache: HashMap::new(),
-            thread_name_cache: HashMap::new(),
         })
     }
 
@@ -270,13 +266,11 @@ impl RotatingWriter {
     fn evict_oldest(&mut self) -> std::io::Result<()> {
         // Always keep at least the current file.
         while self.total_size() > self.max_total_size && !self.closed_files.is_empty() {
-            if let Some((path, _size)) = self.closed_files.pop_front() {
-                if let Err(e) = fs::remove_file(&path) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
+            if let Some((path, _size)) = self.closed_files.pop_front()
+                && let Err(e) = fs::remove_file(&path)
+                    && e.kind() != std::io::ErrorKind::NotFound {
                         tracing::warn!("failed to evict old trace segment {}: {e}", path.display());
                     }
-                }
-            }
         }
         // If even the current file alone exceeds total budget, stop writing.
         if self.total_size() > self.max_total_size {
@@ -390,11 +384,11 @@ impl RotatingWriter {
                 target_worker: *target_worker,
             }),
             RawEvent::CpuSample(data) => {
-                let thread_name = match self.thread_name_cache.get(&data.tid) {
-                    Some(name) => self.encoder.intern_string(name)?,
-                    // TODO: this branch is wrong. if we don't have the thread in the thread name cache, I think we need to look up the thread name?
-                    None => InternedString::default(),
-                };
+                let thread_name = match &data.thread_name {
+                    Some(name) => self.encoder.intern_string(name.as_str()),
+                    None => self.encoder.intern_string("<no thread name>"),
+                }?;
+
                 self.encoder.write(&CpuSampleEvent {
                     timestamp_ns: data.timestamp_nanos,
                     worker_id: data.worker_id as u8,
@@ -415,12 +409,6 @@ impl RotatingWriter {
                     .unwrap_or("<no location>")
                     .to_string(),
             }),
-            RawEvent::ThreadNameDef(data) => {
-                // Cache the tid→name mapping for use by CpuSample's thread_name field.
-                // No wire event needed — the name is inlined into CpuSampleEvent.
-                self.thread_name_cache.insert(data.tid, data.name.clone());
-                Ok(())
-            }
         }?;
         self.maybe_rotate()?;
         Ok(())
@@ -660,7 +648,10 @@ mod tests {
                 }
             })
             .sum();
-        assert!(total < 100, "should have stopped writing, got {total} events");
+        assert!(
+            total < 100,
+            "should have stopped writing, got {total} events"
+        );
     }
 
     /// Bug: write_event_inner sets stopped=true when total_size slightly exceeds

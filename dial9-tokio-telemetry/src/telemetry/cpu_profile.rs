@@ -8,6 +8,7 @@ use crate::telemetry::events::CpuSampleSource;
 use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
 use std::collections::HashMap;
 use std::io;
+use std::sync::Arc;
 
 /// Read the thread name from `/proc/self/task/<tid>/comm`.
 /// Returns `None` if the file can't be read.
@@ -64,7 +65,20 @@ pub(crate) struct CpuProfiler {
     pid: u32,
     /// OS tid → thread name, eagerly cached at drain time so short-lived threads
     /// are captured before they exit and `/proc/self/task/<tid>/comm` disappears.
-    tid_to_name: HashMap<u32, String>,
+    tid_to_name: HashMap<u32, ThreadName>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadName(Arc<str>);
+
+impl ThreadName {
+    pub fn new(name: String) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
+    }
 }
 
 impl CpuProfiler {
@@ -86,7 +100,7 @@ impl CpuProfiler {
     ///
     /// Filters out child-process samples (perf `inherit` leaks them).
     /// Eagerly caches thread names for non-worker tids.
-    pub fn drain(&mut self, mut f: impl FnMut(RawCpuSample, Option<&str>)) {
+    pub fn drain(&mut self, mut f: impl FnMut(RawCpuSample, Option<&ThreadName>)) {
         let pid = self.pid;
         self.sampler.for_each_sample(|sample| {
             if sample.pid != pid {
@@ -95,9 +109,9 @@ impl CpuProfiler {
             if !self.tid_to_name.contains_key(&sample.tid)
                 && let Some(name) = read_thread_name(sample.tid)
             {
-                self.tid_to_name.insert(sample.tid, name);
+                self.tid_to_name.insert(sample.tid, ThreadName::new(name));
             }
-            let thread_name = self.tid_to_name.get(&sample.tid).map(|s| s.as_str());
+            let thread_name = self.tid_to_name.get(&sample.tid);
             f(
                 RawCpuSample {
                     tid: sample.tid,

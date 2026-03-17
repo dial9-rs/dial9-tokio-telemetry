@@ -1,5 +1,5 @@
 #[cfg(feature = "cpu-profiling")]
-use crate::telemetry::events::{CallframeDefData, CpuSampleData, RawEvent, ThreadNameDefData};
+use crate::telemetry::events::{CallframeDefData, CpuSampleData, RawEvent};
 #[cfg(feature = "cpu-profiling")]
 use std::collections::{HashMap, HashSet};
 
@@ -17,10 +17,6 @@ pub(super) struct CpuFlushState {
     pub(super) callframe_intern: HashMap<u64, (String, Option<String>)>,
     /// Addresses whose CallframeDef has been emitted in the current file.
     callframe_emitted_this_file: HashSet<u64>,
-    /// tid → thread name, cached across files. Only populated for non-worker tids.
-    pub(super) thread_name_intern: HashMap<u32, String>,
-    /// tids whose ThreadNameDef has been emitted in the current file.
-    thread_name_emitted_this_file: HashSet<u32>,
 }
 
 #[cfg(feature = "cpu-profiling")]
@@ -30,30 +26,17 @@ impl CpuFlushState {
             inline_callframe_symbols: false,
             callframe_intern: HashMap::new(),
             callframe_emitted_this_file: HashSet::new(),
-            thread_name_intern: HashMap::new(),
-            thread_name_emitted_this_file: HashSet::new(),
         }
     }
 
     /// Called on file rotation — clear per-file tracking sets.
     pub(super) fn on_rotate(&mut self) {
         self.callframe_emitted_this_file.clear();
-        self.thread_name_emitted_this_file.clear();
     }
 
     /// Collect the prerequisite def events for a CPU sample, updating per-file tracking sets.
-    pub(super) fn collect_cpu_event_batch(&mut self, data: &CpuSampleData) -> Vec<RawEvent> {
+    pub(super) fn resolve_cpu_event_symbols(&mut self, data: &CpuSampleData) -> Vec<RawEvent> {
         let mut batch = Vec::new();
-        if !self.thread_name_emitted_this_file.contains(&data.tid) {
-            // TODO: clean up thread names
-            if let Some(name) = self.thread_name_intern.get(&data.tid) {
-                batch.push(RawEvent::ThreadNameDef(Box::new(ThreadNameDefData {
-                    tid: data.tid,
-                    name: name.clone(),
-                })));
-            }
-            self.thread_name_emitted_this_file.insert(data.tid);
-        }
         if self.inline_callframe_symbols {
             for &addr in &data.callchain {
                 if !self.callframe_emitted_this_file.contains(&addr) {

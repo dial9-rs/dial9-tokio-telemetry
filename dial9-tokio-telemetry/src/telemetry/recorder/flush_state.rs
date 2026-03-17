@@ -174,12 +174,6 @@ impl FlushState {
                     location: data.location.clone(),
                 });
             }
-            RawEvent::ThreadNameDef(data) => {
-                events.push(TelemetryEvent::ThreadNameDef {
-                    tid: data.tid,
-                    name: data.name.clone(),
-                });
-            }
         }
         events
     }

@@ -879,6 +879,7 @@ mod tests {
                         worker_id: *worker_id,
                         tid: *tid,
                         source: CpuSampleSource::CpuProfile,
+                        thread_name: None,
                         callchain: callchain.clone(),
                     };
                     *timestamp += 1;
@@ -995,9 +996,6 @@ mod tests {
                 let mut ew = EventWriter::new(Box::new(writer));
                 let mut cpu = CpuFlushState::new();
                 cpu.inline_callframe_symbols = true;
-                for tid in 0u32..4 {
-                    cpu.thread_name_intern.insert(tid, format!("thread-{tid}"));
-                }
                 ew.cpu_flush = Some(cpu);
 
                 #[track_caller]

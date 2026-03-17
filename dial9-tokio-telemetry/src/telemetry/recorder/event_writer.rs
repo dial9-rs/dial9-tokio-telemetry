@@ -38,20 +38,7 @@ impl EventWriter {
 
     /// Write a RawEvent through the writer.
     pub(crate) fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
-        // Check if a previous write caused rotation so CPU state can be reset.
-        #[cfg(feature = "cpu-profiling")]
-        if self.writer.take_rotated()
-            && let Some(ref mut cpu) = self.cpu_flush
-        {
-            cpu.on_rotate();
-        }
         self.writer.write_event(&raw)?;
-        #[cfg(feature = "cpu-profiling")]
-        if self.writer.take_rotated()
-            && let Some(ref mut cpu) = self.cpu_flush
-        {
-            cpu.on_rotate();
-        }
         Ok(())
     }
 
@@ -59,7 +46,7 @@ impl EventWriter {
     #[cfg(feature = "cpu-profiling")]
     pub(crate) fn write_cpu_event(&mut self, data: &CpuSampleData) {
         if let Some(mut cpu) = self.cpu_flush.take() {
-            let batch = cpu.collect_cpu_event_batch(data);
+            let batch = cpu.resolve_cpu_event_symbols(data);
             for event in &batch {
                 if let Err(e) = self.writer.write_event(event) {
                     tracing::warn!("failed to write CPU trace event: {e}");
@@ -90,18 +77,13 @@ impl EventWriter {
         if let Some(mut profiler) = self.cpu_profiler.take() {
             profiler.drain(|raw, thread_name| {
                 let worker_id = resolve(raw.tid);
-                if let Some(ref mut cpu) = self.cpu_flush
-                    && !cpu.thread_name_intern.contains_key(&raw.tid)
-                    && let Some(name) = thread_name
-                {
-                    cpu.thread_name_intern.insert(raw.tid, name.to_string());
-                }
                 let data = CpuSampleData {
                     timestamp_nanos: raw.timestamp_nanos,
                     worker_id,
                     tid: raw.tid,
                     source: raw.source,
                     callchain: raw.callchain,
+                    thread_name: thread_name.cloned(),
                 };
                 self.write_cpu_event(&data);
             });
@@ -118,6 +100,9 @@ impl EventWriter {
                         tid: raw.tid,
                         source: raw.source,
                         callchain: raw.callchain,
+                        // TODO: we should be able to also track thread name here.
+                        // sampler is running on worker threads so no thread name
+                        thread_name: None,
                     };
                     self.write_cpu_event(&data);
                 });

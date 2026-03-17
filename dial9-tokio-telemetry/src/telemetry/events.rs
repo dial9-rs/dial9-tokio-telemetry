@@ -1,4 +1,7 @@
-use crate::telemetry::task_metadata::{SpawnLocationId, TaskId};
+use crate::telemetry::{
+    cpu_profile::ThreadName,
+    task_metadata::{SpawnLocationId, TaskId},
+};
 use serde::Serialize;
 
 /// Sentinel worker_id for events from non-worker threads (encoded as u8 on the wire).
@@ -279,8 +282,6 @@ pub enum RawEvent {
     CpuSample(Box<CpuSampleData>),
     /// Definition of a callframe symbol: maps an address to its resolved name.
     CallframeDef(Box<CallframeDefData>),
-    /// Maps an OS thread ID to its name.
-    ThreadNameDef(Box<ThreadNameDefData>),
 }
 
 /// Data for a CPU stack trace sample. Boxed inside [`RawEvent`] to keep the
@@ -290,6 +291,7 @@ pub struct CpuSampleData {
     pub timestamp_nanos: u64,
     pub worker_id: usize,
     pub tid: u32,
+    pub thread_name: Option<ThreadName>,
     pub source: CpuSampleSource,
     pub callchain: Vec<u64>,
 }
@@ -300,13 +302,6 @@ pub struct CallframeDefData {
     pub address: u64,
     pub symbol: String,
     pub location: Option<String>,
-}
-
-/// Data for a thread name definition. Boxed inside [`RawEvent`].
-#[derive(Debug, Clone)]
-pub struct ThreadNameDefData {
-    pub tid: u32,
-    pub name: String,
 }
 
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.
