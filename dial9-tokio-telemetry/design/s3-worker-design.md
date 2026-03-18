@@ -14,8 +14,9 @@ Application Process              Worker Thread (dedicated tokio current_thread r
 │ TracedRuntime    │             │ WorkerLoop                       │
 │   RotatingWriter │────────────▶│   ┌──────────────────────────┐  │
 │   /tmp/traces/   │  .bin files │   │ SegmentProcessor pipeline │  │
-│                  │             │   │  1. GzipCompressor        │  │
-│                  │             │   │  2. S3PipelineUploader     │  │
+│                  │             │   │  1. SymbolizeProcessor*   │  │
+│                  │             │   │  2. GzipCompressor        │  │
+│                  │             │   │  3. S3PipelineUploader    │  │
 │                  │             │   └──────────────────────────┘  │
 └─────────────────┘             └──────────────────────────────────┘
                                            │
@@ -23,6 +24,10 @@ Application Process              Worker Thread (dedicated tokio current_thread r
                         S3: {bucket}/{prefix}/{date-time}/
                             {service}/{instance}/
                             {epoch_secs}-{index}.bin.gz
+
+* SymbolizeProcessor is included when cpu-profiling is enabled.
+  Without S3, the pipeline is: SymbolizeProcessor → GzipWriteBackProcessor
+  (gzip-compresses and writes back to the segment file on disk).
 ```
 
 The worker runs on a dedicated OS thread with its own single-threaded tokio runtime (`tokio::runtime::Builder::new_current_thread`). This isolates it completely from the application's runtime — the worker can never steal time from application tasks.
@@ -162,7 +167,7 @@ pub(crate) trait SegmentProcessor: Send {
 
 `SegmentData` flows through the pipeline, carrying the segment bytes, accumulated metadata, and a metrics guard. Each processor transforms the data and passes it to the next. On error, `ProcessError` carries the `SegmentData` back so metrics are still recorded.
 
-Current pipeline: `GzipCompressor` → `S3PipelineUploader`.
+Current pipeline: `SymbolizeProcessor` (if cpu-profiling) → `GzipCompressor` → `S3PipelineUploader` (if worker-s3). Without S3: `SymbolizeProcessor` → `GzipWriteBackProcessor`.
 
 **Why a trait instead of hardcoded steps?** Extensibility for symbolization, format conversion, and testing (swap in mock processors). The trait uses manual boxed futures rather than `async_trait` to avoid the dependency.
 
@@ -192,10 +197,10 @@ When set, it completely overrides the default time-first key layout. Closures im
 
 ```rust
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
-use dial9_tokio_telemetry::background_task::BackgroundTaskConfig;
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 
-let writer = RotatingWriter::new("/tmp/traces/trace.bin", 1_MB, 5_MB)?;
+let trace_path = "/tmp/traces/trace.bin";
+let writer = RotatingWriter::new(trace_path, 1_MB, 5_MB)?;
 
 let s3_config = S3Config::builder()
     .bucket("my-traces")
@@ -205,24 +210,22 @@ let s3_config = S3Config::builder()
     .boot_id("unique-boot-id")
     .build();
 
-let uploader_config = BackgroundTaskConfig::builder()
-    .trace_path("/tmp/traces/trace.bin")
-    .s3(s3_config)
-    .build();
-
 let (runtime, guard) = TracedRuntime::builder()
     .with_task_tracking(true)
-    .with_s3_uploader(uploader_config)
+    .with_trace_path(trace_path)
+    .with_s3_uploader(s3_config)
     .build_and_start(builder, writer)?;
 
 // Graceful shutdown: flush, seal, wait for worker to drain
 guard.graceful_shutdown(Duration::from_secs(30)).await?;
 ```
 
-`BackgroundTaskConfig` also accepts:
-- `poll_interval` — how often to scan for sealed segments (default: 1s)
-- `client` — pre-built `aws_sdk_s3::Client` (skips default SDK config loading)
-- `metrics_sink` — `BoxEntrySink` for pipeline metrics (default: dev-null)
+The builder auto-constructs the worker pipeline from the configured options. When `cpu-profiling` is enabled, the `SymbolizeProcessor` is added automatically. When `worker-s3` is configured, the `GzipCompressor` and `S3PipelineUploader` are added. Without S3, symbolized segments are gzip-compressed and written back to disk.
+
+Additional builder options:
+- `with_worker_poll_interval(Duration)` — how often to scan for sealed segments (default: 1s)
+- `with_s3_client(Client)` — pre-built `aws_sdk_s3::Client` (skips default SDK config loading)
+- `with_worker_metrics_sink(BoxEntrySink)` — pipeline metrics sink (default: dev-null)
 
 ## Worker Loop
 
@@ -340,7 +343,6 @@ Use [`s3s`](https://docs.rs/s3s/) for integration tests. It implements the S3 wi
 
 ## Future Work
 
-- **Symbolization:** Embed `/proc/self/maps` in traces, symbolize in worker (as a pipeline processor)
 - **Sidecar mode:** Run worker as separate process for blast-radius isolation
 - **Cross-host indexing:** S3 event → Lambda → DynamoDB for "find all traces matching X"
 - **Parquet output:** Convert traces to Parquet for Athena queries

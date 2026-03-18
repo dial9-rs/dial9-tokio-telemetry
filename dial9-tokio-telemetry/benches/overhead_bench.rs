@@ -176,9 +176,7 @@ fn main() {
             let mut tb = TracedRuntime::builder().with_task_tracking(true);
             #[cfg(target_os = "linux")]
             {
-                tb = tb
-                    .with_cpu_profiling(CpuProfilingConfig::default())
-                    .with_inline_callframe_symbols(true);
+                tb = tb.with_cpu_profiling(CpuProfilingConfig::default());
             }
             let (rt, g) = tb.build_and_start(builder, writer).unwrap();
             (rt, Some(g))

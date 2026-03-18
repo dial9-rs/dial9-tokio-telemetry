@@ -7,22 +7,16 @@ use crate::telemetry::events::{CpuSampleData, ThreadRole};
 use crate::telemetry::format::WorkerId;
 use crate::telemetry::writer::TraceWriter;
 
-#[cfg(feature = "cpu-profiling")]
-use super::cpu_flush_state::CpuFlushState;
-
 /// Intermediate layer between the recorder and the raw `TraceWriter`.
 ///
-/// Owns the writer, CPU-profiling interning state (`CpuFlushState`), and the
-/// CPU profiler itself. Its API is roughly:
+/// Owns the writer and the CPU profiler. Its API is roughly:
 ///
 /// - `write_raw_event(raw)` — write event through the writer
-/// - `write_cpu_event(event)` — intern CPU defs, write atomically
+/// - `write_cpu_event(event)` — write a CPU sample event
 /// - `flush_cpu(shared)` — drain CPU/sched profilers into the trace via `write_cpu_event`
 /// - `flush()` — flush the underlying writer
 pub(crate) struct EventWriter {
     pub(super) writer: Box<dyn TraceWriter>,
-    #[cfg(feature = "cpu-profiling")]
-    pub(super) cpu_flush: Option<CpuFlushState>,
     #[cfg(feature = "cpu-profiling")]
     pub(super) cpu_profiler: Option<crate::telemetry::cpu_profile::CpuProfiler>,
 }
@@ -31,8 +25,6 @@ impl EventWriter {
     pub(crate) fn new(writer: Box<dyn TraceWriter>) -> Self {
         Self {
             writer,
-            #[cfg(feature = "cpu-profiling")]
-            cpu_flush: None,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiler: None,
         }
@@ -44,21 +36,12 @@ impl EventWriter {
         Ok(())
     }
 
-    /// Write a single CPU event, emitting any necessary defs first.
+    /// Write a single CPU sample event.
     #[cfg(feature = "cpu-profiling")]
     pub(crate) fn write_cpu_event(&mut self, data: &CpuSampleData) {
-        if let Some(mut cpu) = self.cpu_flush.take() {
-            if self.writer.take_rotated() {
-                cpu.on_rotate();
-            }
-            let batch = cpu.resolve_cpu_event_symbols(data);
-            if let Err(e) = self.writer.write_event_batch(&batch) {
-                tracing::warn!("failed to write CPU trace event: {e}");
-            }
-            if self.writer.take_rotated() {
-                cpu.on_rotate();
-            }
-            self.cpu_flush = Some(cpu);
+        let event = RawEvent::CpuSample(Box::new(data.clone()));
+        if let Err(e) = self.writer.write_event(&event) {
+            tracing::warn!("failed to write CPU trace event: {e}");
         }
     }
 

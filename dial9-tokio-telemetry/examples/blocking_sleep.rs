@@ -18,7 +18,6 @@ fn main() {
     let (runtime, _guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_cpu_profiling(Default::default())
-        .with_inline_callframe_symbols(true)
         .with_sched_events(Default::default())
         .build_and_start(builder, writer)
         .unwrap();
