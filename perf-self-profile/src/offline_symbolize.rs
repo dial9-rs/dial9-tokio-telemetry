@@ -12,7 +12,7 @@ use dial9_trace_format::{
     decoder::{DecodedFrameRef, Decoder},
     types::{FieldValue, FieldValueRef, InternedString},
 };
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
 
 use crate::MapsEntry;
@@ -29,13 +29,19 @@ pub struct ProcMapsEntry {
 }
 
 /// Schema-based event for resolved symbol table entries.
+///
+/// Each entry maps an instruction pointer address to a resolved symbol name.
+/// When a function has inlined callees, multiple entries share the same `addr`
+/// with increasing `inline_depth` (0 = outermost).
 #[derive(dial9_trace_format::TraceEvent)]
 pub struct SymbolTableEntry {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
-    pub base_addr: u64,
+    pub addr: u64,
     pub size: u64,
     pub symbol_name: InternedString,
+    /// 0 = outermost function, 1+ = inlined callee depth.
+    pub inline_depth: u64,
 }
 
 /// Write ProcMapsEntry events to a writer using low-level codec functions.
@@ -160,17 +166,14 @@ fn write_symbol_data(
     let symbolizer = Symbolizer::new();
     let mut pool_entries: Vec<codec::PoolEntry> = Vec::new();
     let mut string_to_id: HashMap<String, u32> = HashMap::new();
-    let mut seen_base_addrs: HashSet<u64> = HashSet::new();
     let mut next_pool_id: u32 = 0;
-    let mut symbol_events: Vec<(u64, InternedString)> = Vec::new();
+    // (addr, symbol_pool_id, inline_depth)
+    let mut symbol_events: Vec<(u64, InternedString, u64)> = Vec::new();
 
     for &addr in addresses {
         let symbols = crate::resolve_symbols_with_maps(addr, &symbolizer, maps);
-        for info in symbols {
+        for (depth, info) in symbols.into_iter().enumerate() {
             let Some(name) = info.name else { continue };
-            if !seen_base_addrs.insert(info.base_addr) {
-                continue;
-            }
 
             let pool_id = *string_to_id.entry(name.clone()).or_insert_with(|| {
                 let id = next_pool_id;
@@ -182,7 +185,7 @@ fn write_symbol_data(
                 id
             });
 
-            symbol_events.push((info.base_addr, InternedString::from_raw(pool_id)));
+            symbol_events.push((addr, InternedString::from_raw(pool_id), depth as u64));
         }
     }
 
@@ -191,14 +194,15 @@ fn write_symbol_data(
 
         let type_id = WireTypeId(0xFFFE);
         codec::encode_schema(type_id, &SymbolTableEntry::schema_entry(), output)?;
-        for (base_addr, symbol_id) in &symbol_events {
+        for (addr, symbol_id, inline_depth) in &symbol_events {
             codec::encode_event(
                 type_id,
                 Some(0),
                 &[
-                    FieldValue::Varint(*base_addr),
+                    FieldValue::Varint(*addr),
                     FieldValue::Varint(0),
                     FieldValue::PooledString(*symbol_id),
+                    FieldValue::Varint(*inline_depth),
                 ],
                 output,
             )?;
@@ -462,6 +466,7 @@ mod tests {
                 FieldValue::Varint(0x1000),
                 FieldValue::Varint(256),
                 FieldValue::PooledString(InternedString::from_raw(0)),
+                FieldValue::Varint(0),
             ],
             &mut buf,
         )
@@ -478,6 +483,7 @@ mod tests {
                 values[2],
                 FieldValue::PooledString(InternedString::from_raw(0))
             );
+            assert_eq!(values[3], FieldValue::Varint(0));
         } else {
             panic!("expected event frame");
         }
