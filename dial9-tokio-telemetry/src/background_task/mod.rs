@@ -194,15 +194,16 @@ async fn build_pipeline(config: &mut BackgroundTaskConfig) -> Vec<Box<dyn Segmen
         pipeline.push(Box::new(SymbolizeProcessor));
     }
 
+    let mut has_s3 = false;
     #[cfg(feature = "worker-s3")]
     if let Some(s3_config) = config.s3.take() {
         let s3_uploader = S3PipelineUploader::new(s3_config, config.client.take()).await;
         pipeline.push(Box::new(GzipCompressor));
         pipeline.push(Box::new(s3_uploader));
+        has_s3 = true;
     }
 
-    // Without S3: gzip and write back to disk.
-    if !pipeline.iter().any(|p| p.name() == "S3Upload") {
+    if !has_s3 {
         pipeline.push(Box::new(GzipCompressor));
         pipeline.push(Box::new(WriteBackProcessor));
     }
