@@ -91,7 +91,7 @@ pub struct RotatingWriter {
     segment_metadata: Option<Vec<(String, String)>>,
     /// Cache from Location → formatted string, to avoid
     /// reformatting on every event.
-    location_cache: HashMap<std::panic::Location<'static>, String>,
+    formatted_locations: HashMap<std::panic::Location<'static>, String>,
 }
 
 impl RotatingWriter {
@@ -120,7 +120,7 @@ impl RotatingWriter {
             stopped: false,
             did_rotate: false,
             segment_metadata: None,
-            location_cache: HashMap::new(),
+            formatted_locations: HashMap::new(),
         })
     }
 
@@ -154,7 +154,7 @@ impl RotatingWriter {
             stopped: false,
             did_rotate: false,
             segment_metadata: None,
-            location_cache: HashMap::new(),
+            formatted_locations: HashMap::new(),
         })
     }
 
@@ -276,8 +276,11 @@ impl RotatingWriter {
                 task_id,
                 location,
             } => {
-                let spawn_loc =
-                    Self::intern_location(&mut self.encoder, &mut self.location_cache, location)?;
+                let spawn_loc = Self::intern_location(
+                    &mut self.encoder,
+                    &mut self.formatted_locations,
+                    location,
+                )?;
                 self.encoder.write(&PollStartEvent {
                     timestamp_ns: *timestamp_nanos,
                     worker_id: *worker_id,
@@ -329,8 +332,11 @@ impl RotatingWriter {
                 task_id,
                 location,
             } => {
-                let spawn_loc =
-                    Self::intern_location(&mut self.encoder, &mut self.location_cache, location)?;
+                let spawn_loc = Self::intern_location(
+                    &mut self.encoder,
+                    &mut self.formatted_locations,
+                    location,
+                )?;
                 self.encoder.write(&TaskSpawnEvent {
                     timestamp_ns: *timestamp_nanos,
                     task_id: *task_id,
