@@ -19,21 +19,14 @@ echo "Recording demo trace..."
 AWS_PROFILE="${AWS_PROFILE:-rcoh}" cargo run --release -p metrics-service --bin metrics-service -- \
     --trace-path "$TRACE_PATH" --demo
 
-# Find the generated trace file (rotating writer appends an index).
-# The background worker may have gzip-compressed sealed segments,
-# so decompress if needed before copying to the demo destination.
+# Find the generated trace file (rotating writer appends an index)
 TRACE_FILE=$(ls -1S $TRACE_GLOB 2>/dev/null | head -1)
 if [ -z "$TRACE_FILE" ]; then
     echo "ERROR: No trace file generated" >&2
     exit 1
 fi
 
-if file "$TRACE_FILE" | grep -q gzip; then
-    echo "Decompressing gzipped trace..."
-    gunzip -c "$TRACE_FILE" > "$DEMO_DEST"
-else
-    cp "$TRACE_FILE" "$DEMO_DEST"
-fi
+cp "$TRACE_FILE" "$DEMO_DEST"
 rm -f $TRACE_GLOB
 
 echo "Demo trace size:"
