@@ -6,7 +6,6 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
-use dial9_trace_format::codec::SymbolEntry;
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::{Encoder, Schema};
 use dial9_trace_format::schema::FieldDef;
@@ -111,20 +110,12 @@ struct FuzzSchema {
 enum FuzzAction {
     Event { schema_idx: u8 },
     PoolString(String8),
-    SymbolTable(FuzzSymbol),
 }
 
 #[derive(Arbitrary, Debug)]
 struct String8 {
     data: [u8; 8],
     len: u8,
-}
-
-#[derive(Arbitrary, Debug)]
-struct FuzzSymbol {
-    base_addr: u64,
-    size: u32,
-    symbol_id: u32,
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -203,12 +194,6 @@ fuzz_target!(|data: &[u8]| {
                 let s = String::from_utf8_lossy(&ps.data[..len]);
                 enc.intern_string(&s).unwrap();
             }
-            FuzzAction::SymbolTable(sym) => {
-                enc.write_symbol_table(&[SymbolEntry {
-                    base_addr: sym.base_addr,
-                    size: sym.size,
-                    symbol_id: InternedString::from_raw(sym.symbol_id),
-                }]).unwrap();
             }
         }
     }

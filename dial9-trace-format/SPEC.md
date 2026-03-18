@@ -36,7 +36,7 @@ Every frame begins with a 1-byte tag:
 | `0x01` | Schema |
 | `0x02` | Event |
 | `0x03` | String Pool |
-| `0x04` | Symbol Table |
+| `0x04` | *(reserved)* |
 | `0x05` | Timestamp Reset |
 
 Unknown tags **must** cause the decoder to stop (the stream cannot be advanced without knowing the frame size).
@@ -116,24 +116,6 @@ Each **PoolEntry**:
 
 Multiple string pool frames may appear in a stream. A `pool_id` should be defined before it is referenced, but a decoder may choose to resolve references lazily.
 
-### Symbol Table Frame (`0x04`)
-
-Maps address ranges to symbol names (for stack frame symbolization).
-
-| Field | Type | Description |
-|-------|------|-------------|
-| tag | u8 | `0x04` |
-| count | u32 | Number of entries |
-| entries | [SymbolEntry; count] | Symbol entries (see below) |
-
-Each **SymbolEntry**:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| base_addr | u64 | Start address |
-| size | u32 | Size of the address range in bytes |
-| symbol_id | u32 | Pool ID of the symbol name (references string pool) |
-
 ### Timestamp Reset Frame (`0x05`)
 
 Resets the running timestamp base used for packed event timestamps. The encoder emits this frame when the nanosecond delta between the current base and the next event's timestamp exceeds what a u24 can represent (16,777,215 ns ≈ 16.7 ms), or when the next event's timestamp is earlier than the current base.
@@ -207,7 +189,6 @@ A string map carries an ordered list of key-value pairs (both UTF-8 strings):
 | string/bytes field length | 0–4,294,967,295 bytes | u32 length prefix |
 | StackFrames count | 0–4,294,967,295 | u32 count |
 | string pool entry count | 0–4,294,967,295 per frame | u32 count |
-| symbol table entry count | 0–4,294,967,295 per frame | u32 count |
 | pool_id | 0–4,294,967,295 | u32 |
 | Varint | 0–2^64-1 | unsigned LEB128 |
 | Timestamp delta | 0–16,777,215 ns | u24; overflow triggers Timestamp Reset frame |

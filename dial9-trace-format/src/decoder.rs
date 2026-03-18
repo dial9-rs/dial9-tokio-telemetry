@@ -1,8 +1,7 @@
 // Streaming decoder
 
 use crate::codec::{
-    self, Frame, FrameRef, HEADER_SIZE, PoolEntry, PoolEntryRef, SchemaInfo, SymbolEntry,
-    WireTypeId,
+    self, Frame, FrameRef, HEADER_SIZE, PoolEntry, PoolEntryRef, SchemaInfo, WireTypeId,
 };
 use crate::schema::{SchemaEntry, SchemaRegistry};
 use crate::types::{FieldType, FieldValueRef, InternedString};
@@ -80,7 +79,6 @@ pub enum DecodedFrame {
         values: Vec<crate::types::FieldValue>,
     },
     StringPool(Vec<PoolEntry>),
-    SymbolTable(Vec<SymbolEntry>),
 }
 
 /// Zero-copy decoded frame that borrows from the input buffer.
@@ -93,7 +91,6 @@ pub enum DecodedFrameRef<'a> {
         values: Vec<FieldValueRef<'a>>,
     },
     StringPool(Vec<PoolEntryRef<'a>>),
-    SymbolTable(Vec<SymbolEntry>),
 }
 
 struct SchemaCache {
@@ -204,7 +201,6 @@ impl<'a> Decoder<'a> {
                 }
                 Ok(Some(DecodedFrame::StringPool(entries)))
             }
-            Frame::SymbolTable(entries) => Ok(Some(DecodedFrame::SymbolTable(entries))),
             Frame::TimestampReset(ts) => {
                 self.timestamp_base_ns = ts;
                 self.next_frame() // consume silently, return next real frame
@@ -268,7 +264,6 @@ impl<'a> Decoder<'a> {
                 }
                 Ok(Some(DecodedFrameRef::StringPool(entries)))
             }
-            FrameRef::SymbolTable(entries) => Ok(Some(DecodedFrameRef::SymbolTable(entries))),
             FrameRef::TimestampReset(ts) => {
                 self.timestamp_base_ns = ts;
                 self.next_frame_ref()

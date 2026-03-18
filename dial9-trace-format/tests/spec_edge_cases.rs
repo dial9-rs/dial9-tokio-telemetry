@@ -1,12 +1,12 @@
 //! Tests validating SPEC.md edge cases and format limits.
 
 use dial9_trace_format::codec::{
-    self, Frame, HEADER_SIZE, MAGIC, PoolEntry, SchemaInfo, SymbolEntry, VERSION, WireTypeId,
+    self, Frame, HEADER_SIZE, MAGIC, PoolEntry, SchemaInfo, VERSION, WireTypeId,
 };
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::schema::{FieldDef, SchemaEntry};
-use dial9_trace_format::types::{FieldType, FieldValue, InternedString};
+use dial9_trace_format::types::{FieldType, FieldValue};
 
 // --- Header edge cases ---
 
@@ -267,21 +267,6 @@ fn string_pool_many_entries() {
     codec::encode_string_pool(&entries, &mut buf).unwrap();
     let (frame, _) = codec::decode_frame(&buf, |_| None, 0).unwrap();
     assert_eq!(frame, Frame::StringPool(entries));
-}
-
-// --- Symbol table edge cases ---
-
-#[test]
-fn symbol_table_max_address() {
-    let entries = vec![SymbolEntry {
-        base_addr: u64::MAX,
-        size: u32::MAX,
-        symbol_id: InternedString::from_raw(u32::MAX),
-    }];
-    let mut buf = Vec::new();
-    codec::encode_symbol_table(&entries, &mut buf).unwrap();
-    let (frame, _) = codec::decode_frame(&buf, |_| None, 0).unwrap();
-    assert_eq!(frame, Frame::SymbolTable(entries));
 }
 
 // --- Multi-frame ordering ---

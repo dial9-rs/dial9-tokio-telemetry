@@ -5,7 +5,7 @@ const MAGIC = [0x54, 0x52, 0x43, 0x00];
 const TAG_SCHEMA = 0x01;
 const TAG_EVENT = 0x02;
 const TAG_STRING_POOL = 0x03;
-const TAG_SYMBOL_TABLE = 0x04;
+// Tag 0x04 is reserved (formerly SymbolTable, now a schema-based event).
 const TAG_TIMESTAMP_RESET = 0x05;
 
 const FieldType = {
@@ -109,7 +109,6 @@ class TraceDecoder {
       case TAG_SCHEMA: return this._decodeSchema();
       case TAG_EVENT: return this._decodeEvent();
       case TAG_STRING_POOL: return this._decodeStringPool();
-      case TAG_SYMBOL_TABLE: return this._decodeSymbolTable();
       case TAG_TIMESTAMP_RESET: {
         const lo = this._view.getUint32(this._pos, true);
         const hi = this._view.getUint32(this._pos + 4, true);
@@ -196,18 +195,6 @@ class TraceDecoder {
     return { type: 'string_pool', entries };
   }
 
-  _decodeSymbolTable() {
-    const count = this._view.getUint32(this._pos, true); this._pos += 4;
-    const entries = [];
-    for (let i = 0; i < count; i++) {
-      const baseAddr = this._view.getBigUint64(this._pos, true); this._pos += 8;
-      const size = this._view.getUint32(this._pos, true); this._pos += 4;
-      const symbolIdRaw = this._view.getUint32(this._pos, true); this._pos += 4;
-      const symbolName = this.stringPool.get(symbolIdRaw) ?? `<unresolved pool#${symbolIdRaw}>`;
-      entries.push({ baseAddr: baseAddr.toString(), size, symbolName });
-    }
-    return { type: 'symbol_table', entries };
-  }
 }
 
 // --- CLI: decode a file and print JSON ---

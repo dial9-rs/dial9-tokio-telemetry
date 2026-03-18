@@ -1,8 +1,8 @@
-use dial9_trace_format::codec::SymbolEntry;
+use dial9_trace_format::codec::{self, WireTypeId};
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::schema::FieldDef;
-use dial9_trace_format::types::{FieldType, FieldValue};
+use dial9_trace_format::types::{FieldType, FieldValue, InternedString};
 
 #[test]
 fn full_round_trip() {
@@ -63,22 +63,54 @@ fn full_round_trip() {
     .unwrap();
 
     let sym_name_id = enc.intern_string("my_function").unwrap();
-    enc.write_symbol_table(&[SymbolEntry {
-        base_addr: 0x5555_5555_0000,
-        size: 0x2000,
-        symbol_id: sym_name_id,
-    }])
-    .unwrap();
 
-    let data = enc.finish();
+    let mut data = enc.finish();
+
+    // Append symbol table as untimestamped schema-based events via low-level codec.
+    let sym_tid = WireTypeId(100);
+    codec::encode_schema(
+        sym_tid,
+        &dial9_trace_format::schema::SchemaEntry {
+            name: "SymbolTableEntry".into(),
+            has_timestamp: false,
+            fields: vec![
+                FieldDef {
+                    name: "base_addr".into(),
+                    field_type: FieldType::Varint,
+                },
+                FieldDef {
+                    name: "size".into(),
+                    field_type: FieldType::Varint,
+                },
+                FieldDef {
+                    name: "symbol_name".into(),
+                    field_type: FieldType::PooledString,
+                },
+            ],
+        },
+        &mut data,
+    )
+    .unwrap();
+    codec::encode_event(
+        sym_tid,
+        None,
+        &[
+            FieldValue::Varint(0x5555_5555_0000),
+            FieldValue::Varint(0x2000),
+            FieldValue::PooledString(sym_name_id),
+        ],
+        &mut data,
+    )
+    .unwrap();
 
     let mut dec = Decoder::new(&data).unwrap();
     assert_eq!(dec.version(), 1);
 
     let decoded = dec.decode_all();
 
-    // 2 schemas + 1 pool("worker-0") + 1 poll event + 1 cpu sample + 1 pool("my_function") + 1 symbol table = 7
-    assert_eq!(decoded.len(), 7, "got: {decoded:#?}");
+    // 2 schemas(PollStart,CpuSample) + 1 pool("worker-0") + 1 poll event + 1 cpu sample
+    // + 1 pool("my_function") + 1 schema(SymbolTableEntry) + 1 symbol event = 8
+    assert_eq!(decoded.len(), 8, "got: {decoded:#?}");
 
     assert!(matches!(&decoded[0], DecodedFrame::Schema(s) if s.name == "PollStart"));
     assert!(matches!(&decoded[1], DecodedFrame::Schema(s) if s.name == "CpuSample"));
@@ -101,13 +133,14 @@ fn full_round_trip() {
         panic!("expected event frame");
     }
 
-    // Verify symbol table
-    if let DecodedFrame::SymbolTable(entries) = &decoded[6] {
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].base_addr, 0x5555_5555_0000);
-        assert_eq!(entries[0].symbol_id, sym_name_id);
+    // Verify symbol table event
+    assert!(matches!(&decoded[6], DecodedFrame::Schema(s) if s.name == "SymbolTableEntry"));
+    if let DecodedFrame::Event { values, .. } = &decoded[7] {
+        assert_eq!(values[0], FieldValue::Varint(0x5555_5555_0000));
+        assert_eq!(values[1], FieldValue::Varint(0x2000));
+        assert_eq!(values[2], FieldValue::PooledString(sym_name_id));
     } else {
-        panic!("expected symbol table frame");
+        panic!("expected symbol table event");
     }
 }
 
