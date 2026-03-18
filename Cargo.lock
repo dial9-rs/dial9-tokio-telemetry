@@ -1398,6 +1398,7 @@ dependencies = [
  "libc",
  "perf-event-data",
  "perf-event-open-sys2",
+ "tracing",
 ]
 
 [[package]]

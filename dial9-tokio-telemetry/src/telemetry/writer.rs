@@ -265,6 +265,9 @@ impl RotatingWriter {
 
     /// Write a resolved event without triggering rotation.
     fn write_resolved_no_rotate(&mut self, event: &RawEvent) -> std::io::Result<()> {
+        if self.stopped {
+            return Ok(());
+        }
         match event {
             RawEvent::PollStart {
                 timestamp_nanos,

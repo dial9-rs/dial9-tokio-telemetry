@@ -100,7 +100,7 @@ impl Drop for PerfEvent {
     }
 }
 
-const PAGE_COUNT: usize = 16; // power of 2
+const PAGE_COUNT: usize = 512; // power of 2; 2 MB at 4 KB pages
 
 /// Open a perf event fd, mmap the ring buffer, and enable it.
 fn open_perf_event(attr: &mut perf_event_attr, pid: i32, cpu: i32) -> io::Result<PerfEvent> {
@@ -409,6 +409,10 @@ impl PerfSampler {
                             callchain,
                             raw: s.raw().map(|r| r.to_vec()),
                         }
+                    }
+                    Record::Lost(lost) => {
+                        tracing::debug!("[perf] lost {} events (ring buffer overflow)", lost.lost);
+                        return;
                     }
                     _ => return,
                 };
