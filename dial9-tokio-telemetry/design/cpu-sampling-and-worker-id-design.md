@@ -176,7 +176,7 @@ Key event types (as schema names):
 - `QueueSample`, `TaskSpawn`, `WakeEvent`
 - `CpuSample` (carries worker_id, tid, source, and stack frames)
 - `ThreadNameDef` (maps OS tid to thread name)
-- `SymbolTableEntry` (resolved symbol: base_addr, size, symbol_name)
+- `SymbolTableEntry` (resolved symbol: addr, size, symbol_name, inline_depth)
 - `ProcMapsEntry` (memory mapping: start, end, file_offset, path)
 
 The tid to worker mapping is resolved in-process before writing. `CpuSample` events carry an already-resolved `worker_id`, so readers do not need access to the raw tid mapping.
