@@ -148,7 +148,6 @@ fn main() -> std::io::Result<()> {
     let uploader_config = BackgroundTaskConfig::builder()
         .trace_path(&args.trace_path)
         .s3(s3_config)
-        .metrics_sink(metrics_sink)
         .build();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -157,6 +156,7 @@ fn main() -> std::io::Result<()> {
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_s3_uploader(uploader_config)
+        .with_metrics_sink(metrics_sink)
         .build_and_start(builder, writer)?;
 
     let handle = guard.handle();

@@ -21,6 +21,7 @@ use super::cpu_flush_state::CpuFlushState;
 /// - `flush()` — flush the underlying writer
 pub(crate) struct EventWriter {
     pub(super) writer: Box<dyn TraceWriter>,
+    events_written: u64,
     #[cfg(feature = "cpu-profiling")]
     pub(super) cpu_flush: Option<CpuFlushState>,
     #[cfg(feature = "cpu-profiling")]
@@ -31,6 +32,7 @@ impl EventWriter {
     pub(crate) fn new(writer: Box<dyn TraceWriter>) -> Self {
         Self {
             writer,
+            events_written: 0,
             #[cfg(feature = "cpu-profiling")]
             cpu_flush: None,
             #[cfg(feature = "cpu-profiling")]
@@ -38,9 +40,14 @@ impl EventWriter {
         }
     }
 
+    pub(crate) fn events_written(&self) -> u64 {
+        self.events_written
+    }
+
     /// Write a RawEvent through the writer.
     pub(crate) fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
         self.writer.write_event(&raw)?;
+        self.events_written += 1;
         Ok(())
     }
 
@@ -54,6 +61,8 @@ impl EventWriter {
             let batch = cpu.resolve_cpu_event_symbols(data);
             if let Err(e) = self.writer.write_event_batch(&batch) {
                 tracing::warn!("failed to write CPU trace event: {e}");
+            } else {
+                self.events_written += batch.len() as u64;
             }
             if self.writer.take_rotated() {
                 cpu.on_rotate();

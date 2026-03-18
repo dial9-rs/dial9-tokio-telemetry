@@ -9,10 +9,12 @@ use event_writer::EventWriter;
 #[cfg(feature = "cpu-profiling")]
 use cpu_flush_state::CpuFlushState;
 
+use crate::metrics::{FlushMetrics, Operation};
 use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::writer::TraceWriter;
+use metrique::timers::Timer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,6 +23,12 @@ use tokio::runtime::Handle;
 pub struct TelemetryRecorder {
     shared: Arc<SharedState>,
     event_writer: EventWriter,
+}
+
+/// Stats returned by [`TelemetryRecorder::flush`] for metrics publishing.
+pub(crate) struct FlushStats {
+    pub event_count: u64,
+    pub dropped_batches: u64,
 }
 
 impl TelemetryRecorder {
@@ -38,21 +46,37 @@ impl TelemetryRecorder {
         self.shared.metrics.store(Arc::new(Some(metrics)));
     }
 
-    fn flush(&mut self) {
+    fn flush(&mut self) -> FlushStats {
         #[cfg(feature = "cpu-profiling")]
         self.event_writer.flush_cpu(&self.shared);
 
+        let dropped = self.shared.collector.take_dropped_batches();
+        if dropped > 0 {
+            tracing::warn!(
+                dropped_batches = dropped,
+                "telemetry flush fell behind, dropped batches"
+            );
+        }
+
+        let events_before = self.event_writer.events_written();
         for batch in self.shared.collector.drain() {
             for raw in batch {
                 if let Err(e) = self.event_writer.write_raw_event(raw) {
                     tracing::warn!("failed to write trace event: {e}");
                     self.shared.enabled.store(false, Ordering::Relaxed);
-                    return;
+                    return FlushStats {
+                        event_count: self.event_writer.events_written() - events_before,
+                        dropped_batches: dropped as u64,
+                    };
                 }
             }
         }
         if let Err(e) = self.event_writer.flush() {
             tracing::warn!("failed to flush trace data: {e}");
+        }
+        FlushStats {
+            event_count: self.event_writer.events_written() - events_before,
+            dropped_batches: dropped as u64,
         }
     }
 
@@ -342,6 +366,7 @@ pub struct TracedRuntimeBuilder {
     #[cfg(feature = "cpu-profiling")]
     inline_callframe_symbols: bool,
     worker_config: Option<crate::background_task::BackgroundTaskConfig>,
+    metrics_sink: metrique_writer::BoxEntrySink,
 }
 
 impl TracedRuntimeBuilder {
@@ -403,6 +428,14 @@ impl TracedRuntimeBuilder {
         config: crate::background_task::BackgroundTaskConfig,
     ) -> Self {
         self.worker_config = Some(config);
+        self
+    }
+
+    /// Set the metrics sink for telemetry operational metrics (flush stats,
+    /// pipeline metrics, etc.). Defaults to
+    /// [`DevNullSink`](metrique_writer::sink::DevNullSink).
+    pub fn with_metrics_sink(mut self, sink: metrique_writer::BoxEntrySink) -> Self {
+        self.metrics_sink = sink;
         self
     }
 
@@ -485,12 +518,18 @@ impl TracedRuntimeBuilder {
             let rec = recorder.clone();
             let shared = recorder.lock().unwrap().shared.clone();
             let stop = stop.clone();
+            let flush_metrics_sink = self.metrics_sink.clone();
             std::thread::Builder::new()
                 .name("telemetry-flush".into())
                 .spawn(move || {
-                    let flush_interval = Duration::from_millis(250);
+                    // Lower this thread's scheduling priority so it doesn't
+                    // compete with worker threads for CPU time.
+                    #[cfg(target_os = "linux")]
+                    unsafe {
+                        libc::nice(10);
+                    }
+
                     let sample_interval = Duration::from_millis(10);
-                    let mut last_flush = Instant::now();
                     let mut last_sample = Instant::now();
 
                     while !stop.load(Ordering::Acquire) {
@@ -505,9 +544,17 @@ impl TracedRuntimeBuilder {
                             }
                         }
 
-                        if now.duration_since(last_flush) >= flush_interval {
-                            last_flush = now;
-                            rec.lock().unwrap().flush();
+                        let mut flush_timer = Timer::start_now();
+                        let stats = rec.lock().unwrap().flush();
+                        flush_timer.stop();
+                        if stats.event_count > 0 || stats.dropped_batches > 0 {
+                            let _guard = FlushMetrics {
+                                operation: Operation::Flush,
+                                event_count: stats.event_count,
+                                flush_duration: flush_timer,
+                                dropped_batches: stats.dropped_batches,
+                            }
+                            .append_on_drop(flush_metrics_sink.clone());
                         }
                     }
                 })
@@ -519,11 +566,12 @@ impl TracedRuntimeBuilder {
         #[allow(unused_mut)]
         let mut worker = None;
         if let Some(config) = self.worker_config {
+            let metrics_sink = self.metrics_sink.clone();
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             let wt = std::thread::Builder::new()
                 .name("dial9-worker".into())
                 .spawn(move || {
-                    crate::background_task::run_background_task(config, shutdown_rx);
+                    crate::background_task::run_background_task(config, shutdown_rx, metrics_sink);
                 })
                 .expect("failed to spawn dial9-worker thread");
             worker = Some(WorkerHandle {
@@ -575,6 +623,7 @@ impl TracedRuntime {
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
             worker_config: None,
+            metrics_sink: metrique_writer::sink::DevNullSink::boxed(),
         }
     }
 
@@ -595,6 +644,7 @@ impl TracedRuntime {
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
             worker_config: None,
+            metrics_sink: metrique_writer::sink::DevNullSink::boxed(),
         }
         .build(builder, writer)
     }
@@ -617,6 +667,7 @@ impl TracedRuntime {
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
             worker_config: None,
+            metrics_sink: metrique_writer::sink::DevNullSink::boxed(),
         }
         .build_and_start(builder, writer)
     }
