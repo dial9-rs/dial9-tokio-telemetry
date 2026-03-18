@@ -36,14 +36,18 @@ pub struct BackgroundTaskConfig {
     /// How often the worker checks for sealed segments. Defaults to 1 second.
     #[builder(default = DEFAULT_POLL_INTERVAL)]
     poll_interval: Duration,
-    /// S3 upload configuration.
+    /// S3 upload configuration. When `None`, the worker symbolizes and
+    /// gzip-writes back to disk without uploading.
     #[cfg(feature = "worker-s3")]
-    s3: s3::S3Config,
+    s3: Option<s3::S3Config>,
     /// Pre-built S3 client. When provided, the worker uses this client
     /// instead of building one from `aws_config::load_defaults`.
     /// Region auto-detection still applies unless `region` is set on `S3Config`.
     #[cfg(feature = "worker-s3")]
     client: Option<aws_sdk_s3::Client>,
+    /// When true, run the symbolize processor on each segment.
+    #[builder(default)]
+    symbolize: bool,
     /// Metrics sink. Defaults to [`DevNullSink`](metrique_writer::sink::DevNullSink).
     #[builder(default = metrique_writer::sink::DevNullSink::boxed())]
     metrics_sink: BoxEntrySink,
@@ -78,8 +82,8 @@ impl BackgroundTaskConfig {
 
     /// S3 upload configuration.
     #[cfg(feature = "worker-s3")]
-    pub fn s3(&self) -> &s3::S3Config {
-        &self.s3
+    pub fn s3(&self) -> Option<&s3::S3Config> {
+        self.s3.as_ref()
     }
 }
 
@@ -181,16 +185,33 @@ pub(crate) trait SegmentProcessor: Send {
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>;
 }
 
-/// Build the processor pipeline. Requires an async context for S3 client setup.
-#[cfg(feature = "worker-s3")]
+/// Build the processor pipeline based on config flags and available features.
 async fn build_pipeline(config: &mut BackgroundTaskConfig) -> Vec<Box<dyn SegmentProcessor>> {
-    let s3_uploader = S3PipelineUploader::new(config).await;
-    vec![Box::new(GzipCompressor), Box::new(s3_uploader)]
-}
+    let mut pipeline: Vec<Box<dyn SegmentProcessor>> = Vec::new();
 
-#[cfg(not(feature = "worker-s3"))]
-async fn build_pipeline(_config: &mut BackgroundTaskConfig) -> Vec<Box<dyn SegmentProcessor>> {
-    Vec::new()
+    #[cfg(feature = "cpu-profiling")]
+    if config.symbolize {
+        pipeline.push(Box::new(SymbolizeProcessor));
+    }
+
+    #[cfg(feature = "worker-s3")]
+    if let Some(s3_config) = config.s3.take() {
+        let s3_uploader = S3PipelineUploader::new(s3_config, config.client.take()).await;
+        pipeline.push(Box::new(GzipCompressor));
+        pipeline.push(Box::new(s3_uploader));
+    }
+
+    // Symbolize without S3: gzip and write back to disk.
+    #[cfg(feature = "cpu-profiling")]
+    if config.symbolize
+        && !pipeline
+            .iter()
+            .any(|p| p.name() == "Gzip" || p.name() == "S3Upload")
+    {
+        pipeline.push(Box::new(GzipWriteBackProcessor));
+    }
+
+    pipeline
 }
 
 /// The worker loop function. Runs on a dedicated thread, polls for sealed
@@ -560,10 +581,8 @@ pub(crate) struct S3PipelineUploader {
 
 #[cfg(feature = "worker-s3")]
 impl S3PipelineUploader {
-    async fn new(config: &mut BackgroundTaskConfig) -> Self {
-        let s3_config = config.s3().clone();
-
-        let bootstrap_client = match config.client.clone() {
+    async fn new(s3_config: s3::S3Config, client: Option<aws_sdk_s3::Client>) -> Self {
+        let bootstrap_client = match client {
             Some(c) => c,
             None => {
                 let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
