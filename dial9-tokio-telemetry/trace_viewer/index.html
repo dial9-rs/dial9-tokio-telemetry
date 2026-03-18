@@ -874,6 +874,15 @@
                     console.log(`CPU samples: ${trace.cpuSamples.length}, polls with cpu samples: ${pollsWithSamples}, polls with sched events: ${pollsWithSched}`);
                 }
 
+                if (trace.tracepointEvents.length > 0) {
+                    const byName = {};
+                    for (const tp of trace.tracepointEvents) {
+                        byName[tp.name] = (byName[tp.name] || 0) + 1;
+                    }
+                    const summary = Object.entries(byName).map(([n, c]) => `${n}: ${c}`).join(', ');
+                    console.log(`Tracepoint events: ${trace.tracepointEvents.length} (${summary})`);
+                }
+
                 // Per-worker local queue samples (from events that have local_queue)
                 workerQueueSamples = {};
                 maxLocalQueue = 1;
@@ -1179,6 +1188,26 @@
                     lanesContainer.appendChild(lane);
                     laneCanvases[w] = canvas;
                 }
+
+                // Add tracepoint lane if there are tracepoint events
+                if (trace && trace.tracepointEvents && trace.tracepointEvents.length > 0) {
+                    const lane = document.createElement("div");
+                    lane.className = "lane";
+                    const label = document.createElement("div");
+                    label.className = "lane-label";
+                    const names = [...new Set(trace.tracepointEvents.map(e => e.name))];
+                    label.textContent = names.length === 1 ? names[0] : `Tracepoints (${names.length})`;
+                    label.title = names.join(', ');
+                    const content = document.createElement("div");
+                    content.className = "lane-content";
+                    const canvas = document.createElement("canvas");
+                    canvas.id = "tracepoint-canvas";
+                    content.appendChild(canvas);
+                    lane.appendChild(label);
+                    lane.appendChild(content);
+                    lanesContainer.appendChild(lane);
+                    laneCanvases['_tracepoint'] = canvas;
+                }
             }
 
             // ── Rendering ──
@@ -1208,6 +1237,7 @@
 
                 renderTimeline(drawW - scrollbarW);
                 for (const w of workerIds) renderLane(w, drawW);
+                renderTracepointLane(drawW);
                 renderTaskDetail(scrollbarW);
                 renderQueueChart(drawW, scrollbarW);
             }
@@ -1519,6 +1549,38 @@
 
             // Hit regions for task detail tooltip: [{x1, x2, y1, y2, type, detail}]
             let taskDetailHitRegions = [];
+
+            function renderTracepointLane(drawW) {
+                const canvas = laneCanvases['_tracepoint'];
+                if (!canvas || !trace || !trace.tracepointEvents || trace.tracepointEvents.length === 0) return;
+                const parent = canvas.parentElement;
+                const dpr = devicePixelRatio || 1;
+                const pw = parent.clientWidth;
+                const ph = parent.clientHeight;
+                canvas.width = pw * dpr;
+                canvas.height = ph * dpr;
+                canvas.style.width = pw + "px";
+                canvas.style.height = ph + "px";
+                const ctx = canvas.getContext("2d");
+                ctx.scale(dpr, dpr);
+                ctx.clearRect(0, 0, pw, ph);
+
+                // Assign a color per tracepoint name
+                const colors = ["#4fc3f7", "#81c784", "#ffb74d", "#e57373", "#ba68c8", "#4dd0e1"];
+                const nameSet = [...new Set(trace.tracepointEvents.map(e => e.name))];
+                const colorMap = {};
+                nameSet.forEach((n, i) => colorMap[n] = colors[i % colors.length]);
+
+                const bandH = Math.max(ph - 4, 8);
+                const bandTop = 2;
+
+                for (const tp of trace.tracepointEvents) {
+                    if (tp.timestamp < viewStart || tp.timestamp > viewEnd) continue;
+                    const x = nsToX(tp.timestamp, pw);
+                    ctx.fillStyle = colorMap[tp.name];
+                    ctx.fillRect(x, bandTop, 2, bandH);
+                }
+            }
 
             function renderTaskDetail(scrollbarW) {
                 const panel = document.getElementById("task-detail");

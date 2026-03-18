@@ -19,6 +19,8 @@ pub use analysis::{
 pub use cpu_profile::CpuProfilingConfig;
 #[cfg(feature = "cpu-profiling")]
 pub use cpu_profile::SchedEventConfig;
+#[cfg(feature = "cpu-profiling")]
+pub use cpu_profile::Tracepoint;
 pub use dial9_trace_format::InternedString;
 pub use events::{CallframeDefData, CpuSampleData, CpuSampleSource, SchedStat, TelemetryEvent};
 pub use format::WorkerId;

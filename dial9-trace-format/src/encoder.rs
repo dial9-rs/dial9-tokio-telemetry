@@ -186,9 +186,6 @@ impl<W: Write> Encoder<W> {
     ) -> io::Result<()> {
         use crate::types::FieldValue;
 
-        let type_id = self.ensure_registered(schema)?;
-        let expected_fields = schema.entry.fields.len();
-
         let ts_ns = match values.first() {
             Some(FieldValue::Varint(ns)) => *ns,
             _ => {
@@ -198,26 +195,41 @@ impl<W: Write> Encoder<W> {
                 ));
             }
         };
-        let field_values = &values[1..];
+        self.write_event_ts(schema, ts_ns, &values[1..])
+    }
 
-        if field_values.len() != expected_fields {
+    /// Write a dynamic-schema event with an explicit timestamp.
+    ///
+    /// Unlike [`write_event`](Self::write_event), the timestamp is passed
+    /// separately and `values` contains only the field values (no leading
+    /// timestamp varint).
+    pub fn write_event_ts(
+        &mut self,
+        schema: &Schema,
+        timestamp_ns: u64,
+        values: &[crate::types::FieldValue],
+    ) -> io::Result<()> {
+        let type_id = self.ensure_registered(schema)?;
+        let expected_fields = schema.entry.fields.len();
+
+        if values.len() != expected_fields {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "value count ({}) does not match schema field count ({}) for schema '{}'",
-                    field_values.len(),
+                    values.len(),
                     expected_fields,
                     schema.name(),
                 ),
             ));
         }
 
-        let ts_delta = self.state.encode_timestamp_delta(ts_ns)?;
+        let ts_delta = self.state.encode_timestamp_delta(timestamp_ns)?;
         self.state.writer.write_all(&[codec::TAG_EVENT])?;
         self.state.writer.write_all(&type_id.0.to_le_bytes())?;
         codec::encode_u24_le(ts_delta, &mut self.state.writer)?;
         let mut enc = EventEncoder::new(&mut self.state);
-        for v in field_values {
+        for v in values {
             enc.write_field_value(v)?;
         }
         Ok(())

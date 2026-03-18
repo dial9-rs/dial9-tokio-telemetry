@@ -95,6 +95,8 @@ pub(crate) struct SharedState {
     pub(crate) thread_roles: Mutex<HashMap<u32, ThreadRole>>,
     #[cfg(feature = "cpu-profiling")]
     pub(crate) sched_profiler: Mutex<Option<crate::telemetry::cpu_profile::SchedProfiler>>,
+    #[cfg(feature = "cpu-profiling")]
+    pub(crate) tracepoint_profilers: Mutex<Vec<crate::telemetry::cpu_profile::TracepointProfiler>>,
 }
 
 impl SharedState {
@@ -108,6 +110,8 @@ impl SharedState {
             thread_roles: Mutex::new(HashMap::new()),
             #[cfg(feature = "cpu-profiling")]
             sched_profiler: Mutex::new(None),
+            #[cfg(feature = "cpu-profiling")]
+            tracepoint_profilers: Mutex::new(Vec::new()),
         }
     }
 

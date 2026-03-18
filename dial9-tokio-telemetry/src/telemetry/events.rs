@@ -272,6 +272,14 @@ pub enum RawEvent {
     CpuSample(Box<CpuSampleData>),
     /// Definition of a callframe symbol: maps an address to its resolved name.
     CallframeDef(Box<CallframeDefData>),
+    /// A dynamic-schema event (e.g. kernel tracepoint). The schema is
+    /// Arc-backed so cloning is cheap; values contain only field data
+    /// (timestamp is separate).
+    DynamicEvent {
+        schema: dial9_trace_format::encoder::Schema,
+        timestamp_ns: u64,
+        values: Vec<dial9_trace_format::types::FieldValue>,
+    },
 }
 
 /// Data for a CPU stack trace sample. Boxed inside [`RawEvent`] to keep the

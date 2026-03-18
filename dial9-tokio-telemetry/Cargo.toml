@@ -108,3 +108,7 @@ required-features = ["cpu-profiling"]
 [[bench]]
 name = "flush_path"
 harness = false
+
+[[example]]
+name = "tracepoint_demo"
+required-features = ["cpu-profiling"]

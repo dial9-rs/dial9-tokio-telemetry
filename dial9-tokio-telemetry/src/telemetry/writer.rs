@@ -32,6 +32,15 @@ pub trait TraceWriter: Send {
         }
         Ok(())
     }
+    /// Write a dynamic-schema event (e.g. kernel tracepoint).
+    /// Default implementation is a no-op for writers that don't support it.
+    fn write_dynamic_event(
+        &mut self,
+        _schema: &dial9_trace_format::encoder::Schema,
+        _values: &[dial9_trace_format::types::FieldValue],
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
@@ -49,6 +58,13 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     }
     fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
         (**self).write_event_batch(events)
+    }
+    fn write_dynamic_event(
+        &mut self,
+        schema: &dial9_trace_format::encoder::Schema,
+        values: &[dial9_trace_format::types::FieldValue],
+    ) -> std::io::Result<()> {
+        (**self).write_dynamic_event(schema, values)
     }
 }
 
@@ -387,6 +403,11 @@ impl RotatingWriter {
                     .unwrap_or("<no location>")
                     .to_string(),
             }),
+            RawEvent::DynamicEvent {
+                schema,
+                timestamp_ns,
+                values,
+            } => self.encoder.write_event_ts(schema, *timestamp_ns, values),
         }?;
         Ok(())
     }

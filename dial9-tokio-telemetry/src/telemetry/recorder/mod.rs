@@ -155,6 +155,11 @@ impl TelemetryRecorder {
                     {
                         let _ = p.track_current_thread();
                     }
+                    if let Ok(mut profilers) = s_start.tracepoint_profilers.lock() {
+                        for p in profilers.iter_mut() {
+                            let _ = p.track_current_thread();
+                        }
+                    }
                 })
                 .on_thread_stop(move || {
                     {
@@ -165,6 +170,11 @@ impl TelemetryRecorder {
                         && let Some(ref mut p) = *prof
                     {
                         p.stop_tracking_current_thread();
+                    }
+                    if let Ok(mut profilers) = s_stop.tracepoint_profilers.lock() {
+                        for p in profilers.iter_mut() {
+                            p.stop_tracking_current_thread();
+                        }
                     }
                 });
         }
@@ -349,6 +359,8 @@ pub struct TracedRuntimeBuilder {
     sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
     #[cfg(feature = "cpu-profiling")]
     inline_callframe_symbols: bool,
+    #[cfg(feature = "cpu-profiling")]
+    tracepoints: Vec<crate::telemetry::cpu_profile::Tracepoint>,
     worker_config: Option<crate::background_task::BackgroundTaskConfig>,
 }
 
@@ -401,6 +413,28 @@ impl TracedRuntimeBuilder {
     #[cfg(feature = "cpu-profiling")]
     pub fn with_inline_callframe_symbols(mut self, enabled: bool) -> Self {
         self.inline_callframe_symbols = enabled;
+        self
+    }
+
+    /// Register a kernel tracepoint to capture into the trace.
+    ///
+    /// Accepts a [`Tracepoint`](crate::telemetry::cpu_profile::Tracepoint)
+    /// created via [`Tracepoint::new`], [`Tracepoint::parse`], or
+    /// pre-validated with [`Tracepoint::validate`].
+    ///
+    /// ```no_run
+    /// # use dial9_tokio_telemetry::telemetry::cpu_profile::Tracepoint;
+    /// # use dial9_tokio_telemetry::telemetry::recorder::TracedRuntime;
+    /// TracedRuntime::builder()
+    ///     .capture_tracepoint(Tracepoint::new("sched", "sched_switch"))
+    ///     .capture_tracepoint(Tracepoint::parse("sched:sched_wakeup").unwrap());
+    /// ```
+    #[cfg(feature = "cpu-profiling")]
+    pub fn capture_tracepoint(
+        mut self,
+        tracepoint: crate::telemetry::cpu_profile::Tracepoint,
+    ) -> Self {
+        self.tracepoints.push(tracepoint);
         self
     }
 
@@ -477,6 +511,20 @@ impl TracedRuntimeBuilder {
             }
             if let Some(Ok(sched)) = sched {
                 *rec.shared.sched_profiler.lock().unwrap() = Some(sched);
+            }
+            for tp in self.tracepoints {
+                match tp.into_def() {
+                    Ok(def) => match crate::telemetry::cpu_profile::TracepointProfiler::new(def) {
+                        Ok(profiler) => rec
+                            .shared
+                            .tracepoint_profilers
+                            .lock()
+                            .unwrap()
+                            .push(profiler),
+                        Err(e) => tracing::warn!("failed to start tracepoint profiler: {e}"),
+                    },
+                    Err(e) => tracing::warn!("failed to resolve tracepoint: {e}"),
+                }
             }
         }
 
@@ -584,6 +632,8 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
+            #[cfg(feature = "cpu-profiling")]
+            tracepoints: Vec::new(),
             worker_config: None,
         }
     }
@@ -604,6 +654,8 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
+            #[cfg(feature = "cpu-profiling")]
+            tracepoints: Vec::new(),
             worker_config: None,
         }
         .build(builder, writer)
@@ -626,6 +678,8 @@ impl TracedRuntime {
             sched_event_config: None,
             #[cfg(feature = "cpu-profiling")]
             inline_callframe_symbols: false,
+            #[cfg(feature = "cpu-profiling")]
+            tracepoints: Vec::new(),
             worker_config: None,
         }
         .build_and_start(builder, writer)

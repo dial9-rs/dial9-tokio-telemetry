@@ -43,6 +43,7 @@
         const callframeSymbols = new Map();
         const cpuSamples = [];
         const threadNames = new Map();
+        const tracepointEvents = [];  // dynamic-schema events (kernel tracepoints)
 
         for (const frame of frames) {
             if (events.length >= MAX_EVENTS) break;
@@ -143,6 +144,19 @@
                     });
                     break;
                 }
+                default: {
+                    // Collect dynamic-schema events (kernel tracepoints, etc.)
+                    if (ts > 0) {
+                        const fields = {};
+                        for (const [k, val] of Object.entries(v)) {
+                            fields[k] = typeof val === 'bigint' ? val.toString() : val;
+                        }
+                        tracepointEvents.push({
+                            name: frame.name, timestamp: ts, fields,
+                        });
+                    }
+                    break;
+                }
             }
         }
 
@@ -152,6 +166,7 @@
             hasCpuTime: true, hasSchedWait: true, hasTaskTracking: true,
             spawnLocations, taskSpawnLocs, taskSpawnTimes,
             cpuSamples, callframeSymbols, threadNames, taskTerminateTimes,
+            tracepointEvents,
         };
     }
 

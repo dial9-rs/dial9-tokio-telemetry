@@ -235,11 +235,8 @@ impl TracepointDef {
         raw: &[u8],
     ) -> io::Result<()> {
         let extracted = self.extract_fields(raw)?;
-        let field_values = self.to_trace_format_values(&extracted);
-        let mut values = Vec::with_capacity(1 + field_values.len());
-        values.push(FieldValue::Varint(timestamp_ns));
-        values.extend(field_values);
-        encoder.write_event(schema, &values)
+        let values = self.to_trace_format_values(&extracted);
+        encoder.write_event_ts(schema, timestamp_ns, &values)
     }
 }
 

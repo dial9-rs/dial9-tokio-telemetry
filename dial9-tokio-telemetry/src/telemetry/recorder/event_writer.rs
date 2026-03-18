@@ -110,6 +110,25 @@ impl EventWriter {
                 });
             }
         }
+
+        {
+            let mut profilers = shared.tracepoint_profilers.lock().unwrap();
+            for profiler in profilers.iter_mut() {
+                profiler.drain(|mut tp_event| {
+                    let worker_id = resolve(tp_event.tid);
+                    tp_event.values[0] =
+                        dial9_trace_format::types::FieldValue::Varint(worker_id.as_u64());
+                    let event = RawEvent::DynamicEvent {
+                        schema: tp_event.schema,
+                        timestamp_ns: tp_event.timestamp_ns,
+                        values: tp_event.values,
+                    };
+                    if let Err(e) = self.writer.write_event(&event) {
+                        tracing::warn!("failed to write tracepoint event: {e}");
+                    }
+                });
+            }
+        }
     }
 
     pub(crate) fn flush(&mut self) -> std::io::Result<()> {
