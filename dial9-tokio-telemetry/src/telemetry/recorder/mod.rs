@@ -26,7 +26,9 @@ pub struct TelemetryRecorder {
 impl TelemetryRecorder {
     pub fn new(writer: impl TraceWriter + 'static) -> Self {
         Self {
-            shared: Arc::new(SharedState::new(crate::telemetry::events::clock_monotonic_ns())),
+            shared: Arc::new(SharedState::new(
+                crate::telemetry::events::clock_monotonic_ns(),
+            )),
             event_writer: EventWriter::new(Box::new(writer)),
         }
     }
@@ -410,7 +412,9 @@ impl TracedRuntimeBuilder {
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         use crate::telemetry::writer::NullWriter;
         let runtime = builder.build()?;
-        let shared = Arc::new(SharedState::new(crate::telemetry::events::clock_monotonic_ns()));
+        let shared = Arc::new(SharedState::new(
+            crate::telemetry::events::clock_monotonic_ns(),
+        ));
         let recorder = Arc::new(Mutex::new(TelemetryRecorder {
             shared: shared.clone(),
             event_writer: EventWriter::new(Box::new(NullWriter)),
@@ -440,12 +444,12 @@ impl TracedRuntimeBuilder {
         #[cfg(feature = "cpu-profiling")]
         let sampler = self
             .cpu_profiling_config
-            .map(|config| crate::telemetry::cpu_profile::CpuProfiler::start(config));
+            .map(crate::telemetry::cpu_profile::CpuProfiler::start);
 
         #[cfg(feature = "cpu-profiling")]
         let sched = self
             .sched_event_config
-            .map(|config| crate::telemetry::cpu_profile::SchedProfiler::new(config));
+            .map(crate::telemetry::cpu_profile::SchedProfiler::new);
 
         let recorder = TelemetryRecorder::install(
             &mut builder,

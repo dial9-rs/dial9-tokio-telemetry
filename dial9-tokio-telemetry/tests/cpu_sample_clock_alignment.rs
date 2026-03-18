@@ -17,7 +17,7 @@ mod common;
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
-    use dial9_tokio_telemetry::telemetry::events::{clock_monotonic_ns, CpuSampleSource, RawEvent};
+    use dial9_tokio_telemetry::telemetry::events::{CpuSampleSource, RawEvent, clock_monotonic_ns};
     use dial9_tokio_telemetry::telemetry::format::WorkerId;
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
     use std::sync::{Arc, Mutex};
