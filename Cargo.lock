@@ -1414,6 +1414,7 @@ dependencies = [
  "bon",
  "clap",
  "criterion",
+ "crossbeam-queue",
  "dial9-perf-self-profile",
  "dial9-tokio-telemetry",
  "dial9-trace-format",
