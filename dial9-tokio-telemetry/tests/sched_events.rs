@@ -18,7 +18,6 @@ fn sched_events_capture_context_switches() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_sched_events(SchedEventConfig::default())
-        .with_inline_callframe_symbols(true)
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -40,7 +39,7 @@ fn sched_events_capture_context_switches() {
 
     let events = events.lock().unwrap();
 
-    // 1. CpuSample events exist with SchedEvent source and some are attributed to workers
+    // CpuSample events exist with SchedEvent source and some are attributed to workers
     let worker_samples: Vec<_> = events
         .iter()
         .filter(|e| {
@@ -62,37 +61,4 @@ fn sched_events_capture_context_switches() {
         })
         .count();
     assert_eq!(cpu_profile_samples, 0, "should have no CpuProfile samples");
-
-    // 2. CallframeDef symbols exist, contain "sleep", and include line numbers
-    let callframes: Vec<_> = events
-        .iter()
-        .filter_map(|e| match e {
-            RawEvent::CallframeDef(data) => Some((data.symbol.as_str(), data.location.as_deref())),
-            _ => None,
-        })
-        .collect();
-
-    assert!(!callframes.is_empty(), "expected CallframeDef events");
-
-    let symbols: Vec<&str> = callframes.iter().map(|(s, _)| *s).collect();
-    assert!(
-        symbols
-            .iter()
-            .any(|s| s.contains("sleep") || s.contains("nanosleep")),
-        "expected a symbol containing 'sleep', got:\n{}",
-        symbols.join("\n")
-    );
-
-    // Check that at least one callframe has a location with a line number
-    assert!(
-        callframes.iter().any(|(_, loc)| {
-            loc.is_some_and(|l| {
-                l.rsplit(':')
-                    .next()
-                    .is_some_and(|n| n.parse::<u32>().is_ok())
-            })
-        }),
-        "expected at least one symbol with a line number in location field, got:\n{}",
-        symbols.join("\n")
-    );
 }

@@ -113,7 +113,6 @@ fn main() -> std::io::Result<()> {
     {
         traced_builder = traced_builder
             .with_cpu_profiling(CpuProfilingConfig::default())
-            .with_inline_callframe_symbols(true)
             .with_sched_events(SchedEventConfig {
                 include_kernel: true,
             });

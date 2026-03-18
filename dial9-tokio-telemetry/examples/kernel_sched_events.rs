@@ -69,7 +69,6 @@ fn main() {
         .with_sched_events(SchedEventConfig {
             include_kernel: true,
         })
-        .with_inline_callframe_symbols(true)
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -108,12 +107,7 @@ fn main() {
                 printed += 1;
                 eprintln!("\n--- SchedEvent sample #{printed} (worker {worker_id}) ---");
                 for addr in callchain {
-                    let name = reader
-                        .callframe_symbols
-                        .get(addr)
-                        .cloned()
-                        .unwrap_or_else(|| format!("{:#x}", addr));
-                    eprintln!("  {name}");
+                    eprintln!("  {addr:#x}");
                 }
             }
         }

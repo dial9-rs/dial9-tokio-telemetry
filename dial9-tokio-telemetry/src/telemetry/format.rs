@@ -166,16 +166,6 @@ pub struct CpuSampleEvent {
 }
 
 #[derive(TraceEvent)]
-pub struct CallframeDefEvent {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    pub address: u64,
-    pub symbol: String,
-    /// Empty string encodes `None`.
-    pub location: String,
-}
-
-#[derive(TraceEvent)]
 pub struct WakeEventEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
@@ -231,7 +221,6 @@ pub enum TelemetryEventRef<'a> {
     TaskSpawn(TaskSpawnEventRef<'a>),
     TaskTerminate(TaskTerminateEventRef<'a>),
     CpuSample(CpuSampleEventRef<'a>),
-    CallframeDef(CallframeDefEventRef<'a>),
     WakeEvent(WakeEventEventRef<'a>),
     SegmentMetadata(SegmentMetadataEventRef<'a>),
 }
@@ -249,7 +238,6 @@ impl<'a> TelemetryEventRef<'a> {
             Self::TaskTerminate(e) => Some(e.timestamp_ns),
             Self::CpuSample(e) => Some(e.timestamp_ns),
             Self::WakeEvent(e) => Some(e.timestamp_ns),
-            Self::CallframeDef(e) => Some(e.timestamp_ns),
             Self::SegmentMetadata(e) => Some(e.timestamp_ns),
         }
     }
@@ -285,9 +273,6 @@ pub fn decode_ref<'a>(
         }
         "CpuSampleEvent" => {
             TelemetryEventRef::CpuSample(CpuSampleEvent::decode(timestamp_ns, fields)?)
-        }
-        "CallframeDefEvent" => {
-            TelemetryEventRef::CallframeDef(CallframeDefEvent::decode(timestamp_ns, fields)?)
         }
         "WakeEventEvent" => {
             TelemetryEventRef::WakeEvent(WakeEventEvent::decode(timestamp_ns, fields)?)
@@ -347,18 +332,6 @@ impl From<TelemetryEventRef<'_>> for TelemetryEvent {
                 source: e.source,
                 callchain: e.callchain.iter().collect(),
             },
-            TelemetryEventRef::CallframeDef(e) => {
-                let loc = e.location;
-                TelemetryEvent::CallframeDef {
-                    address: e.address,
-                    symbol: e.symbol.to_owned(),
-                    location: if loc.is_empty() {
-                        None
-                    } else {
-                        Some(loc.to_owned())
-                    },
-                }
-            }
             TelemetryEventRef::WakeEvent(e) => TelemetryEvent::WakeEvent {
                 timestamp_nanos: e.timestamp_ns,
                 waker_task_id: e.waker_task_id,

@@ -339,8 +339,6 @@ pub struct TracedRuntimeBuilder {
     cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
     #[cfg(feature = "cpu-profiling")]
     sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
-    #[cfg(feature = "cpu-profiling")]
-    inline_callframe_symbols: bool,
     worker_config: Option<crate::background_task::BackgroundTaskConfig>,
 }
 
@@ -387,12 +385,6 @@ impl TracedRuntimeBuilder {
         config: crate::telemetry::cpu_profile::SchedEventConfig,
     ) -> Self {
         self.sched_event_config = Some(config);
-        self
-    }
-
-    #[cfg(feature = "cpu-profiling")]
-    pub fn with_inline_callframe_symbols(mut self, enabled: bool) -> Self {
-        self.inline_callframe_symbols = enabled;
         self
     }
 
@@ -461,8 +453,7 @@ impl TracedRuntimeBuilder {
         #[cfg(feature = "cpu-profiling")]
         {
             let mut rec = recorder.lock().unwrap();
-            let mut cpu_flush = CpuFlushState::new();
-            cpu_flush.inline_callframe_symbols = self.inline_callframe_symbols;
+            let cpu_flush = CpuFlushState::new();
             rec.event_writer.cpu_flush = Some(cpu_flush);
             if let Some(Ok(sampler)) = sampler {
                 rec.event_writer.cpu_profiler = Some(sampler);
@@ -572,8 +563,6 @@ impl TracedRuntime {
             cpu_profiling_config: None,
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: None,
-            #[cfg(feature = "cpu-profiling")]
-            inline_callframe_symbols: false,
             worker_config: None,
         }
     }
@@ -592,8 +581,6 @@ impl TracedRuntime {
             cpu_profiling_config: None,
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: None,
-            #[cfg(feature = "cpu-profiling")]
-            inline_callframe_symbols: false,
             worker_config: None,
         }
         .build(builder, writer)
@@ -614,8 +601,6 @@ impl TracedRuntime {
             cpu_profiling_config: None,
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: None,
-            #[cfg(feature = "cpu-profiling")]
-            inline_callframe_symbols: false,
             worker_config: None,
         }
         .build_and_start(builder, writer)
@@ -890,22 +875,9 @@ mod tests {
                             );
                             total_raw += 1;
                         }
-                        TelemetryEvent::CpuSample {
-                            worker_id,
-                            callchain,
-                            ..
-                        } => {
-                            if *worker_id == WorkerId::UNKNOWN {
-                                // Thread name tracking is handled by the string pool now;
-                                // just verify callframe symbols resolve.
-                            }
-                            for addr in callchain {
-                                assert!(
-                                    reader.callframe_symbols.contains_key(addr),
-                                    "{path_str}: CpuSample references callchain address {addr:#x} but no CallframeDef. Defs: {:?}",
-                                    reader.callframe_symbols
-                                );
-                            }
+                        TelemetryEvent::CpuSample { .. } => {
+                            // Callchain addresses are raw; symbolization
+                            // happens in the background worker now.
                         }
                         _ => {}
                     }
@@ -928,8 +900,7 @@ mod tests {
                 let writer = RotatingWriter::new(&base, max_file_size, 1_000_000).unwrap();
 
                 let mut ew = EventWriter::new(Box::new(writer));
-                let mut cpu = CpuFlushState::new();
-                cpu.inline_callframe_symbols = true;
+                let cpu = CpuFlushState::new();
                 ew.cpu_flush = Some(cpu);
 
                 #[track_caller]

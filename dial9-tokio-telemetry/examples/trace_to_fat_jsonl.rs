@@ -152,13 +152,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             source: format!("{:?}", source),
             callchain: callchain
                 .iter()
-                .map(|addr| {
-                    reader
-                        .callframe_symbols
-                        .get(addr)
-                        .cloned()
-                        .unwrap_or_else(|| format!("0x{:x}", addr))
-                })
+                .map(|addr| format!("0x{:x}", addr))
                 .collect(),
         }),
         TelemetryEvent::WakeEvent {
@@ -174,7 +168,6 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
         }),
         TelemetryEvent::TaskSpawn { .. }
         | TelemetryEvent::TaskTerminate { .. }
-        | TelemetryEvent::CallframeDef { .. }
         | TelemetryEvent::ThreadNameDef { .. }
         | TelemetryEvent::SegmentMetadata { .. } => None,
     }
