@@ -2824,8 +2824,38 @@
                     const laneIdx = Math.floor(
                         (mouseY + lanesContainer.scrollTop) / LANE_H,
                     );
-                    if (laneIdx < 0 || laneIdx >= workerIds.length) {
+                    const hasTracepointLane = trace && trace.tracepointEvents && trace.tracepointEvents.length > 0;
+                    const totalLanes = workerIds.length + (hasTracepointLane ? 1 : 0);
+                    if (laneIdx < 0 || laneIdx >= totalLanes) {
                         tooltip.style.display = "none";
+                        return;
+                    }
+
+                    // Tracepoint lane tooltip
+                    if (hasTracepointLane && laneIdx === workerIds.length) {
+                        const relMs = (ns - minTs) / 1e6;
+                        // Find nearest tracepoint event to cursor
+                        let best = null, bestDist = Infinity;
+                        for (const tp of trace.tracepointEvents) {
+                            const d = Math.abs(tp.timestamp - ns);
+                            if (d < bestDist) { bestDist = d; best = tp; }
+                        }
+                        // Only show if within ~5px worth of time
+                        const pxThreshold = 5;
+                        const nsPerPx = (viewEnd - viewStart) / drawW;
+                        if (!best || bestDist > nsPerPx * pxThreshold) {
+                            tooltip.style.display = "none";
+                            return;
+                        }
+                        const evtRelMs = ((best.timestamp - minTs) / 1e6).toFixed(3);
+                        let html = `<span class="label">Event</span> <span class="value">${best.name}</span> · <span class="label">Time</span> <span class="value">${evtRelMs}ms</span><br>`;
+                        for (const [k, v] of Object.entries(best.fields)) {
+                            html += `<span class="label">${k}:</span> <span class="value">${v}</span><br>`;
+                        }
+                        tooltip.innerHTML = html;
+                        tooltip.style.display = "block";
+                        tooltip.style.left = Math.min(e.clientX + 12, window.innerWidth - 340) + "px";
+                        tooltip.style.top = e.clientY + 130 + "px";
                         return;
                     }
 

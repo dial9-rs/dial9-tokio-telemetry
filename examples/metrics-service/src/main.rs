@@ -9,7 +9,7 @@ use std::time::Duration;
 use aws_config::BehaviorVersion;
 use clap::Parser;
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
+use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig, Tracepoint};
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
@@ -117,6 +117,12 @@ fn main() -> std::io::Result<()> {
             .with_sched_events(SchedEventConfig {
                 include_kernel: true,
             });
+        if let Ok(tp) = Tracepoint::new("probe", "alloc_fdtable").validate() {
+            traced_builder = traced_builder.capture_tracepoint(tp);
+        }
+        if let Ok(tp) = Tracepoint::new("sock", "inet_sock_set_state").validate() {
+            traced_builder = traced_builder.capture_tracepoint(tp);
+        }
     }
     if let Some(bucket) = &args.s3_bucket {
         use dial9_tokio_telemetry::background_task::BackgroundTaskConfig;
