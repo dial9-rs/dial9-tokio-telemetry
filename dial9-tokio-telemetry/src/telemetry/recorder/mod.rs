@@ -42,14 +42,6 @@ impl TelemetryRecorder {
         #[cfg(feature = "cpu-profiling")]
         self.event_writer.flush_cpu(&self.shared);
 
-        let dropped = self.shared.collector.take_dropped_batches();
-        if dropped > 0 {
-            tracing::warn!(
-                dropped_batches = dropped,
-                "telemetry flush fell behind, dropped batches"
-            );
-        }
-
         for batch in self.shared.collector.drain() {
             for raw in batch {
                 if let Err(e) = self.event_writer.write_raw_event(raw) {
@@ -496,14 +488,9 @@ impl TracedRuntimeBuilder {
             std::thread::Builder::new()
                 .name("telemetry-flush".into())
                 .spawn(move || {
-                    // Lower this thread's scheduling priority so it doesn't
-                    // compete with worker threads for CPU time.
-                    #[cfg(target_os = "linux")]
-                    unsafe {
-                        libc::nice(10);
-                    }
-
+                    let flush_interval = Duration::from_millis(250);
                     let sample_interval = Duration::from_millis(10);
+                    let mut last_flush = Instant::now();
                     let mut last_sample = Instant::now();
 
                     while !stop.load(Ordering::Acquire) {
@@ -518,7 +505,10 @@ impl TracedRuntimeBuilder {
                             }
                         }
 
-                        rec.lock().unwrap().flush();
+                        if now.duration_since(last_flush) >= flush_interval {
+                            last_flush = now;
+                            rec.lock().unwrap().flush();
+                        }
                     }
                 })
                 .expect("failed to spawn telemetry-flush thread")

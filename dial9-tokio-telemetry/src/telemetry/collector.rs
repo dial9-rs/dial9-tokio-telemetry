@@ -1,15 +1,8 @@
 use crate::telemetry::events::RawEvent;
-use crossbeam_queue::ArrayQueue;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// Maximum number of batches (each up to 1024 events) that can be buffered.
-/// Beyond this, new batches are dropped — back-pressure when the flush thread
-/// falls behind.
-const DEFAULT_CAPACITY: usize = 1024;
+use std::sync::Mutex;
 
 pub struct CentralCollector {
-    queue: ArrayQueue<Vec<RawEvent>>,
-    dropped_batches: AtomicUsize,
+    buffers: Mutex<Vec<Vec<RawEvent>>>,
 }
 
 impl Default for CentralCollector {
@@ -20,41 +13,25 @@ impl Default for CentralCollector {
 
 impl CentralCollector {
     pub fn new() -> Self {
-        Self::with_capacity(DEFAULT_CAPACITY)
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            queue: ArrayQueue::new(capacity),
-            dropped_batches: AtomicUsize::new(0),
+            buffers: Mutex::new(Vec::new()),
         }
     }
 
     pub fn accept_flush(&self, buffer: Vec<RawEvent>) {
-        if self.queue.push(buffer).is_err() {
-            self.dropped_batches.fetch_add(1, Ordering::Relaxed);
-        }
+        self.buffers.lock().unwrap().push(buffer);
     }
 
     pub fn drain(&self) -> Vec<Vec<RawEvent>> {
-        let mut batches = Vec::new();
-        while let Some(batch) = self.queue.pop() {
-            batches.push(batch);
-        }
-        batches
+        std::mem::take(&mut *self.buffers.lock().unwrap())
     }
 
     pub fn len(&self) -> usize {
-        self.queue.len()
+        self.buffers.lock().unwrap().iter().map(|b| b.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    /// Returns the number of batches dropped since the last call.
-    pub fn take_dropped_batches(&self) -> usize {
-        self.dropped_batches.swap(0, Ordering::Relaxed)
+        self.len() == 0
     }
 }
 
@@ -91,15 +68,5 @@ mod tests {
         collector.accept_flush(vec![poll_end()]);
         assert_eq!(collector.drain().len(), 1);
         assert_eq!(collector.drain().len(), 0);
-    }
-
-    #[test]
-    fn test_bounded_drops_when_full() {
-        let collector = CentralCollector::with_capacity(2);
-        collector.accept_flush(vec![poll_end()]);
-        collector.accept_flush(vec![poll_end()]);
-        collector.accept_flush(vec![poll_end()]); // should be dropped
-        assert_eq!(collector.take_dropped_batches(), 1);
-        assert_eq!(collector.drain().len(), 2);
     }
 }
