@@ -656,7 +656,7 @@ impl TracedRuntimeBuilder<HasTracePath> {
                 .unwrap_or(crate::background_task::DEFAULT_POLL_INTERVAL);
             let metrics_sink = self
                 .worker_metrics_sink
-                .unwrap_or_else(|| metrique_writer::sink::DevNullSink::boxed());
+                .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
 
             let config = crate::background_task::BackgroundTaskConfig::builder()
                 .trace_path(trace_path)
