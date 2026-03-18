@@ -281,6 +281,107 @@ impl SegmentProcessor for GzipCompressor {
 }
 
 // ---------------------------------------------------------------------------
+// SymbolizeProcessor — resolves stack frame addresses to symbol names
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cpu-profiling")]
+pub(crate) struct SymbolizeProcessor;
+
+#[cfg(feature = "cpu-profiling")]
+impl SegmentProcessor for SymbolizeProcessor {
+    fn name(&self) -> &'static str {
+        "Symbolize"
+    }
+
+    fn process(
+        &mut self,
+        mut data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(async move {
+            let input = std::mem::take(&mut data.bytes);
+            let result = tokio::task::spawn_blocking(move || {
+                let maps = dial9_perf_self_profile::read_proc_maps();
+                let mut output = Vec::new();
+                dial9_perf_self_profile::offline_symbolize::symbolize_trace_with_maps(
+                    &input,
+                    &maps,
+                    &mut output,
+                )?;
+                let mut combined = input;
+                combined.extend_from_slice(&output);
+                Ok::<_, std::io::Error>(combined)
+            })
+            .await;
+            match result {
+                Ok(Ok(bytes)) => {
+                    data.bytes = bytes;
+                    Ok(data)
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(target: "dial9_worker", error = %e, "symbolization failed, preserving original bytes");
+                    Err(ProcessError {
+                        data,
+                        kind: ProcessErrorKind::Io(e),
+                    })
+                }
+                Err(e) => Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(std::io::Error::other(e)),
+                }),
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GzipWriteBackProcessor — gzip-compresses and writes back to disk
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cpu-profiling")]
+pub(crate) struct GzipWriteBackProcessor;
+
+#[cfg(feature = "cpu-profiling")]
+impl SegmentProcessor for GzipWriteBackProcessor {
+    fn name(&self) -> &'static str {
+        "GzipWriteBack"
+    }
+
+    fn process(
+        &mut self,
+        mut data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(async move {
+            let raw = std::mem::take(&mut data.bytes);
+            let path = data.segment.path.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                use flate2::write::GzEncoder;
+                use std::io::Write;
+                let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                encoder.write_all(&raw)?;
+                let compressed = encoder.finish()?;
+                std::fs::write(&path, &compressed)?;
+                Ok::<_, std::io::Error>(compressed.len() as u64)
+            })
+            .await;
+            match result {
+                Ok(Ok(compressed_size)) => {
+                    data.metrics.compressed_size = Some(compressed_size);
+                    Ok(data)
+                }
+                Ok(Err(e)) => Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(e),
+                }),
+                Err(e) => Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(std::io::Error::other(e)),
+                }),
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Metrics
 // ---------------------------------------------------------------------------
 
