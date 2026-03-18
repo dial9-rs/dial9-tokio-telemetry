@@ -73,7 +73,6 @@ resolve_worker_id()               1. Acquire worker_tids lock once:
                                   3. Drain SchedProfiler → Vec<TelemetryEvent>
                                   4. For each CpuSample:
                                        emit ThreadNameDef if new non-worker tid
-                                       optionally emit CallframeDef (symbolication)
                                   5. Write all CpuSample events to trace
 ```
 
@@ -114,15 +113,20 @@ Wire format: `code(u8) + timestamp_us(u32) + worker_id(u8) + tid(u32) + source(u
 
 Fixed overhead: 12 bytes per sample (before frames).
 
-### Inline symbolication (optional)
+### Background symbolication
 
-When `inline_callframe_symbols` is enabled, the flush thread:
-1. For each address in a CpuSample's callchain, checks if it's been emitted in the current file.
-2. If not, and not yet interned, calls `perf_self_profile::resolve_symbol(addr)` to get symbol name + source location, and caches in `callframe_intern`.
-3. Emits a `CallframeDef { address, symbol, location }` event before the sample.
-4. Tracks which addresses have been emitted per-file in `callframe_emitted_this_file` (cleared on rotation).
+Stack frame addresses in `CpuSample` events are recorded as raw instruction pointers. Symbolication (resolving addresses to function names) happens in the background worker pipeline, not on the hot path.
 
-This is analogous to how `SpawnLocationDef` works for spawn locations. `callframe_intern` is retained across file rotations to avoid redundant symbolication work; only the per-file emission tracking is cleared.
+When `cpu-profiling` is configured with a `trace_path`, the builder automatically adds a `SymbolizeProcessor` to the worker pipeline. For each sealed segment, the processor:
+
+1. Reads `/proc/self/maps` to get the current memory mappings.
+2. Scans the segment for `StackFrames` fields and collects unique addresses.
+3. Resolves addresses to symbol names via blazesym (including inlined functions).
+4. Appends `StringPool` and `SymbolTableEntry` schema-based events to the segment.
+
+The symbolized data is appended to the original segment bytes (not a separate file). Downstream, the `GzipWriteBackProcessor` (no S3) or `GzipCompressor` + `S3PipelineUploader` (with S3) handles compression and storage.
+
+This replaces the previous inline `CallframeDef` approach, which resolved symbols on the flush thread and added latency to the hot path.
 
 ---
 
@@ -155,29 +159,24 @@ All non-worker CPU samples carry `worker_id = 255`, which makes them indistingui
 
 ## 5. File Rotation Handling
 
-`SpawnLocationDef`, `CallframeDef`, and `ThreadNameDef` are metadata events that must be re-emitted when the writer rotates to a new file. The system tracks this via:
+`SpawnLocationDef` and `ThreadNameDef` are metadata events that must be re-emitted when the writer rotates to a new file. The system tracks this via:
 
 - `FlushState.emitted_this_file: HashSet<SpawnLocationId>` — cleared on rotation.
-- `callframe_emitted_this_file: HashSet<u64>` — cleared on rotation.
 - `thread_name_emitted_this_file: HashSet<u32>` — cleared on rotation.
 - `writer.take_rotated()` is checked before writing events and after `write_atomic` returns.
 
 ---
 
-## 6. Wire Codes (v13)
+## 6. Wire Format
 
-| Code | Event |
-|------|-------|
-| 0 | `PollStart` |
-| 1 | `PollEnd` |
-| 2 | `WorkerPark` |
-| 3 | `WorkerUnpark` |
-| 4 | `QueueSample` |
-| 5 | `SpawnLocationDef` |
-| 6 | `TaskSpawn` |
-| 7 | `WakeEvent` |
-| 8 | `CpuSample` |
-| 9 | `CallframeDef` |
-| 10 | `ThreadNameDef` |
+The trace format has migrated from fixed wire codes to `dial9-trace-format`, a self-describing schema-based binary format. Events are identified by schema name rather than numeric codes. The format uses `StringPool` frames for string interning and schema frames to define event layouts.
 
-The tid→worker mapping is resolved in-process before writing; there is no `WorkerThreadMap` wire event. `CpuSample` events carry an already-resolved `worker_id` on the wire, so readers do not need access to the raw tid mapping.
+Key event types (as schema names):
+- `PollStart`, `PollEnd`, `WorkerPark`, `WorkerUnpark`
+- `QueueSample`, `TaskSpawn`, `WakeEvent`
+- `CpuSample` (carries worker_id, tid, source, and stack frames)
+- `ThreadNameDef` (maps OS tid to thread name)
+- `SymbolTableEntry` (resolved symbol: base_addr, size, symbol_name)
+- `ProcMapsEntry` (memory mapping: start, end, file_offset, path)
+
+The tid to worker mapping is resolved in-process before writing. `CpuSample` events carry an already-resolved `worker_id`, so readers do not need access to the raw tid mapping.
