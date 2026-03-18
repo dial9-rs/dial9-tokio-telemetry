@@ -21,13 +21,16 @@ runs:
                   rm -fv Cargo.lock
               fi
               cargo build
-        - name: Enable perf_event_open for tests
+        - name: Enable perf_event_open and kallsyms for tests
           shell: bash
           run: |
               sudo sysctl kernel.perf_event_paranoid=1
-              cat /proc/sys/kernel/perf_event_paranoid
+              sudo sysctl kernel.kptr_restrict=0
         - name: Run tests
           shell: bash
           env:
               RUSTFLAGS: "--cfg tokio_unstable"
-          run: cargo test
+          run: |
+              # Raise locked-memory limit for large perf ring buffers
+              sudo prlimit --pid $$ --memlock=unlimited:unlimited
+              cargo test
