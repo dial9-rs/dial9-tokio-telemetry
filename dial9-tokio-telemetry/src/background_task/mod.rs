@@ -201,14 +201,10 @@ async fn build_pipeline(config: &mut BackgroundTaskConfig) -> Vec<Box<dyn Segmen
         pipeline.push(Box::new(s3_uploader));
     }
 
-    // Symbolize without S3: gzip and write back to disk.
-    #[cfg(feature = "cpu-profiling")]
-    if config.symbolize
-        && !pipeline
-            .iter()
-            .any(|p| p.name() == "Gzip" || p.name() == "S3Upload")
-    {
-        pipeline.push(Box::new(GzipWriteBackProcessor));
+    // Without S3: gzip and write back to disk.
+    if !pipeline.iter().any(|p| p.name() == "S3Upload") {
+        pipeline.push(Box::new(GzipCompressor));
+        pipeline.push(Box::new(WriteBackProcessor));
     }
 
     pipeline
@@ -257,10 +253,8 @@ pub(crate) fn run_background_task(
 // GzipCompressor — compresses segment bytes in-memory
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "worker-s3")]
 struct GzipCompressor;
 
-#[cfg(feature = "worker-s3")]
 impl SegmentProcessor for GzipCompressor {
     fn name(&self) -> &'static str {
         "Gzip"
@@ -272,8 +266,14 @@ impl SegmentProcessor for GzipCompressor {
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
             let raw = data.bytes;
-            let compressed =
-                tokio::task::spawn_blocking(move || s3::gzip_compress_bytes(&raw)).await;
+            let compressed = tokio::task::spawn_blocking(move || {
+                use flate2::write::GzEncoder;
+                use std::io::Write;
+                let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                encoder.write_all(&raw)?;
+                encoder.finish()
+            })
+            .await;
             match compressed {
                 Ok(Ok(bytes)) => {
                     data.metrics.compressed_size = Some(bytes.len() as u64);
@@ -355,40 +355,26 @@ impl SegmentProcessor for SymbolizeProcessor {
 }
 
 // ---------------------------------------------------------------------------
-// GzipWriteBackProcessor — gzip-compresses and writes back to disk
+// WriteBackProcessor — writes processed bytes back to disk
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "cpu-profiling")]
-pub(crate) struct GzipWriteBackProcessor;
+struct WriteBackProcessor;
 
-#[cfg(feature = "cpu-profiling")]
-impl SegmentProcessor for GzipWriteBackProcessor {
+impl SegmentProcessor for WriteBackProcessor {
     fn name(&self) -> &'static str {
-        "GzipWriteBack"
+        "WriteBack"
     }
 
     fn process(
         &mut self,
-        mut data: SegmentData,
+        data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
-            let raw = std::mem::take(&mut data.bytes);
             let path = data.segment.path.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                use flate2::write::GzEncoder;
-                use std::io::Write;
-                let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
-                encoder.write_all(&raw)?;
-                let compressed = encoder.finish()?;
-                std::fs::write(&path, &compressed)?;
-                Ok::<_, std::io::Error>(compressed.len() as u64)
-            })
-            .await;
+            let bytes = data.bytes.clone();
+            let result = tokio::task::spawn_blocking(move || std::fs::write(&path, &bytes)).await;
             match result {
-                Ok(Ok(compressed_size)) => {
-                    data.metrics.compressed_size = Some(compressed_size);
-                    Ok(data)
-                }
+                Ok(Ok(())) => Ok(data),
                 Ok(Err(e)) => Err(ProcessError {
                     data,
                     kind: ProcessErrorKind::Io(e),
