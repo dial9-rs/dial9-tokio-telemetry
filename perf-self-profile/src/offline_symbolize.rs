@@ -97,15 +97,7 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
                         maps.push(entry);
                     }
                 } else {
-                    for field in &values {
-                        if let FieldValueRef::StackFrames(frames) = field {
-                            for addr in frames.iter() {
-                                if addr != 0 {
-                                    addresses.insert(addr);
-                                }
-                            }
-                        }
-                    }
+                    collect_stack_frame_addresses(&values, &mut addresses);
                 }
             }
             _ => {}
@@ -116,7 +108,55 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
         return Ok(());
     }
 
-    // Resolve symbols.
+    write_symbol_data(&addresses, &maps, output)
+}
+
+/// Symbolize a trace using caller-provided proc maps instead of reading them
+/// from the trace.
+///
+/// Use this when the caller already has the memory mappings (e.g. from
+/// `read_proc_maps()` in the same process). This avoids the overhead of
+/// encoding proc maps into the trace and re-parsing them.
+pub fn symbolize_trace_with_maps(
+    input: &[u8],
+    maps: &[MapsEntry],
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let mut addresses: BTreeSet<u64> = BTreeSet::new();
+
+    let mut decoder = Decoder::new(input)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
+
+    while let Ok(Some(frame)) = decoder.next_frame_ref() {
+        if let DecodedFrameRef::Event { values, .. } = frame {
+            collect_stack_frame_addresses(&values, &mut addresses);
+        }
+    }
+
+    if addresses.is_empty() {
+        return Ok(());
+    }
+
+    write_symbol_data(&addresses, maps, output)
+}
+
+fn collect_stack_frame_addresses(values: &[FieldValueRef<'_>], addresses: &mut BTreeSet<u64>) {
+    for field in values {
+        if let FieldValueRef::StackFrames(frames) = field {
+            for addr in frames.iter() {
+                if addr != 0 {
+                    addresses.insert(addr);
+                }
+            }
+        }
+    }
+}
+
+fn write_symbol_data(
+    addresses: &BTreeSet<u64>,
+    maps: &[MapsEntry],
+    output: &mut impl Write,
+) -> io::Result<()> {
     let symbolizer = Symbolizer::new();
     let mut pool_entries: Vec<codec::PoolEntry> = Vec::new();
     let mut string_to_id: HashMap<String, u32> = HashMap::new();
@@ -124,8 +164,8 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
     let mut next_pool_id: u32 = 0;
     let mut symbol_events: Vec<(u64, InternedString)> = Vec::new();
 
-    for &addr in &addresses {
-        let symbols = crate::resolve_symbols_with_maps(addr, &symbolizer, &maps);
+    for &addr in addresses {
+        let symbols = crate::resolve_symbols_with_maps(addr, &symbolizer, maps);
         for info in symbols {
             let Some(name) = info.name else { continue };
             if !seen_base_addrs.insert(info.base_addr) {
@@ -146,7 +186,6 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
         }
     }
 
-    // Append symbol data.
     if !symbol_events.is_empty() {
         codec::encode_string_pool(&pool_entries, output)?;
 
@@ -324,6 +363,51 @@ mod tests {
         let has_symbol_schema = frames
             .iter()
             .any(|f| matches!(f, DecodedFrame::Schema(s) if s.name == symbol_table_name));
+        assert!(has_string_pool, "expected StringPool frame in output");
+        assert!(
+            has_symbol_schema,
+            "expected SymbolTableEntry schema in output"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symbolize_with_maps_produces_symbol_events() {
+        let addr = symbolize_with_maps_produces_symbol_events as *const () as u64;
+        let raw_maps = crate::read_proc_maps();
+
+        let mut buf = Encoder::new().finish();
+        let tid = WireTypeId(0);
+        codec::encode_schema(
+            tid,
+            &SchemaEntry {
+                name: "Ev".into(),
+                has_timestamp: false,
+                fields: vec![FieldDef {
+                    name: "frames".into(),
+                    field_type: FieldType::StackFrames,
+                }],
+            },
+            &mut buf,
+        )
+        .unwrap();
+        codec::encode_event(tid, None, &[FieldValue::StackFrames(vec![addr])], &mut buf).unwrap();
+
+        let mut output = Vec::new();
+        symbolize_trace_with_maps(&buf, &raw_maps, &mut output).unwrap();
+
+        assert!(!output.is_empty(), "expected symbol data to be written");
+
+        let mut combined = buf.clone();
+        combined.extend_from_slice(&output);
+        let mut dec = Decoder::new(&combined).unwrap();
+        let frames = dec.decode_all();
+        let has_string_pool = frames
+            .iter()
+            .any(|f| matches!(f, DecodedFrame::StringPool(_)));
+        let has_symbol_schema = frames.iter().any(
+            |f| matches!(f, DecodedFrame::Schema(s) if s.name == SymbolTableEntry::event_name()),
+        );
         assert!(has_string_pool, "expected StringPool frame in output");
         assert!(
             has_symbol_schema,
