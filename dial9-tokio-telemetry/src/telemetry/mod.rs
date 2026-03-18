@@ -22,6 +22,8 @@ pub use cpu_profile::SchedEventConfig;
 pub use dial9_trace_format::InternedString;
 pub use events::{CpuSampleData, CpuSampleSource, SchedStat, TelemetryEvent};
 pub use format::WorkerId;
-pub use recorder::{TelemetryGuard, TelemetryHandle, TracedRuntime, TracedRuntimeBuilder};
+pub use recorder::{
+    HasTracePath, NoTracePath, TelemetryGuard, TelemetryHandle, TracedRuntime, TracedRuntimeBuilder,
+};
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
 pub use writer::{NullWriter, RotatingWriter, TraceWriter};

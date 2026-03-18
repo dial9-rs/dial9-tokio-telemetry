@@ -157,6 +157,11 @@ impl RotatingWriter {
         })
     }
 
+    /// The base path used for trace segment files.
+    pub fn base_path(&self) -> &Path {
+        &self.base_path
+    }
+
     /// Set key-value metadata to be written at the start of each new segment.
     /// Immediately writes metadata to the current segment (call before writing events).
     pub fn set_segment_metadata(&mut self, entries: Vec<(String, String)>) -> std::io::Result<()> {

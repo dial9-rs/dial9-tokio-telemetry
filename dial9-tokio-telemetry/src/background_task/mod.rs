@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Configuration for the in-process worker pipeline.
 ///

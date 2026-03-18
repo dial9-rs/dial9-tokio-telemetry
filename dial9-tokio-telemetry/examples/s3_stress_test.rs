@@ -11,7 +11,6 @@
 #![cfg(feature = "worker-s3")]
 
 use clap::Parser;
-use dial9_tokio_telemetry::background_task::BackgroundTaskConfig;
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use metrique::local::{LocalFormat, OutputStyle};
@@ -145,18 +144,14 @@ fn main() -> std::io::Result<()> {
         LocalFormat::new(OutputStyle::Pretty).output_to_makewriter(|| std::io::stderr().lock()),
     );
 
-    let uploader_config = BackgroundTaskConfig::builder()
-        .trace_path(&args.trace_path)
-        .s3(s3_config)
-        .metrics_sink(metrics_sink)
-        .build();
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(args.worker_threads).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .with_s3_uploader(uploader_config)
+        .with_trace_path(&args.trace_path)
+        .with_s3_uploader(s3_config)
+        .with_worker_metrics_sink(metrics_sink)
         .build_and_start(builder, writer)?;
 
     let handle = guard.handle();
