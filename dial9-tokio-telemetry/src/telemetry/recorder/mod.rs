@@ -1,13 +1,9 @@
-mod cpu_flush_state;
 mod event_writer;
 mod shared_state;
 
 pub(crate) use shared_state::SharedState;
 
 use event_writer::EventWriter;
-
-#[cfg(feature = "cpu-profiling")]
-use cpu_flush_state::CpuFlushState;
 
 use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::events::RawEvent;
@@ -572,8 +568,6 @@ impl TracedRuntimeBuilder<HasTracePath> {
         #[cfg(feature = "cpu-profiling")]
         {
             let mut rec = recorder.lock().unwrap();
-            let cpu_flush = CpuFlushState::new();
-            rec.event_writer.cpu_flush = Some(cpu_flush);
             if let Some(Ok(sampler)) = sampler {
                 rec.event_writer.cpu_profiler = Some(sampler);
             }
@@ -896,7 +890,6 @@ mod tests {
         use crate::telemetry::format::WorkerId;
         use crate::telemetry::task_metadata::TaskId;
         use crate::telemetry::writer::RotatingWriter;
-        use cpu_flush_state::CpuFlushState;
         use proptest::prelude::*;
 
         #[derive(Debug, Clone)]
@@ -1055,8 +1048,6 @@ mod tests {
                 let writer = RotatingWriter::new(&base, max_file_size, 1_000_000).unwrap();
 
                 let mut ew = EventWriter::new(Box::new(writer));
-                let cpu = CpuFlushState::new();
-                ew.cpu_flush = Some(cpu);
 
                 #[track_caller]
                 fn loc0() -> &'static Location<'static> { Location::caller() }
