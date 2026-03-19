@@ -16,7 +16,7 @@ jobs:
   stress-test:
     name: Stress Test (${{ inputs.duration_minutes || '60' }} min)
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ fromJSON(inputs.duration_minutes || '60') + 15 }}
+    timeout-minutes: 75
     env:
       RUST_BACKTRACE: 1
       RUSTFLAGS: "--cfg tokio_unstable"
