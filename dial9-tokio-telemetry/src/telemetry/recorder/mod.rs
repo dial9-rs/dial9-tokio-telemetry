@@ -53,10 +53,10 @@ impl TelemetryRecorder {
         }
     }
 
-    fn seal(&mut self) {
+    fn finalize(&mut self) {
         self.flush();
-        if let Err(e) = self.event_writer.seal() {
-            tracing::warn!("failed to seal trace segment: {e}");
+        if let Err(e) = self.event_writer.finalize() {
+            tracing::warn!("failed to finalize trace segment: {e}");
         }
     }
 
@@ -283,7 +283,7 @@ impl TelemetryGuard {
         }
 
         // 2. Seal final segment
-        self.handle.recorder.lock().unwrap().seal();
+        self.handle.recorder.lock().unwrap().finalize();
         tracing::debug!(target: "dial9_telemetry", "sealed final segment");
 
         // 3. Signal worker to drain with the given timeout and wait
@@ -319,7 +319,7 @@ impl Drop for TelemetryGuard {
             }
         });
         // 2. Seal the final segment (.active → .bin)
-        self.handle.recorder.lock().unwrap().seal();
+        self.handle.recorder.lock().unwrap().finalize();
         // 3. Hard shutdown: drop the sender without sending — worker sees
         // RecvError and exits without draining. No need to join the thread.
         // For graceful drain, use graceful_shutdown() instead.
@@ -838,7 +838,7 @@ mod tests {
             .unwrap();
         }
         ew.flush().unwrap();
-        ew.seal().unwrap();
+        ew.finalize().unwrap();
 
         let mut files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -1070,7 +1070,7 @@ mod tests {
                     );
                 }
                 ew.flush().unwrap();
-                ew.seal().unwrap();
+                ew.finalize().unwrap();
 
                 let actual_raw = verify_files(dir.path());
 

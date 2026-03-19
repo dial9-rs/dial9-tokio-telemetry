@@ -99,7 +99,7 @@ impl EventWriter {
         self.writer.flush()
     }
 
-    pub(crate) fn seal(&mut self) -> std::io::Result<()> {
-        self.writer.seal()
+    pub(crate) fn finalize(&mut self) -> std::io::Result<()> {
+        self.writer.finalize()
     }
 }

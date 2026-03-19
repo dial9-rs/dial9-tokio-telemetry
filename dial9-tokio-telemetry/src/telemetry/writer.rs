@@ -18,9 +18,10 @@ pub trait TraceWriter: Send {
     fn take_rotated(&mut self) -> bool {
         false
     }
-    /// Seal the current segment: flush and rename `.active` → `.bin`.
-    /// Called on shutdown so the final segment is visible to the worker.
-    fn seal(&mut self) -> std::io::Result<()> {
+    /// Finalize the writer: flush, rename `.active` → `.bin`, and prevent
+    /// further writes. This is a terminal operation — the writer becomes
+    /// inert afterward.
+    fn finalize(&mut self) -> std::io::Result<()> {
         self.flush()
     }
     /// Write a batch of events atomically — rotation is deferred until after
@@ -43,8 +44,8 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     fn take_rotated(&mut self) -> bool {
         (**self).take_rotated()
     }
-    fn seal(&mut self) -> std::io::Result<()> {
-        (**self).seal()
+    fn finalize(&mut self) -> std::io::Result<()> {
+        (**self).finalize()
     }
     fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
         (**self).write_event_batch(events)
@@ -80,10 +81,8 @@ pub struct RotatingWriter {
     closed_files: VecDeque<(PathBuf, u64)>,
     /// Path of the currently active (being-written) file.
     active_path: PathBuf,
-    encoder: Encoder<BufWriter<File>>,
+    state: WriterState,
     next_index: u32,
-    /// Set when we've hit the total size cap; silently drops further events.
-    stopped: bool,
     /// Set after rotation; cleared by `take_rotated()`.
     did_rotate: bool,
     /// Optional metadata written at the start of each segment.
@@ -91,6 +90,17 @@ pub struct RotatingWriter {
     /// Cache from Location → formatted string, to avoid
     /// reformatting on every event.
     formatted_locations: HashMap<std::panic::Location<'static>, String>,
+    /// Events silently dropped because the writer was finished/stopped.
+    dropped_events: usize,
+}
+
+// the write side is obviously marge larger than the `Finished` size so clippy warns on this
+// but we don't want to force going through a pointer every time we want to write.
+#[allow(clippy::large_enum_variant)]
+enum WriterState {
+    Active(Encoder<BufWriter<File>>),
+    /// Writer has been finalized or stopped — no encoder, no fd, no writes.
+    Finished,
 }
 
 impl RotatingWriter {
@@ -114,12 +124,12 @@ impl RotatingWriter {
             max_total_size,
             closed_files: VecDeque::new(),
             active_path: first_path,
-            encoder,
+            state: WriterState::Active(encoder),
             next_index: 1,
-            stopped: false,
             did_rotate: false,
             segment_metadata: None,
             formatted_locations: HashMap::new(),
+            dropped_events: 0,
         })
     }
 
@@ -148,12 +158,12 @@ impl RotatingWriter {
             max_total_size: u64::MAX,
             closed_files: VecDeque::new(),
             active_path: path,
-            encoder: Encoder::new_to(writer)?,
+            state: WriterState::Active(Encoder::new_to(writer)?),
             next_index: 1,
-            stopped: false,
             did_rotate: false,
             segment_metadata: None,
             formatted_locations: HashMap::new(),
+            dropped_events: 0,
         })
     }
 
@@ -171,12 +181,15 @@ impl RotatingWriter {
 
     /// Write the segment metadata event if configured. Called after writing the header.
     fn write_segment_metadata(&mut self) -> std::io::Result<()> {
+        let WriterState::Active(encoder) = &mut self.state else {
+            return Ok(());
+        };
         if let Some(ref entries) = self.segment_metadata {
             let timestamp_ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64;
-            self.encoder.write(&SegmentMetadataEvent {
+            encoder.write(&SegmentMetadataEvent {
                 timestamp_ns,
                 entries: entries.clone(),
             })?;
@@ -198,9 +211,12 @@ impl RotatingWriter {
     }
 
     fn rotate(&mut self) -> std::io::Result<()> {
-        self.encoder.flush()?;
+        let WriterState::Active(encoder) = &mut self.state else {
+            return Ok(());
+        };
+        encoder.flush()?;
         // Seal the current segment: snapshot size and rename .active → .bin
-        let closed_size = self.encoder.bytes_written();
+        let closed_size = encoder.bytes_written();
         let sealed = Self::file_path(&self.base_path, self.next_index - 1);
         fs::rename(&self.active_path, &sealed)?;
         self.closed_files.push_back((sealed, closed_size));
@@ -209,7 +225,7 @@ impl RotatingWriter {
         self.next_index += 1;
         let file = File::create(&new_path)?;
         let writer = BufWriter::new(file);
-        self.encoder = Encoder::new_to(writer)?;
+        self.state = WriterState::Active(Encoder::new_to(writer)?);
         self.active_path = new_path;
         self.did_rotate = true;
         self.write_segment_metadata()?;
@@ -225,7 +241,11 @@ impl RotatingWriter {
     /// Total size across all files (closed + active).
     fn total_size(&self) -> u64 {
         let closed: u64 = self.closed_files.iter().map(|(_, s)| s).sum();
-        closed + self.encoder.bytes_written()
+        let active = match &self.state {
+            WriterState::Active(encoder) => encoder.bytes_written(),
+            WriterState::Finished => 0,
+        };
+        closed + active
     }
 
     fn evict_oldest(&mut self) -> std::io::Result<()> {
@@ -240,7 +260,7 @@ impl RotatingWriter {
         }
         // If even the current file alone exceeds total budget, stop writing.
         if self.total_size() > self.max_total_size {
-            self.stopped = true;
+            self.state = WriterState::Finished;
         }
         Ok(())
     }
@@ -269,9 +289,10 @@ impl RotatingWriter {
 
     /// Write a resolved event without triggering rotation.
     fn write_resolved_no_rotate(&mut self, event: &RawEvent) -> std::io::Result<()> {
-        if self.stopped {
+        let WriterState::Active(encoder) = &mut self.state else {
+            self.dropped_events += 1;
             return Ok(());
-        }
+        };
         match event {
             RawEvent::PollStart {
                 timestamp_nanos,
@@ -280,12 +301,9 @@ impl RotatingWriter {
                 task_id,
                 location,
             } => {
-                let spawn_loc = Self::intern_location(
-                    &mut self.encoder,
-                    &mut self.formatted_locations,
-                    location,
-                )?;
-                self.encoder.write(&PollStartEvent {
+                let spawn_loc =
+                    Self::intern_location(encoder, &mut self.formatted_locations, location)?;
+                encoder.write(&PollStartEvent {
                     timestamp_ns: *timestamp_nanos,
                     worker_id: *worker_id,
                     local_queue: *worker_local_queue_depth as u8,
@@ -296,7 +314,7 @@ impl RotatingWriter {
             RawEvent::PollEnd {
                 timestamp_nanos,
                 worker_id,
-            } => self.encoder.write(&PollEndEvent {
+            } => encoder.write(&PollEndEvent {
                 timestamp_ns: *timestamp_nanos,
                 worker_id: *worker_id,
             }),
@@ -305,7 +323,7 @@ impl RotatingWriter {
                 worker_id,
                 worker_local_queue_depth,
                 cpu_time_nanos,
-            } => self.encoder.write(&WorkerParkEvent {
+            } => encoder.write(&WorkerParkEvent {
                 timestamp_ns: *timestamp_nanos,
                 worker_id: *worker_id,
                 local_queue: *worker_local_queue_depth as u8,
@@ -317,7 +335,7 @@ impl RotatingWriter {
                 worker_local_queue_depth,
                 cpu_time_nanos,
                 sched_wait_delta_nanos,
-            } => self.encoder.write(&WorkerUnparkEvent {
+            } => encoder.write(&WorkerUnparkEvent {
                 timestamp_ns: *timestamp_nanos,
                 worker_id: *worker_id,
                 local_queue: *worker_local_queue_depth as u8,
@@ -327,7 +345,7 @@ impl RotatingWriter {
             RawEvent::QueueSample {
                 timestamp_nanos,
                 global_queue_depth,
-            } => self.encoder.write(&QueueSampleEvent {
+            } => encoder.write(&QueueSampleEvent {
                 timestamp_ns: *timestamp_nanos,
                 global_queue: *global_queue_depth as u8,
             }),
@@ -336,12 +354,9 @@ impl RotatingWriter {
                 task_id,
                 location,
             } => {
-                let spawn_loc = Self::intern_location(
-                    &mut self.encoder,
-                    &mut self.formatted_locations,
-                    location,
-                )?;
-                self.encoder.write(&TaskSpawnEvent {
+                let spawn_loc =
+                    Self::intern_location(encoder, &mut self.formatted_locations, location)?;
+                encoder.write(&TaskSpawnEvent {
                     timestamp_ns: *timestamp_nanos,
                     task_id: *task_id,
                     spawn_loc,
@@ -350,7 +365,7 @@ impl RotatingWriter {
             RawEvent::TaskTerminate {
                 timestamp_nanos,
                 task_id,
-            } => self.encoder.write(&TaskTerminateEvent {
+            } => encoder.write(&TaskTerminateEvent {
                 timestamp_ns: *timestamp_nanos,
                 task_id: *task_id,
             }),
@@ -359,7 +374,7 @@ impl RotatingWriter {
                 waker_task_id,
                 woken_task_id,
                 target_worker,
-            } => self.encoder.write(&WakeEventEvent {
+            } => encoder.write(&WakeEventEvent {
                 timestamp_ns: *timestamp_nanos,
                 waker_task_id: *waker_task_id,
                 woken_task_id: *woken_task_id,
@@ -367,11 +382,11 @@ impl RotatingWriter {
             }),
             RawEvent::CpuSample(data) => {
                 let thread_name = match &data.thread_name {
-                    Some(name) => self.encoder.intern_string(name.as_str()),
-                    None => self.encoder.intern_string("<no thread name>"),
+                    Some(name) => encoder.intern_string(name.as_str()),
+                    None => encoder.intern_string("<no thread name>"),
                 }?;
 
-                self.encoder.write(&CpuSampleEvent {
+                encoder.write(&CpuSampleEvent {
                     timestamp_ns: data.timestamp_nanos,
                     worker_id: data.worker_id,
                     tid: data.tid,
@@ -387,7 +402,9 @@ impl RotatingWriter {
     /// Rotate if the current file exceeds max_file_size.
     /// Called after writing a complete logical unit (def + event).
     fn maybe_rotate(&mut self) -> std::io::Result<()> {
-        if !self.stopped && self.encoder.bytes_written() > self.max_file_size {
+        if let WriterState::Active(encoder) = &self.state
+            && encoder.bytes_written() > self.max_file_size
+        {
             self.rotate()?;
         }
         Ok(())
@@ -408,8 +425,8 @@ impl TraceWriter for RotatingWriter {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        if !self.stopped {
-            self.encoder.flush()?;
+        if let WriterState::Active(encoder) = &mut self.state {
+            encoder.flush()?;
         }
         Ok(())
     }
@@ -418,7 +435,10 @@ impl TraceWriter for RotatingWriter {
         std::mem::take(&mut self.did_rotate)
     }
 
-    fn seal(&mut self) -> std::io::Result<()> {
+    fn finalize(&mut self) -> std::io::Result<()> {
+        if matches!(self.state, WriterState::Finished) {
+            tracing::warn!("writer is already closed.")
+        }
         self.flush()?;
         // Rename .active → .bin for the current segment (if it has .active suffix)
         if self
@@ -430,7 +450,20 @@ impl TraceWriter for RotatingWriter {
             fs::rename(&self.active_path, &sealed)?;
             self.active_path = sealed;
         }
+        self.state = WriterState::Finished;
         Ok(())
+    }
+}
+
+impl Drop for RotatingWriter {
+    fn drop(&mut self) {
+        if self.dropped_events > 0 {
+            tracing::info!(
+                target: "dial9_telemetry",
+                dropped_events = self.dropped_events,
+                "RotatingWriter dropped events after finalization"
+            );
+        }
     }
 }
 
@@ -546,7 +579,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let mut writer = RotatingWriter::new(&base, 1024, 4096).unwrap();
-        writer.seal().unwrap();
+        writer.finalize().unwrap();
 
         let events = read_trace_events(&rotating_file(&base, 0));
         assert_eq!(events.len(), 0);
@@ -563,7 +596,7 @@ mod tests {
         for _ in 0..3 {
             writer.write_event(&park_event()).unwrap();
         }
-        writer.seal().unwrap();
+        writer.finalize().unwrap();
 
         // All 3 events should be readable across rotated files
         let total: usize = (0..10)
@@ -591,7 +624,7 @@ mod tests {
         for _ in 0..10 {
             writer.write_event(&park_event()).unwrap();
         }
-        writer.seal().unwrap();
+        writer.finalize().unwrap();
 
         // Key invariant: total disk usage stays within budget
         assert!(total_disk_usage(dir.path()) <= max_total_size);
@@ -613,7 +646,7 @@ mod tests {
         for _ in 0..100 {
             writer.write_event(&park_event()).unwrap();
         }
-        writer.seal().unwrap();
+        writer.finalize().unwrap();
 
         // Should have stopped writing — total events across all files < 100
         let total: usize = (0..100)
@@ -658,14 +691,13 @@ mod tests {
         // few bytes. After 100 rotations, total_size drifts above max_total_size.
         for i in 0..5000 {
             writer.write_event(&park_event()).unwrap();
-            if writer.stopped {
+            if matches!(writer.state, WriterState::Finished) {
                 panic!(
                     "Writer stopped at event {i}! total_size={}, max_total_size={}, \
-                     bytes_written={}, closed_files={}. \
+                     closed_files={}. \
                      write_event_inner should try eviction before stopping.",
                     writer.total_size(),
                     max_total_size,
-                    writer.encoder.bytes_written(),
                     writer.closed_files.len()
                 );
             }
@@ -682,7 +714,7 @@ mod tests {
         for _ in 0..5 {
             writer.write_event(&park_event()).unwrap();
         }
-        writer.seal().unwrap();
+        writer.finalize().unwrap();
 
         // Should have created multiple files with sequential naming
         assert!(
@@ -713,7 +745,7 @@ mod tests {
         for _ in 0..3 {
             writer.write_event(&park_event()).unwrap();
         }
-        writer.seal().unwrap();
+        writer.finalize().unwrap();
 
         // All 3 events should be readable across the rotated files.
         let total: usize = (0..10)
@@ -739,7 +771,7 @@ mod tests {
         for _ in 0..3 {
             writer.write_event(&park_event()).unwrap();
         }
-        writer.seal().unwrap();
+        writer.finalize().unwrap();
 
         // Each rotated file must be a self-contained, readable trace.
         let total: usize = (0..10)
@@ -801,7 +833,7 @@ mod tests {
         for e in &events {
             writer.write_event(e).unwrap();
         }
-        writer.seal().unwrap();
+        writer.finalize().unwrap();
 
         // All events should be readable across files.
         let mut total = 0;
@@ -825,7 +857,7 @@ mod tests {
         for _ in 0..2 {
             writer.write_event(&park_event()).unwrap();
         }
-        writer.seal().unwrap();
+        writer.finalize().unwrap();
 
         // Both events readable across files
         let total: usize = (0..10)
@@ -888,20 +920,20 @@ mod tests {
     }
 
     #[test]
-    fn test_seal_renames_current_file() {
+    fn test_finalize_renames_current_file() {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let mut writer = RotatingWriter::new(&base, 1024, 100000).unwrap();
         writer.write_event(&park_event()).unwrap();
-        writer.seal().unwrap();
+        writer.finalize().unwrap();
 
         assert!(
             dir.path().join("trace.0.bin").exists(),
-            "file should be sealed after seal()"
+            "file should be sealed after finalize()"
         );
         assert!(
             !dir.path().join("trace.0.bin.active").exists(),
-            "active file should be gone after seal()"
+            "active file should be gone after finalize()"
         );
     }
 
@@ -964,7 +996,7 @@ mod tests {
             writer.write_event(&park_event()).unwrap();
         }
         writer.flush().unwrap();
-        writer.seal().unwrap();
+        writer.finalize().unwrap();
 
         let mut files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
