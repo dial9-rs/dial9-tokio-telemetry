@@ -336,6 +336,7 @@ impl SegmentProcessor for SymbolizeProcessor {
             let input = std::mem::take(&mut data.bytes);
             let result = tokio::task::spawn_blocking(move || {
                 let maps = dial9_perf_self_profile::read_proc_maps();
+                // TODO: reduce the amount of reallocation we are doing here, probably by making it possible to extend segment data instead of all the copying
                 let mut output = Vec::new();
                 dial9_perf_self_profile::offline_symbolize::symbolize_trace_with_maps(
                     &input,

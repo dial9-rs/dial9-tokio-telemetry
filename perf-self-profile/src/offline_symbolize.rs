@@ -85,6 +85,8 @@ fn write_symbol_data(
     output: &mut impl Write,
 ) -> io::Result<()> {
     let mut encoder = decoder.into_encoder(output);
+    // TODO: avoid recreating the Symbolizer here every time. This is a little non trivial because of threading issues and Symbolizer being !Send and !Sync.
+    // We need to basically have a background symbolization thread.
     let symbolizer = Symbolizer::new();
 
     // Partition addresses into kernel vs userspace, group userspace by mapping.
