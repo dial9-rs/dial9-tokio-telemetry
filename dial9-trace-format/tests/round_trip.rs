@@ -2,7 +2,7 @@ use dial9_trace_format::codec::{self, WireTypeId};
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::schema::FieldDef;
-use dial9_trace_format::types::{FieldType, FieldValue, InternedString};
+use dial9_trace_format::types::{FieldType, FieldValue};
 
 #[test]
 fn full_round_trip() {

@@ -181,10 +181,10 @@ fn write_symbol_data(
     let mut next_pool_id: u32 = 0;
     let mut symbol_events: Vec<ResolvedSymbol> = Vec::new();
 
-    let mut intern = |s: String,
-                      pool_entries: &mut Vec<codec::PoolEntry>,
-                      next_pool_id: &mut u32,
-                      string_to_id: &mut HashMap<String, u32>|
+    let intern = |s: String,
+                  pool_entries: &mut Vec<codec::PoolEntry>,
+                  next_pool_id: &mut u32,
+                  string_to_id: &mut HashMap<String, u32>|
      -> InternedString {
         let id = *string_to_id.entry(s.clone()).or_insert_with(|| {
             let id = *next_pool_id;
@@ -203,14 +203,24 @@ fn write_symbol_data(
         for (depth, info) in symbols.into_iter().enumerate() {
             let Some(name) = info.name else { continue };
 
-            let symbol_name = intern(name, &mut pool_entries, &mut next_pool_id, &mut string_to_id);
+            let symbol_name = intern(
+                name,
+                &mut pool_entries,
+                &mut next_pool_id,
+                &mut string_to_id,
+            );
 
             let (source_file_str, source_line) = match info.code_info {
                 Some(ci) => (ci.file, ci.line.unwrap_or(0) as u64),
                 None => (String::new(), 0),
             };
 
-            let source_file = intern(source_file_str, &mut pool_entries, &mut next_pool_id, &mut string_to_id);
+            let source_file = intern(
+                source_file_str,
+                &mut pool_entries,
+                &mut next_pool_id,
+                &mut string_to_id,
+            );
 
             symbol_events.push(ResolvedSymbol {
                 addr,

@@ -47,6 +47,7 @@ pub struct BackgroundTaskConfig {
     client: Option<aws_sdk_s3::Client>,
     /// When true, run the symbolize processor on each segment.
     #[builder(default)]
+    #[allow(dead_code)]
     symbolize: bool,
     /// Metrics sink. Defaults to [`DevNullSink`](metrique_writer::sink::DevNullSink).
     #[builder(default = metrique_writer::sink::DevNullSink::boxed())]
@@ -186,18 +187,19 @@ pub(crate) trait SegmentProcessor: Send {
 }
 
 /// Build the processor pipeline based on config flags and available features.
-async fn build_pipeline(config: &mut BackgroundTaskConfig) -> Vec<Box<dyn SegmentProcessor>> {
+async fn build_pipeline(_config: &mut BackgroundTaskConfig) -> Vec<Box<dyn SegmentProcessor>> {
     let mut pipeline: Vec<Box<dyn SegmentProcessor>> = Vec::new();
 
     #[cfg(feature = "cpu-profiling")]
-    if config.symbolize {
+    if _config.symbolize {
         pipeline.push(Box::new(SymbolizeProcessor));
     }
 
+    #[allow(unused_mut)]
     let mut has_s3 = false;
     #[cfg(feature = "worker-s3")]
-    if let Some(s3_config) = config.s3.take() {
-        let s3_uploader = S3PipelineUploader::new(s3_config, config.client.take()).await;
+    if let Some(s3_config) = _config.s3.take() {
+        let s3_uploader = S3PipelineUploader::new(s3_config, _config.client.take()).await;
         pipeline.push(Box::new(GzipCompressor));
         pipeline.push(Box::new(s3_uploader));
         has_s3 = true;
