@@ -136,17 +136,24 @@ pub fn validate_trace_matches_metrics(
         metrics_spawned
     );
 
-    // 5. Per-worker park count: allow small percentage-based discrepancy (±1% or ±3, whichever is larger)
-    let park_mismatches: Vec<_> = active_workers
+    // 5. Per-worker park count sanity checks.
+    //
+    // Tokio's `worker_park_count` counts inner-loop iterations inside the
+    // worker's `park()` method (spurious wakeups, maintenance cycles), while
+    // the `on_thread_park` callback fires only once per `park()` call.
+    // Therefore our trace count is generally less than tokio's count.
+    // However, the metrics snapshot and trace end at different times, so the
+    // trace may also capture a few parks after the snapshot. We check:
+    //   (a) every active worker recorded at least one park
+    //   (b) trace parks ≤ tokio parks + small margin (for post-snapshot parks)
+    let park_violations: Vec<_> = active_workers
         .iter()
         .filter_map(|&w| {
             analysis.worker_stats.get(&WorkerId::from(w)).and_then(|s| {
-                let trace = s.park_count as i64;
-                let tokio = metrics_parks[w] as i64;
-                let diff = (trace - tokio).abs();
-                let threshold = ((tokio as f64 * 0.01).ceil() as i64).max(5);
-                if diff > threshold {
-                    Some((w, trace, tokio, diff, threshold))
+                let trace = s.park_count;
+                let tokio = metrics_parks[w] as usize;
+                if trace == 0 || trace > tokio + 5 {
+                    Some((w, trace, tokio))
                 } else {
                     None
                 }
@@ -154,9 +161,10 @@ pub fn validate_trace_matches_metrics(
         })
         .collect();
     check!(
-        park_mismatches.is_empty(),
-        "per-worker park mismatches >1% (worker, trace, tokio, diff, threshold): {:?}",
-        park_mismatches
+        park_violations.is_empty(),
+        "park violations (worker, trace_parks, tokio_parks): {:?} — \
+         trace parks must be >= 1 and <= tokio parks + 5",
+        park_violations
     );
 
     // 6. Park/unpark balance: unparks ≈ parks (within 1)
