@@ -1,5 +1,7 @@
 //! Operational metrics published via metrique.
 
+use std::time::Duration;
+
 use crate::background_task::pipeline_metrics::{MetriqueResult, PipelineMetrics};
 use metrique::timers::Timer;
 use metrique::unit::{Byte, Microsecond, Millisecond};
@@ -41,6 +43,9 @@ pub(crate) struct FlushMetrics {
     pub flush_duration: Timer,
     /// Oldest batches evicted since last flush.
     pub dropped_batches: u64,
+
+    #[metrics(unit = Microsecond)]
+    pub cpu_flush_duration: Duration,
 }
 
 /// Metrics emitted per sealed segment processed by the background worker.

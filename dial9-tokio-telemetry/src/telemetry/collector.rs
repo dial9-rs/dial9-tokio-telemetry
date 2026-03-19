@@ -36,6 +36,10 @@ impl CentralCollector {
         }
     }
 
+    pub fn next(&self) -> Option<Vec<RawEvent>> {
+        self.queue.pop()
+    }
+
     pub fn drain(&self) -> Vec<Vec<RawEvent>> {
         let mut batches = Vec::new();
         while let Some(batch) = self.queue.pop() {
