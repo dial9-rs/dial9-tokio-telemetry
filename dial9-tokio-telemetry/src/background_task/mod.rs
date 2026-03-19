@@ -12,7 +12,7 @@ use metrique::unit::Millisecond;
 use metrique::unit_of_work::metrics;
 use metrique_writer::BoxEntrySink;
 use pipeline_metrics::{MetriqueResult, PipelineMetrics, StageMetrics};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -320,6 +320,11 @@ impl SegmentProcessor for SymbolizeProcessor {
         mut data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
+            // Skip already-compressed segments (e.g. leftover from a previous run).
+            if data.bytes.starts_with(&[0x1f, 0x8b]) {
+                tracing::debug!(target: "dial9_worker", "segment is gzip-compressed, skipping symbolization");
+                return Ok(data);
+            }
             let input = std::mem::take(&mut data.bytes);
             let result = tokio::task::spawn_blocking(move || {
                 let maps = dial9_perf_self_profile::read_proc_maps();
@@ -425,6 +430,9 @@ pub(crate) struct WorkerLoop {
     /// When cancelled, the worker finishes its current cycle and exits
     /// instead of sleeping.
     stop: tokio_util::sync::CancellationToken,
+    /// Segments that have permanently failed processing. Tracked to avoid
+    /// spin-looping on the same broken segment every poll cycle.
+    failed_segments: HashSet<PathBuf>,
 }
 
 impl WorkerLoop {
@@ -440,6 +448,7 @@ impl WorkerLoop {
             processors,
             metrics_sink: config.metrics_sink,
             stop,
+            failed_segments: HashSet::new(),
         }
     }
 
@@ -468,6 +477,10 @@ impl WorkerLoop {
                 return false;
             }
         };
+        let segments: Vec<_> = segments
+            .into_iter()
+            .filter(|s| !self.failed_segments.contains(&s.path))
+            .collect();
         tracing::debug!(target: "dial9_worker", dir = %self.dir.display(), stem = %self.stem, count = segments.len(), "scanned for sealed segments");
         let found = !segments.is_empty();
         self.process_segments(&segments).await;
@@ -542,7 +555,8 @@ impl WorkerLoop {
                         {
                             tracing::debug!(target: "dial9_worker", path = %segment.path.display(), "segment evicted during processing, skipping");
                         } else {
-                            tracing::warn!(target: "dial9_worker", error = %e.kind, cause = ?e.kind, path = %segment.path.display(), "processor failed, skipping segment");
+                            self.failed_segments.insert(segment.path.clone());
+                            tracing::warn!(target: "dial9_worker", error = %e.kind, cause = ?e.kind, path = %segment.path.display(), "processor failed, skipping segment permanently");
                         }
                         continue 'next_segment;
                     }
