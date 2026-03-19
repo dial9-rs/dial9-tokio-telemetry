@@ -1066,3 +1066,106 @@ mod trace_stem_tests {
         check!(config.trace_dir() == std::path::Path::new("/tmp"));
     }
 }
+
+#[cfg(test)]
+mod worker_pipeline_tests {
+    use super::*;
+    use assert2::check;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn config_for(dir: &std::path::Path) -> BackgroundTaskConfig {
+        BackgroundTaskConfig::builder()
+            .trace_path(dir.join("trace.bin"))
+            .build()
+    }
+
+    /// A segment that fails processing is not retried on subsequent poll cycles.
+    #[tokio::test]
+    async fn failed_segment_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("trace.0.bin"), b"bad data").unwrap();
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        struct AlwaysFailProcessor(Arc<AtomicUsize>);
+        impl SegmentProcessor for AlwaysFailProcessor {
+            fn name(&self) -> &'static str {
+                "AlwaysFail"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Err(ProcessError {
+                        data,
+                        kind: ProcessErrorKind::Io(std::io::Error::other("permanent failure")),
+                    })
+                })
+            }
+        }
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let processors: Vec<Box<dyn SegmentProcessor>> =
+            vec![Box::new(AlwaysFailProcessor(attempts.clone()))];
+
+        let mut worker = WorkerLoop::new(config_for(dir.path()), processors, stop);
+
+        // Run two poll cycles manually.
+        worker.process_open_segments().await;
+        worker.process_open_segments().await;
+
+        // The processor should only be called once: the second cycle skips
+        // the segment because it was recorded as permanently failed.
+        check!(attempts.load(Ordering::SeqCst) == 1);
+    }
+
+    /// Gzip-compressed segments pass through GzipCompressor unchanged.
+    #[tokio::test]
+    async fn gzip_segment_not_double_compressed() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let gzip_data = {
+            use flate2::write::GzEncoder;
+            use std::io::Write;
+            let mut enc = GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            enc.write_all(b"already compressed").unwrap();
+            enc.finish().unwrap()
+        };
+        std::fs::write(dir.path().join("trace.0.bin"), &gzip_data).unwrap();
+
+        let output_bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        struct CaptureProcessor(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl SegmentProcessor for CaptureProcessor {
+            fn name(&self) -> &'static str {
+                "Capture"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                *self.0.lock().unwrap() = data.bytes.clone();
+                Box::pin(async { Ok(data) })
+            }
+        }
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![
+            Box::new(GzipCompressor),
+            Box::new(CaptureProcessor(output_bytes.clone())),
+        ];
+
+        let mut worker = WorkerLoop::new(config_for(dir.path()), processors, stop);
+        worker.run().await;
+
+        // The captured bytes should be identical to the input (not double-gzipped).
+        check!(output_bytes.lock().unwrap().as_slice() == gzip_data.as_slice());
+    }
+}
