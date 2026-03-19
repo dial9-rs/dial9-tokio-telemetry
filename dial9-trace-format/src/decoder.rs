@@ -66,6 +66,11 @@ impl StringPool {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Iterate over all interned strings as `(id, value)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (InternedString, &str)> {
+        self.0.iter().map(|(&id, v)| (id, v.as_str()))
+    }
 }
 
 /// Decoded events yielded by the decoder.
@@ -133,6 +138,10 @@ impl<'a> Decoder<'a> {
 
     pub fn string_pool(&self) -> &StringPool {
         &self.string_pool
+    }
+
+    pub(crate) fn timestamp_base_ns(&self) -> u64 {
+        self.timestamp_base_ns
     }
 
     fn schema_info(&self, type_id: WireTypeId) -> Option<SchemaInfo<'_>> {

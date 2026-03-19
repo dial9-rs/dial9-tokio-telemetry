@@ -108,6 +108,49 @@ impl<W: Write> Encoder<W> {
         })
     }
 
+    /// Create an encoder that appends to an existing trace.
+    ///
+    /// Parses `existing` to recover the schema registry and string pool, then
+    /// writes new frames into `writer` **without** emitting a file header.
+    /// Use this when you need to append events (e.g. symbol tables) to a trace
+    /// that already has a header.
+    ///
+    /// Returns `None` if `existing` does not contain a valid trace header.
+    pub fn extend(existing: &[u8], writer: W) -> Option<Self> {
+        use crate::decoder::Decoder;
+
+        let mut decoder = Decoder::new(existing)?;
+        while decoder.next_frame_ref().ok().flatten().is_some() {}
+
+        let mut string_pool = HashMap::new();
+        let mut next_pool_id: u32 = 0;
+        for (id, value) in decoder.string_pool().iter() {
+            string_pool.insert(value.to_string(), id.raw_id());
+            if id.raw_id() >= next_pool_id {
+                next_pool_id = id.raw_id() + 1;
+            }
+        }
+
+        let mut schema_ids = HashMap::new();
+        for (wire_id, entry) in decoder.registry().entries() {
+            schema_ids.insert(SchemaKey::Name(Arc::from(entry.name.as_str())), wire_id);
+        }
+
+        let mut registry = decoder.registry().clone();
+        registry.sync_next_id();
+
+        let mut state = EncodeState::new(writer);
+        state.timestamp_base_ns = decoder.timestamp_base_ns();
+
+        Some(Self {
+            state,
+            registry,
+            string_pool,
+            next_pool_id,
+            schema_ids,
+        })
+    }
+
     /// Consume the encoder and return the inner writer.
     pub fn into_inner(self) -> W {
         self.state.writer.into_inner()
@@ -480,6 +523,86 @@ mod tests {
         drop(enc);
         assert!(buf.len() >= 5);
         assert_eq!(&buf[..5], &[0x54, 0x52, 0x43, 0x00, 1]);
+    }
+
+    #[test]
+    fn encoder_extend_to_appends_without_header() {
+        use crate::decoder::{DecodedFrame, Decoder};
+
+        // Create a trace with a header, a schema, and an event
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        enc.write_event(&schema, &[FieldValue::Varint(1_000), FieldValue::Varint(1)])
+            .unwrap();
+        let base = enc.finish();
+
+        // Extend: parses base to learn the schema, appends to output
+        let mut output = Vec::new();
+        let mut ext = Encoder::extend(&base, &mut output).unwrap();
+        // Schema "Ev" is already known — no duplicate schema frame emitted
+        ext.write_event(&schema, &[FieldValue::Varint(2_000), FieldValue::Varint(2)])
+            .unwrap();
+        drop(ext);
+
+        // Concatenate and decode
+        let mut combined = base.clone();
+        combined.extend_from_slice(&output);
+        let mut dec = Decoder::new(&combined).unwrap();
+        let events: Vec<_> = dec
+            .decode_all()
+            .into_iter()
+            .filter_map(|f| match f {
+                DecodedFrame::Event {
+                    timestamp_ns,
+                    values,
+                    ..
+                } => Some((timestamp_ns, values)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, Some(1_000));
+        assert_eq!(events[1].0, Some(2_000));
+    }
+
+    #[test]
+    fn encoder_extend_deduplicates_interned_strings() {
+        use crate::decoder::{DecodedFrame, Decoder};
+
+        // Create a trace with an interned string
+        let mut enc = Encoder::new();
+        let id1 = enc.intern_string("hello").unwrap();
+        let base = enc.finish();
+
+        // Extend: "hello" is already interned, should reuse the same ID
+        let mut output = Vec::new();
+        let mut ext = Encoder::extend(&base, &mut output).unwrap();
+        let id2 = ext.intern_string("hello").unwrap();
+        let id3 = ext.intern_string("world").unwrap();
+        drop(ext);
+
+        assert_eq!(id1, id2, "existing string should reuse pool ID");
+        assert_ne!(id2, id3);
+
+        // "hello" should not produce a new StringPool frame; "world" should
+        let mut combined = base.clone();
+        combined.extend_from_slice(&output);
+        let mut dec = Decoder::new(&combined).unwrap();
+        let frames = dec.decode_all();
+        let pool_frames: Vec<_> = frames
+            .iter()
+            .filter(|f| matches!(f, DecodedFrame::StringPool(_)))
+            .collect();
+        // One from the base trace ("hello"), one from extend ("world")
+        assert_eq!(pool_frames.len(), 2);
     }
 
     #[test]

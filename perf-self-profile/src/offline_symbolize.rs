@@ -8,11 +8,12 @@
 use blazesym::symbolize::Symbolizer;
 use dial9_trace_format::{
     TraceEvent,
-    codec::{self, WireTypeId},
+    codec::WireTypeId,
     decoder::{DecodedFrameRef, Decoder},
-    types::{FieldValue, FieldValueRef, InternedString},
+    encoder::Encoder,
+    types::{FieldValueRef, InternedString},
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::io::{self, Write};
 
 use crate::MapsEntry;
@@ -48,27 +49,19 @@ pub struct SymbolTableEntry {
     pub source_line: u64,
 }
 
-/// Write ProcMapsEntry events to a writer using low-level codec functions.
-///
-/// Writes the schema frame followed by one event per entry.
+/// Write ProcMapsEntry events to an encoder.
 pub fn encode_proc_maps(
-    type_id: WireTypeId,
     entries: &[MapsEntry],
-    w: &mut impl Write,
+    encoder: &mut Encoder<impl Write>,
 ) -> io::Result<()> {
-    codec::encode_schema(type_id, &ProcMapsEntry::schema_entry(), w)?;
     for e in entries {
-        codec::encode_event(
-            type_id,
-            Some(0),
-            &[
-                FieldValue::Varint(e.start),
-                FieldValue::Varint(e.end),
-                FieldValue::Varint(e.file_offset),
-                FieldValue::String(e.path.clone()),
-            ],
-            w,
-        )?;
+        encoder.write(&ProcMapsEntry {
+            timestamp_ns: 0,
+            start: e.start,
+            end: e.end,
+            file_offset: e.file_offset,
+            path: e.path.clone(),
+        })?;
     }
     Ok(())
 }
@@ -118,7 +111,7 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
         return Ok(());
     }
 
-    write_symbol_data(&addresses, &maps, output)
+    write_symbol_data(input, &addresses, &maps, output)
 }
 
 /// Symbolize a trace using caller-provided proc maps instead of reading them
@@ -147,7 +140,7 @@ pub fn symbolize_trace_with_maps(
         return Ok(());
     }
 
-    write_symbol_data(&addresses, maps, output)
+    write_symbol_data(input, &addresses, maps, output)
 }
 
 fn collect_stack_frame_addresses(values: &[FieldValueRef<'_>], addresses: &mut BTreeSet<u64>) {
@@ -162,95 +155,39 @@ fn collect_stack_frame_addresses(values: &[FieldValueRef<'_>], addresses: &mut B
     }
 }
 
-struct ResolvedSymbol {
-    addr: u64,
-    symbol_name: InternedString,
-    inline_depth: u64,
-    source_file: InternedString,
-    source_line: u64,
-}
-
 fn write_symbol_data(
+    input: &[u8],
     addresses: &BTreeSet<u64>,
     maps: &[MapsEntry],
     output: &mut impl Write,
 ) -> io::Result<()> {
+    let mut encoder = Encoder::extend(input, output)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
     let symbolizer = Symbolizer::new();
-    let mut pool_entries: Vec<codec::PoolEntry> = Vec::new();
-    let mut string_to_id: HashMap<String, u32> = HashMap::new();
-    let mut next_pool_id: u32 = 0;
-    let mut symbol_events: Vec<ResolvedSymbol> = Vec::new();
-
-    let intern = |s: String,
-                  pool_entries: &mut Vec<codec::PoolEntry>,
-                  next_pool_id: &mut u32,
-                  string_to_id: &mut HashMap<String, u32>|
-     -> InternedString {
-        let id = *string_to_id.entry(s.clone()).or_insert_with(|| {
-            let id = *next_pool_id;
-            *next_pool_id += 1;
-            pool_entries.push(codec::PoolEntry {
-                pool_id: id,
-                data: s.into_bytes(),
-            });
-            id
-        });
-        InternedString::from_raw(id)
-    };
 
     for &addr in addresses {
         let symbols = crate::resolve_symbols_with_maps(addr, &symbolizer, maps);
         for (depth, info) in symbols.into_iter().enumerate() {
             let Some(name) = info.name else { continue };
 
-            let symbol_name = intern(
-                name,
-                &mut pool_entries,
-                &mut next_pool_id,
-                &mut string_to_id,
-            );
+            let symbol_name = encoder.intern_string(&name)?;
 
             let (source_file_str, source_line) = match info.code_info {
                 Some(ci) => (ci.file, ci.line.unwrap_or(0) as u64),
                 None => (String::new(), 0),
             };
 
-            let source_file = intern(
-                source_file_str,
-                &mut pool_entries,
-                &mut next_pool_id,
-                &mut string_to_id,
-            );
+            let source_file = encoder.intern_string(&source_file_str)?;
 
-            symbol_events.push(ResolvedSymbol {
+            encoder.write(&SymbolTableEntry {
+                timestamp_ns: 0,
                 addr,
+                size: 0,
                 symbol_name,
                 inline_depth: depth as u64,
                 source_file,
                 source_line,
-            });
-        }
-    }
-
-    if !symbol_events.is_empty() {
-        codec::encode_string_pool(&pool_entries, output)?;
-
-        let type_id = WireTypeId(0xFFFE);
-        codec::encode_schema(type_id, &SymbolTableEntry::schema_entry(), output)?;
-        for sym in &symbol_events {
-            codec::encode_event(
-                type_id,
-                Some(0),
-                &[
-                    FieldValue::Varint(sym.addr),
-                    FieldValue::Varint(0),
-                    FieldValue::PooledString(sym.symbol_name),
-                    FieldValue::Varint(sym.inline_depth),
-                    FieldValue::PooledString(sym.source_file),
-                    FieldValue::Varint(sym.source_line),
-                ],
-                output,
-            )?;
+            })?;
         }
     }
 
@@ -273,14 +210,14 @@ mod tests {
     use dial9_trace_format::{
         decoder::{DecodedFrame, Decoder},
         encoder::Encoder,
-        schema::{FieldDef, SchemaEntry},
-        types::FieldType,
+        schema::FieldDef,
+        types::{FieldType, FieldValue},
     };
 
     fn make_encoder_with_proc_maps(maps: &[MapsEntry]) -> Vec<u8> {
-        let mut buf = Encoder::new().finish();
-        encode_proc_maps(WireTypeId(100), maps, &mut buf).unwrap();
-        buf
+        let mut enc = Encoder::new();
+        encode_proc_maps(maps, &mut enc).unwrap();
+        enc.finish()
     }
 
     #[test]
@@ -293,24 +230,22 @@ mod tests {
 
     #[test]
     fn symbolize_no_proc_maps_writes_nothing() {
-        let mut buf = Encoder::new().finish();
-        let schema = SchemaEntry {
-            name: "Ev".into(),
-            has_timestamp: false,
-            fields: vec![FieldDef {
-                name: "frames".into(),
-                field_type: FieldType::StackFrames,
-            }],
-        };
-        let tid = WireTypeId(0);
-        codec::encode_schema(tid, &schema, &mut buf).unwrap();
-        codec::encode_event(
-            tid,
-            None,
-            &[FieldValue::StackFrames(vec![0x1000])],
-            &mut buf,
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "frames".into(),
+                    field_type: FieldType::StackFrames,
+                }],
+            )
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![0x1000])],
         )
         .unwrap();
+        let buf = enc.finish();
 
         let mut output = Vec::new();
         symbolize_trace(&buf, &mut output).unwrap();
@@ -332,35 +267,35 @@ mod tests {
 
     #[test]
     fn symbolize_unresolvable_addresses_produces_valid_trace() {
-        let mut buf = Encoder::new().finish();
-        let ev_schema = SchemaEntry {
-            name: "Ev".into(),
-            has_timestamp: false,
-            fields: vec![FieldDef {
-                name: "frames".into(),
-                field_type: FieldType::StackFrames,
-            }],
-        };
-        let tid = WireTypeId(0);
-        codec::encode_schema(tid, &ev_schema, &mut buf).unwrap();
-        codec::encode_event(
-            tid,
-            None,
-            &[FieldValue::StackFrames(vec![0x55a4b2c01000])],
-            &mut buf,
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "frames".into(),
+                    field_type: FieldType::StackFrames,
+                }],
+            )
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![0x55a4b2c01000]),
+            ],
         )
         .unwrap();
         encode_proc_maps(
-            WireTypeId(1),
             &[MapsEntry {
                 start: 0x55a4b2c00000,
                 end: 0x55a4b2c05000,
                 file_offset: 0x1000,
                 path: "/nonexistent/binary".into(),
             }],
-            &mut buf,
+            &mut enc,
         )
         .unwrap();
+        let buf = enc.finish();
 
         let mut output = Vec::new();
         symbolize_trace(&buf, &mut output).unwrap();
@@ -382,19 +317,23 @@ mod tests {
             "test function address {addr:#x} not found in any mapping"
         );
 
-        let mut buf = Encoder::new().finish();
-        let ev_schema = SchemaEntry {
-            name: "Ev".into(),
-            has_timestamp: false,
-            fields: vec![FieldDef {
-                name: "frames".into(),
-                field_type: FieldType::StackFrames,
-            }],
-        };
-        let tid = WireTypeId(0);
-        codec::encode_schema(tid, &ev_schema, &mut buf).unwrap();
-        codec::encode_event(tid, None, &[FieldValue::StackFrames(vec![addr])], &mut buf).unwrap();
-        encode_proc_maps(WireTypeId(1), &raw_maps, &mut buf).unwrap();
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "frames".into(),
+                    field_type: FieldType::StackFrames,
+                }],
+            )
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![addr])],
+        )
+        .unwrap();
+        encode_proc_maps(&raw_maps, &mut enc).unwrap();
+        let buf = enc.finish();
 
         let mut output = Vec::new();
         symbolize_trace(&buf, &mut output).unwrap();
@@ -425,22 +364,22 @@ mod tests {
         let addr = symbolize_with_maps_produces_symbol_events as *const () as u64;
         let raw_maps = crate::read_proc_maps();
 
-        let mut buf = Encoder::new().finish();
-        let tid = WireTypeId(0);
-        codec::encode_schema(
-            tid,
-            &SchemaEntry {
-                name: "Ev".into(),
-                has_timestamp: false,
-                fields: vec![FieldDef {
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
                     name: "frames".into(),
                     field_type: FieldType::StackFrames,
                 }],
-            },
-            &mut buf,
+            )
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![addr])],
         )
         .unwrap();
-        codec::encode_event(tid, None, &[FieldValue::StackFrames(vec![addr])], &mut buf).unwrap();
+        let buf = enc.finish();
 
         let mut output = Vec::new();
         symbolize_trace_with_maps(&buf, &raw_maps, &mut output).unwrap();
@@ -472,9 +411,9 @@ mod tests {
             file_offset: 0x1000,
             path: "/usr/bin/foo".into(),
         };
-        let mut buf = Vec::new();
-        codec::encode_header(&mut buf).unwrap();
-        encode_proc_maps(WireTypeId(0), &[entry.clone()], &mut buf).unwrap();
+        let mut enc = Encoder::new();
+        encode_proc_maps(std::slice::from_ref(&entry), &mut enc).unwrap();
+        let buf = enc.finish();
 
         let mut dec = Decoder::new(&buf).unwrap();
         let frames = dec.decode_all_ref();
@@ -492,44 +431,26 @@ mod tests {
 
     #[test]
     fn symbol_table_event_round_trip() {
-        let mut buf = Vec::new();
-        codec::encode_header(&mut buf).unwrap();
-        codec::encode_string_pool(
-            &[
-                codec::PoolEntry {
-                    pool_id: 0,
-                    data: b"my_function".to_vec(),
-                },
-                codec::PoolEntry {
-                    pool_id: 1,
-                    data: b"/src/lib.rs".to_vec(),
-                },
-            ],
-            &mut buf,
-        )
+        let mut enc = Encoder::new();
+        let sym_name = enc.intern_string("my_function").unwrap();
+        let src_file = enc.intern_string("/src/lib.rs").unwrap();
+        enc.write(&SymbolTableEntry {
+            timestamp_ns: 0,
+            addr: 0x1000,
+            size: 256,
+            symbol_name: sym_name,
+            inline_depth: 0,
+            source_file: src_file,
+            source_line: 42,
+        })
         .unwrap();
-        let tid = WireTypeId(0);
-        codec::encode_schema(tid, &SymbolTableEntry::schema_entry(), &mut buf).unwrap();
-        codec::encode_event(
-            tid,
-            Some(0),
-            &[
-                FieldValue::Varint(0x1000),
-                FieldValue::Varint(256),
-                FieldValue::PooledString(InternedString::from_raw(0)),
-                FieldValue::Varint(0),
-                FieldValue::PooledString(InternedString::from_raw(1)),
-                FieldValue::Varint(42),
-            ],
-            &mut buf,
-        )
-        .unwrap();
+        let buf = enc.finish();
 
         let mut dec = Decoder::new(&buf).unwrap();
         let frames = dec.decode_all();
-        // StringPool + Schema + Event
-        assert_eq!(frames.len(), 3);
-        if let DecodedFrame::Event { values, .. } = &frames[2] {
+        // StringPool("my_function") + StringPool("/src/lib.rs") + Schema + Event
+        assert_eq!(frames.len(), 4);
+        if let DecodedFrame::Event { values, .. } = &frames[3] {
             assert_eq!(values[0], FieldValue::Varint(0x1000));
             assert_eq!(values[1], FieldValue::Varint(256));
             assert_eq!(
