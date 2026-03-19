@@ -33,4 +33,4 @@ jobs:
       - name: Run stress test
         run: |
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
-          cargo nextest run --all-features --stress-duration $(( ${{ inputs.duration_minutes || '60' }} * 60 ))
+          cargo nextest run --all-features --stress-duration '${{ inputs.duration_minutes || '60' }}m'
