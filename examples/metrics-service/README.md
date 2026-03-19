@@ -37,3 +37,5 @@ curl http://localhost:3001/metrics/cpu
 Everything is controlled via CLI flags—run `cargo run -- --help` for the full list. The load profile constants (`MAX_WORKERS`, `THUNDERING_HERD`, `BASELINE`, etc.) live at the top of `src/client.rs`.
 
 On Linux, CPU profiling and scheduler event tracing are enabled automatically.
+
+Set `PREWARM_FD_TABLE_SIZE=N` to pre-warm the kernel FD table before the runtime starts, mitigating RCU-synchronization latency spikes from FD table growth under load (see [tokio#7970](https://github.com/tokio-rs/tokio/issues/7970)).

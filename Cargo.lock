@@ -2548,6 +2548,7 @@ dependencies = [
  "hostname",
  "hyper 1.8.1",
  "hyper-util",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
