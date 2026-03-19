@@ -1,4 +1,3 @@
-mod cpu_flush_state;
 mod event_writer;
 mod shared_state;
 
@@ -6,15 +5,13 @@ pub(crate) use shared_state::SharedState;
 
 use event_writer::EventWriter;
 
-#[cfg(feature = "cpu-profiling")]
-use cpu_flush_state::CpuFlushState;
-
 use crate::metrics::{FlushMetrics, Operation};
 use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::task_metadata::TaskId;
-use crate::telemetry::writer::TraceWriter;
+use crate::telemetry::writer::{RotatingWriter, TraceWriter};
 use metrique::timers::Timer;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -356,37 +353,36 @@ impl Drop for TelemetryGuard {
     }
 }
 
-pub struct TracedRuntimeBuilder {
+/// Marker: no trace path has been set yet.
+pub struct NoTracePath;
+/// Marker: a trace path has been set.
+pub struct HasTracePath;
+
+pub struct TracedRuntimeBuilder<P = NoTracePath> {
     enabled: bool,
     task_tracking_enabled: bool,
+    trace_path: Option<PathBuf>,
     #[cfg(feature = "cpu-profiling")]
     cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
     #[cfg(feature = "cpu-profiling")]
     sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
-    #[cfg(feature = "cpu-profiling")]
-    inline_callframe_symbols: bool,
-    worker_config: Option<crate::background_task::BackgroundTaskConfig>,
-    metrics_sink: metrique_writer::BoxEntrySink,
+    #[cfg(feature = "worker-s3")]
+    s3_config: Option<crate::background_task::s3::S3Config>,
+    #[cfg(feature = "worker-s3")]
+    s3_client: Option<aws_sdk_s3::Client>,
+    worker_poll_interval: Option<Duration>,
+    worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
+    _marker: std::marker::PhantomData<P>,
 }
 
-impl TracedRuntimeBuilder {
+// Methods available on both NoTracePath and HasTracePath.
+impl<P> TracedRuntimeBuilder<P> {
     /// Set to `false` to build a plain runtime with no telemetry
     /// installed and a dummy [`TelemetryGuard`]. Defaults to `true`.
     ///
     /// Unlike [`TelemetryGuard::enable`]/[`TelemetryGuard::disable`]
     /// (which toggle recording at runtime), this controls whether
     /// telemetry hooks and threads are installed at all.
-    ///
-    /// ```no_run
-    /// # use dial9_tokio_telemetry::telemetry::writer::NullWriter;
-    /// # use dial9_tokio_telemetry::telemetry::recorder::TracedRuntime;
-    /// let enabled = std::env::var("ENABLE_DIAL9").is_ok();
-    /// let builder = tokio::runtime::Builder::new_multi_thread();
-    /// let (runtime, guard) = TracedRuntime::builder()
-    ///     .install(enabled)
-    ///     .build_and_start(builder, NullWriter)?;
-    /// # Ok::<(), std::io::Error>(())
-    /// ```
     pub fn install(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
@@ -415,69 +411,171 @@ impl TracedRuntimeBuilder {
         self
     }
 
-    #[cfg(feature = "cpu-profiling")]
-    pub fn with_inline_callframe_symbols(mut self, enabled: bool) -> Self {
-        self.inline_callframe_symbols = enabled;
+    /// Configure S3 upload for sealed trace segments.
+    #[cfg(feature = "worker-s3")]
+    pub fn with_s3_uploader(mut self, config: crate::background_task::s3::S3Config) -> Self {
+        self.s3_config = Some(config);
         self
     }
 
-    /// Configure an S3 uploader that watches for sealed trace segments
-    /// and uploads them to S3.
-    pub fn with_s3_uploader(
+    /// Provide a pre-built S3 client (for custom credentials or endpoints).
+    #[cfg(feature = "worker-s3")]
+    pub fn with_s3_client(mut self, client: aws_sdk_s3::Client) -> Self {
+        self.s3_client = Some(client);
+        self
+    }
+
+    pub fn with_worker_poll_interval(mut self, interval: Duration) -> Self {
+        self.worker_poll_interval = Some(interval);
+        self
+    }
+
+    pub fn with_worker_metrics_sink(mut self, sink: metrique_writer::BoxEntrySink) -> Self {
+        self.worker_metrics_sink = Some(sink);
+        self
+    }
+
+    fn into_state<Q>(self) -> TracedRuntimeBuilder<Q> {
+        TracedRuntimeBuilder {
+            enabled: self.enabled,
+            task_tracking_enabled: self.task_tracking_enabled,
+            trace_path: self.trace_path,
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiling_config: self.cpu_profiling_config,
+            #[cfg(feature = "cpu-profiling")]
+            sched_event_config: self.sched_event_config,
+            #[cfg(feature = "worker-s3")]
+            s3_config: self.s3_config,
+            #[cfg(feature = "worker-s3")]
+            s3_client: self.s3_client,
+            worker_poll_interval: self.worker_poll_interval,
+            worker_metrics_sink: self.worker_metrics_sink,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl TracedRuntimeBuilder<NoTracePath> {
+    /// Set the trace output path. This transitions the builder to
+    /// `HasTracePath`, enabling `build()` and `build_and_start()`.
+    pub fn with_trace_path(
         mut self,
-        config: crate::background_task::BackgroundTaskConfig,
-    ) -> Self {
-        self.worker_config = Some(config);
-        self
+        path: impl Into<PathBuf>,
+    ) -> TracedRuntimeBuilder<HasTracePath> {
+        self.trace_path = Some(path.into());
+        self.into_state()
     }
 
-    /// Set the metrics sink for telemetry operational metrics (flush stats,
-    /// pipeline metrics, etc.). Defaults to
-    /// [`DevNullSink`](metrique_writer::sink::DevNullSink).
-    pub fn with_metrics_sink(mut self, sink: metrique_writer::BoxEntrySink) -> Self {
-        self.metrics_sink = sink;
-        self
-    }
-
-    /// Build a plain runtime with a dummy guard.
-    fn build_disabled(
-        mut builder: tokio::runtime::Builder,
+    /// Build with a custom writer (for tests or `NullWriter`).
+    /// No background worker is spawned.
+    pub fn build_with_writer(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        use crate::telemetry::writer::NullWriter;
-        let runtime = builder.build()?;
-        let shared = Arc::new(SharedState::new(
-            crate::telemetry::events::clock_monotonic_ns(),
-        ));
-        let recorder = Arc::new(Mutex::new(TelemetryRecorder {
-            shared: shared.clone(),
-            event_writer: EventWriter::new(Box::new(NullWriter)),
-        }));
-        let guard = TelemetryGuard {
-            handle: TelemetryHandle { shared, recorder },
-            stop: Arc::new(AtomicBool::new(true)),
-            flush_thread: None,
-            worker: None,
-        };
+        self.into_state::<HasTracePath>()
+            .build_inner(builder, Box::new(writer))
+    }
+
+    /// Build with a custom writer and immediately enable recording.
+    pub fn build_and_start_with_writer(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: impl TraceWriter + 'static,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        let (runtime, guard) = self.build_with_writer(builder, writer)?;
+        guard.enable();
         Ok((runtime, guard))
     }
 
-    /// Build the traced runtime. Recording starts **disabled** — call
-    /// [`TelemetryGuard::enable`] to begin, or use
-    /// [`build_and_start`](Self::build_and_start).
+    /// Build the traced runtime. No background worker is spawned
+    /// (use `with_trace_path()` first for worker support).
     pub fn build(
         self,
-        mut builder: tokio::runtime::Builder,
+        builder: tokio::runtime::Builder,
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        self.build_with_writer(builder, writer)
+    }
+
+    /// Build and immediately enable recording.
+    pub fn build_and_start(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: impl TraceWriter + 'static,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        self.build_and_start_with_writer(builder, writer)
+    }
+}
+
+impl TracedRuntimeBuilder<HasTracePath> {
+    /// Set the trace output path (no-op, already set).
+    pub fn with_trace_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.trace_path = Some(path.into());
+        self
+    }
+
+    /// Build the traced runtime with a `RotatingWriter`.
+    ///
+    /// The background worker is auto-spawned when cpu-profiling or S3 is
+    /// configured. Recording starts disabled; call [`TelemetryGuard::enable`]
+    /// to begin, or use [`build_and_start`](Self::build_and_start).
+    pub fn build(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: RotatingWriter,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        self.build_inner(builder, Box::new(writer))
+    }
+
+    /// Build the traced runtime and immediately enable recording.
+    pub fn build_and_start(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: RotatingWriter,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        let (runtime, guard) = self.build(builder, writer)?;
+        guard.enable();
+        Ok((runtime, guard))
+    }
+
+    /// Build with a custom writer (for tests). The background worker is
+    /// still spawned if cpu-profiling or S3 is configured and `trace_path`
+    /// is set.
+    pub fn build_with_writer(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: impl TraceWriter + 'static,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        self.build_inner(builder, Box::new(writer))
+    }
+
+    /// Build with a custom writer and immediately enable recording.
+    pub fn build_and_start_with_writer(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: impl TraceWriter + 'static,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        let (runtime, guard) = self.build_with_writer(builder, writer)?;
+        guard.enable();
+        Ok((runtime, guard))
+    }
+
+    fn build_inner(
+        self,
+        mut builder: tokio::runtime::Builder,
+        writer: Box<dyn TraceWriter>,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         if !self.enabled {
-            return Self::build_disabled(builder);
+            return TracedRuntime::build_disabled(builder);
         }
         let start_mono_ns = crate::telemetry::events::clock_monotonic_ns();
 
         #[cfg(feature = "cpu-profiling")]
         let sampler = self
             .cpu_profiling_config
-            .map(crate::telemetry::cpu_profile::CpuProfiler::start);
+            .as_ref()
+            .map(|c| crate::telemetry::cpu_profile::CpuProfiler::start(c.clone()));
 
         #[cfg(feature = "cpu-profiling")]
         let sched = self
@@ -486,7 +584,7 @@ impl TracedRuntimeBuilder {
 
         let recorder = TelemetryRecorder::install(
             &mut builder,
-            Box::new(writer),
+            writer,
             self.task_tracking_enabled,
             start_mono_ns,
         );
@@ -494,9 +592,6 @@ impl TracedRuntimeBuilder {
         #[cfg(feature = "cpu-profiling")]
         {
             let mut rec = recorder.lock().unwrap();
-            let mut cpu_flush = CpuFlushState::new();
-            cpu_flush.inline_callframe_symbols = self.inline_callframe_symbols;
-            rec.event_writer.cpu_flush = Some(cpu_flush);
             if let Some(Ok(sampler)) = sampler {
                 rec.event_writer.cpu_profiler = Some(sampler);
             }
@@ -518,7 +613,10 @@ impl TracedRuntimeBuilder {
             let rec = recorder.clone();
             let shared = recorder.lock().unwrap().shared.clone();
             let stop = stop.clone();
-            let flush_metrics_sink = self.metrics_sink.clone();
+            let flush_metrics_sink = self
+                .worker_metrics_sink
+                .clone()
+                .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
             std::thread::Builder::new()
                 .name("telemetry-flush".into())
                 .spawn(move || {
@@ -563,15 +661,58 @@ impl TracedRuntimeBuilder {
 
         let guard_shared = recorder.lock().unwrap().shared.clone();
 
+        // Auto-construct worker config when we have a trace path and
+        // either cpu-profiling or S3 is configured.
+        let worker_config = self.trace_path.and_then(|trace_path| {
+            #[allow(unused_mut)]
+            let mut needs_worker = false;
+            #[allow(unused_mut)]
+            let mut symbolize = false;
+
+            #[cfg(feature = "cpu-profiling")]
+            if self.cpu_profiling_config.is_some() {
+                needs_worker = true;
+                symbolize = true;
+            }
+
+            #[cfg(feature = "worker-s3")]
+            let s3 = self.s3_config;
+            #[cfg(feature = "worker-s3")]
+            if s3.is_some() {
+                needs_worker = true;
+            }
+
+            if !needs_worker {
+                return None;
+            }
+
+            let poll_interval = self
+                .worker_poll_interval
+                .unwrap_or(crate::background_task::DEFAULT_POLL_INTERVAL);
+            let metrics_sink = self
+                .worker_metrics_sink
+                .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
+
+            let config = crate::background_task::BackgroundTaskConfig::builder()
+                .trace_path(trace_path)
+                .poll_interval(poll_interval)
+                .symbolize(symbolize)
+                .metrics_sink(metrics_sink);
+
+            #[cfg(feature = "worker-s3")]
+            let config = config.maybe_s3(s3).maybe_client(self.s3_client);
+
+            Some(config.build())
+        });
+
         #[allow(unused_mut)]
         let mut worker = None;
-        if let Some(config) = self.worker_config {
-            let metrics_sink = self.metrics_sink.clone();
+        if let Some(config) = worker_config {
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             let wt = std::thread::Builder::new()
                 .name("dial9-worker".into())
                 .spawn(move || {
-                    crate::background_task::run_background_task(config, shutdown_rx, metrics_sink);
+                    crate::background_task::run_background_task(config, shutdown_rx);
                 })
                 .expect("failed to spawn dial9-worker thread");
             worker = Some(WorkerHandle {
@@ -592,84 +733,67 @@ impl TracedRuntimeBuilder {
 
         Ok((runtime, guard))
     }
-
-    /// Build the traced runtime and immediately enable recording.
-    ///
-    /// Equivalent to calling [`build`](Self::build) followed by
-    /// [`TelemetryGuard::enable`].
-    pub fn build_and_start(
-        self,
-        builder: tokio::runtime::Builder,
-        writer: impl TraceWriter + 'static,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        let (runtime, guard) = self.build(builder, writer)?;
-        guard.enable();
-        Ok((runtime, guard))
-    }
 }
 
 /// Entry point for setting up a traced Tokio runtime.
 pub struct TracedRuntime;
 
 impl TracedRuntime {
-    pub fn builder() -> TracedRuntimeBuilder {
+    pub fn builder() -> TracedRuntimeBuilder<NoTracePath> {
         TracedRuntimeBuilder {
             enabled: true,
             task_tracking_enabled: false,
+            trace_path: None,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: None,
-            #[cfg(feature = "cpu-profiling")]
-            inline_callframe_symbols: false,
-            worker_config: None,
-            metrics_sink: metrique_writer::sink::DevNullSink::boxed(),
+            #[cfg(feature = "worker-s3")]
+            s3_config: None,
+            #[cfg(feature = "worker-s3")]
+            s3_client: None,
+            worker_poll_interval: None,
+            worker_metrics_sink: None,
+            _marker: std::marker::PhantomData,
         }
     }
 
-    /// Build the traced runtime. Recording starts **disabled** — call
-    /// [`TelemetryGuard::enable`] to begin, or use
-    /// [`TracedRuntime::build_and_start`].
+    /// Build a plain runtime with no telemetry installed.
+    pub fn build_disabled(
+        mut builder: tokio::runtime::Builder,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        use crate::telemetry::writer::NullWriter;
+        let runtime = builder.build()?;
+        let shared = Arc::new(SharedState::new(
+            crate::telemetry::events::clock_monotonic_ns(),
+        ));
+        let recorder = Arc::new(Mutex::new(TelemetryRecorder {
+            shared: shared.clone(),
+            event_writer: EventWriter::new(Box::new(NullWriter)),
+        }));
+        let guard = TelemetryGuard {
+            handle: TelemetryHandle { shared, recorder },
+            stop: Arc::new(AtomicBool::new(true)),
+            flush_thread: None,
+            worker: None,
+        };
+        Ok((runtime, guard))
+    }
+
+    /// Build the traced runtime. Recording starts disabled.
     pub fn build(
         builder: tokio::runtime::Builder,
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        TracedRuntimeBuilder {
-            enabled: true,
-            task_tracking_enabled: false,
-            #[cfg(feature = "cpu-profiling")]
-            cpu_profiling_config: None,
-            #[cfg(feature = "cpu-profiling")]
-            sched_event_config: None,
-            #[cfg(feature = "cpu-profiling")]
-            inline_callframe_symbols: false,
-            worker_config: None,
-            metrics_sink: metrique_writer::sink::DevNullSink::boxed(),
-        }
-        .build(builder, writer)
+        Self::builder().build_with_writer(builder, writer)
     }
 
     /// Build the traced runtime and immediately enable recording.
-    ///
-    /// Equivalent to calling [`build`](Self::build) followed by
-    /// [`TelemetryGuard::enable`].
     pub fn build_and_start(
         builder: tokio::runtime::Builder,
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        TracedRuntimeBuilder {
-            enabled: true,
-            task_tracking_enabled: false,
-            #[cfg(feature = "cpu-profiling")]
-            cpu_profiling_config: None,
-            #[cfg(feature = "cpu-profiling")]
-            sched_event_config: None,
-            #[cfg(feature = "cpu-profiling")]
-            inline_callframe_symbols: false,
-            worker_config: None,
-            metrics_sink: metrique_writer::sink::DevNullSink::boxed(),
-        }
-        .build_and_start(builder, writer)
+        Self::builder().build_and_start_with_writer(builder, writer)
     }
 }
 
@@ -807,7 +931,6 @@ mod tests {
         use crate::telemetry::format::WorkerId;
         use crate::telemetry::task_metadata::TaskId;
         use crate::telemetry::writer::RotatingWriter;
-        use cpu_flush_state::CpuFlushState;
         use proptest::prelude::*;
 
         #[derive(Debug, Clone)]
@@ -941,22 +1064,9 @@ mod tests {
                             );
                             total_raw += 1;
                         }
-                        TelemetryEvent::CpuSample {
-                            worker_id,
-                            callchain,
-                            ..
-                        } => {
-                            if *worker_id == WorkerId::UNKNOWN {
-                                // Thread name tracking is handled by the string pool now;
-                                // just verify callframe symbols resolve.
-                            }
-                            for addr in callchain {
-                                assert!(
-                                    reader.callframe_symbols.contains_key(addr),
-                                    "{path_str}: CpuSample references callchain address {addr:#x} but no CallframeDef. Defs: {:?}",
-                                    reader.callframe_symbols
-                                );
-                            }
+                        TelemetryEvent::CpuSample { .. } => {
+                            // Callchain addresses are raw; symbolization
+                            // happens in the background worker now.
                         }
                         _ => {}
                     }
@@ -979,9 +1089,6 @@ mod tests {
                 let writer = RotatingWriter::new(&base, max_file_size, 1_000_000).unwrap();
 
                 let mut ew = EventWriter::new(Box::new(writer));
-                let mut cpu = CpuFlushState::new();
-                cpu.inline_callframe_symbols = true;
-                ew.cpu_flush = Some(cpu);
 
                 #[track_caller]
                 fn loc0() -> &'static Location<'static> { Location::caller() }

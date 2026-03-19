@@ -3,9 +3,8 @@ use dial9_trace_format::{InternedString, StackFrames};
 
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::format::{
-    CallframeDefEvent, CpuSampleEvent, PollEndEvent, PollStartEvent, QueueSampleEvent,
-    SegmentMetadataEvent, TaskSpawnEvent, TaskTerminateEvent, WakeEventEvent, WorkerParkEvent,
-    WorkerUnparkEvent,
+    CpuSampleEvent, PollEndEvent, PollStartEvent, QueueSampleEvent, SegmentMetadataEvent,
+    TaskSpawnEvent, TaskTerminateEvent, WakeEventEvent, WorkerParkEvent, WorkerUnparkEvent,
 };
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
@@ -156,6 +155,11 @@ impl RotatingWriter {
             segment_metadata: None,
             formatted_locations: HashMap::new(),
         })
+    }
+
+    /// The base path used for trace segment files.
+    pub fn base_path(&self) -> &Path {
+        &self.base_path
     }
 
     /// Set key-value metadata to be written at the start of each new segment.
@@ -376,17 +380,6 @@ impl RotatingWriter {
                     callchain: StackFrames(data.callchain.clone()),
                 })
             }
-            // TODO: Remove CallframeDef as an event type.
-            RawEvent::CallframeDef(data) => self.encoder.write(&CallframeDefEvent {
-                timestamp_ns: 0,
-                address: data.address,
-                symbol: data.symbol.clone(),
-                location: data
-                    .location
-                    .as_deref()
-                    .unwrap_or("<no location>")
-                    .to_string(),
-            }),
         }?;
         Ok(())
     }

@@ -19,8 +19,6 @@ pub struct TraceReader {
     pub spawn_locations: HashMap<InternedString, String>,
     /// Task ID → spawn location mapping built from TaskSpawn events.
     pub task_spawn_locs: HashMap<TaskId, InternedString>,
-    /// Callframe address → symbol name mapping built from CallframeDef events.
-    pub callframe_symbols: HashMap<u64, String>,
     /// OS tid → thread name mapping built from ThreadNameDef events.
     pub thread_names: HashMap<u32, String>,
     /// Key-value metadata from the most recent SegmentMetadata event.
@@ -46,7 +44,6 @@ impl TraceReader {
 
         let mut spawn_locations = HashMap::new();
         let mut task_spawn_locs = HashMap::new();
-        let mut callframe_symbols = HashMap::new();
         let mut thread_names = HashMap::new();
         let mut segment_metadata = Vec::new();
 
@@ -60,9 +57,6 @@ impl TraceReader {
                 TelemetryEventRef::TaskSpawn(e) => {
                     populate_spawn_loc(&mut spawn_locations, e.spawn_loc, string_pool);
                     task_spawn_locs.insert(e.task_id, e.spawn_loc);
-                }
-                TelemetryEventRef::CallframeDef(e) => {
-                    callframe_symbols.insert(e.address, e.symbol.to_string());
                 }
                 TelemetryEventRef::SegmentMetadata(e) => {
                     segment_metadata = e
@@ -93,7 +87,6 @@ impl TraceReader {
             pos: 0,
             spawn_locations,
             task_spawn_locs,
-            callframe_symbols,
             thread_names,
             segment_metadata,
         })
@@ -121,7 +114,6 @@ impl TraceReader {
                 None => return Ok(None),
                 Some(
                     TelemetryEvent::TaskSpawn { .. }
-                    | TelemetryEvent::CallframeDef { .. }
                     | TelemetryEvent::ThreadNameDef { .. }
                     | TelemetryEvent::SegmentMetadata { .. },
                 ) => continue,
@@ -289,7 +281,6 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
             TelemetryEvent::TaskSpawn { .. }
             | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::CpuSample { .. }
-            | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. }
             | TelemetryEvent::SegmentMetadata { .. } => {}

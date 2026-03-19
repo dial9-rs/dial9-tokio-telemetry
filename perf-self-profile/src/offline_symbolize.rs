@@ -12,7 +12,7 @@ use dial9_trace_format::{
     decoder::{DecodedFrameRef, Decoder},
     types::{FieldValue, FieldValueRef, InternedString},
 };
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
 
 use crate::MapsEntry;
@@ -29,13 +29,19 @@ pub struct ProcMapsEntry {
 }
 
 /// Schema-based event for resolved symbol table entries.
+///
+/// Each entry maps an instruction pointer address to a resolved symbol name.
+/// When a function has inlined callees, multiple entries share the same `addr`
+/// with increasing `inline_depth` (0 = outermost).
 #[derive(dial9_trace_format::TraceEvent)]
 pub struct SymbolTableEntry {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
-    pub base_addr: u64,
+    pub addr: u64,
     pub size: u64,
     pub symbol_name: InternedString,
+    /// 0 = outermost function, 1+ = inlined callee depth.
+    pub inline_depth: u64,
 }
 
 /// Write ProcMapsEntry events to a writer using low-level codec functions.
@@ -97,15 +103,7 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
                         maps.push(entry);
                     }
                 } else {
-                    for field in &values {
-                        if let FieldValueRef::StackFrames(frames) = field {
-                            for addr in frames.iter() {
-                                if addr != 0 {
-                                    addresses.insert(addr);
-                                }
-                            }
-                        }
-                    }
+                    collect_stack_frame_addresses(&values, &mut addresses);
                 }
             }
             _ => {}
@@ -116,21 +114,66 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
         return Ok(());
     }
 
-    // Resolve symbols.
+    write_symbol_data(&addresses, &maps, output)
+}
+
+/// Symbolize a trace using caller-provided proc maps instead of reading them
+/// from the trace.
+///
+/// Use this when the caller already has the memory mappings (e.g. from
+/// `read_proc_maps()` in the same process). This avoids the overhead of
+/// encoding proc maps into the trace and re-parsing them.
+pub fn symbolize_trace_with_maps(
+    input: &[u8],
+    maps: &[MapsEntry],
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let mut addresses: BTreeSet<u64> = BTreeSet::new();
+
+    let mut decoder = Decoder::new(input)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
+
+    while let Ok(Some(frame)) = decoder.next_frame_ref() {
+        if let DecodedFrameRef::Event { values, .. } = frame {
+            collect_stack_frame_addresses(&values, &mut addresses);
+        }
+    }
+
+    if addresses.is_empty() {
+        return Ok(());
+    }
+
+    write_symbol_data(&addresses, maps, output)
+}
+
+fn collect_stack_frame_addresses(values: &[FieldValueRef<'_>], addresses: &mut BTreeSet<u64>) {
+    for field in values {
+        if let FieldValueRef::StackFrames(frames) = field {
+            for addr in frames.iter() {
+                if addr != 0 {
+                    addresses.insert(addr);
+                }
+            }
+        }
+    }
+}
+
+fn write_symbol_data(
+    addresses: &BTreeSet<u64>,
+    maps: &[MapsEntry],
+    output: &mut impl Write,
+) -> io::Result<()> {
     let symbolizer = Symbolizer::new();
     let mut pool_entries: Vec<codec::PoolEntry> = Vec::new();
     let mut string_to_id: HashMap<String, u32> = HashMap::new();
-    let mut seen_base_addrs: HashSet<u64> = HashSet::new();
     let mut next_pool_id: u32 = 0;
-    let mut symbol_events: Vec<(u64, InternedString)> = Vec::new();
+    // (addr, symbol_pool_id, inline_depth)
+    let mut symbol_events: Vec<(u64, InternedString, u64)> = Vec::new();
 
-    for &addr in &addresses {
-        let symbols = crate::resolve_symbols_with_maps(addr, &symbolizer, &maps);
-        for info in symbols {
+    for &addr in addresses {
+        let symbols = crate::resolve_symbols_with_maps(addr, &symbolizer, maps);
+        for (depth, info) in symbols.into_iter().enumerate() {
             let Some(name) = info.name else { continue };
-            if !seen_base_addrs.insert(info.base_addr) {
-                continue;
-            }
 
             let pool_id = *string_to_id.entry(name.clone()).or_insert_with(|| {
                 let id = next_pool_id;
@@ -142,24 +185,24 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
                 id
             });
 
-            symbol_events.push((info.base_addr, InternedString::from_raw(pool_id)));
+            symbol_events.push((addr, InternedString::from_raw(pool_id), depth as u64));
         }
     }
 
-    // Append symbol data.
     if !symbol_events.is_empty() {
         codec::encode_string_pool(&pool_entries, output)?;
 
         let type_id = WireTypeId(0xFFFE);
         codec::encode_schema(type_id, &SymbolTableEntry::schema_entry(), output)?;
-        for (base_addr, symbol_id) in &symbol_events {
+        for (addr, symbol_id, inline_depth) in &symbol_events {
             codec::encode_event(
                 type_id,
                 Some(0),
                 &[
-                    FieldValue::Varint(*base_addr),
+                    FieldValue::Varint(*addr),
                     FieldValue::Varint(0),
                     FieldValue::PooledString(*symbol_id),
+                    FieldValue::Varint(*inline_depth),
                 ],
                 output,
             )?;
@@ -331,6 +374,51 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symbolize_with_maps_produces_symbol_events() {
+        let addr = symbolize_with_maps_produces_symbol_events as *const () as u64;
+        let raw_maps = crate::read_proc_maps();
+
+        let mut buf = Encoder::new().finish();
+        let tid = WireTypeId(0);
+        codec::encode_schema(
+            tid,
+            &SchemaEntry {
+                name: "Ev".into(),
+                has_timestamp: false,
+                fields: vec![FieldDef {
+                    name: "frames".into(),
+                    field_type: FieldType::StackFrames,
+                }],
+            },
+            &mut buf,
+        )
+        .unwrap();
+        codec::encode_event(tid, None, &[FieldValue::StackFrames(vec![addr])], &mut buf).unwrap();
+
+        let mut output = Vec::new();
+        symbolize_trace_with_maps(&buf, &raw_maps, &mut output).unwrap();
+
+        assert!(!output.is_empty(), "expected symbol data to be written");
+
+        let mut combined = buf.clone();
+        combined.extend_from_slice(&output);
+        let mut dec = Decoder::new(&combined).unwrap();
+        let frames = dec.decode_all();
+        let has_string_pool = frames
+            .iter()
+            .any(|f| matches!(f, DecodedFrame::StringPool(_)));
+        let has_symbol_schema = frames.iter().any(
+            |f| matches!(f, DecodedFrame::Schema(s) if s.name == SymbolTableEntry::event_name()),
+        );
+        assert!(has_string_pool, "expected StringPool frame in output");
+        assert!(
+            has_symbol_schema,
+            "expected SymbolTableEntry schema in output"
+        );
+    }
+
     #[test]
     fn proc_maps_event_round_trip() {
         let entry = MapsEntry {
@@ -378,6 +466,7 @@ mod tests {
                 FieldValue::Varint(0x1000),
                 FieldValue::Varint(256),
                 FieldValue::PooledString(InternedString::from_raw(0)),
+                FieldValue::Varint(0),
             ],
             &mut buf,
         )
@@ -394,6 +483,7 @@ mod tests {
                 values[2],
                 FieldValue::PooledString(InternedString::from_raw(0))
             );
+            assert_eq!(values[3], FieldValue::Varint(0));
         } else {
             panic!("expected event frame");
         }

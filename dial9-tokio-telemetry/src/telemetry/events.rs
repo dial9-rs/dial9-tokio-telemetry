@@ -127,17 +127,6 @@ pub enum TelemetryEvent {
         /// Raw instruction pointer addresses (leaf first). Symbolized offline.
         callchain: Vec<u64>,
     },
-    /// Definition of a callframe symbol: maps an address to its resolved name.
-    /// Emitted before the first CpuSample that references this address (when inline
-    /// symbolication is enabled). Analogous to SpawnLocationDef.
-    CallframeDef {
-        /// The raw instruction pointer address.
-        address: u64,
-        /// Resolved symbol name (demangled), e.g. "my_crate::my_function".
-        symbol: String,
-        /// Source location, e.g. "my_file.rs:123". None if unavailable.
-        location: Option<String>,
-    },
     /// Maps an OS thread ID to its name (from `/proc/self/task/<tid>/comm`).
     /// Emitted before the first CpuSample referencing this tid in each file.
     /// Allows grouping non-worker CPU samples by thread name.
@@ -188,7 +177,7 @@ impl TelemetryEvent {
             | TelemetryEvent::TaskTerminate {
                 timestamp_nanos, ..
             } => Some(*timestamp_nanos),
-            TelemetryEvent::CallframeDef { .. } | TelemetryEvent::ThreadNameDef { .. } => None,
+            TelemetryEvent::ThreadNameDef { .. } => None,
             TelemetryEvent::SegmentMetadata {
                 timestamp_nanos, ..
             } => Some(*timestamp_nanos),
@@ -206,7 +195,6 @@ impl TelemetryEvent {
             TelemetryEvent::QueueSample { .. }
             | TelemetryEvent::TaskSpawn { .. }
             | TelemetryEvent::TaskTerminate { .. }
-            | TelemetryEvent::CallframeDef { .. }
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. }
             | TelemetryEvent::SegmentMetadata { .. } => None,
@@ -270,8 +258,6 @@ pub enum RawEvent {
     },
     /// A CPU stack trace sample from perf_event, attributed to a worker thread.
     CpuSample(Box<CpuSampleData>),
-    /// Definition of a callframe symbol: maps an address to its resolved name.
-    CallframeDef(Box<CallframeDefData>),
 }
 
 /// Data for a CPU stack trace sample. Boxed inside [`RawEvent`] to keep the
@@ -284,14 +270,6 @@ pub struct CpuSampleData {
     pub thread_name: Option<ThreadName>,
     pub source: CpuSampleSource,
     pub callchain: Vec<u64>,
-}
-
-/// Data for a callframe symbol definition. Boxed inside [`RawEvent`].
-#[derive(Debug, Clone)]
-pub struct CallframeDefData {
-    pub address: u64,
-    pub symbol: String,
-    pub location: Option<String>,
 }
 
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.
@@ -501,13 +479,6 @@ mod tests {
         };
         assert!(poll_start.is_runtime_event());
 
-        let callframe_def = TelemetryEvent::CallframeDef {
-            address: 0x1234,
-            symbol: "test".to_string(),
-            location: None,
-        };
-        assert!(!callframe_def.is_runtime_event());
-
         let task_spawn = TelemetryEvent::TaskSpawn {
             timestamp_nanos: 5_000_000,
             task_id: TaskId::from_u32(1),
@@ -531,10 +502,9 @@ mod tests {
 
     #[test]
     fn test_telemetry_event_clone() {
-        let event = TelemetryEvent::CallframeDef {
-            address: 0x1234,
-            symbol: "src/lib.rs:1:1".to_string(),
-            location: None,
+        let event = TelemetryEvent::ThreadNameDef {
+            tid: 42,
+            name: "worker-0".to_string(),
         };
         let cloned = event.clone();
         assert_eq!(event, cloned);

@@ -5,7 +5,6 @@ mod fake_s3;
 
 use aws_config::Region;
 use aws_sdk_s3::Client;
-use dial9_tokio_telemetry::background_task::BackgroundTaskConfig;
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use fake_s3::{
@@ -15,12 +14,8 @@ use fake_s3::{
 use flate2::read::GzDecoder;
 use std::io::Read;
 
-/// Create a dummy S3 config + client for tests that need a BackgroundTaskConfig
-/// but don't actually upload anything.
-fn dummy_worker_s3(
-    trace_path: &std::path::Path,
-    s3_root: &std::path::Path,
-) -> BackgroundTaskConfig {
+/// Create a dummy S3 config + client for tests.
+fn dummy_s3(s3_root: &std::path::Path) -> (S3Config, aws_sdk_s3::Client) {
     std::fs::create_dir_all(s3_root.join("dummy-bucket")).unwrap();
     let s3_config = S3Config::builder()
         .bucket("dummy-bucket")
@@ -29,12 +24,7 @@ fn dummy_worker_s3(
         .boot_id("test")
         .region("us-east-1")
         .build();
-    BackgroundTaskConfig::builder()
-        .trace_path(trace_path)
-        .poll_interval(std::time::Duration::from_millis(50))
-        .s3(s3_config)
-        .client(fake_s3_client(s3_root))
-        .build()
+    (s3_config, fake_s3_client(s3_root))
 }
 
 #[test]
@@ -44,13 +34,16 @@ fn worker_thread_starts_and_stops_cleanly() {
     let trace_path = trace_dir.path().join("trace.bin");
 
     let writer = RotatingWriter::new(&trace_path, 1024, 10 * 1024).unwrap();
-    let uploader_config = dummy_worker_s3(&trace_path, s3_root.path());
+    let (s3_config, client) = dummy_s3(s3_root.path());
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_s3_uploader(uploader_config)
+        .with_trace_path(&trace_path)
+        .with_s3_uploader(s3_config.clone())
+        .with_s3_client(client.clone())
+        .with_worker_poll_interval(std::time::Duration::from_millis(50))
         .build(builder, writer)
         .unwrap();
 
@@ -69,13 +62,16 @@ async fn graceful_shutdown_seals_segments() {
     let trace_path = trace_dir.path().join("trace.bin");
 
     let writer = RotatingWriter::new(&trace_path, 1024, 10 * 1024).unwrap();
-    let uploader_config = dummy_worker_s3(&trace_path, s3_root.path());
+    let (s3_config, client) = dummy_s3(s3_root.path());
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_s3_uploader(uploader_config)
+        .with_trace_path(&trace_path)
+        .with_s3_uploader(s3_config.clone())
+        .with_s3_client(client.clone())
+        .with_worker_poll_interval(std::time::Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -125,18 +121,14 @@ fn end_to_end_trace_to_s3_roundtrip() {
         .region("us-east-1")
         .build();
 
-    let uploader_config = BackgroundTaskConfig::builder()
-        .trace_path(&trace_path)
-        .poll_interval(std::time::Duration::from_millis(50))
-        .s3(s3_config)
-        .client(client.clone())
-        .build();
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_s3_uploader(uploader_config)
+        .with_trace_path(&trace_path)
+        .with_s3_uploader(s3_config.clone())
+        .with_s3_client(client.clone())
+        .with_worker_poll_interval(std::time::Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -260,18 +252,14 @@ fn region_auto_detection_corrects_wrong_client_region() {
         .boot_id("test-boot-id")
         .build();
 
-    let uploader_config = BackgroundTaskConfig::builder()
-        .trace_path(&trace_path)
-        .poll_interval(std::time::Duration::from_millis(50))
-        .s3(s3_config)
-        .client(client.clone())
-        .build();
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_s3_uploader(uploader_config)
+        .with_trace_path(&trace_path)
+        .with_s3_uploader(s3_config.clone())
+        .with_s3_client(client.clone())
+        .with_worker_poll_interval(std::time::Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -378,20 +366,16 @@ fn stress_test_all_segments_uploaded_and_valid() {
         sink: metrics_sink,
     } = metrique_writer::test_util::test_entry_sink();
 
-    let uploader_config = BackgroundTaskConfig::builder()
-        .trace_path(&trace_path)
-        .poll_interval(std::time::Duration::from_millis(50))
-        .s3(s3_config)
-        .client(client.clone())
-        .build();
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .with_s3_uploader(uploader_config)
-        .with_metrics_sink(metrics_sink)
+        .with_trace_path(&trace_path)
+        .with_s3_uploader(s3_config.clone())
+        .with_s3_client(client.clone())
+        .with_worker_poll_interval(std::time::Duration::from_millis(50))
+        .with_worker_metrics_sink(metrics_sink)
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -595,18 +579,14 @@ async fn graceful_shutdown_completes_when_s3_hangs() {
         .region("us-east-1")
         .build();
 
-    let uploader_config = BackgroundTaskConfig::builder()
-        .trace_path(&trace_path)
-        .poll_interval(std::time::Duration::from_millis(50))
-        .s3(s3_config)
-        .client(client)
-        .build();
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_s3_uploader(uploader_config)
+        .with_trace_path(&trace_path)
+        .with_s3_uploader(s3_config.clone())
+        .with_s3_client(client.clone())
+        .with_worker_poll_interval(std::time::Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -673,19 +653,15 @@ fn stress_test_with_s3_failures() {
         .region("us-east-1")
         .build();
 
-    let uploader_config = BackgroundTaskConfig::builder()
-        .trace_path(&trace_path)
-        .poll_interval(std::time::Duration::from_millis(50))
-        .s3(s3_config)
-        .client(client)
-        .build();
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .with_s3_uploader(uploader_config)
+        .with_trace_path(&trace_path)
+        .with_s3_uploader(s3_config.clone())
+        .with_s3_client(client.clone())
+        .with_worker_poll_interval(std::time::Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -767,19 +743,15 @@ fn permanently_broken_s3_produces_failure_metrics() {
         sink: metrics_sink,
     } = metrique_writer::test_util::test_entry_sink();
 
-    let uploader_config = BackgroundTaskConfig::builder()
-        .trace_path(&trace_path)
-        .poll_interval(std::time::Duration::from_millis(50))
-        .s3(s3_config)
-        .client(client)
-        .build();
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_s3_uploader(uploader_config)
-        .with_metrics_sink(metrics_sink)
+        .with_trace_path(&trace_path)
+        .with_s3_uploader(s3_config.clone())
+        .with_s3_client(client.clone())
+        .with_worker_poll_interval(std::time::Duration::from_millis(50))
+        .with_worker_metrics_sink(metrics_sink)
         .build_and_start(builder, writer)
         .unwrap();
 

@@ -40,7 +40,7 @@ metrique-writer = "0.1"
 metrique = { version = "0.1.20", features = ["local-format"] }
 
 [features]
-cpu-profiling = ["dep:dial9-perf-self-profile"]
+cpu-profiling = ["dep:dial9-perf-self-profile", "dep:flate2"]
 task-dump = ["tokio/taskdump"]
 worker-s3 = ["dep:aws-sdk-s3-transfer-manager", "dep:aws-sdk-s3", "dep:aws-config", "dep:flate2", "dep:time"]
 

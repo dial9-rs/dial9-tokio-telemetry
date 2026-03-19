@@ -32,7 +32,6 @@ fn main() {
             frequency_hz: 999,
             ..Default::default()
         })
-        .with_inline_callframe_symbols(true)
         .build_and_start(builder, writer)
         .unwrap();
 

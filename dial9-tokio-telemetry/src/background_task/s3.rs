@@ -7,10 +7,7 @@ use crate::background_task::ProcessErrorKind;
 use crate::background_task::instance_metadata::InstanceIdentity;
 use crate::background_task::sealed::SealedSegment;
 use aws_sdk_s3_transfer_manager::Client;
-use flate2::Compression;
-use flate2::write::GzEncoder;
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::Arc;
 
 /// Generate a per-process identifier from PID and current timestamp.
@@ -169,7 +166,9 @@ fn time_bucket_from_epoch(epoch_secs: u64) -> String {
 /// Gzip-compress a file synchronously. Intended for use with `spawn_blocking`.
 #[cfg(test)]
 pub(crate) fn gzip_compress_file_sync(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::{Read, Write};
     let mut file = std::fs::File::open(path)?;
     let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
     let mut buf = [0u8; 64 * 1024];
@@ -180,13 +179,6 @@ pub(crate) fn gzip_compress_file_sync(path: &std::path::Path) -> std::io::Result
         }
         encoder.write_all(&buf[..n])?;
     }
-    encoder.finish()
-}
-
-/// Gzip-compress bytes in memory.
-pub(crate) fn gzip_compress_bytes(data: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-    encoder.write_all(data)?;
     encoder.finish()
 }
 
@@ -261,6 +253,15 @@ mod tests {
     use flate2::read::GzDecoder;
     use std::io::Read;
     use std::path::PathBuf;
+
+    fn gzip_compress_bytes(data: &[u8]) -> std::io::Result<Vec<u8>> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(data)?;
+        encoder.finish()
+    }
 
     fn make_config() -> S3Config {
         S3Config::builder()

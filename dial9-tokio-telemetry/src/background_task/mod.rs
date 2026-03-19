@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Configuration for the in-process worker pipeline.
 ///
@@ -33,14 +33,21 @@ pub struct BackgroundTaskConfig {
     /// How often the worker checks for sealed segments. Defaults to 1 second.
     #[builder(default = DEFAULT_POLL_INTERVAL)]
     poll_interval: Duration,
-    /// S3 upload configuration.
+    /// S3 upload configuration. When `None`, the worker symbolizes and
+    /// gzip-writes back to disk without uploading.
     #[cfg(feature = "worker-s3")]
-    s3: s3::S3Config,
+    s3: Option<s3::S3Config>,
     /// Pre-built S3 client. When provided, the worker uses this client
     /// instead of building one from `aws_config::load_defaults`.
     /// Region auto-detection still applies unless `region` is set on `S3Config`.
     #[cfg(feature = "worker-s3")]
     client: Option<aws_sdk_s3::Client>,
+    /// When true, run the symbolize processor on each segment.
+    #[builder(default)]
+    symbolize: bool,
+    /// Metrics sink. Defaults to [`DevNullSink`](metrique_writer::sink::DevNullSink).
+    #[builder(default = metrique_writer::sink::DevNullSink::boxed())]
+    metrics_sink: BoxEntrySink,
 }
 
 impl BackgroundTaskConfig {
@@ -72,8 +79,8 @@ impl BackgroundTaskConfig {
 
     /// S3 upload configuration.
     #[cfg(feature = "worker-s3")]
-    pub fn s3(&self) -> &s3::S3Config {
-        &self.s3
+    pub fn s3(&self) -> Option<&s3::S3Config> {
+        self.s3.as_ref()
     }
 }
 
@@ -185,16 +192,30 @@ pub(crate) trait SegmentProcessor: Send {
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>;
 }
 
-/// Build the processor pipeline. Requires an async context for S3 client setup.
-#[cfg(feature = "worker-s3")]
+/// Build the processor pipeline based on config flags and available features.
 async fn build_pipeline(config: &mut BackgroundTaskConfig) -> Vec<Box<dyn SegmentProcessor>> {
-    let s3_uploader = S3PipelineUploader::new(config).await;
-    vec![Box::new(GzipCompressor), Box::new(s3_uploader)]
-}
+    let mut pipeline: Vec<Box<dyn SegmentProcessor>> = Vec::new();
 
-#[cfg(not(feature = "worker-s3"))]
-async fn build_pipeline(_config: &mut BackgroundTaskConfig) -> Vec<Box<dyn SegmentProcessor>> {
-    Vec::new()
+    #[cfg(feature = "cpu-profiling")]
+    if config.symbolize {
+        pipeline.push(Box::new(SymbolizeProcessor));
+    }
+
+    let mut has_s3 = false;
+    #[cfg(feature = "worker-s3")]
+    if let Some(s3_config) = config.s3.take() {
+        let s3_uploader = S3PipelineUploader::new(s3_config, config.client.take()).await;
+        pipeline.push(Box::new(GzipCompressor));
+        pipeline.push(Box::new(s3_uploader));
+        has_s3 = true;
+    }
+
+    if !has_s3 {
+        pipeline.push(Box::new(GzipCompressor));
+        pipeline.push(Box::new(WriteBackProcessor));
+    }
+
+    pipeline
 }
 
 /// The worker loop function. Runs on a dedicated thread, polls for sealed
@@ -205,7 +226,6 @@ async fn build_pipeline(_config: &mut BackgroundTaskConfig) -> Vec<Box<dyn Segme
 pub(crate) fn run_background_task(
     mut config: BackgroundTaskConfig,
     shutdown: tokio::sync::oneshot::Receiver<Duration>,
-    metrics_sink: BoxEntrySink,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .thread_name("dial9-worker-rt")
@@ -214,6 +234,7 @@ pub(crate) fn run_background_task(
         .expect("failed to create worker runtime");
 
     let processors = rt.block_on(build_pipeline(&mut config));
+    let metrics_sink = config.metrics_sink.clone();
 
     tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), "worker started");
     rt.block_on(async {
@@ -241,10 +262,8 @@ pub(crate) fn run_background_task(
 // GzipCompressor — compresses segment bytes in-memory
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "worker-s3")]
 struct GzipCompressor;
 
-#[cfg(feature = "worker-s3")]
 impl SegmentProcessor for GzipCompressor {
     fn name(&self) -> &'static str {
         "Gzip"
@@ -256,8 +275,14 @@ impl SegmentProcessor for GzipCompressor {
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
             let raw = data.bytes;
-            let compressed =
-                tokio::task::spawn_blocking(move || s3::gzip_compress_bytes(&raw)).await;
+            let compressed = tokio::task::spawn_blocking(move || {
+                use flate2::write::GzEncoder;
+                use std::io::Write;
+                let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                encoder.write_all(&raw)?;
+                encoder.finish()
+            })
+            .await;
             match compressed {
                 Ok(Ok(bytes)) => {
                     data.metrics.compressed_size = Some(bytes.len() as u64);
@@ -280,6 +305,93 @@ impl SegmentProcessor for GzipCompressor {
                         kind: ProcessErrorKind::Io(std::io::Error::other(e)),
                     })
                 }
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SymbolizeProcessor — resolves stack frame addresses to symbol names
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cpu-profiling")]
+pub(crate) struct SymbolizeProcessor;
+
+#[cfg(feature = "cpu-profiling")]
+impl SegmentProcessor for SymbolizeProcessor {
+    fn name(&self) -> &'static str {
+        "Symbolize"
+    }
+
+    fn process(
+        &mut self,
+        mut data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(async move {
+            let input = std::mem::take(&mut data.bytes);
+            let result = tokio::task::spawn_blocking(move || {
+                let maps = dial9_perf_self_profile::read_proc_maps();
+                let mut output = Vec::new();
+                dial9_perf_self_profile::offline_symbolize::symbolize_trace_with_maps(
+                    &input,
+                    &maps,
+                    &mut output,
+                )?;
+                let mut combined = input;
+                combined.extend_from_slice(&output);
+                Ok::<_, std::io::Error>(combined)
+            })
+            .await;
+            match result {
+                Ok(Ok(bytes)) => {
+                    data.bytes = bytes;
+                    Ok(data)
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(target: "dial9_worker", error = %e, "symbolization failed, preserving original bytes");
+                    Err(ProcessError {
+                        data,
+                        kind: ProcessErrorKind::Io(e),
+                    })
+                }
+                Err(e) => Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(std::io::Error::other(e)),
+                }),
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WriteBackProcessor — writes processed bytes back to disk
+// ---------------------------------------------------------------------------
+
+struct WriteBackProcessor;
+
+impl SegmentProcessor for WriteBackProcessor {
+    fn name(&self) -> &'static str {
+        "WriteBack"
+    }
+
+    fn process(
+        &mut self,
+        data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(async move {
+            let path = data.segment.path.clone();
+            let bytes = data.bytes.clone();
+            let result = tokio::task::spawn_blocking(move || std::fs::write(&path, &bytes)).await;
+            match result {
+                Ok(Ok(())) => Ok(data),
+                Ok(Err(e)) => Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(e),
+                }),
+                Err(e) => Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(std::io::Error::other(e)),
+                }),
             }
         })
     }
@@ -443,10 +555,8 @@ pub(crate) struct S3PipelineUploader {
 
 #[cfg(feature = "worker-s3")]
 impl S3PipelineUploader {
-    async fn new(config: &mut BackgroundTaskConfig) -> Self {
-        let s3_config = config.s3().clone();
-
-        let bootstrap_client = match config.client.clone() {
+    async fn new(s3_config: s3::S3Config, client: Option<aws_sdk_s3::Client>) -> Self {
+        let bootstrap_client = match client {
             Some(c) => c,
             None => {
                 let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
