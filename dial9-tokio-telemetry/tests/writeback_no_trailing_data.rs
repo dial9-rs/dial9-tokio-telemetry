@@ -1,7 +1,7 @@
-//! Regression test: after graceful_shutdown, worker-processed segments
-//! must be clean gzip with no trailing data. Previously, TelemetryGuard::Drop
-//! wrote events through a stale file descriptor after the worker had already
-//! compressed and written back the segment, leaving trailing garbage.
+//! After graceful_shutdown, worker-processed segments must be clean gzip with
+//! no trailing data. Previously, TelemetryRecorder::Drop flushed queued events
+//! through a stale file descriptor after the worker had already compressed and
+//! rewritten the segment, appending trailing garbage.
 #![cfg(feature = "cpu-profiling")]
 
 use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RotatingWriter, TracedRuntime};
@@ -72,15 +72,18 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
 
         let consumed = raw.len() as u64 - decoder.into_inner().len() as u64;
 
-        // BUG (to be fixed): the file has trailing data after the gzip stream.
-        // Once fixed, flip this assertion to: assert_eq!(consumed, raw.len() as u64)
-        assert_ne!(
+        // The gzip stream must consume the entire file (no trailing garbage).
+        assert_eq!(
             consumed,
             raw.len() as u64,
-            "expected trailing data in {} (this assertion will be flipped after the fix)",
-            path.display()
+            "gzip segment {} has {} trailing bytes",
+            path.display(),
+            raw.len() as u64 - consumed
         );
     }
 
-    assert!(gzip_files > 0, "expected at least one gzip-compressed segment");
+    assert!(
+        gzip_files > 0,
+        "expected at least one gzip-compressed segment"
+    );
 }

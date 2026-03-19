@@ -18,6 +18,8 @@ use tokio::runtime::Handle;
 pub struct TelemetryRecorder {
     shared: Arc<SharedState>,
     event_writer: EventWriter,
+    /// Set by `graceful_shutdown`; suppresses the flush in `Drop`.
+    shutdown_complete: bool,
 }
 
 impl TelemetryRecorder {
@@ -27,6 +29,7 @@ impl TelemetryRecorder {
                 crate::telemetry::events::clock_monotonic_ns(),
             )),
             event_writer: EventWriter::new(Box::new(writer)),
+            shutdown_complete: false,
         }
     }
 
@@ -70,6 +73,7 @@ impl TelemetryRecorder {
         let recorder = Arc::new(Mutex::new(Self {
             shared: shared.clone(),
             event_writer: EventWriter::new(writer),
+            shutdown_complete: false,
         }));
 
         let s1 = shared.clone();
@@ -195,7 +199,9 @@ impl TelemetryRecorder {
 
 impl Drop for TelemetryRecorder {
     fn drop(&mut self) {
-        self.flush();
+        if !self.shutdown_complete {
+            self.flush();
+        }
     }
 }
 
@@ -298,12 +304,16 @@ impl TelemetryGuard {
             tracing::debug!(target: "dial9_telemetry", "worker finished");
         }
 
+        self.handle.recorder.lock().unwrap().shutdown_complete = true;
         Ok(())
     }
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
+        if self.handle.recorder.lock().unwrap().shutdown_complete {
+            return;
+        }
         // 1. Stop the flush thread
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.flush_thread.take() {
@@ -729,6 +739,7 @@ impl TracedRuntime {
         let recorder = Arc::new(Mutex::new(TelemetryRecorder {
             shared: shared.clone(),
             event_writer: EventWriter::new(Box::new(NullWriter)),
+            shutdown_complete: false,
         }));
         let guard = TelemetryGuard {
             handle: TelemetryHandle { shared, recorder },
