@@ -104,16 +104,16 @@ fn background_symbolization_produces_symbol_table_entries() {
                     ev.fields.get(2)
                 && let Some(name) = ev.string_pool.get(*id)
             {
-                let source_file = if let Some(
-                    dial9_trace_format::types::FieldValueRef::PooledString(fid),
-                ) = ev.fields.get(4)
-                    && let Some(f) = ev.string_pool.get(*fid)
-                    && !f.is_empty()
-                {
-                    f.to_string()
-                } else {
-                    String::new()
-                };
+                let source_file =
+                    if let Some(dial9_trace_format::types::FieldValueRef::PooledString(fid)) =
+                        ev.fields.get(4)
+                        && let Some(f) = ev.string_pool.get(*fid)
+                        && !f.is_empty()
+                    {
+                        f.to_string()
+                    } else {
+                        String::new()
+                    };
                 if name.contains("burn_cpu_work") && !source_file.is_empty() {
                     all_source_files.push(source_file);
                 }
