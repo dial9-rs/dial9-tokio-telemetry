@@ -121,34 +121,42 @@ impl<W: Write> Encoder<W> {
 
         let mut decoder = Decoder::new(existing)?;
         while decoder.next_frame_ref().ok().flatten().is_some() {}
+        Some(decoder.into_encoder(writer))
+    }
 
-        let mut string_pool = HashMap::new();
+    /// Create an encoder seeded from decoded state. Used by
+    /// [`Decoder::into_encoder`](crate::decoder::Decoder::into_encoder).
+    pub(crate) fn from_decoder(
+        mut registry: SchemaRegistry,
+        string_pool: &crate::decoder::StringPool,
+        timestamp_base_ns: u64,
+        writer: W,
+    ) -> Self {
+        let mut pool = HashMap::new();
         let mut next_pool_id: u32 = 0;
-        for (id, value) in decoder.string_pool().iter() {
-            string_pool.insert(value.to_string(), id.raw_id());
+        for (id, value) in string_pool.iter() {
+            pool.insert(value.to_string(), id.raw_id());
             if id.raw_id() >= next_pool_id {
                 next_pool_id = id.raw_id() + 1;
             }
         }
 
         let mut schema_ids = HashMap::new();
-        for (wire_id, entry) in decoder.registry().entries() {
+        for (wire_id, entry) in registry.entries() {
             schema_ids.insert(SchemaKey::Name(Arc::from(entry.name.as_str())), wire_id);
         }
-
-        let mut registry = decoder.registry().clone();
         registry.sync_next_id();
 
         let mut state = EncodeState::new(writer);
-        state.timestamp_base_ns = decoder.timestamp_base_ns();
+        state.timestamp_base_ns = timestamp_base_ns;
 
-        Some(Self {
+        Self {
             state,
             registry,
-            string_pool,
+            string_pool: pool,
             next_pool_id,
             schema_ids,
-        })
+        }
     }
 
     /// Consume the encoder and return the inner writer.

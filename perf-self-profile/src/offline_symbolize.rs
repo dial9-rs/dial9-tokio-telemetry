@@ -111,7 +111,7 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
         return Ok(());
     }
 
-    write_symbol_data(input, &addresses, &maps, output)
+    write_symbol_data(decoder, &addresses, &maps, output)
 }
 
 /// Symbolize a trace using caller-provided proc maps instead of reading them
@@ -140,7 +140,7 @@ pub fn symbolize_trace_with_maps(
         return Ok(());
     }
 
-    write_symbol_data(input, &addresses, maps, output)
+    write_symbol_data(decoder, &addresses, maps, output)
 }
 
 fn collect_stack_frame_addresses(values: &[FieldValueRef<'_>], addresses: &mut BTreeSet<u64>) {
@@ -156,13 +156,12 @@ fn collect_stack_frame_addresses(values: &[FieldValueRef<'_>], addresses: &mut B
 }
 
 fn write_symbol_data(
-    input: &[u8],
+    decoder: Decoder<'_>,
     addresses: &BTreeSet<u64>,
     maps: &[MapsEntry],
     output: &mut impl Write,
 ) -> io::Result<()> {
-    let mut encoder = Encoder::extend(input, output)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
+    let mut encoder = decoder.into_encoder(output);
     let symbolizer = Symbolizer::new();
 
     for &addr in addresses {

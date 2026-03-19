@@ -140,8 +140,19 @@ impl<'a> Decoder<'a> {
         &self.string_pool
     }
 
-    pub(crate) fn timestamp_base_ns(&self) -> u64 {
-        self.timestamp_base_ns
+    /// Consume this decoder and create an [`Encoder`] that appends to the
+    /// decoded trace. The encoder inherits the string pool, schema registry,
+    /// and timestamp base so new frames are compatible with the existing data.
+    ///
+    /// No file header is written — the caller is responsible for concatenating
+    /// the encoder's output after the original trace bytes.
+    pub fn into_encoder<W: std::io::Write>(self, writer: W) -> crate::encoder::Encoder<W> {
+        crate::encoder::Encoder::from_decoder(
+            self.registry,
+            &self.string_pool,
+            self.timestamp_base_ns,
+            writer,
+        )
     }
 
     fn schema_info(&self, type_id: WireTypeId) -> Option<SchemaInfo<'_>> {
