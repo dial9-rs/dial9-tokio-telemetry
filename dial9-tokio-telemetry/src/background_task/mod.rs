@@ -12,7 +12,7 @@ use metrique::unit::Millisecond;
 use metrique::unit_of_work::metrics;
 use metrique_writer::BoxEntrySink;
 use pipeline_metrics::{MetriqueResult, PipelineMetrics, StageMetrics};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -436,9 +436,6 @@ pub(crate) struct WorkerLoop {
     /// When cancelled, the worker finishes its current cycle and exits
     /// instead of sleeping.
     stop: tokio_util::sync::CancellationToken,
-    /// Segments that have permanently failed processing. Tracked to avoid
-    /// spin-looping on the same broken segment every poll cycle.
-    failed_segments: HashSet<PathBuf>,
 }
 
 impl WorkerLoop {
@@ -454,7 +451,6 @@ impl WorkerLoop {
             processors,
             metrics_sink: config.metrics_sink,
             stop,
-            failed_segments: HashSet::new(),
         }
     }
 
@@ -483,10 +479,6 @@ impl WorkerLoop {
                 return false;
             }
         };
-        let segments: Vec<_> = segments
-            .into_iter()
-            .filter(|s| !self.failed_segments.contains(&s.path))
-            .collect();
         tracing::debug!(target: "dial9_worker", dir = %self.dir.display(), stem = %self.stem, count = segments.len(), "scanned for sealed segments");
         let found = !segments.is_empty();
         self.process_segments(&segments).await;
@@ -561,8 +553,10 @@ impl WorkerLoop {
                         {
                             tracing::debug!(target: "dial9_worker", path = %segment.path.display(), "segment evicted during processing, skipping");
                         } else {
-                            self.failed_segments.insert(segment.path.clone());
-                            tracing::warn!(target: "dial9_worker", error = %e.kind, cause = ?e.kind, path = %segment.path.display(), "processor failed, skipping segment permanently");
+                            if let Err(remove_err) = std::fs::remove_file(&segment.path) {
+                                tracing::warn!(target: "dial9_worker", error = %remove_err, path = %segment.path.display(), "failed to remove corrupted segment");
+                            }
+                            tracing::warn!(target: "dial9_worker", error = %e.kind, cause = ?e.kind, path = %segment.path.display(), "processor failed, removing segment");
                         }
                         continue 'next_segment;
                     }
@@ -1072,7 +1066,6 @@ mod worker_pipeline_tests {
     use super::*;
     use assert2::check;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn config_for(dir: &std::path::Path) -> BackgroundTaskConfig {
         BackgroundTaskConfig::builder()
@@ -1080,15 +1073,14 @@ mod worker_pipeline_tests {
             .build()
     }
 
-    /// A segment that fails processing is not retried on subsequent poll cycles.
+    /// A segment that fails processing is deleted so it is not retried.
     #[tokio::test]
-    async fn failed_segment_not_retried() {
+    async fn failed_segment_deleted() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("trace.0.bin"), b"bad data").unwrap();
+        let seg_path = dir.path().join("trace.0.bin");
+        std::fs::write(&seg_path, b"bad data").unwrap();
 
-        let attempts = Arc::new(AtomicUsize::new(0));
-
-        struct AlwaysFailProcessor(Arc<AtomicUsize>);
+        struct AlwaysFailProcessor;
         impl SegmentProcessor for AlwaysFailProcessor {
             fn name(&self) -> &'static str {
                 "AlwaysFail"
@@ -1098,7 +1090,6 @@ mod worker_pipeline_tests {
                 data: SegmentData,
             ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
             {
-                self.0.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async {
                     Err(ProcessError {
                         data,
@@ -1109,18 +1100,12 @@ mod worker_pipeline_tests {
         }
 
         let stop = tokio_util::sync::CancellationToken::new();
-        let processors: Vec<Box<dyn SegmentProcessor>> =
-            vec![Box::new(AlwaysFailProcessor(attempts.clone()))];
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(AlwaysFailProcessor)];
 
         let mut worker = WorkerLoop::new(config_for(dir.path()), processors, stop);
-
-        // Run two poll cycles manually.
-        worker.process_open_segments().await;
         worker.process_open_segments().await;
 
-        // The processor should only be called once: the second cycle skips
-        // the segment because it was recorded as permanently failed.
-        check!(attempts.load(Ordering::SeqCst) == 1);
+        check!(!seg_path.exists());
     }
 
     /// Gzip-compressed segments pass through GzipCompressor unchanged.
