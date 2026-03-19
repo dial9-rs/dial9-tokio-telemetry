@@ -58,7 +58,7 @@ fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
                     .registry()
                     .get(type_id)
                     .map(|s| s.name.as_str())
-                    .ok_or_else(|| ParseTimestampError::UnknownTypeId(type_id.0))?;
+                    .ok_or(ParseTimestampError::UnknownTypeId(type_id.0))?;
                 if name == "SegmentMetadataEvent" {
                     return timestamp_ns.ok_or(ParseTimestampError::MissingTimestamp);
                 }

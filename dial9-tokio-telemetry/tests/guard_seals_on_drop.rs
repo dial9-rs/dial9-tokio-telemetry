@@ -11,8 +11,7 @@ fn guard_drop_produces_sealed_bin_files() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
-    let writer = RotatingWriter::new(&trace_path, 1024, 1024 * 1024)
-        .unwrap();
+    let writer = RotatingWriter::new(&trace_path, 1024, 1024 * 1024).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
     runtime.block_on(async {
