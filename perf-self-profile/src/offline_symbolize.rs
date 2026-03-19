@@ -5,11 +5,10 @@
 //! resolves addresses via blazesym, and appends `SymbolTableEntry` events
 //! (with a `StringPool` frame for symbol names).
 
-use blazesym::symbolize::Symbolizer;
+use blazesym::symbolize::{Input, Symbolized, Symbolizer, source};
 use dial9_trace_format::{
     TraceEvent,
-    codec::WireTypeId,
-    decoder::{DecodedFrameRef, Decoder},
+    decoder::Decoder,
     encoder::Encoder,
     types::{FieldValueRef, InternedString},
 };
@@ -78,34 +77,25 @@ pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> 
 
     let mut maps: Vec<MapsEntry> = Vec::new();
     let mut addresses: BTreeSet<u64> = BTreeSet::new();
-    let mut proc_maps_type_id: Option<WireTypeId> = None;
 
     let mut decoder = Decoder::new(input)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
 
-    while let Ok(Some(frame)) = decoder.next_frame_ref() {
-        match frame {
-            DecodedFrameRef::Schema(ref entry) if entry.name == proc_maps_name => {
-                proc_maps_type_id = decoder
-                    .registry()
-                    .entries()
-                    .find(|(_, e)| e.name == proc_maps_name)
-                    .map(|(id, _)| id);
-            }
-            DecodedFrameRef::Event {
-                type_id, values, ..
-            } => {
-                if Some(type_id) == proc_maps_type_id {
-                    if let Some(entry) = try_decode_proc_maps_event(&values) {
-                        maps.push(entry);
-                    }
-                } else {
-                    collect_stack_frame_addresses(&values, &mut addresses);
+    decoder
+        .for_each_event(|event| {
+            if event.name == proc_maps_name {
+                if let Some(entry) = ProcMapsEntry::decode(event.timestamp_ns, event.fields) {
+                    maps.push(MapsEntry {
+                        start: entry.start,
+                        end: entry.end,
+                        file_offset: entry.file_offset,
+                        path: entry.path.to_string(),
+                    });
                 }
             }
-            _ => {}
-        }
-    }
+            collect_stack_frame_addresses(event.fields, &mut addresses);
+        })
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
     if addresses.is_empty() || maps.is_empty() {
         return Ok(());
@@ -130,11 +120,11 @@ pub fn symbolize_trace_with_maps(
     let mut decoder = Decoder::new(input)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
 
-    while let Ok(Some(frame)) = decoder.next_frame_ref() {
-        if let DecodedFrameRef::Event { values, .. } = frame {
-            collect_stack_frame_addresses(&values, &mut addresses);
-        }
-    }
+    decoder
+        .for_each_event(|event| {
+            collect_stack_frame_addresses(event.fields, &mut addresses);
+        })
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
     if addresses.is_empty() {
         return Ok(());
@@ -164,50 +154,137 @@ fn write_symbol_data(
     let mut encoder = decoder.into_encoder(output);
     let symbolizer = Symbolizer::new();
 
+    // Partition addresses into kernel vs userspace, group userspace by mapping.
+    let mut kernel_addrs: Vec<u64> = Vec::new();
+    // (mapping_index, file_offset, original_addr)
+    let mut user_groups: std::collections::HashMap<usize, Vec<(u64, u64)>> =
+        std::collections::HashMap::new();
+
     for &addr in addresses {
-        let symbols = crate::resolve_symbols_with_maps(addr, &symbolizer, maps);
-        for (depth, info) in symbols.into_iter().enumerate() {
-            let Some(name) = info.name else { continue };
+        if addr >= crate::USER_ADDR_LIMIT {
+            kernel_addrs.push(addr);
+        } else {
+            for (i, entry) in maps.iter().enumerate() {
+                if addr >= entry.start && addr < entry.end {
+                    let offset = addr - entry.start + entry.file_offset;
+                    user_groups.entry(i).or_default().push((offset, addr));
+                    break;
+                }
+            }
+        }
+    }
 
-            let symbol_name = encoder.intern_string(&name)?;
+    // Batch-resolve kernel addresses.
+    if !kernel_addrs.is_empty() {
+        let src = source::Source::Kernel(source::Kernel {
+            kallsyms: blazesym::MaybeDefault::Default,
+            vmlinux: blazesym::MaybeDefault::None,
+            kaslr_offset: Some(0),
+            debug_syms: false,
+            _non_exhaustive: (),
+        });
+        if let Ok(results) = symbolizer.symbolize(&src, Input::AbsAddr(&kernel_addrs)) {
+            write_symbolized_batch(&results, &kernel_addrs, &mut encoder)?;
+        } else {
+            // Fallback: emit unresolved kernel placeholders.
+            for &addr in &kernel_addrs {
+                let name = format!("[kernel] {:#x}", addr);
+                let symbol_name = encoder.intern_string(&name)?;
+                let source_file = encoder.intern_string("")?;
+                encoder.write(&SymbolTableEntry {
+                    timestamp_ns: 0,
+                    addr,
+                    size: 0,
+                    symbol_name,
+                    inline_depth: 0,
+                    source_file,
+                    source_line: 0,
+                })?;
+            }
+        }
+    }
 
-            let (source_file_str, source_line) = match info.code_info {
-                Some(ci) => (ci.file, ci.line.unwrap_or(0) as u64),
-                None => (String::new(), 0),
-            };
-
-            let source_file = encoder.intern_string(&source_file_str)?;
-
-            encoder.write(&SymbolTableEntry {
-                timestamp_ns: 0,
-                addr,
-                size: 0,
-                symbol_name,
-                inline_depth: depth as u64,
-                source_file,
-                source_line,
-            })?;
+    // Batch-resolve per ELF mapping.
+    for (map_idx, offsets_and_addrs) in &user_groups {
+        let entry = &maps[*map_idx];
+        let offsets: Vec<u64> = offsets_and_addrs.iter().map(|(o, _)| *o).collect();
+        let addrs: Vec<u64> = offsets_and_addrs.iter().map(|(_, a)| *a).collect();
+        let src = source::Source::Elf(source::Elf::new(&entry.path));
+        if let Ok(results) = symbolizer.symbolize(&src, Input::FileOffset(&offsets)) {
+            write_symbolized_batch(&results, &addrs, &mut encoder)?;
         }
     }
 
     Ok(())
 }
 
-fn try_decode_proc_maps_event(values: &[FieldValueRef<'_>]) -> Option<MapsEntry> {
-    let decoded = ProcMapsEntry::decode(Some(0), values)?;
-    Some(MapsEntry {
-        start: decoded.start,
-        end: decoded.end,
-        file_offset: decoded.file_offset,
-        path: decoded.path.to_string(),
-    })
+/// Write a batch of symbolization results, borrowing symbol names directly
+/// from the `Symbolized` results to avoid re-allocating strings.
+fn write_symbolized_batch(
+    results: &[Symbolized<'_>],
+    addrs: &[u64],
+    encoder: &mut Encoder<impl Write>,
+) -> io::Result<()> {
+    for (symbolized, &addr) in results.iter().zip(addrs) {
+        let Some(sym) = symbolized.as_sym() else {
+            continue;
+        };
+        let symbol_name = encoder.intern_string(&sym.name)?;
+        let (source_file, source_line) = intern_code_info(sym.code_info.as_deref(), encoder)?;
+        encoder.write(&SymbolTableEntry {
+            timestamp_ns: 0,
+            addr,
+            size: 0,
+            symbol_name,
+            inline_depth: 0,
+            source_file,
+            source_line,
+        })?;
+        for (depth, inlined) in sym.inlined.iter().enumerate() {
+            let symbol_name = encoder.intern_string(&inlined.name)?;
+            let (source_file, source_line) = intern_code_info(inlined.code_info.as_ref(), encoder)?;
+            encoder.write(&SymbolTableEntry {
+                timestamp_ns: 0,
+                addr,
+                size: 0,
+                symbol_name,
+                inline_depth: (depth + 1) as u64,
+                source_file,
+                source_line,
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn intern_code_info(
+    code_info: Option<&blazesym::symbolize::CodeInfo<'_>>,
+    encoder: &mut Encoder<impl Write>,
+) -> io::Result<(InternedString, u64)> {
+    match code_info {
+        Some(ci) => {
+            let file = match &ci.dir {
+                Some(dir) => dir
+                    .join(ci.file.as_ref() as &std::path::Path)
+                    .to_string_lossy()
+                    .into_owned(),
+                None => ci.file.to_string_lossy().into_owned(),
+            };
+            let interned = encoder.intern_string(&file)?;
+            Ok((interned, ci.line.unwrap_or(0) as u64))
+        }
+        None => {
+            let interned = encoder.intern_string("")?;
+            Ok((interned, 0))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use dial9_trace_format::{
-        decoder::{DecodedFrame, Decoder},
+        decoder::{DecodedFrame, DecodedFrameRef, Decoder},
         encoder::Encoder,
         schema::FieldDef,
         types::{FieldType, FieldValue},
@@ -417,8 +494,13 @@ mod tests {
         let mut dec = Decoder::new(&buf).unwrap();
         let frames = dec.decode_all_ref();
         assert_eq!(frames.len(), 2);
-        if let DecodedFrameRef::Event { values, .. } = &frames[1] {
-            let decoded = try_decode_proc_maps_event(values).unwrap();
+        if let DecodedFrameRef::Event {
+            timestamp_ns,
+            values,
+            ..
+        } = &frames[1]
+        {
+            let decoded = ProcMapsEntry::decode(*timestamp_ns, values).unwrap();
             assert_eq!(decoded.start, entry.start);
             assert_eq!(decoded.end, entry.end);
             assert_eq!(decoded.file_offset, entry.file_offset);
