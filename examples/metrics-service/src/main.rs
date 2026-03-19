@@ -82,6 +82,31 @@ pub struct AppState {
     pub shutdown: CancellationToken,
 }
 
+/// Pre-warm the kernel FD table to avoid RCU-synchronization stalls when the
+/// table grows under load.  See <https://github.com/tokio-rs/tokio/issues/7970>.
+///
+/// Opens `/dev/null`, then uses `fcntl(fd, F_DUPFD_CLOEXEC, target)` to force
+/// the kernel to expand the table to at least `target` entries.  Both FDs are
+/// closed immediately; the table capacity persists for the process lifetime.
+#[cfg(target_os = "linux")]
+fn prewarm_fd_table(target: libc::c_int) {
+    unsafe {
+        let src = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        if src < 0 {
+            tracing::warn!("fd prewarm: failed to open /dev/null");
+            return;
+        }
+        let dup = libc::fcntl(src, libc::F_DUPFD_CLOEXEC, target);
+        if dup < 0 {
+            tracing::warn!(target, "fd prewarm: fcntl F_DUPFD_CLOEXEC failed");
+        } else {
+            tracing::info!(target, actual = dup, "fd table pre-warmed");
+            libc::close(dup);
+        }
+        libc::close(src);
+    }
+}
+
 fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -89,6 +114,15 @@ fn main() -> std::io::Result<()> {
                 .unwrap_or_else(|_| "info,dial9_worker=debug".parse().unwrap()),
         )
         .init();
+
+    #[cfg(target_os = "linux")]
+    if let Ok(val) = std::env::var("PREWARM_FD_TABLE_SIZE") {
+        if let Ok(n) = val.parse::<libc::c_int>() {
+            prewarm_fd_table(n);
+        } else {
+            tracing::warn!(val, "PREWARM_FD_TABLE_SIZE is not a valid integer");
+        }
+    }
 
     let mut args = Args::parse();
 

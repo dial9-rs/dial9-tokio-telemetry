@@ -103,20 +103,29 @@ class TraceDecoder {
 
   nextFrame() {
     if (this._pos >= this._view.byteLength) return null;
-    const tag = this._view.getUint8(this._pos);
-    this._pos++;
-    switch (tag) {
-      case TAG_SCHEMA: return this._decodeSchema();
-      case TAG_EVENT: return this._decodeEvent();
-      case TAG_STRING_POOL: return this._decodeStringPool();
-      case TAG_TIMESTAMP_RESET: {
-        const lo = this._view.getUint32(this._pos, true);
-        const hi = this._view.getUint32(this._pos + 4, true);
-        this._timestampBaseNs = BigInt(hi) << 32n | BigInt(lo);
-        this._pos += 8;
-        return this.nextFrame(); // consume silently
+    try {
+      const tag = this._view.getUint8(this._pos);
+      this._pos++;
+      switch (tag) {
+        case TAG_SCHEMA: return this._decodeSchema();
+        case TAG_EVENT: return this._decodeEvent();
+        case TAG_STRING_POOL: return this._decodeStringPool();
+        case TAG_TIMESTAMP_RESET: {
+          const lo = this._view.getUint32(this._pos, true);
+          const hi = this._view.getUint32(this._pos + 4, true);
+          this._timestampBaseNs = BigInt(hi) << 32n | BigInt(lo);
+          this._pos += 8;
+          return this.nextFrame(); // consume silently
+        }
+        default: throw new Error(`Unknown frame tag: 0x${tag.toString(16)}`);
       }
-      default: throw new Error(`Unknown frame tag: 0x${tag.toString(16)}`);
+    } catch (e) {
+      if (e instanceof RangeError) {
+        // Truncated frame at end of segment; stop gracefully.
+        this._pos = this._view.byteLength;
+        return null;
+      }
+      throw e;
     }
   }
 

@@ -166,6 +166,47 @@ fn js_decodes_empty_stream() {
 }
 
 #[test]
+fn js_decodes_truncated_trace_gracefully() {
+    let mut enc = Encoder::new();
+    let tid = enc
+        .register_schema(
+            "Ping",
+            vec![FieldDef {
+                name: "seq".into(),
+                field_type: FieldType::Varint,
+            }],
+        )
+        .unwrap();
+    // Write two events so the first one is fully decodable.
+    for i in 0..2u64 {
+        enc.write_event(
+            &tid,
+            &[FieldValue::Varint(i * 1_000_000), FieldValue::Varint(i)],
+        )
+        .unwrap();
+    }
+    let full = enc.finish();
+
+    // Chop off the last few bytes to simulate a truncated final frame.
+    let truncated = &full[..full.len() - 3];
+    let json = js_decode(truncated);
+
+    assert_eq!(json["version"], 1);
+    let frames = json["frames"].as_array().unwrap();
+    // Schema + first event should survive; the truncated second event is dropped.
+    assert!(
+        frames.len() >= 2,
+        "expected at least schema + one event, got {}",
+        frames.len()
+    );
+    let events: Vec<_> = frames.iter().filter(|f| f["type"] == "event").collect();
+    assert!(
+        !events.is_empty(),
+        "expected at least one successfully decoded event"
+    );
+}
+
+#[test]
 fn js_decodes_multiple_events() {
     let mut enc = Encoder::new();
     let tid = enc

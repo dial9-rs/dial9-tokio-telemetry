@@ -160,6 +160,15 @@ cat /proc/sys/kernel/perf_event_paranoid
 sudo sysctl kernel.perf_event_paranoid=1
 ```
 
+**`kallsyms`**: Resolving kernel addresses requires `kptr_restrict == 0` for non-root, or else they will show up like: `[kernel] 0xffffffff81336901`:
+```bash
+# check current value
+cat /proc/sys/kernel/kptr_restrict
+
+# allow non-root to resolve kernel symbols
+sudo sysctl kernel.kptr_restrict=0
+```
+
 #### Diagnosing long polls with CPU samples
 
 Because CPU samples are tagged with the worker thread they were collected on, and the trace records which task is being polled on each worker at each instant, the viewer can correlate samples with individual polls. When a poll takes an unusually long time (a "long poll"), the CPU samples collected during that poll show you exactly what code was running — expensive serialization, accidental blocking I/O, lock contention, etc. In the trace viewer, click on a long poll to see its flamegraph, or shift+drag to aggregate CPU samples across a time range.

@@ -29,7 +29,8 @@
      * @param {ArrayBuffer} buffer - The binary trace data
      * @returns {Object} Parsed trace with events, metadata, and CPU samples
      */
-    function parseTrace(buffer) {
+    function parseTrace(buffer, options) {
+        const maxEvents = (options && options.maxEvents) || MAX_EVENTS;
         const TD = getTraceDecoder();
         const dec = new TD(buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer);
         if (!dec.decodeHeader()) throw new Error('Invalid trace header');
@@ -44,22 +45,22 @@
         const cpuSamples = [];
         const threadNames = new Map();
 
+        const capped = () => events.length >= maxEvents;
+
         for (const frame of frames) {
-            if (events.length >= MAX_EVENTS) break;
             if (frame.type !== 'event') continue;
             const v = frame.values;
             const ts = num(frame.timestamp_ns);
 
             switch (frame.name) {
                 case 'PollStartEvent': {
-                    // spawn_loc is a PooledString, already resolved to the string
                     const spawnLoc = v.spawn_loc || null;
                     if (spawnLoc) spawnLocations.set(spawnLoc, spawnLoc);
                     const taskId = num(v.task_id);
                     if (taskId && spawnLoc && !taskSpawnLocs.has(taskId)) {
                         taskSpawnLocs.set(taskId, spawnLoc);
                     }
-                    events.push({
+                    if (!capped()) events.push({
                         eventType: 0, timestamp: ts,
                         workerId: num(v.worker_id), localQueue: num(v.local_queue),
                         globalQueue: 0, cpuTime: 0, schedWait: 0,
@@ -68,14 +69,14 @@
                     break;
                 }
                 case 'PollEndEvent':
-                    events.push({
+                    if (!capped()) events.push({
                         eventType: 1, timestamp: ts, workerId: num(v.worker_id),
                         globalQueue: 0, localQueue: 0, cpuTime: 0, schedWait: 0,
                         taskId: 0, spawnLocId: null, spawnLoc: null,
                     });
                     break;
                 case 'WorkerParkEvent':
-                    events.push({
+                    if (!capped()) events.push({
                         eventType: 2, timestamp: ts,
                         workerId: num(v.worker_id), localQueue: num(v.local_queue),
                         cpuTime: num(v.cpu_time_ns),
@@ -84,7 +85,7 @@
                     });
                     break;
                 case 'WorkerUnparkEvent':
-                    events.push({
+                    if (!capped()) events.push({
                         eventType: 3, timestamp: ts,
                         workerId: num(v.worker_id), localQueue: num(v.local_queue),
                         cpuTime: num(v.cpu_time_ns), schedWait: num(v.sched_wait_ns),
@@ -93,7 +94,7 @@
                     });
                     break;
                 case 'QueueSampleEvent':
-                    events.push({
+                    if (!capped()) events.push({
                         eventType: 4, timestamp: ts,
                         globalQueue: num(v.global_queue),
                         workerId: 0, localQueue: 0, cpuTime: 0, schedWait: 0,
@@ -112,7 +113,7 @@
                     taskTerminateTimes.set(num(v.task_id), ts);
                     break;
                 case 'WakeEventEvent':
-                    events.push({
+                    if (!capped()) events.push({
                         eventType: 9, timestamp: ts,
                         workerId: num(v.target_worker),
                         wakerTaskId: num(v.waker_task_id),
@@ -129,21 +130,13 @@
                         timestamp: ts, workerId: num(v.worker_id),
                         tid: num(v.tid), source: num(v.source), callchain: chain,
                     });
-                    // thread_name is a PooledString, already resolved
                     const tn = v.thread_name;
                     if (tn && tn !== '<no thread name>') {
                         threadNames.set(num(v.tid), tn);
                     }
                     break;
                 }
-                case 'CallframeDefEvent': {
-                    const addrKey = "0x" + BigInt(v.address).toString(16);
-                    callframeSymbols.set(addrKey, {
-                        symbol: v.symbol, location: v.location || null,
-                    });
-                    break;
-                }
-                case 'SymbolTableEntryEvent': {
+                case 'SymbolTableEntry': {
                     const addrKey = "0x" + BigInt(v.addr).toString(16);
                     const depth = Number(v.inline_depth || 0);
                     const entry = { symbol: v.symbol_name, location: null };
@@ -171,7 +164,7 @@
 
         return {
             magic: 'D9TF', version: dec.version, events,
-            truncated: events.length >= MAX_EVENTS,
+            truncated: events.length >= maxEvents,
             hasCpuTime: true, hasSchedWait: true, hasTaskTracking: true,
             spawnLocations, taskSpawnLocs, taskSpawnTimes,
             cpuSamples, callframeSymbols, threadNames, taskTerminateTimes,
