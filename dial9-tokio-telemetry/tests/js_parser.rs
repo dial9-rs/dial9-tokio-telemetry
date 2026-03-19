@@ -119,12 +119,15 @@ fn test_js_parser_resolves_symbols_past_event_cap() {
             .unwrap();
         }
         let sym_name = enc.intern_string("my_function").unwrap();
+        let empty_file = enc.intern_string("").unwrap();
         enc.write(&SymbolTableEntry {
             timestamp_ns: 0,
             addr: 0x1234,
             size: 256,
             symbol_name: sym_name,
             inline_depth: 0,
+            source_file: empty_file,
+            source_line: 0,
         })
         .unwrap();
         std::fs::write(&trace_path, enc.finish()).unwrap();

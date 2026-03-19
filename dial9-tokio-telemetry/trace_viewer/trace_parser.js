@@ -139,7 +139,10 @@
                 case 'SymbolTableEntry': {
                     const addrKey = "0x" + BigInt(v.addr).toString(16);
                     const depth = Number(v.inline_depth || 0);
-                    const entry = { symbol: v.symbol_name, location: null };
+                    const sf = v.source_file || '';
+                    const sl = Number(v.source_line || 0);
+                    const location = sf ? (sl ? `${sf}:${sl}` : sf) : null;
+                    const entry = { symbol: v.symbol_name, location };
                     if (depth === 0) {
                         // Outermost frame: store directly (or as first element of array)
                         const existing = callframeSymbols.get(addrKey);

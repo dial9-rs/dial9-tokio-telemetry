@@ -42,6 +42,10 @@ pub struct SymbolTableEntry {
     pub symbol_name: InternedString,
     /// 0 = outermost function, 1+ = inlined callee depth.
     pub inline_depth: u64,
+    /// Source file path from debug info (e.g. `/home/user/.cargo/registry/src/.../hyper-0.14.28/src/client.rs`).
+    pub source_file: InternedString,
+    /// Source line number, or 0 if unavailable.
+    pub source_line: u64,
 }
 
 /// Write ProcMapsEntry events to a writer using low-level codec functions.
@@ -158,6 +162,14 @@ fn collect_stack_frame_addresses(values: &[FieldValueRef<'_>], addresses: &mut B
     }
 }
 
+struct ResolvedSymbol {
+    addr: u64,
+    symbol_name: InternedString,
+    inline_depth: u64,
+    source_file: InternedString,
+    source_line: u64,
+}
+
 fn write_symbol_data(
     addresses: &BTreeSet<u64>,
     maps: &[MapsEntry],
@@ -167,25 +179,56 @@ fn write_symbol_data(
     let mut pool_entries: Vec<codec::PoolEntry> = Vec::new();
     let mut string_to_id: HashMap<String, u32> = HashMap::new();
     let mut next_pool_id: u32 = 0;
-    // (addr, symbol_pool_id, inline_depth)
-    let mut symbol_events: Vec<(u64, InternedString, u64)> = Vec::new();
+    let mut symbol_events: Vec<ResolvedSymbol> = Vec::new();
+
+    let intern = |s: String,
+                  pool_entries: &mut Vec<codec::PoolEntry>,
+                  next_pool_id: &mut u32,
+                  string_to_id: &mut HashMap<String, u32>|
+     -> InternedString {
+        let id = *string_to_id.entry(s.clone()).or_insert_with(|| {
+            let id = *next_pool_id;
+            *next_pool_id += 1;
+            pool_entries.push(codec::PoolEntry {
+                pool_id: id,
+                data: s.into_bytes(),
+            });
+            id
+        });
+        InternedString::from_raw(id)
+    };
 
     for &addr in addresses {
         let symbols = crate::resolve_symbols_with_maps(addr, &symbolizer, maps);
         for (depth, info) in symbols.into_iter().enumerate() {
             let Some(name) = info.name else { continue };
 
-            let pool_id = *string_to_id.entry(name.clone()).or_insert_with(|| {
-                let id = next_pool_id;
-                next_pool_id += 1;
-                pool_entries.push(codec::PoolEntry {
-                    pool_id: id,
-                    data: name.into_bytes(),
-                });
-                id
-            });
+            let symbol_name = intern(
+                name,
+                &mut pool_entries,
+                &mut next_pool_id,
+                &mut string_to_id,
+            );
 
-            symbol_events.push((addr, InternedString::from_raw(pool_id), depth as u64));
+            let (source_file_str, source_line) = match info.code_info {
+                Some(ci) => (ci.file, ci.line.unwrap_or(0) as u64),
+                None => (String::new(), 0),
+            };
+
+            let source_file = intern(
+                source_file_str,
+                &mut pool_entries,
+                &mut next_pool_id,
+                &mut string_to_id,
+            );
+
+            symbol_events.push(ResolvedSymbol {
+                addr,
+                symbol_name,
+                inline_depth: depth as u64,
+                source_file,
+                source_line,
+            });
         }
     }
 
@@ -194,15 +237,17 @@ fn write_symbol_data(
 
         let type_id = WireTypeId(0xFFFE);
         codec::encode_schema(type_id, &SymbolTableEntry::schema_entry(), output)?;
-        for (addr, symbol_id, inline_depth) in &symbol_events {
+        for sym in &symbol_events {
             codec::encode_event(
                 type_id,
                 Some(0),
                 &[
-                    FieldValue::Varint(*addr),
+                    FieldValue::Varint(sym.addr),
                     FieldValue::Varint(0),
-                    FieldValue::PooledString(*symbol_id),
-                    FieldValue::Varint(*inline_depth),
+                    FieldValue::PooledString(sym.symbol_name),
+                    FieldValue::Varint(sym.inline_depth),
+                    FieldValue::PooledString(sym.source_file),
+                    FieldValue::Varint(sym.source_line),
                 ],
                 output,
             )?;
@@ -450,10 +495,16 @@ mod tests {
         let mut buf = Vec::new();
         codec::encode_header(&mut buf).unwrap();
         codec::encode_string_pool(
-            &[codec::PoolEntry {
-                pool_id: 0,
-                data: b"my_function".to_vec(),
-            }],
+            &[
+                codec::PoolEntry {
+                    pool_id: 0,
+                    data: b"my_function".to_vec(),
+                },
+                codec::PoolEntry {
+                    pool_id: 1,
+                    data: b"/src/lib.rs".to_vec(),
+                },
+            ],
             &mut buf,
         )
         .unwrap();
@@ -467,6 +518,8 @@ mod tests {
                 FieldValue::Varint(256),
                 FieldValue::PooledString(InternedString::from_raw(0)),
                 FieldValue::Varint(0),
+                FieldValue::PooledString(InternedString::from_raw(1)),
+                FieldValue::Varint(42),
             ],
             &mut buf,
         )
@@ -484,6 +537,11 @@ mod tests {
                 FieldValue::PooledString(InternedString::from_raw(0))
             );
             assert_eq!(values[3], FieldValue::Varint(0));
+            assert_eq!(
+                values[4],
+                FieldValue::PooledString(InternedString::from_raw(1))
+            );
+            assert_eq!(values[5], FieldValue::Varint(42));
         } else {
             panic!("expected event frame");
         }

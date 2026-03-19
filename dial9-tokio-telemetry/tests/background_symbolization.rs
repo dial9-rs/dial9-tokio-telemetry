@@ -74,6 +74,7 @@ fn background_symbolization_produces_symbol_table_entries() {
     // Read all .bin files in the trace directory. After the worker runs,
     // processed segments are gzip-compressed (GzipWriteBackProcessor).
     let mut all_symbol_names: Vec<String> = Vec::new();
+    let mut all_source_files: Vec<String> = Vec::new();
 
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {
         let entry = entry.unwrap();
@@ -103,6 +104,19 @@ fn background_symbolization_produces_symbol_table_entries() {
                     ev.fields.get(2)
                 && let Some(name) = ev.string_pool.get(*id)
             {
+                let source_file =
+                    if let Some(dial9_trace_format::types::FieldValueRef::PooledString(fid)) =
+                        ev.fields.get(4)
+                        && let Some(f) = ev.string_pool.get(*fid)
+                        && !f.is_empty()
+                    {
+                        f.to_string()
+                    } else {
+                        String::new()
+                    };
+                if name.contains("burn_cpu_work") && !source_file.is_empty() {
+                    all_source_files.push(source_file);
+                }
                 all_symbol_names.push(name.to_string());
             }
         })
@@ -122,6 +136,19 @@ fn background_symbolization_produces_symbol_table_entries() {
         has_burn,
         "expected to find 'burn_cpu_work' in symbol names, got: {:?}",
         &all_symbol_names[..all_symbol_names.len().min(20)]
+    );
+
+    // Verify that burn_cpu_work entries have source file locations (code_info).
+    assert!(
+        !all_source_files.is_empty(),
+        "expected burn_cpu_work SymbolTableEntry to have source_file, but none did"
+    );
+    assert!(
+        all_source_files
+            .iter()
+            .any(|f| f.ends_with("background_symbolization.rs")),
+        "expected source_file to reference this test file, got: {:?}",
+        &all_source_files
     );
 }
 
