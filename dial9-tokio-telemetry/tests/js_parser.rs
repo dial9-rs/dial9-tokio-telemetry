@@ -38,9 +38,9 @@ fn test_js_parser_matches_rust() {
         let mut tb = TracedRuntime::builder().with_task_tracking(true);
         #[cfg(feature = "cpu-profiling")]
         {
-            tb = tb
-                .with_cpu_profiling(dial9_tokio_telemetry::telemetry::CpuProfilingConfig::default())
-                .with_inline_callframe_symbols(true);
+            tb = tb.with_cpu_profiling(
+                dial9_tokio_telemetry::telemetry::CpuProfilingConfig::default(),
+            );
         }
         let (runtime, _guard) = tb.build_and_start(builder, writer).unwrap();
 

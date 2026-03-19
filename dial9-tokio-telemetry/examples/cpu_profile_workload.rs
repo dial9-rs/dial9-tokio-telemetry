@@ -42,7 +42,6 @@ fn main() {
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig::default())
-        .with_inline_callframe_symbols(true)
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -88,12 +87,7 @@ fn main() {
                         callchain.len()
                     );
                     for (i, addr) in callchain.iter().take(8).enumerate() {
-                        let name = reader
-                            .callframe_symbols
-                            .get(addr)
-                            .cloned()
-                            .unwrap_or_else(|| format!("{:#x}", addr));
-                        eprintln!("    [{i}] {name}");
+                        eprintln!("    [{i}] {addr:#x}");
                     }
                 }
             }
@@ -105,7 +99,6 @@ fn main() {
     eprintln!("\nTotal events: {}", events.len());
     eprintln!("Poll starts: {polls}");
     eprintln!("CPU samples: {cpu_samples}");
-    eprintln!("Callframe symbols: {}", reader.callframe_symbols.len());
     for (worker, count) in &samples_by_worker {
         eprintln!("  worker {worker}: {count} samples");
     }

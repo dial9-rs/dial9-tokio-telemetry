@@ -130,7 +130,7 @@ let (runtime, guard) = TracedRuntime::builder()
     .with_task_tracking(true)
     .with_cpu_profiling(CpuProfilingConfig::default())
     .with_sched_events(SchedEventConfig { include_kernel: true })
-    .with_inline_callframe_symbols(true)
+    .with_trace_path("/tmp/t.bin")
     .build_and_start(builder, writer)?;
 # Ok(())
 # }
@@ -138,7 +138,7 @@ let (runtime, guard) = TracedRuntime::builder()
 # fn main() {}
 ```
 
-This pulls in [`dial9-perf-self-profile`](/perf-self-profile) for `perf_event_open` access. It records `CpuSample` events with full callchains and `CallframeDef` / `ThreadNameDef` metadata for offline symbolization.
+This pulls in [`dial9-perf-self-profile`](/perf-self-profile) for `perf_event_open` access. It records `CpuSample` events with raw stack frame addresses. When a `trace_path` is set, the background worker automatically symbolizes sealed segments (resolving addresses to function names via `/proc/self/maps` and blazesym) and gzip-compresses them on disk.
 
 #### Requirements
 
@@ -224,17 +224,17 @@ See [TRACE_ANALYSIS_GUIDE.md](/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) fo
 
 With the `worker-s3` feature, sealed trace segments are automatically gzip-compressed and uploaded to S3 by a background worker thread. The application process is unaffected: uploads happen asynchronously after segments are sealed.
 
-Only `bucket` and `service_name` are required. See [`S3Config`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/background_task/s3/struct.S3Config.html) and [`BackgroundTaskConfig`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/background_task/struct.BackgroundTaskConfig.html) for additional options.
+Only `bucket` and `service_name` are required. See [`S3Config`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/background_task/s3/struct.S3Config.html) for additional options.
 
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
 # fn main() -> std::io::Result<()> {
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
-use dial9_tokio_telemetry::background_task::BackgroundTaskConfig;
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 
+let trace_path = "/tmp/my_traces/trace.bin";
 let writer = RotatingWriter::new(
-    "/tmp/my_traces/trace.bin",
+    trace_path,
     1024 * 1024,      // rotate after 1 MiB per file
     5 * 1024 * 1024,  // keep at most 5 MiB on disk
 )?;
@@ -244,17 +244,13 @@ let s3_config = S3Config::builder()
     .service_name("my-service")
     .build();
 
-let uploader_config = BackgroundTaskConfig::builder()
-    .trace_path("/tmp/my_traces/trace.bin")
-    .s3(s3_config)
-    .build();
-
 let mut builder = tokio::runtime::Builder::new_multi_thread();
 builder.worker_threads(4).enable_all();
 
 let (runtime, guard) = TracedRuntime::builder()
     .with_task_tracking(true)
-    .with_s3_uploader(uploader_config)
+    .with_trace_path(trace_path)
+    .with_s3_uploader(s3_config)
     .build_and_start(builder, writer)?;
 
 runtime.block_on(async {

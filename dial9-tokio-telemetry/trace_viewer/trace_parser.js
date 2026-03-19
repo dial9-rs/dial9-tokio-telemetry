@@ -143,6 +143,29 @@
                     });
                     break;
                 }
+                case 'SymbolTableEntryEvent': {
+                    const addrKey = "0x" + BigInt(v.addr).toString(16);
+                    const depth = Number(v.inline_depth || 0);
+                    const entry = { symbol: v.symbol_name, location: null };
+                    if (depth === 0) {
+                        // Outermost frame: store directly (or as first element of array)
+                        const existing = callframeSymbols.get(addrKey);
+                        if (Array.isArray(existing)) {
+                            existing[0] = entry;
+                        } else {
+                            callframeSymbols.set(addrKey, entry);
+                        }
+                    } else {
+                        // Inlined frame: promote to array
+                        let arr = callframeSymbols.get(addrKey);
+                        if (!Array.isArray(arr)) {
+                            arr = [arr || { symbol: addrKey, location: null }];
+                            callframeSymbols.set(addrKey, arr);
+                        }
+                        arr[depth] = entry;
+                    }
+                    break;
+                }
             }
         }
 
@@ -219,7 +242,7 @@
             if (!callframeSymbols) throw new Error('formatFrame requires callframeSymbols when given an address string');
             const entry = callframeSymbols.get(frame);
             if (!entry) return { text: frame || '(unknown)', docsUrl: null };
-            frame = entry;
+            frame = Array.isArray(entry) ? entry[0] : entry;
         }
         const { symbol: sym, location } = frame;
         if (!sym || sym.startsWith('0x')) return { text: sym || '(unknown)', docsUrl: null };
@@ -246,17 +269,22 @@
 
     /**
      * Resolve a callchain (array of address strings) to frame objects.
+     * When an address has inlined frames (stored as an array in callframeSymbols),
+     * they are expanded in place (outermost first, then inlined callees).
      * @param {string[]} callchain - Address strings like "0x55cc6d053893"
-     * @param {Map<string, {symbol: string, location: string|null}>} callframeSymbols
+     * @param {Map<string, {symbol: string, location: string|null}|Array>} callframeSymbols
      * @returns {{symbol: string, location: string|null}[]}
      */
     function symbolizeChain(callchain, callframeSymbols) {
-        return callchain.map(addr => {
+        const result = [];
+        for (const addr of callchain) {
             const entry = callframeSymbols.get(addr);
-            if (!entry) return { symbol: addr, location: null };
-            if (typeof entry === 'string') return { symbol: entry, location: null };
-            return entry;
-        });
+            if (!entry) { result.push({ symbol: addr, location: null }); continue; }
+            if (Array.isArray(entry)) { for (const e of entry) result.push(e); continue; }
+            if (typeof entry === 'string') { result.push({ symbol: entry, location: null }); continue; }
+            result.push(entry);
+        }
+        return result;
     }
 
     /**
