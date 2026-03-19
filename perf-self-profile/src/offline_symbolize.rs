@@ -7,7 +7,6 @@
 
 use blazesym::symbolize::{Input, Symbolized, Symbolizer, source};
 use dial9_trace_format::{
-    TraceEvent,
     decoder::Decoder,
     encoder::Encoder,
     types::{FieldValueRef, InternedString},
@@ -16,17 +15,6 @@ use std::collections::BTreeSet;
 use std::io::{self, Write};
 
 use crate::MapsEntry;
-
-/// Schema-based event for capturing `/proc/self/maps` entries in a trace.
-#[derive(dial9_trace_format::TraceEvent)]
-pub struct ProcMapsEntry {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    pub start: u64,
-    pub end: u64,
-    pub file_offset: u64,
-    pub path: String,
-}
 
 /// Schema-based event for resolved symbol table entries.
 ///
@@ -43,65 +31,10 @@ pub struct SymbolTableEntry {
     /// 0 = outermost function, 1+ = inlined callee depth.
     pub inline_depth: u64,
     /// Source file path from debug info (e.g. `/home/user/.cargo/registry/src/.../hyper-0.14.28/src/client.rs`).
+    // TODO: consider splitting out source_file and source_dir to allow avoiding an extra allocation during interning.
     pub source_file: InternedString,
     /// Source line number, or 0 if unavailable.
     pub source_line: u64,
-}
-
-/// Write ProcMapsEntry events to an encoder.
-pub fn encode_proc_maps(
-    entries: &[MapsEntry],
-    encoder: &mut Encoder<impl Write>,
-) -> io::Result<()> {
-    for e in entries {
-        encoder.write(&ProcMapsEntry {
-            timestamp_ns: 0,
-            start: e.start,
-            end: e.end,
-            file_offset: e.file_offset,
-            path: e.path.clone(),
-        })?;
-    }
-    Ok(())
-}
-
-/// Symbolize a trace: read `input` for `ProcMapsEntry` events and `StackFrames`
-/// fields, resolve addresses via blazesym, and write only the new
-/// `SymbolTableEntry` frames (with a `StringPool`) to `output`.
-///
-/// The caller is responsible for the original trace data. In the typical
-/// file-based workflow, open the trace file in append mode and pass it as
-/// `output` so symbols are appended in place without copying.
-pub fn symbolize_trace(input: &[u8], output: &mut impl Write) -> io::Result<()> {
-    let proc_maps_name = ProcMapsEntry::event_name();
-
-    let mut maps: Vec<MapsEntry> = Vec::new();
-    let mut addresses: BTreeSet<u64> = BTreeSet::new();
-
-    let mut decoder = Decoder::new(input)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
-
-    decoder
-        .for_each_event(|event| {
-            if event.name == proc_maps_name {
-                if let Some(entry) = ProcMapsEntry::decode(event.timestamp_ns, event.fields) {
-                    maps.push(MapsEntry {
-                        start: entry.start,
-                        end: entry.end,
-                        file_offset: entry.file_offset,
-                        path: entry.path.to_string(),
-                    });
-                }
-            }
-            collect_stack_frame_addresses(event.fields, &mut addresses);
-        })
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
-    if addresses.is_empty() || maps.is_empty() {
-        return Ok(());
-    }
-
-    write_symbol_data(decoder, &addresses, &maps, output)
 }
 
 /// Symbolize a trace using caller-provided proc maps instead of reading them
@@ -190,7 +123,7 @@ fn write_symbol_data(
             for &addr in &kernel_addrs {
                 let name = format!("[kernel] {:#x}", addr);
                 let symbol_name = encoder.intern_string(&name)?;
-                let source_file = encoder.intern_string("")?;
+                let source_file = encoder.intern_string("kernel")?;
                 encoder.write(&SymbolTableEntry {
                     timestamp_ns: 0,
                     addr,
@@ -263,14 +196,14 @@ fn intern_code_info(
 ) -> io::Result<(InternedString, u64)> {
     match code_info {
         Some(ci) => {
-            let file = match &ci.dir {
-                Some(dir) => dir
-                    .join(ci.file.as_ref() as &std::path::Path)
-                    .to_string_lossy()
-                    .into_owned(),
-                None => ci.file.to_string_lossy().into_owned(),
+            let interned = match &ci.dir {
+                Some(dir) => {
+                    // todo: avoid allocations here
+                    let joined = dir.join(ci.file.as_ref() as &std::path::Path);
+                    encoder.intern_string(&joined.to_string_lossy())?
+                }
+                None => encoder.intern_string(&ci.file.to_string_lossy())?,
             };
-            let interned = encoder.intern_string(&file)?;
             Ok((interned, ci.line.unwrap_or(0) as u64))
         }
         None => {
@@ -284,159 +217,17 @@ fn intern_code_info(
 mod tests {
     use super::*;
     use dial9_trace_format::{
-        decoder::{DecodedFrame, DecodedFrameRef, Decoder},
+        decoder::{DecodedFrame, Decoder},
         encoder::Encoder,
         schema::FieldDef,
         types::{FieldType, FieldValue},
     };
 
-    fn make_encoder_with_proc_maps(maps: &[MapsEntry]) -> Vec<u8> {
-        let mut enc = Encoder::new();
-        encode_proc_maps(maps, &mut enc).unwrap();
-        enc.finish()
-    }
-
-    #[test]
-    fn symbolize_empty_trace() {
-        let input = Encoder::new().finish();
-        let mut output = Vec::new();
-        symbolize_trace(&input, &mut output).unwrap();
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn symbolize_no_proc_maps_writes_nothing() {
-        let mut enc = Encoder::new();
-        let schema = enc
-            .register_schema(
-                "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::StackFrames,
-                }],
-            )
-            .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![0x1000])],
-        )
-        .unwrap();
-        let buf = enc.finish();
-
-        let mut output = Vec::new();
-        symbolize_trace(&buf, &mut output).unwrap();
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn symbolize_no_stack_frames_writes_nothing() {
-        let input = make_encoder_with_proc_maps(&[MapsEntry {
-            start: 0x1000,
-            end: 0x2000,
-            file_offset: 0,
-            path: "/bin/test".into(),
-        }]);
-        let mut output = Vec::new();
-        symbolize_trace(&input, &mut output).unwrap();
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn symbolize_unresolvable_addresses_produces_valid_trace() {
-        let mut enc = Encoder::new();
-        let schema = enc
-            .register_schema(
-                "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::StackFrames,
-                }],
-            )
-            .unwrap();
-        enc.write_event(
-            &schema,
-            &[
-                FieldValue::Varint(0),
-                FieldValue::StackFrames(vec![0x55a4b2c01000]),
-            ],
-        )
-        .unwrap();
-        encode_proc_maps(
-            &[MapsEntry {
-                start: 0x55a4b2c00000,
-                end: 0x55a4b2c05000,
-                file_offset: 0x1000,
-                path: "/nonexistent/binary".into(),
-            }],
-            &mut enc,
-        )
-        .unwrap();
-        let buf = enc.finish();
-
-        let mut output = Vec::new();
-        symbolize_trace(&buf, &mut output).unwrap();
-        // Unresolvable addresses produce no symbol events
-        let mut combined = buf.clone();
-        combined.extend_from_slice(&output);
-        let mut dec = Decoder::new(&combined).unwrap();
-        let frames = dec.decode_all();
-        assert!(frames.len() >= 4);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn symbolize_real_address_produces_symbol_events() {
-        let addr = symbolize_real_address_produces_symbol_events as *const () as u64;
-        let raw_maps = crate::read_proc_maps();
-        assert!(
-            raw_maps.iter().any(|m| addr >= m.start && addr < m.end),
-            "test function address {addr:#x} not found in any mapping"
-        );
-
-        let mut enc = Encoder::new();
-        let schema = enc
-            .register_schema(
-                "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::StackFrames,
-                }],
-            )
-            .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![addr])],
-        )
-        .unwrap();
-        encode_proc_maps(&raw_maps, &mut enc).unwrap();
-        let buf = enc.finish();
-
-        let mut output = Vec::new();
-        symbolize_trace(&buf, &mut output).unwrap();
-
-        assert!(!output.is_empty(), "expected symbol data to be written");
-
-        let symbol_table_name = SymbolTableEntry::event_name();
-        let mut combined = buf.clone();
-        combined.extend_from_slice(&output);
-        let mut dec = Decoder::new(&combined).unwrap();
-        let frames = dec.decode_all();
-        let has_string_pool = frames
-            .iter()
-            .any(|f| matches!(f, DecodedFrame::StringPool(_)));
-        let has_symbol_schema = frames
-            .iter()
-            .any(|f| matches!(f, DecodedFrame::Schema(s) if s.name == symbol_table_name));
-        assert!(has_string_pool, "expected StringPool frame in output");
-        assert!(
-            has_symbol_schema,
-            "expected SymbolTableEntry schema in output"
-        );
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn symbolize_with_maps_produces_symbol_events() {
+        use dial9_trace_format::TraceEvent;
+
         let addr = symbolize_with_maps_produces_symbol_events as *const () as u64;
         let raw_maps = crate::read_proc_maps();
 
@@ -477,37 +268,6 @@ mod tests {
             has_symbol_schema,
             "expected SymbolTableEntry schema in output"
         );
-    }
-
-    #[test]
-    fn proc_maps_event_round_trip() {
-        let entry = MapsEntry {
-            start: 0x55a4b2c00000,
-            end: 0x55a4b2c05000,
-            file_offset: 0x1000,
-            path: "/usr/bin/foo".into(),
-        };
-        let mut enc = Encoder::new();
-        encode_proc_maps(std::slice::from_ref(&entry), &mut enc).unwrap();
-        let buf = enc.finish();
-
-        let mut dec = Decoder::new(&buf).unwrap();
-        let frames = dec.decode_all_ref();
-        assert_eq!(frames.len(), 2);
-        if let DecodedFrameRef::Event {
-            timestamp_ns,
-            values,
-            ..
-        } = &frames[1]
-        {
-            let decoded = ProcMapsEntry::decode(*timestamp_ns, values).unwrap();
-            assert_eq!(decoded.start, entry.start);
-            assert_eq!(decoded.end, entry.end);
-            assert_eq!(decoded.file_offset, entry.file_offset);
-            assert_eq!(decoded.path, entry.path);
-        } else {
-            panic!("expected event frame");
-        }
     }
 
     #[test]
