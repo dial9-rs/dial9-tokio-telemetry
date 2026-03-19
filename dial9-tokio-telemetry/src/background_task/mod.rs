@@ -266,6 +266,12 @@ impl SegmentProcessor for GzipCompressor {
         mut data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
+            // Skip already-compressed segments to avoid double-gzip.
+            if data.bytes.starts_with(&[0x1f, 0x8b]) {
+                data.metadata
+                    .insert("content_encoding".into(), "gzip".into());
+                return Ok(data);
+            }
             let raw = data.bytes;
             let compressed = tokio::task::spawn_blocking(move || {
                 use flate2::write::GzEncoder;
