@@ -128,14 +128,14 @@ impl<W: Write> Encoder<W> {
     /// [`Decoder::into_encoder`](crate::decoder::Decoder::into_encoder).
     pub(crate) fn from_decoder(
         mut registry: SchemaRegistry,
-        string_pool: &crate::decoder::StringPool,
+        string_pool: crate::decoder::StringPool,
         timestamp_base_ns: u64,
         writer: W,
     ) -> Self {
         let mut pool = HashMap::new();
         let mut next_pool_id: u32 = 0;
-        for (id, value) in string_pool.iter() {
-            pool.insert(value.to_string(), id.raw_id());
+        for (id, value) in string_pool.0.into_iter() {
+            pool.insert(value, id.raw_id());
             if id.raw_id() >= next_pool_id {
                 next_pool_id = id.raw_id() + 1;
             }

@@ -22,8 +22,8 @@ pub struct SchemaEntry {
 
 #[derive(Debug, Default, Clone)]
 pub struct SchemaRegistry {
-    schemas: HashMap<WireTypeId, SchemaEntry>,
-    next_id: u16,
+    pub(crate) schemas: HashMap<WireTypeId, SchemaEntry>,
+    pub(crate) next_id: u16,
 }
 
 impl SchemaRegistry {

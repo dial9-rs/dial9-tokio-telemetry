@@ -44,7 +44,7 @@ pub struct RawEvent<'a, 'f> {
 /// Pass a reference to [`crate::TraceEvent::decode`] so that `InternedString` fields
 /// resolve to `&str` in derived `Ref` types.
 #[derive(Debug, Clone, Default)]
-pub struct StringPool(HashMap<InternedString, String>);
+pub struct StringPool(pub(crate) HashMap<InternedString, String>);
 
 impl StringPool {
     pub(crate) fn new() -> Self {
@@ -149,7 +149,7 @@ impl<'a> Decoder<'a> {
     pub fn into_encoder<W: std::io::Write>(self, writer: W) -> crate::encoder::Encoder<W> {
         crate::encoder::Encoder::from_decoder(
             self.registry,
-            &self.string_pool,
+            self.string_pool,
             self.timestamp_base_ns,
             writer,
         )
