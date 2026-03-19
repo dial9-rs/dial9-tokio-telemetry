@@ -157,7 +157,11 @@ impl TelemetryRecorder {
                     }
                     if let Ok(mut profilers) = s_start.tracepoint_profilers.lock() {
                         for p in profilers.iter_mut() {
-                            let _ = p.track_current_thread();
+                            if let Err(e) = p.track_current_thread() {
+                                eprintln!("[dial9] tracepoint track_current_thread failed: {e}");
+                            } else {
+                                eprintln!("[dial9] tracepoint track_current_thread OK on tid {}", crate::telemetry::events::current_tid());
+                            }
                         }
                     }
                 })
@@ -514,18 +518,22 @@ impl TracedRuntimeBuilder {
             }
             for tp in self.tracepoints {
                 match tp.into_def() {
-                    Ok(def) => match crate::telemetry::cpu_profile::TracepointProfiler::new(def) {
-                        Ok(profiler) => rec
-                            .shared
-                            .tracepoint_profilers
-                            .lock()
-                            .unwrap()
-                            .push(profiler),
-                        Err(e) => tracing::warn!("failed to start tracepoint profiler: {e}"),
-                    },
-                    Err(e) => tracing::warn!("failed to resolve tracepoint: {e}"),
+                    Ok(def) => {
+                        eprintln!("[dial9] registering tracepoint: {}", def.name);
+                        match crate::telemetry::cpu_profile::TracepointProfiler::new(def) {
+                            Ok(profiler) => rec
+                                .shared
+                                .tracepoint_profilers
+                                .lock()
+                                .unwrap()
+                                .push(profiler),
+                            Err(e) => eprintln!("[dial9] failed to start tracepoint profiler: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("[dial9] failed to resolve tracepoint: {e}"),
                 }
             }
+            eprintln!("[dial9] tracepoint profilers registered: {}", rec.shared.tracepoint_profilers.lock().unwrap().len());
         }
 
         let runtime = builder.build()?;
