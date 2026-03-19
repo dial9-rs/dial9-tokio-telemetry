@@ -18,8 +18,6 @@ use tokio::runtime::Handle;
 pub struct TelemetryRecorder {
     shared: Arc<SharedState>,
     event_writer: EventWriter,
-    /// Set by `graceful_shutdown`; suppresses the flush in `Drop`.
-    shutdown_complete: bool,
 }
 
 impl TelemetryRecorder {
@@ -29,7 +27,6 @@ impl TelemetryRecorder {
                 crate::telemetry::events::clock_monotonic_ns(),
             )),
             event_writer: EventWriter::new(Box::new(writer)),
-            shutdown_complete: false,
         }
     }
 
@@ -56,10 +53,10 @@ impl TelemetryRecorder {
         }
     }
 
-    fn seal(&mut self) {
+    fn finalize(&mut self) {
         self.flush();
-        if let Err(e) = self.event_writer.seal() {
-            tracing::warn!("failed to seal trace segment: {e}");
+        if let Err(e) = self.event_writer.finalize() {
+            tracing::warn!("failed to finalize trace segment: {e}");
         }
     }
 
@@ -73,7 +70,6 @@ impl TelemetryRecorder {
         let recorder = Arc::new(Mutex::new(Self {
             shared: shared.clone(),
             event_writer: EventWriter::new(writer),
-            shutdown_complete: false,
         }));
 
         let s1 = shared.clone();
@@ -199,9 +195,7 @@ impl TelemetryRecorder {
 
 impl Drop for TelemetryRecorder {
     fn drop(&mut self) {
-        if !self.shutdown_complete {
-            self.flush();
-        }
+        self.flush();
     }
 }
 
@@ -289,7 +283,7 @@ impl TelemetryGuard {
         }
 
         // 2. Seal final segment
-        self.handle.recorder.lock().unwrap().seal();
+        self.handle.recorder.lock().unwrap().finalize();
         tracing::debug!(target: "dial9_telemetry", "sealed final segment");
 
         // 3. Signal worker to drain with the given timeout and wait
@@ -304,16 +298,12 @@ impl TelemetryGuard {
             tracing::debug!(target: "dial9_telemetry", "worker finished");
         }
 
-        self.handle.recorder.lock().unwrap().shutdown_complete = true;
         Ok(())
     }
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if self.handle.recorder.lock().unwrap().shutdown_complete {
-            return;
-        }
         // 1. Stop the flush thread
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.flush_thread.take() {
@@ -329,7 +319,7 @@ impl Drop for TelemetryGuard {
             }
         });
         // 2. Seal the final segment (.active → .bin)
-        self.handle.recorder.lock().unwrap().seal();
+        self.handle.recorder.lock().unwrap().finalize();
         // 3. Hard shutdown: drop the sender without sending — worker sees
         // RecvError and exits without draining. No need to join the thread.
         // For graceful drain, use graceful_shutdown() instead.
@@ -739,7 +729,6 @@ impl TracedRuntime {
         let recorder = Arc::new(Mutex::new(TelemetryRecorder {
             shared: shared.clone(),
             event_writer: EventWriter::new(Box::new(NullWriter)),
-            shutdown_complete: false,
         }));
         let guard = TelemetryGuard {
             handle: TelemetryHandle { shared, recorder },
@@ -849,7 +838,7 @@ mod tests {
             .unwrap();
         }
         ew.flush().unwrap();
-        ew.seal().unwrap();
+        ew.finalize().unwrap();
 
         let mut files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -1081,7 +1070,7 @@ mod tests {
                     );
                 }
                 ew.flush().unwrap();
-                ew.seal().unwrap();
+                ew.finalize().unwrap();
 
                 let actual_raw = verify_files(dir.path());
 
