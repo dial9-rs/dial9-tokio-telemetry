@@ -133,11 +133,18 @@ fn main() -> std::io::Result<()> {
         args.trace_max_total_size = 5_000_000;
     }
 
-    let writer = RotatingWriter::new(
-        &args.trace_path,
-        args.trace_max_file_size,
-        args.trace_max_total_size,
-    )?;
+    let writer = RotatingWriter::builder()
+        .base_path(&args.trace_path)
+        .max_file_size(args.trace_max_file_size)
+        .max_total_size(args.trace_max_total_size)
+        .segment_metadata(vec![
+            ("service".into(), "metrics-service".into()),
+            ("worker_threads".into(), args.worker_threads.to_string()),
+            ("flush_interval".into(), args.flush_interval.to_string()),
+            ("table_name".into(), args.table_name.clone()),
+            ("server_addr".into(), args.server_addr.clone()),
+        ])
+        .build()?;
 
     let mut builder = Builder::new_multi_thread();
     builder.worker_threads(args.worker_threads).enable_all();

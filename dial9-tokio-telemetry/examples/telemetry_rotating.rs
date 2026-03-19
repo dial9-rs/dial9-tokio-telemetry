@@ -20,11 +20,11 @@ fn main() -> std::io::Result<()> {
     // exceeds `max_total_size`.
     //
     // Files are written as `trace.0.bin`, `trace.1.bin`, etc.
-    let writer = RotatingWriter::new(
-        format!("{trace_dir}/trace.bin"),
-        1024 * 1024,     // rotate after 1 MiB per file
-        5 * 1024 * 1024, // keep at most 5 MiB of trace data on disk
-    )?;
+    let writer = RotatingWriter::builder()
+        .base_path(format!("{trace_dir}/trace.bin"))
+        .max_file_size(1024 * 1024) // rotate after 1 MiB per file
+        .max_total_size(5 * 1024 * 1024) // keep at most 5 MiB of trace data on disk
+        .build()?;
 
     // TracedRuntime::build installs telemetry hooks on the tokio runtime
     // builder and returns both the runtime and a guard that manages the

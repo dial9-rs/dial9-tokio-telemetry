@@ -34,7 +34,8 @@ fn background_symbolization_produces_symbol_table_entries() {
 
     // Small segments to force rotation so the worker has segments to process.
     // Large total size so segments aren't evicted before the worker processes them.
-    let writer = RotatingWriter::new(&trace_path, 4 * 1024, 10 * 1024 * 1024).unwrap();
+    let writer = RotatingWriter::new(&trace_path, 4 * 1024, 10 * 1024 * 1024)
+        .unwrap();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();

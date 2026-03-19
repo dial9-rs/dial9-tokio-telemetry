@@ -13,7 +13,8 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
     let trace_dir = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = RotatingWriter::new(&trace_path, 512 * 1024, 10 * 1024 * 1024).unwrap();
+    let writer = RotatingWriter::new(&trace_path, 512 * 1024, 10 * 1024 * 1024)
+        .unwrap();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
