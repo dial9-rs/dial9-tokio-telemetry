@@ -34,10 +34,26 @@ fn sched_event_timestamps_align_with_wall_clock() {
     let _trace_start = guard.start_time();
     let sleep_windows: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let sleep_duration = Duration::from_micros(50);
+    let sleep_duration = Duration::from_millis(1);
     let num_sleeps = 4;
 
     runtime.block_on(async {
+        // Warmup: ensure all worker threads are fully initialized and perf
+        // events are flowing before we start measuring. Without this, the
+        // first sleep window can race with worker thread startup — Tokio
+        // spawns workers via the blocking pool and `set_thread_id` /
+        // `resolve_worker_id` may not have run yet, causing sched events
+        // to be attributed to `Blocking` instead of `Worker(i)`.
+        for _ in 0..num_workers {
+            tokio::spawn(async {
+                std::thread::sleep(Duration::from_millis(10));
+            })
+            .await
+            .unwrap();
+        }
+        // Let the flush cycle drain warmup sched events
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Space out sleeps so windows don't overlap
         for i in 0..num_sleeps {
             let windows = sleep_windows.clone();

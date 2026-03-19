@@ -19,6 +19,7 @@ all-features = true
 tokio = { version = "1", features = ["rt", "macros", "time", "rt-multi-thread", "sync", "net", "io-util"] }
 tokio-util = "0.7"
 arc-swap = "1"
+crossbeam-queue = "0.3"
 libc.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 pin-project-lite = "0.2"
@@ -103,3 +104,7 @@ required-features = ["worker-s3"]
 [[example]]
 name = "kernel_sched_events"
 required-features = ["cpu-profiling"]
+
+[[bench]]
+name = "flush_path"
+harness = false

@@ -522,7 +522,12 @@ fn stress_test_all_segments_uploaded_and_valid() {
     let entries = inspector.entries();
     let successes: Vec<_> = entries
         .iter()
-        .filter(|e| e.metrics["Success"] == true)
+        .filter(|e| {
+            e.metrics
+                .contains_key("Success")
+                .then(|| e.metrics["Success"] == true)
+                .unwrap_or(false)
+        })
         .collect();
     assert_eq!(
         successes.len(),
@@ -766,17 +771,25 @@ fn permanently_broken_s3_produces_failure_metrics() {
     drop(runtime);
 
     let entries = inspector.entries();
-    assert!(!entries.is_empty(), "expected at least one metric entry");
+    // Filter to pipeline metrics only (FlushMetrics entries don't have Failure/Success keys).
+    let pipeline_entries: Vec<_> = entries
+        .iter()
+        .filter(|e| e.metrics.contains_key("Failure") || e.metrics.contains_key("Success"))
+        .collect();
+    assert!(
+        !pipeline_entries.is_empty(),
+        "expected at least one pipeline metric entry"
+    );
 
-    let failures = entries
+    let failures = pipeline_entries
         .iter()
         .filter(|e| e.metrics["Failure"] == true)
         .count();
     assert_eq!(
         failures,
-        entries.len(),
+        pipeline_entries.len(),
         "all {} entries should be failures when S3 is permanently broken, but {} succeeded",
-        entries.len(),
-        entries.len() - failures,
+        pipeline_entries.len(),
+        pipeline_entries.len() - failures,
     );
 }

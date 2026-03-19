@@ -225,7 +225,7 @@ mod tests {
     /// so you can see what the metric output looks like end-to-end.
     #[test]
     fn show_full_segment_metrics() {
-        use crate::background_task::SegmentProcessMetrics;
+        use crate::metrics::{Operation, SegmentProcessMetrics};
         use metrique::timers::Timer;
 
         let mut pipeline = PipelineMetrics::default();
@@ -238,6 +238,7 @@ mod tests {
         pipeline.push("S3Upload", upload);
 
         let m = SegmentProcessMetrics {
+            operation: Operation::ProcessSegment,
             total_time: Timer::start_now(),
             status: Some(super::MetriqueResult::Success),
             segment_index: 7,

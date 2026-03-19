@@ -5,10 +5,12 @@ pub(crate) use shared_state::SharedState;
 
 use event_writer::EventWriter;
 
+use crate::metrics::{FlushMetrics, Operation};
 use crate::telemetry::buffer::BUFFER;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+use metrique::timers::Timer;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +20,13 @@ use tokio::runtime::Handle;
 pub struct TelemetryRecorder {
     shared: Arc<SharedState>,
     event_writer: EventWriter,
+}
+
+/// Stats returned by [`TelemetryRecorder::flush`] for metrics publishing.
+pub(crate) struct FlushStats {
+    pub event_count: u64,
+    pub dropped_batches: u64,
+    pub cpu_time: Duration,
 }
 
 impl TelemetryRecorder {
@@ -35,21 +44,54 @@ impl TelemetryRecorder {
         self.shared.metrics.store(Arc::new(Some(metrics)));
     }
 
-    fn flush(&mut self) {
+    fn flush(&mut self) -> FlushStats {
+        let cpu_events_time = Instant::now();
         #[cfg(feature = "cpu-profiling")]
-        self.event_writer.flush_cpu(&self.shared);
+        {
+            self.event_writer.flush_cpu(&self.shared);
+        }
+        let cpu_time = cpu_events_time.elapsed();
 
-        for batch in self.shared.collector.drain() {
+        // Flush the current thread's buffer (e.g. the flush thread itself
+        // produces queue-sample events via record_event) so those events
+        // reach the collector before we drain it.
+        BUFFER.with(|buf| {
+            let mut buf = buf.borrow_mut();
+            let events = buf.flush();
+            if !events.is_empty() {
+                self.shared.collector.accept_flush(events);
+            }
+        });
+
+        let dropped = self.shared.collector.take_dropped_batches();
+        if dropped > 0 {
+            tracing::warn!(
+                dropped_batches = dropped,
+                "telemetry flush fell behind, dropped batches"
+            );
+        }
+
+        let events_before = self.event_writer.events_written();
+        while let Some(batch) = self.shared.collector.next() {
             for raw in batch {
                 if let Err(e) = self.event_writer.write_raw_event(raw) {
                     tracing::warn!("failed to write trace event: {e}");
                     self.shared.enabled.store(false, Ordering::Relaxed);
-                    return;
+                    return FlushStats {
+                        event_count: self.event_writer.events_written() - events_before,
+                        dropped_batches: dropped as u64,
+                        cpu_time,
+                    };
                 }
             }
         }
         if let Err(e) = self.event_writer.flush() {
             tracing::warn!("failed to flush trace data: {e}");
+        }
+        FlushStats {
+            event_count: self.event_writer.events_written() - events_before,
+            dropped_batches: dropped as u64,
+            cpu_time,
         }
     }
 
@@ -170,24 +212,6 @@ impl TelemetryRecorder {
             loop {
                 interval.tick().await;
                 recorder.lock().unwrap().flush();
-            }
-        })
-    }
-
-    pub fn start_sampler_task(
-        recorder: Arc<Mutex<Self>>,
-        interval: Duration,
-    ) -> tokio::task::JoinHandle<()> {
-        let shared = recorder.lock().unwrap().shared.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(interval);
-            loop {
-                tick.tick().await;
-                let metrics_guard = shared.metrics.load();
-                let Some(ref metrics) = **metrics_guard else {
-                    continue;
-                };
-                shared.record_queue_sample(metrics.global_queue_depth());
             }
         })
     }
@@ -589,12 +613,24 @@ impl TracedRuntimeBuilder<HasTracePath> {
             let rec = recorder.clone();
             let shared = recorder.lock().unwrap().shared.clone();
             let stop = stop.clone();
+            let flush_metrics_sink = self
+                .worker_metrics_sink
+                .clone()
+                .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
             std::thread::Builder::new()
                 .name("telemetry-flush".into())
                 .spawn(move || {
-                    let flush_interval = Duration::from_millis(250);
+                    // Lower this thread's scheduling priority so it doesn't
+                    // compete with worker threads for CPU time.
+                    // SAFETY: nice() is a simple syscall with no memory safety
+                    // implications. Increasing the nice value (lowering priority)
+                    // is always permitted for unprivileged processes.
+                    #[cfg(target_os = "linux")]
+                    unsafe {
+                        let _ = libc::nice(10);
+                    }
+
                     let sample_interval = Duration::from_millis(10);
-                    let mut last_flush = Instant::now();
                     let mut last_sample = Instant::now();
 
                     while !stop.load(Ordering::Acquire) {
@@ -609,9 +645,18 @@ impl TracedRuntimeBuilder<HasTracePath> {
                             }
                         }
 
-                        if now.duration_since(last_flush) >= flush_interval {
-                            last_flush = now;
-                            rec.lock().unwrap().flush();
+                        let mut flush_timer = Timer::start_now();
+                        let stats = rec.lock().unwrap().flush();
+                        flush_timer.stop();
+                        if stats.event_count > 0 || stats.dropped_batches > 0 {
+                            let _guard = FlushMetrics {
+                                operation: Operation::Flush,
+                                event_count: stats.event_count,
+                                flush_duration: flush_timer,
+                                dropped_batches: stats.dropped_batches,
+                                cpu_flush_duration: stats.cpu_time,
+                            }
+                            .append_on_drop(flush_metrics_sink.clone());
                         }
                     }
                 })

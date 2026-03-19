@@ -127,13 +127,10 @@ impl SharedState {
     }
 
     pub(crate) fn record_queue_sample(&self, global_queue_depth: usize) {
-        if !self.enabled.load(Ordering::Relaxed) {
-            return;
-        }
-        self.collector.accept_flush(vec![RawEvent::QueueSample {
+        self.record_event(RawEvent::QueueSample {
             timestamp_nanos: self.timestamp_nanos(),
             global_queue_depth,
-        }]);
+        });
     }
 
     pub(crate) fn record_event(&self, event: RawEvent) {
@@ -143,9 +140,8 @@ impl SharedState {
         BUFFER.with(|buf| {
             let mut buf = buf.borrow_mut();
             buf.set_collector(&self.collector);
-            let is_park = matches!(event, RawEvent::WorkerPark { .. });
             buf.record_event(event);
-            if buf.should_flush() || is_park {
+            if buf.should_flush() {
                 self.collector.accept_flush(buf.flush());
             }
         });
