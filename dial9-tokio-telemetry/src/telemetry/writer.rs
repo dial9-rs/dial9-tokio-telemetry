@@ -436,6 +436,9 @@ impl TraceWriter for RotatingWriter {
     }
 
     fn finalize(&mut self) -> std::io::Result<()> {
+        if matches!(self.state, WriterState::Finished) {
+            tracing::warn!("writer is already closed.")
+        }
         self.flush()?;
         // Rename .active → .bin for the current segment (if it has .active suffix)
         if self
