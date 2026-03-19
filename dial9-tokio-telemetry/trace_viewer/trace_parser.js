@@ -46,11 +46,17 @@
         const threadNames = new Map();
 
         const capped = () => events.length >= maxEvents;
+        const META_FRAMES = new Set([
+            'TaskSpawnEvent', 'TaskTerminateEvent',
+            'CpuSampleEvent', 'SymbolTableEntry',
+        ]);
 
         for (const frame of frames) {
             if (frame.type !== 'event') continue;
             const v = frame.values;
             const ts = num(frame.timestamp_ns);
+
+            if (capped() && !META_FRAMES.has(frame.name)) continue;
 
             switch (frame.name) {
                 case 'PollStartEvent': {
@@ -60,7 +66,7 @@
                     if (taskId && spawnLoc && !taskSpawnLocs.has(taskId)) {
                         taskSpawnLocs.set(taskId, spawnLoc);
                     }
-                    if (!capped()) events.push({
+                    events.push({
                         eventType: 0, timestamp: ts,
                         workerId: num(v.worker_id), localQueue: num(v.local_queue),
                         globalQueue: 0, cpuTime: 0, schedWait: 0,
@@ -69,14 +75,14 @@
                     break;
                 }
                 case 'PollEndEvent':
-                    if (!capped()) events.push({
+                    events.push({
                         eventType: 1, timestamp: ts, workerId: num(v.worker_id),
                         globalQueue: 0, localQueue: 0, cpuTime: 0, schedWait: 0,
                         taskId: 0, spawnLocId: null, spawnLoc: null,
                     });
                     break;
                 case 'WorkerParkEvent':
-                    if (!capped()) events.push({
+                    events.push({
                         eventType: 2, timestamp: ts,
                         workerId: num(v.worker_id), localQueue: num(v.local_queue),
                         cpuTime: num(v.cpu_time_ns),
@@ -85,7 +91,7 @@
                     });
                     break;
                 case 'WorkerUnparkEvent':
-                    if (!capped()) events.push({
+                    events.push({
                         eventType: 3, timestamp: ts,
                         workerId: num(v.worker_id), localQueue: num(v.local_queue),
                         cpuTime: num(v.cpu_time_ns), schedWait: num(v.sched_wait_ns),
@@ -94,7 +100,7 @@
                     });
                     break;
                 case 'QueueSampleEvent':
-                    if (!capped()) events.push({
+                    events.push({
                         eventType: 4, timestamp: ts,
                         globalQueue: num(v.global_queue),
                         workerId: 0, localQueue: 0, cpuTime: 0, schedWait: 0,
@@ -113,7 +119,7 @@
                     taskTerminateTimes.set(num(v.task_id), ts);
                     break;
                 case 'WakeEventEvent':
-                    if (!capped()) events.push({
+                    events.push({
                         eventType: 9, timestamp: ts,
                         workerId: num(v.target_worker),
                         wakerTaskId: num(v.waker_task_id),
