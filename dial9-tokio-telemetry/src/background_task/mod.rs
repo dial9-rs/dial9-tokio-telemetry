@@ -1100,7 +1100,12 @@ mod worker_pipeline_tests {
         let stop = tokio_util::sync::CancellationToken::new();
         let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(AlwaysFailProcessor)];
 
-        let mut worker = WorkerLoop::new(config_for(dir.path()), processors, stop);
+        let mut worker = WorkerLoop::new(
+            config_for(dir.path()),
+            processors,
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
         worker.process_open_segments().await;
 
         check!(!seg_path.exists());
@@ -1145,7 +1150,12 @@ mod worker_pipeline_tests {
             Box::new(CaptureProcessor(output_bytes.clone())),
         ];
 
-        let mut worker = WorkerLoop::new(config_for(dir.path()), processors, stop);
+        let mut worker = WorkerLoop::new(
+            config_for(dir.path()),
+            processors,
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
         worker.run().await;
 
         // The captured bytes should be identical to the input (not double-gzipped).
