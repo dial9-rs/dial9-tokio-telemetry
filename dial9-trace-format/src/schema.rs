@@ -1,12 +1,18 @@
-// Schema types and registry
+//! Schema types describing event layouts.
+//!
+//! A [`SchemaEntry`] defines the name and fields of an event type. The
+//! [`SchemaRegistry`] tracks all registered schemas and assigns wire type IDs.
 
 use crate::codec::WireTypeId;
 use crate::types::FieldType;
 use std::collections::HashMap;
 
+/// A single field within a schema: a name and a [`FieldType`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldDef {
+    /// Field name (e.g. `"worker_id"`).
     pub name: String,
+    /// Wire type used to encode this field.
     pub field_type: FieldType,
 }
 
@@ -14,12 +20,18 @@ pub struct FieldDef {
 /// the ID is assigned by the encoder and tracked externally by the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaEntry {
+    /// Event type name (e.g. `"PollStart"`).
     pub name: String,
     /// Whether events of this type carry a packed u24 nanosecond timestamp in the event header.
     pub has_timestamp: bool,
+    /// Ordered list of fields (excluding the timestamp, which is in the header).
     pub fields: Vec<FieldDef>,
 }
 
+/// Registry mapping [`WireTypeId`]s to [`SchemaEntry`] definitions.
+///
+/// Used internally by the encoder and decoder. Most callers interact with
+/// schemas through [`Encoder::register_schema`](crate::encoder::Encoder::register_schema).
 #[derive(Debug, Default, Clone)]
 pub struct SchemaRegistry {
     pub(crate) schemas: HashMap<WireTypeId, SchemaEntry>,

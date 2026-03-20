@@ -103,7 +103,7 @@ fn test_js_parser_matches_rust() {
 #[test]
 fn test_js_parser_resolves_symbols_past_event_cap() {
     use dial9_perf_self_profile::offline_symbolize::SymbolTableEntry;
-    use dial9_tokio_telemetry::telemetry::format::{PollEndEvent, WorkerId};
+    use dial9_tokio_telemetry::telemetry::{PollEndEvent, WorkerId};
     use dial9_trace_format::encoder::Encoder;
 
     let temp_dir = TempDir::new().unwrap();

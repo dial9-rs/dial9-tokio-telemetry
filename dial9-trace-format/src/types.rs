@@ -1,4 +1,9 @@
-// Field types and value encoding
+//! Field types, values, and the [`TraceField`] trait.
+//!
+//! This module defines the wire types used to encode event fields, along with
+//! owned ([`FieldValue`]) and zero-copy ([`FieldValueRef`]) decoded
+//! representations. The [`EventEncoder`] is the low-level writer passed to
+//! derived `encode_fields` implementations.
 
 use crate::codec::{MAX_TIMESTAMP_DELTA_NS, TAG_TIMESTAMP_RESET};
 use std::io::{self, Write};

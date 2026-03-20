@@ -184,7 +184,8 @@ pub struct SegmentMetadataEvent {
 // ── dial9-trace-format: decode ──────────────────────────────────────────────
 
 /// Decode all events from a `dial9-trace-format` byte slice into `TelemetryEvent`s.
-pub fn decode_events_v2(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
+#[cfg(test)]
+pub(crate) fn decode_events_v2(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
     Ok(decode_events_ref(data)?
         .into_iter()
         .map(TelemetryEvent::from)
@@ -192,7 +193,8 @@ pub fn decode_events_v2(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
 }
 
 /// Decode all events from a byte slice into zero-copy [`TelemetryEventRef`]s.
-pub fn decode_events_ref(data: &[u8]) -> io::Result<Vec<TelemetryEventRef<'_>>> {
+#[cfg(test)]
+pub(crate) fn decode_events_ref(data: &[u8]) -> io::Result<Vec<TelemetryEventRef<'_>>> {
     use dial9_trace_format::decoder::Decoder;
 
     let mut dec = Decoder::new(data)
@@ -245,7 +247,7 @@ impl<'a> TelemetryEventRef<'a> {
 
 /// Decode a single event from its schema name and zero-copy field values.
 /// Returns `None` for unknown event names.
-pub fn decode_ref<'a>(
+pub(crate) fn decode_ref<'a>(
     name: &str,
     timestamp_ns: Option<u64>,
     fields: &[FieldValueRef<'a>],
