@@ -1,3 +1,7 @@
+//! `ThreadLocalBuffer` is the entrypoint for almost all dial9 events
+//!
+//! The TL buffer is created lazily the first time an event is sent. Events are buffered into a fixed-size Vec (currently 1024 items)
+//! before being flushed to the central collector.
 use crate::telemetry::collector::CentralCollector;
 use crate::telemetry::events::RawEvent;
 use std::cell::RefCell;
@@ -5,7 +9,7 @@ use std::sync::Arc;
 
 const BUFFER_CAPACITY: usize = 1024;
 
-pub struct ThreadLocalBuffer {
+pub(crate) struct ThreadLocalBuffer {
     pub(crate) events: Vec<RawEvent>,
     collector: Option<Arc<CentralCollector>>,
 }
@@ -61,7 +65,7 @@ impl Drop for ThreadLocalBuffer {
 }
 
 thread_local! {
-    pub static BUFFER: RefCell<ThreadLocalBuffer> = RefCell::new(ThreadLocalBuffer::new());
+    pub(crate) static BUFFER: RefCell<ThreadLocalBuffer> = RefCell::new(ThreadLocalBuffer::new());
 }
 
 #[cfg(test)]
