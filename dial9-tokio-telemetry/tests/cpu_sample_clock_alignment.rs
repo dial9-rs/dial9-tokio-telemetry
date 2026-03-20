@@ -285,7 +285,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     let blocking_handle = runtime.spawn(async {
         tokio::task::spawn_blocking(|| burn_cpu(Duration::from_millis(400)));
         tokio::task::spawn_blocking(|| {
-            let tid = nix::unistd::gettid().as_raw() as u32;
+            let tid = nix::unistd::gettid().as_raw() as u32; // p_tid is i32
             burn_cpu(Duration::from_millis(400));
             tid
         })
@@ -337,10 +337,10 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     eprintln!("Blocking thread tid={blocking_tid}, name={blocking_name:?}");
     assert!(
         blocking_name.is_some_and(|n| n.starts_with("test-traced-run")),
-        "expected blocking thread name starting with 'test-traced-run', got: {blocking_name:?}"
+        "expected blocking thread name starting with 'test-traced-run', got: {blocking_name:?} [{unique_defs:?}]"
     );
 
-    // ── Verify CpuSamples exist for both tids ────────────────────────────
+    // ── Verify CpuSamples exist for both tids with expected worker ids ────────────────────────────
     let ext_samples: Vec<_> = events
         .iter()
         .filter(|e| matches!(e, RawEvent::CpuSample(data) if data.tid == ext_tid && data.worker_id == WorkerId::UNKNOWN))
