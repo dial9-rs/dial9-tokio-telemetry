@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/dial9-tokio-telemetry.svg)](https://crates.io/crates/dial9-tokio-telemetry)
 [![Documentation](https://docs.rs/dial9-tokio-telemetry/badge.svg)](https://docs.rs/dial9-tokio-telemetry)
-[![License](https://img.shields.io/crates/l/dial9-tokio-telemetry.svg)](LICENSE)
+[![License](https://img.shields.io/crates/l/dial9-tokio-telemetry.svg)]
 
 **Low-overhead runtime telemetry for Tokio.** Records poll timing, worker park/unpark, wake events, queue depths, and (on Linux) CPU profile samples into a compact binary trace format. Traces can be analyzed offline to find long polls, scheduling delays, idle workers, and CPU hotspots.
 
@@ -24,11 +24,11 @@ Without this flag, compilation will fail with errors about missing methods on `t
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 
 fn main() -> std::io::Result<()> {
-    let writer = RotatingWriter::new(
-        "/tmp/my_traces/trace.bin",
-        1024 * 1024,      // rotate after 1 MiB per file
-        5 * 1024 * 1024,  // keep at most 5 MiB on disk
-    )?;
+    let writer = RotatingWriter::builder()
+        .base_path("/tmp/my_traces/trace.bin")
+        .max_file_size(1024 * 1024)      // rotate after 1 MiB per file
+        .max_total_size(5 * 1024 * 1024) // keep at most 5 MiB on disk
+        .build()?;
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
@@ -233,11 +233,11 @@ use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 
 let trace_path = "/tmp/my_traces/trace.bin";
-let writer = RotatingWriter::new(
-    trace_path,
-    1024 * 1024,      // rotate after 1 MiB per file
-    5 * 1024 * 1024,  // keep at most 5 MiB on disk
-)?;
+let writer = RotatingWriter::builder()
+    .base_path(trace_path)
+    .max_file_size(1024 * 1024)      // rotate after 1 MiB per file
+    .max_total_size(5 * 1024 * 1024) // keep at most 5 MiB on disk
+    .build()?;
 
 let s3_config = S3Config::builder()
     .bucket("my-trace-bucket")

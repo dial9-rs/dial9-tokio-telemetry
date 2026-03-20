@@ -16,8 +16,15 @@ pub struct SealedSegment {
 /// Returns `(epoch_secs, true)` if the header was valid, or falls back to
 /// file mtime / current time with `(epoch_secs, false)`.
 pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
-    if let Some(ts) = parse_segment_timestamp(data) {
-        return (ts / 1_000_000_000, true);
+    match parse_segment_timestamp(data) {
+        Ok(ts) => return (ts / 1_000_000_000, true),
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to parse segment timestamp, falling back to mtime"
+            );
+        }
     }
     let secs = std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -34,29 +41,68 @@ pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
 }
 
 /// Parse the timestamp (nanos) from the first SegmentMetadata event in a trace segment.
-fn parse_segment_timestamp(data: &[u8]) -> Option<u64> {
+fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
     use dial9_trace_format::decoder::{DecodedFrameRef, Decoder};
 
-    let mut dec = Decoder::new(data)?;
+    let mut dec = Decoder::new(data).ok_or(ParseTimestampError::InvalidHeader)?;
     let mut events_seen = 0;
-    while let Ok(Some(frame)) = dec.next_frame_ref() {
-        if let DecodedFrameRef::Event {
-            type_id,
-            timestamp_ns,
-            ..
-        } = frame
-        {
-            events_seen += 1;
-            let name = dec.registry().get(type_id).map(|s| s.name.as_str())?;
-            if name == "SegmentMetadataEvent" {
-                return timestamp_ns;
+    loop {
+        match dec.next_frame_ref() {
+            Ok(Some(DecodedFrameRef::Event {
+                type_id,
+                timestamp_ns,
+                ..
+            })) => {
+                events_seen += 1;
+                let name = dec
+                    .registry()
+                    .get(type_id)
+                    .map(|s| s.name.as_str())
+                    .ok_or(ParseTimestampError::UnknownTypeId(type_id.0))?;
+                if name == "SegmentMetadataEvent" {
+                    return timestamp_ns.ok_or(ParseTimestampError::MissingTimestamp);
+                }
+                if events_seen >= 10 {
+                    return Err(ParseTimestampError::NotFoundInFirst10Events);
+                }
             }
-            if events_seen >= 10 {
-                return None;
+            Ok(Some(_)) => {} // schema/pool frame, keep going
+            Ok(None) => {
+                return Err(ParseTimestampError::EndOfStream { events_seen });
+            }
+            Err(e) => {
+                return Err(ParseTimestampError::DecodeError(e.to_string()));
             }
         }
     }
-    None
+}
+
+#[derive(Debug)]
+enum ParseTimestampError {
+    InvalidHeader,
+    UnknownTypeId(u16),
+    MissingTimestamp,
+    NotFoundInFirst10Events,
+    EndOfStream { events_seen: u32 },
+    DecodeError(String),
+}
+
+impl std::fmt::Display for ParseTimestampError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidHeader => write!(f, "invalid trace header"),
+            Self::UnknownTypeId(id) => write!(f, "unknown type_id {id} not in registry"),
+            Self::MissingTimestamp => write!(f, "SegmentMetadataEvent had no timestamp"),
+            Self::NotFoundInFirst10Events => {
+                write!(f, "SegmentMetadataEvent not found in first 10 events")
+            }
+            Self::EndOfStream { events_seen } => write!(
+                f,
+                "end of stream after {events_seen} events without SegmentMetadataEvent"
+            ),
+            Self::DecodeError(e) => write!(f, "decode error: {e}"),
+        }
+    }
 }
 
 /// Find sealed `.bin` segments in `dir`, sorted oldest-first by index.
@@ -160,9 +206,6 @@ mod tests {
         let base = dir.path().join("trace");
 
         let mut writer = RotatingWriter::single_file(&base).unwrap();
-        writer
-            .set_segment_metadata(vec![("test".into(), "value".into())])
-            .unwrap();
 
         let event = RawEvent::WorkerPark {
             timestamp_nanos: 1000000000,
@@ -195,9 +238,6 @@ mod tests {
         let base = dir.path().join("trace");
 
         let mut writer = RotatingWriter::single_file(&base).unwrap();
-        writer
-            .set_segment_metadata(vec![("test".into(), "value".into())])
-            .unwrap();
 
         let event = RawEvent::WorkerPark {
             timestamp_nanos: 1000000000,
@@ -236,6 +276,34 @@ mod tests {
             .unwrap()
             .as_secs();
         check!(now.abs_diff(epoch_secs) < 60);
+    }
+
+    #[test]
+    fn test_parse_segment_timestamp_no_metadata() {
+        use crate::telemetry::events::RawEvent;
+        use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+
+        // Don't call set_segment_metadata — writer should still write one automatically
+        let mut writer = RotatingWriter::single_file(&base).unwrap();
+        let event = RawEvent::WorkerPark {
+            timestamp_nanos: 1_000_000_000,
+            worker_id: crate::telemetry::format::WorkerId::from(0usize),
+            worker_local_queue_depth: 0,
+            cpu_time_nanos: 0,
+        };
+        writer.write_event(&event).unwrap();
+        writer.flush().unwrap();
+
+        let data = std::fs::read(&base).unwrap();
+        let ts = parse_segment_timestamp(&data).unwrap();
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        check!(now_nanos.abs_diff(ts) < 60_000_000_000);
     }
 
     #[test]

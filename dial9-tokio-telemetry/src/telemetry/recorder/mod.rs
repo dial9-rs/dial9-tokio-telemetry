@@ -859,7 +859,12 @@ mod tests {
         let location_a = loc_a();
         let location_b = loc_b();
 
-        let writer = crate::telemetry::writer::RotatingWriter::new(&base, 100, 100_000).unwrap();
+        let writer = crate::telemetry::writer::RotatingWriter::builder()
+            .base_path(&base)
+            .max_file_size(100)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
         let mut ew = EventWriter::new(Box::new(writer));
 
         let locations = [
@@ -1090,7 +1095,12 @@ mod tests {
                 let dir = tempfile::TempDir::new().unwrap();
                 let base = dir.path().join("trace");
 
-                let writer = RotatingWriter::new(&base, max_file_size, 1_000_000).unwrap();
+                let writer = RotatingWriter::builder()
+                    .base_path(&base)
+                    .max_file_size(max_file_size)
+                    .max_total_size(1_000_000)
+                    .build()
+                    .unwrap();
 
                 let mut ew = EventWriter::new(Box::new(writer));
 
