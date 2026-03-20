@@ -44,8 +44,12 @@ pub(crate) struct FlushMetrics {
     /// Oldest batches evicted since last flush.
     pub dropped_batches: u64,
 
+    /// Duration spent flushing CPU metircs
     #[metrics(unit = Microsecond)]
     pub cpu_flush_duration: Duration,
+
+    /// The last flush during shutdown
+    pub last_flush: bool,
 }
 
 /// Metrics emitted per sealed segment processed by the background worker.
