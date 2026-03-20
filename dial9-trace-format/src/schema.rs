@@ -20,10 +20,10 @@ pub struct SchemaEntry {
     pub fields: Vec<FieldDef>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SchemaRegistry {
-    schemas: HashMap<WireTypeId, SchemaEntry>,
-    next_id: u16,
+    pub(crate) schemas: HashMap<WireTypeId, SchemaEntry>,
+    pub(crate) next_id: u16,
 }
 
 impl SchemaRegistry {
@@ -59,6 +59,18 @@ impl SchemaRegistry {
         let id = WireTypeId(self.next_id);
         self.next_id += 1;
         id
+    }
+
+    /// Advance `next_id` past all registered type IDs.
+    ///
+    /// Call this after bulk-inserting schemas (e.g. from a decoded trace) so
+    /// that [`next_type_id`](Self::next_type_id) won't collide.
+    pub fn sync_next_id(&mut self) {
+        for &id in self.schemas.keys() {
+            if id.0 >= self.next_id {
+                self.next_id = id.0 + 1;
+            }
+        }
     }
 }
 

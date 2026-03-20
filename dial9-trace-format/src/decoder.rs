@@ -44,7 +44,7 @@ pub struct RawEvent<'a, 'f> {
 /// Pass a reference to [`crate::TraceEvent::decode`] so that `InternedString` fields
 /// resolve to `&str` in derived `Ref` types.
 #[derive(Debug, Clone, Default)]
-pub struct StringPool(HashMap<InternedString, String>);
+pub struct StringPool(pub(crate) HashMap<InternedString, String>);
 
 impl StringPool {
     pub(crate) fn new() -> Self {
@@ -65,6 +65,11 @@ impl StringPool {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Iterate over all interned strings as `(id, value)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (InternedString, &str)> {
+        self.0.iter().map(|(&id, v)| (id, v.as_str()))
     }
 }
 
@@ -133,6 +138,21 @@ impl<'a> Decoder<'a> {
 
     pub fn string_pool(&self) -> &StringPool {
         &self.string_pool
+    }
+
+    /// Consume this decoder and create an [`Encoder`] that appends to the
+    /// decoded trace. The encoder inherits the string pool, schema registry,
+    /// and timestamp base so new frames are compatible with the existing data.
+    ///
+    /// No file header is written — the caller is responsible for concatenating
+    /// the encoder's output after the original trace bytes.
+    pub fn into_encoder<W: std::io::Write>(self, writer: W) -> crate::encoder::Encoder<W> {
+        crate::encoder::Encoder::from_decoder(
+            self.registry,
+            self.string_pool,
+            self.timestamp_base_ns,
+            writer,
+        )
     }
 
     fn schema_info(&self, type_id: WireTypeId) -> Option<SchemaInfo<'_>> {
