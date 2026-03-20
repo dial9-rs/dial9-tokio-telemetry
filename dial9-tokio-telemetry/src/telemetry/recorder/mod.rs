@@ -12,209 +12,184 @@ use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::writer::{RotatingWriter, TraceWriter};
 use metrique::timers::Timer;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use tokio::runtime::Handle;
 
-pub struct TelemetryRecorder {
-    shared: Arc<SharedState>,
-    event_writer: EventWriter,
+// ---------------------------------------------------------------------------
+// Channel-based control for the flush thread
+// ---------------------------------------------------------------------------
+
+/// Commands sent to the flush thread from TelemetryHandle / TelemetryGuard.
+enum ControlCommand {
+    /// Flush, finalize (seal segment), then exit the thread.
+    FinalizeAndStop(std::sync::mpsc::SyncSender<()>),
 }
 
-/// Stats returned by [`TelemetryRecorder::flush`] for metrics publishing.
+/// Stats returned by flush for metrics publishing.
 pub(crate) struct FlushStats {
     pub event_count: u64,
     pub dropped_batches: u64,
     pub cpu_time: Duration,
 }
 
-impl TelemetryRecorder {
-    pub fn new(writer: impl TraceWriter + 'static) -> Self {
-        Self {
-            shared: Arc::new(SharedState::new(
-                crate::telemetry::events::clock_monotonic_ns(),
-            )),
-            event_writer: EventWriter::new(Box::new(writer)),
+/// Perform one flush cycle: drain CPU profilers, drain the collector, write
+/// events to disk, and flush the writer. This is the only code path that
+/// touches EventWriter, and it runs exclusively on the flush thread.
+fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStats {
+    let cpu_events_time = Instant::now();
+    #[cfg(feature = "cpu-profiling")]
+    {
+        event_writer.flush_cpu(shared);
+    }
+    let cpu_time = cpu_events_time.elapsed();
+
+    // Flush the current thread's buffer (the flush thread itself produces
+    // queue-sample events via record_event) so those events reach the
+    // collector before we drain it.
+    BUFFER.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        let events = buf.flush();
+        if !events.is_empty() {
+            shared.collector.accept_flush(events);
         }
+    });
+
+    let dropped = shared.collector.take_dropped_batches();
+    if dropped > 0 {
+        tracing::warn!(
+            dropped_batches = dropped,
+            "telemetry flush fell behind, dropped batches"
+        );
     }
 
-    pub fn initialize(&mut self, handle: Handle) {
-        let metrics = handle.metrics();
-        self.shared.metrics.store(Arc::new(Some(metrics)));
-    }
-
-    fn flush(&mut self) -> FlushStats {
-        let cpu_events_time = Instant::now();
-        #[cfg(feature = "cpu-profiling")]
-        {
-            self.event_writer.flush_cpu(&self.shared);
-        }
-        let cpu_time = cpu_events_time.elapsed();
-
-        // Flush the current thread's buffer (e.g. the flush thread itself
-        // produces queue-sample events via record_event) so those events
-        // reach the collector before we drain it.
-        BUFFER.with(|buf| {
-            let mut buf = buf.borrow_mut();
-            let events = buf.flush();
-            if !events.is_empty() {
-                self.shared.collector.accept_flush(events);
-            }
-        });
-
-        let dropped = self.shared.collector.take_dropped_batches();
-        if dropped > 0 {
-            tracing::warn!(
-                dropped_batches = dropped,
-                "telemetry flush fell behind, dropped batches"
-            );
-        }
-
-        let events_before = self.event_writer.events_written();
-        while let Some(batch) = self.shared.collector.next() {
-            for raw in batch {
-                if let Err(e) = self.event_writer.write_raw_event(raw) {
-                    tracing::warn!("failed to write trace event: {e}");
-                    self.shared.enabled.store(false, Ordering::Relaxed);
-                    return FlushStats {
-                        event_count: self.event_writer.events_written() - events_before,
-                        dropped_batches: dropped as u64,
-                        cpu_time,
-                    };
-                }
+    let events_before = event_writer.events_written();
+    while let Some(batch) = shared.collector.next() {
+        for raw in batch {
+            if let Err(e) = event_writer.write_raw_event(raw) {
+                tracing::warn!("failed to write trace event: {e}");
+                shared.enabled.store(false, Ordering::Relaxed);
+                return FlushStats {
+                    event_count: event_writer.events_written() - events_before,
+                    dropped_batches: dropped as u64,
+                    cpu_time,
+                };
             }
         }
-        if let Err(e) = self.event_writer.flush() {
-            tracing::warn!("failed to flush trace data: {e}");
-        }
-        FlushStats {
-            event_count: self.event_writer.events_written() - events_before,
-            dropped_batches: dropped as u64,
-            cpu_time,
-        }
     }
-
-    fn finalize(&mut self) {
-        self.flush();
-        if let Err(e) = self.event_writer.finalize() {
-            tracing::warn!("failed to finalize trace segment: {e}");
-        }
+    if let Err(e) = event_writer.flush() {
+        tracing::warn!("failed to flush trace data: {e}");
     }
-
-    pub(crate) fn install(
-        builder: &mut tokio::runtime::Builder,
-        writer: Box<dyn TraceWriter>,
-        task_tracking_enabled: bool,
-        start_time_ns: u64,
-    ) -> Arc<Mutex<Self>> {
-        let shared = Arc::new(SharedState::new(start_time_ns));
-        let recorder = Arc::new(Mutex::new(Self {
-            shared: shared.clone(),
-            event_writer: EventWriter::new(writer),
-        }));
-
-        let s1 = shared.clone();
-        let s2 = shared.clone();
-        let s3 = shared.clone();
-        let s4 = shared.clone();
-
-        builder
-            .on_thread_park(move || {
-                let event = s1.make_worker_park();
-                s1.record_event(event);
-            })
-            .on_thread_unpark(move || {
-                let event = s2.make_worker_unpark();
-                s2.record_event(event);
-            })
-            .on_before_task_poll(move |meta| {
-                let task_id = TaskId::from(meta.id());
-                let location = meta.spawned_at();
-                let event = s3.make_poll_start(location, task_id);
-                s3.record_event(event);
-            })
-            .on_after_task_poll(move |_meta| {
-                let event = s4.make_poll_end();
-                s4.record_event(event);
-            });
-
-        if task_tracking_enabled {
-            let s5 = shared.clone();
-            builder.on_task_spawn(move |meta| {
-                let task_id = TaskId::from(meta.id());
-                let location = meta.spawned_at();
-                s5.record_event(RawEvent::TaskSpawn {
-                    timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
-                    task_id,
-                    location,
-                });
-            });
-            let s6 = shared.clone();
-            builder.on_task_terminate(move |meta| {
-                let task_id = TaskId::from(meta.id());
-                s6.record_event(RawEvent::TaskTerminate {
-                    timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
-                    task_id,
-                });
-            });
-        }
-
-        #[cfg(feature = "cpu-profiling")]
-        {
-            let s_start = shared.clone();
-            let s_stop = shared.clone();
-            builder
-                .on_thread_start(move || {
-                    // Register as Blocking initially; worker threads will
-                    // overwrite this to Worker(i) in resolve_worker_id.
-                    // Note: there is a brief window between thread start and the
-                    // first poll event where worker threads appear as Blocking.
-                    // This is benign — resolve_worker_id corrects it on first poll.
-                    // We use insert (not or_insert) so that a recycled OS tid always
-                    // starts fresh rather than inheriting a stale Worker entry.
-                    {
-                        let tid = crate::telemetry::events::current_tid();
-                        s_start
-                            .thread_roles
-                            .lock()
-                            .unwrap()
-                            .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
-                    }
-                    if let Ok(mut prof) = s_start.sched_profiler.lock()
-                        && let Some(ref mut p) = *prof
-                    {
-                        let _ = p.track_current_thread();
-                    }
-                })
-                .on_thread_stop(move || {
-                    {
-                        let tid = crate::telemetry::events::current_tid();
-                        s_stop.thread_roles.lock().unwrap().remove(&tid);
-                    }
-                    if let Ok(mut prof) = s_stop.sched_profiler.lock()
-                        && let Some(ref mut p) = *prof
-                    {
-                        p.stop_tracking_current_thread();
-                    }
-                });
-        }
-
-        recorder
+    FlushStats {
+        event_count: event_writer.events_written() - events_before,
+        dropped_batches: dropped as u64,
+        cpu_time,
     }
 }
 
-impl Drop for TelemetryRecorder {
-    fn drop(&mut self) {
-        self.flush();
+/// Install telemetry hooks on the runtime builder. Returns the shared state
+/// (for the hot-path callbacks) and the event writer (to be moved into the
+/// flush thread). No shared mutex is created.
+fn install_hooks(
+    builder: &mut tokio::runtime::Builder,
+    writer: Box<dyn TraceWriter>,
+    task_tracking_enabled: bool,
+    start_time_ns: u64,
+) -> (Arc<SharedState>, EventWriter) {
+    let shared = Arc::new(SharedState::new(start_time_ns));
+
+    let s1 = shared.clone();
+    let s2 = shared.clone();
+    let s3 = shared.clone();
+    let s4 = shared.clone();
+
+    builder
+        .on_thread_park(move || {
+            let event = s1.make_worker_park();
+            s1.record_event(event);
+        })
+        .on_thread_unpark(move || {
+            let event = s2.make_worker_unpark();
+            s2.record_event(event);
+        })
+        .on_before_task_poll(move |meta| {
+            let task_id = TaskId::from(meta.id());
+            let location = meta.spawned_at();
+            let event = s3.make_poll_start(location, task_id);
+            s3.record_event(event);
+        })
+        .on_after_task_poll(move |_meta| {
+            let event = s4.make_poll_end();
+            s4.record_event(event);
+        });
+
+    if task_tracking_enabled {
+        let s5 = shared.clone();
+        builder.on_task_spawn(move |meta| {
+            let task_id = TaskId::from(meta.id());
+            let location = meta.spawned_at();
+            s5.record_event(RawEvent::TaskSpawn {
+                timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
+                task_id,
+                location,
+            });
+        });
+        let s6 = shared.clone();
+        builder.on_task_terminate(move |meta| {
+            let task_id = TaskId::from(meta.id());
+            s6.record_event(RawEvent::TaskTerminate {
+                timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
+                task_id,
+            });
+        });
     }
+
+    #[cfg(feature = "cpu-profiling")]
+    {
+        let s_start = shared.clone();
+        let s_stop = shared.clone();
+        builder
+            .on_thread_start(move || {
+                // Register as Blocking initially; worker threads will
+                // overwrite this to Worker(i) in resolve_worker_id.
+                {
+                    let tid = crate::telemetry::events::current_tid();
+                    s_start
+                        .thread_roles
+                        .lock()
+                        .unwrap()
+                        .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
+                }
+                if let Ok(mut prof) = s_start.sched_profiler.lock()
+                    && let Some(ref mut p) = *prof
+                {
+                    let _ = p.track_current_thread();
+                }
+            })
+            .on_thread_stop(move || {
+                {
+                    let tid = crate::telemetry::events::current_tid();
+                    s_stop.thread_roles.lock().unwrap().remove(&tid);
+                }
+                if let Ok(mut prof) = s_stop.sched_profiler.lock()
+                    && let Some(ref mut p) = *prof
+                {
+                    p.stop_tracking_current_thread();
+                }
+            });
+    }
+
+    let event_writer = EventWriter::new(writer);
+    (shared, event_writer)
 }
 
 /// Cheap, cloneable handle for controlling telemetry from anywhere.
+///
+/// Uses a channel to communicate with the flush thread — no shared mutex.
 #[derive(Clone)]
 pub struct TelemetryHandle {
     shared: Arc<SharedState>,
-    recorder: Arc<Mutex<TelemetryRecorder>>,
+    control_tx: std::sync::mpsc::SyncSender<ControlCommand>,
 }
 
 impl TelemetryHandle {
@@ -224,7 +199,6 @@ impl TelemetryHandle {
 
     pub fn disable(&self) {
         self.shared.enabled.store(false, Ordering::Relaxed);
-        self.recorder.lock().unwrap().flush();
     }
 
     pub fn traced_handle(&self) -> crate::traced::TracedHandle {
@@ -247,16 +221,17 @@ impl TelemetryHandle {
     }
 }
 
-/// Holds the worker thread and its stop signal.
+/// Holds the background worker thread and its stop signal.
 struct WorkerHandle {
     shutdown: Option<tokio::sync::oneshot::Sender<Duration>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// RAII guard returned by [`TracedRuntimeBuilder::build`].
+///
+/// Controls the flush thread via a channel — no shared mutex.
 pub struct TelemetryGuard {
     handle: TelemetryHandle,
-    stop: Arc<AtomicBool>,
     flush_thread: Option<std::thread::JoinHandle<()>>,
     worker: Option<WorkerHandle>,
 }
@@ -278,6 +253,35 @@ impl TelemetryGuard {
         self.handle.disable();
     }
 
+    /// Send FinalizeAndStop to the flush thread, join it, then drain the
+    /// caller's thread-local buffer into the collector so the flush thread
+    /// picks up any stragglers.
+    fn stop_flush_thread(&mut self) {
+        // Drain the current thread's buffer (e.g. main thread in block_on)
+        // which may contain TaskSpawn events that were never flushed.
+        BUFFER.with(|buf| {
+            let mut buf = buf.borrow_mut();
+            let events = buf.flush();
+            if !events.is_empty() {
+                self.handle.shared.collector.accept_flush(events);
+            }
+        });
+
+        // Tell the flush thread to do a final flush + finalize, then exit.
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(0);
+        if self
+            .handle
+            .control_tx
+            .send(ControlCommand::FinalizeAndStop(ack_tx))
+            .is_ok()
+        {
+            let _ = ack_rx.recv();
+        }
+        if let Some(t) = self.flush_thread.take() {
+            let _ = t.join();
+        }
+    }
+
     /// Flush remaining events, seal the final segment, and wait for the
     /// worker to drain. Returns `Ok(())` if the worker finishes within the
     /// timeout, `Err` if it times out or the worker panics.
@@ -285,19 +289,12 @@ impl TelemetryGuard {
     /// Consumes the guard so `Drop` becomes a no-op.
     pub async fn graceful_shutdown(mut self, timeout: Duration) -> Result<(), std::io::Error> {
         tracing::debug!(target: "dial9_telemetry", "graceful_shutdown starting");
-        // 1. Stop flush thread
-        self.stop.store(true, Ordering::Release);
-        if let Some(t) = self.flush_thread.take() {
-            tracing::debug!(target: "dial9_telemetry", "joining flush thread");
-            let _ = t.join();
-            tracing::debug!(target: "dial9_telemetry", "flush thread joined");
-        }
 
-        // 2. Seal final segment
-        self.handle.recorder.lock().unwrap().finalize();
-        tracing::debug!(target: "dial9_telemetry", "sealed final segment");
+        // 1. Stop flush thread (flushes + finalizes the last segment)
+        self.stop_flush_thread();
+        tracing::debug!(target: "dial9_telemetry", "flush thread joined, segment sealed");
 
-        // 3. Signal worker to drain with the given timeout and wait
+        // 2. Signal worker to drain with the given timeout and wait
         if let Some(ref mut w) = self.worker {
             tracing::debug!(target: "dial9_telemetry", timeout_secs = timeout.as_secs(), "waiting for worker drain");
             if let Some(tx) = w.shutdown.take() {
@@ -315,23 +312,9 @@ impl TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        // 1. Stop the flush thread
-        self.stop.store(true, Ordering::Release);
-        if let Some(t) = self.flush_thread.take() {
-            let _ = t.join();
-        }
-        // Flush the current thread's buffer (e.g. main thread in block_on)
-        // which may contain TaskSpawn events that were never flushed.
-        BUFFER.with(|buf| {
-            let mut buf = buf.borrow_mut();
-            let events = buf.flush();
-            if !events.is_empty() {
-                self.handle.shared.collector.accept_flush(events);
-            }
-        });
-        // 2. Seal the final segment (.active → .bin)
-        self.handle.recorder.lock().unwrap().finalize();
-        // 3. Hard shutdown: drop the sender without sending — worker sees
+        // 1. Stop the flush thread (flushes + finalizes)
+        self.stop_flush_thread();
+        // 2. Hard shutdown: drop the sender without sending — worker sees
         // RecvError and exits without draining. No need to join the thread.
         // For graceful drain, use graceful_shutdown() instead.
         if let Some(ref mut w) = self.worker {
@@ -569,7 +552,7 @@ impl TracedRuntimeBuilder<HasTracePath> {
             .sched_event_config
             .map(crate::telemetry::cpu_profile::SchedProfiler::new);
 
-        let recorder = TelemetryRecorder::install(
+        let (shared, mut event_writer) = install_hooks(
             &mut builder,
             writer,
             self.task_tracking_enabled,
@@ -578,34 +561,33 @@ impl TracedRuntimeBuilder<HasTracePath> {
 
         #[cfg(feature = "cpu-profiling")]
         {
-            let mut rec = recorder.lock().unwrap();
             if let Some(Ok(sampler)) = sampler {
-                rec.event_writer.cpu_profiler = Some(sampler);
+                event_writer.cpu_profiler = Some(sampler);
             }
             if let Some(Ok(sched)) = sched {
-                *rec.shared.sched_profiler.lock().unwrap() = Some(sched);
+                *shared.sched_profiler.lock().unwrap() = Some(sched);
             }
         }
 
         let runtime = builder.build()?;
 
-        recorder
-            .lock()
-            .unwrap()
-            .initialize(runtime.handle().clone());
+        // Store runtime metrics so worker-id resolution works.
+        shared
+            .metrics
+            .store(Arc::new(Some(runtime.handle().metrics())));
 
-        let stop = Arc::new(AtomicBool::new(false));
+        // Channel for TelemetryHandle/Guard → flush thread communication.
+        // Bounded(1) so senders don't pile up commands.
+        let (control_tx, control_rx) = std::sync::mpsc::sync_channel::<ControlCommand>(1);
 
         let thread = {
-            let rec = recorder.clone();
-            let shared = recorder.lock().unwrap().shared.clone();
-            let stop = stop.clone();
+            let shared = shared.clone();
             let flush_metrics_sink = self
                 .worker_metrics_sink
                 .clone()
                 .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
             std::thread::Builder::new()
-                .name("telemetry-flush".into())
+                .name("dial9-flush".into())
                 .spawn(move || {
                     // Lower this thread's scheduling priority so it doesn't
                     // compete with worker threads for CPU time.
@@ -620,8 +602,21 @@ impl TracedRuntimeBuilder<HasTracePath> {
                     let sample_interval = Duration::from_millis(10);
                     let mut last_sample = Instant::now();
 
-                    while !stop.load(Ordering::Acquire) {
-                        std::thread::sleep(Duration::from_millis(5));
+                    loop {
+                        let mut ack_tx = None;
+                        let mut exit = false;
+                        // wait for control commands up to 5ms.
+                        match control_rx.recv_timeout(Duration::from_millis(5)) {
+                            Ok(ControlCommand::FinalizeAndStop(ack)) => {
+                                ack_tx = Some(ack);
+                                exit = true;
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                // All senders dropped — do a best-effort finalize.
+                                exit = true;
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        }
 
                         let now = Instant::now();
                         if now.duration_since(last_sample) >= sample_interval {
@@ -633,7 +628,7 @@ impl TracedRuntimeBuilder<HasTracePath> {
                         }
 
                         let mut flush_timer = Timer::start_now();
-                        let stats = rec.lock().unwrap().flush();
+                        let stats = flush_once(&mut event_writer, &shared);
                         flush_timer.stop();
                         if stats.event_count > 0 || stats.dropped_batches > 0 {
                             let _guard = FlushMetrics {
@@ -642,15 +637,23 @@ impl TracedRuntimeBuilder<HasTracePath> {
                                 flush_duration: flush_timer,
                                 dropped_batches: stats.dropped_batches,
                                 cpu_flush_duration: stats.cpu_time,
+                                last_flush: exit,
                             }
                             .append_on_drop(flush_metrics_sink.clone());
+                        }
+                        if exit && let Err(e) = event_writer.finalize() {
+                            tracing::warn!("failed to finalize trace segment: {e}");
+                        }
+                        if let Some(tx) = ack_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        if exit {
+                            return;
                         }
                     }
                 })
                 .expect("failed to spawn telemetry-flush thread")
         };
-
-        let guard_shared = recorder.lock().unwrap().shared.clone();
 
         // Auto-construct worker config when we have a trace path and
         // either cpu-profiling or S3 is configured.
@@ -713,11 +716,7 @@ impl TracedRuntimeBuilder<HasTracePath> {
         }
 
         let guard = TelemetryGuard {
-            handle: TelemetryHandle {
-                shared: guard_shared,
-                recorder,
-            },
-            stop,
+            handle: TelemetryHandle { shared, control_tx },
             flush_thread: Some(thread),
             worker,
         };
@@ -753,18 +752,15 @@ impl TracedRuntime {
     pub fn build_disabled(
         mut builder: tokio::runtime::Builder,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        use crate::telemetry::writer::NullWriter;
         let runtime = builder.build()?;
         let shared = Arc::new(SharedState::new(
             crate::telemetry::events::clock_monotonic_ns(),
         ));
-        let recorder = Arc::new(Mutex::new(TelemetryRecorder {
-            shared: shared.clone(),
-            event_writer: EventWriter::new(Box::new(NullWriter)),
-        }));
+        // Create a dummy channel — nothing listens on the other end, so
+        // disable() sends will fail silently (which is correct for disabled).
+        let (control_tx, _control_rx) = std::sync::mpsc::sync_channel(1);
         let guard = TelemetryGuard {
-            handle: TelemetryHandle { shared, recorder },
-            stop: Arc::new(AtomicBool::new(true)),
+            handle: TelemetryHandle { shared, control_tx },
             flush_thread: None,
             worker: None,
         };
@@ -796,7 +792,7 @@ mod tests {
 
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
-        let _recorder = TelemetryRecorder::new(NullWriter);
+        let _shared = SharedState::new(crate::telemetry::events::clock_monotonic_ns());
     }
 
     #[test]
