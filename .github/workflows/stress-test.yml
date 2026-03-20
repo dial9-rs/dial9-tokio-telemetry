@@ -1,0 +1,36 @@
+name: Stress Test
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "Stress test duration in minutes"
+        required: false
+        default: "60"
+        type: string
+  schedule:
+    - cron: "0 6 * * *"
+permissions:
+  contents: read
+
+jobs:
+  stress-test:
+    name: Stress Test (${{ inputs.duration_minutes || '60' }} min)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "--cfg tokio_unstable"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Enable perf_event_open and kallsyms
+        run: |
+          sudo sysctl kernel.perf_event_paranoid=1
+          sudo sysctl kernel.kptr_restrict=0
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run stress test
+        run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          cargo nextest run --all-features --stress-duration '${{ inputs.duration_minutes || '60' }}m'
