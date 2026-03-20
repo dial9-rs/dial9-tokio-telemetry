@@ -5,7 +5,7 @@
 //! encoding cost from disk I/O.
 //!
 //! Usage:
-//!   cargo bench --bench flush_path
+//!   cargo bench --bench writer_encode
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dial9_tokio_telemetry::telemetry::events::RawEvent;
@@ -86,8 +86,8 @@ fn bench_writer_encode(c: &mut Criterion) {
             BenchmarkId::new("batches", num_batches),
             &batches,
             |b, batches| {
+                let mut writer = RotatingWriter::single_file("/dev/null").unwrap();
                 b.iter(|| {
-                    let mut writer = RotatingWriter::single_file("/dev/null").unwrap();
                     for batch in batches {
                         writer.write_event_batch(batch).unwrap();
                     }

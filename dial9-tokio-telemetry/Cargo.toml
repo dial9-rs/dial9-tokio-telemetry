@@ -106,5 +106,5 @@ name = "kernel_sched_events"
 required-features = ["cpu-profiling"]
 
 [[bench]]
-name = "flush_path"
+name = "writer_encode"
 harness = false
