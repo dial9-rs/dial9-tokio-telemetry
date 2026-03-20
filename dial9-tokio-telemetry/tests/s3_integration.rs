@@ -198,11 +198,8 @@ fn end_to_end_trace_to_s3_roundtrip() {
     });
 
     // Parse the downloaded trace with TraceReader
-    let mut reader = TraceReader::new(downloaded_path.to_str().unwrap()).unwrap();
-    let (_magic, version) = reader.read_header().unwrap();
-    assert!(version > 0, "expected valid format version");
-
-    let events = reader.read_all().unwrap();
+    let reader = TraceReader::new(downloaded_path.to_str().unwrap()).unwrap();
+    let events = &reader.runtime_events;
     assert!(
         !events.is_empty(),
         "expected trace events in downloaded segment, got none"
@@ -314,9 +311,8 @@ fn region_auto_detection_corrects_wrong_client_region() {
         std::fs::write(&downloaded_path, &decompressed).unwrap();
     });
 
-    let mut reader = TraceReader::new(downloaded_path.to_str().unwrap()).unwrap();
-    reader.read_header().unwrap();
-    let events = reader.read_all().unwrap();
+    let reader = TraceReader::new(downloaded_path.to_str().unwrap()).unwrap();
+    let events = &reader.runtime_events;
     assert!(
         !events.is_empty(),
         "expected trace events after region correction"
@@ -482,10 +478,8 @@ fn stress_test_all_segments_uploaded_and_valid() {
         // Parseable trace events.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &decompressed).unwrap();
-        let mut reader = TraceReader::new(tmp.path().to_str().unwrap()).unwrap();
-        let (_magic, version) = reader.read_header().unwrap();
-        assert!(version > 0, "invalid format version in {key}");
-        let events = reader.read_all().unwrap();
+        let reader = TraceReader::new(tmp.path().to_str().unwrap()).unwrap();
+        let events = &reader.runtime_events;
         assert!(!events.is_empty(), "expected events in {key}, got none");
         total_events += events.len();
     }

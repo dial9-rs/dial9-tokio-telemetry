@@ -59,13 +59,8 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    let mut reader = TraceReader::new(&args[1])?;
-    let (magic, version) = reader.read_header()?;
-    if magic != "TOKIOTRC" {
-        eprintln!("not a TOKIOTRC file (got: {magic})");
-        std::process::exit(1);
-    }
-    eprintln!("TOKIOTRC v{version}, converting to fat events...");
+    let reader = TraceReader::new(&args[1])?;
+    eprintln!("Converting to fat events...");
 
     let out: Box<dyn Write> = if let Some(path) = args.get(2) {
         Box::new(std::fs::File::create(path)?)
@@ -75,8 +70,8 @@ fn main() -> std::io::Result<()> {
     let mut w = BufWriter::new(out);
 
     let mut count = 0u64;
-    while let Some(e) = reader.read_raw_event()? {
-        if let Some(fat) = to_fat_event(&e, &reader) {
+    for e in &reader.all_events {
+        if let Some(fat) = to_fat_event(e, &reader) {
             serde_json::to_writer(&mut w, &fat).map_err(std::io::Error::other)?;
             w.write_all(b"\n")?;
             count += 1;

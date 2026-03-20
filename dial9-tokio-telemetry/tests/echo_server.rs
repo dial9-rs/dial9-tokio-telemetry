@@ -99,9 +99,9 @@ fn overhead_bench_validates() {
     drop(guard);
 
     // Read trace
-    let mut reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
-    reader.read_header().unwrap();
-    let events = reader.read_all().unwrap();
+    let reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
+
+    let events = &reader.runtime_events;
     let analysis = analyze_trace(&events);
 
     let (metrics, total_requests) = tokio_metrics;

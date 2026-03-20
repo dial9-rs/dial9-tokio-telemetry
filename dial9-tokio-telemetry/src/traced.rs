@@ -164,9 +164,8 @@ mod tests {
 
         // Parse the trace file and collect all WakeEvents.
         let trace_path_str = trace_path.to_str().unwrap();
-        let mut reader = TraceReader::new(trace_path_str).unwrap();
-        reader.read_header().unwrap();
-        let events = reader.read_all().unwrap();
+        let reader = TraceReader::new(trace_path_str).unwrap();
+        let events = &reader.runtime_events;
 
         let wake_task_ids: Vec<TaskId> = events
             .iter()
