@@ -60,17 +60,14 @@ fn main() {
 
     // Read back and report
     eprintln!("\n=== Reading trace from {trace_path} ===");
-    let mut reader = dial9_tokio_telemetry::telemetry::TraceReader::new(trace_path).unwrap();
-    let (magic, version) = reader.read_header().unwrap();
-    eprintln!("Format: {magic} v{version}");
-
-    let events = reader.read_all().unwrap();
+    let reader = dial9_tokio_telemetry::telemetry::TraceReader::new(trace_path).unwrap();
+    let events = &reader.runtime_events;
     let mut cpu_samples = 0;
     let mut polls = 0;
     let mut samples_by_worker: std::collections::HashMap<u64, usize> =
         std::collections::HashMap::new();
 
-    for event in &events {
+    for event in events {
         match event {
             TelemetryEvent::CpuSample {
                 worker_id,

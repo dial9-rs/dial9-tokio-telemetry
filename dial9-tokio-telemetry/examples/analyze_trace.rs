@@ -15,24 +15,21 @@ fn main() {
     let trace_file = &args[1];
     println!("Analyzing trace: {}", trace_file);
 
-    let mut reader = TraceReader::new(trace_file).expect("Failed to open trace file");
+    let reader = TraceReader::new(trace_file).expect("Failed to open trace file");
 
-    let (magic, version) = reader.read_header().expect("Failed to read header");
-    println!("Magic: {}, Version: {}", magic, version);
-
-    let events = reader.read_all().expect("Failed to read events");
+    let events = &reader.runtime_events;
     println!("Read {} events", events.len());
     if !reader.spawn_locations.is_empty() {
         println!("Spawn locations: {}", reader.spawn_locations.len());
     }
 
-    let analysis = analyze_trace(&events);
+    let analysis = analyze_trace(events);
     print_analysis(&analysis, &reader.spawn_locations);
 
     println!("\n=== Idle Worker Detection ===");
-    let idle_periods = detect_idle_workers(&events);
+    let idle_periods = detect_idle_workers(events);
 
-    let delays = compute_wake_to_poll_delays(&events);
+    let delays = compute_wake_to_poll_delays(events);
     if !delays.is_empty() {
         let p50 = delays[delays.len() * 50 / 100];
         let p99 = delays[delays.len() * 99 / 100];
@@ -51,7 +48,7 @@ fn main() {
     // Build task_id → spawn_loc from PollStart events (more complete than TaskSpawn alone)
     let mut task_locs: HashMap<TaskId, dial9_tokio_telemetry::telemetry::InternedString> =
         HashMap::new();
-    for e in &events {
+    for e in events {
         if let TelemetryEvent::PollStart {
             task_id, spawn_loc, ..
         } = e
@@ -68,7 +65,7 @@ fn main() {
     let mut wakes_by_loc: HashMap<Option<&str>, usize> = HashMap::new();
     let mut resolved = 0usize;
     let mut unresolved = 0usize;
-    for e in &events {
+    for e in events {
         if let TelemetryEvent::WakeEvent { waker_task_id, .. } = e {
             let id = waker_task_id;
             if *id == UNKNOWN_TASK_ID {
@@ -95,7 +92,7 @@ fn main() {
 
         // Debug: show some unresolved waker task IDs vs known task IDs
         let mut unresolved_ids: HashMap<TaskId, usize> = HashMap::new();
-        for e in &events {
+        for e in events {
             if let TelemetryEvent::WakeEvent { waker_task_id, .. } = e
                 && *waker_task_id != UNKNOWN_TASK_ID
                 && !task_locs.contains_key(waker_task_id)

@@ -894,7 +894,7 @@ mod tests {
         let mut total_events = 0;
         for file in &files {
             let path = file.to_str().unwrap();
-            let mut reader = TraceReader::new(path).unwrap();
+            let reader = TraceReader::new(path).unwrap();
 
             for (spawn_loc, loc) in &reader.spawn_locations {
                 assert!(
@@ -911,7 +911,7 @@ mod tests {
                 });
             }
 
-            let events = reader.read_all().unwrap();
+            let events = &reader.runtime_events;
             total_events += events.len();
         }
         assert_eq!(
@@ -1052,7 +1052,7 @@ mod tests {
                 // Verify every PollStart's spawn_loc_id resolves.
                 let spawn_locs = &reader.spawn_locations;
 
-                for ev in &reader.events {
+                for ev in &reader.all_events {
                     match ev {
                         TelemetryEvent::PollStart { spawn_loc, .. } => {
                             assert!(

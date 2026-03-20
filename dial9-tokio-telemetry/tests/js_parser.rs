@@ -59,11 +59,10 @@ fn test_js_parser_matches_rust() {
 
     // Export to JSONL using Rust parser (in-process to avoid cargo subprocess overhead)
     {
-        let mut reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
-        reader.read_header().unwrap();
+        let reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
         let file = std::fs::File::create(&jsonl_path).unwrap();
         let mut w = BufWriter::new(file);
-        while let Some(e) = reader.read_raw_event().unwrap() {
+        for e in &reader.all_events {
             serde_json::to_writer(&mut w, &e).unwrap();
             w.write_all(b"\n").unwrap();
         }

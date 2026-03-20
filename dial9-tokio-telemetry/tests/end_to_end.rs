@@ -51,9 +51,8 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     drop(guard);
 
     // --- Read the trace back ---
-    let mut reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
-    reader.read_header().unwrap();
-    let events = reader.read_all().unwrap();
+    let reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
+    let events = &reader.runtime_events;
     let analysis = analyze_trace(&events);
 
     validation::validate_trace_matches_metrics(&analysis, &events, &tokio_metrics);
