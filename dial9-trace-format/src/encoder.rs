@@ -108,22 +108,6 @@ impl<W: Write> Encoder<W> {
         })
     }
 
-    /// Create an encoder that appends to an existing trace.
-    ///
-    /// Parses `existing` to recover the schema registry and string pool, then
-    /// writes new frames into `writer` **without** emitting a file header.
-    /// Use this when you need to append events (e.g. symbol tables) to a trace
-    /// that already has a header.
-    ///
-    /// Returns `None` if `existing` does not contain a valid trace header.
-    pub fn extend(existing: &[u8], writer: W) -> Option<Self> {
-        use crate::decoder::Decoder;
-
-        let mut decoder = Decoder::new(existing)?;
-        while decoder.next_frame_ref().ok().flatten().is_some() {}
-        Some(decoder.into_encoder(writer))
-    }
-
     /// Create an encoder seeded from decoded state. Used by
     /// [`Decoder::into_encoder`](crate::decoder::Decoder::into_encoder).
     pub(crate) fn from_decoder(
@@ -534,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn encoder_extend_to_appends_without_header() {
+    fn decoder_into_encoder_appends_without_header() {
         use crate::decoder::{DecodedFrame, Decoder};
 
         // Create a trace with a header, a schema, and an event
@@ -552,9 +536,11 @@ mod tests {
             .unwrap();
         let base = enc.finish();
 
-        // Extend: parses base to learn the schema, appends to output
+        // Decode all frames, then convert into an encoder that appends to output
+        let mut decoder = Decoder::new(&base).unwrap();
+        while decoder.next_frame_ref().ok().flatten().is_some() {}
         let mut output = Vec::new();
-        let mut ext = Encoder::extend(&base, &mut output).unwrap();
+        let mut ext = decoder.into_encoder(&mut output);
         // Schema "Ev" is already known — no duplicate schema frame emitted
         ext.write_event(&schema, &[FieldValue::Varint(2_000), FieldValue::Varint(2)])
             .unwrap();
@@ -582,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn encoder_extend_deduplicates_interned_strings() {
+    fn decoder_into_encoder_deduplicates_interned_strings() {
         use crate::decoder::{DecodedFrame, Decoder};
 
         // Create a trace with an interned string
@@ -590,9 +576,12 @@ mod tests {
         let id1 = enc.intern_string("hello").unwrap();
         let base = enc.finish();
 
-        // Extend: "hello" is already interned, should reuse the same ID
+        // Decode all frames, then convert into an encoder
+        let mut decoder = Decoder::new(&base).unwrap();
+        while decoder.next_frame_ref().ok().flatten().is_some() {}
         let mut output = Vec::new();
-        let mut ext = Encoder::extend(&base, &mut output).unwrap();
+        let mut ext = decoder.into_encoder(&mut output);
+        // "hello" is already interned, should reuse the same ID
         let id2 = ext.intern_string("hello").unwrap();
         let id3 = ext.intern_string("world").unwrap();
         drop(ext);

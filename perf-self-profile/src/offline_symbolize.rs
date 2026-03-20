@@ -11,7 +11,7 @@ use dial9_trace_format::{
     encoder::Encoder,
     types::{FieldValueRef, InternedString},
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
 
 use crate::MapsEntry;
@@ -92,8 +92,7 @@ fn write_symbol_data(
     // Partition addresses into kernel vs userspace, group userspace by mapping.
     let mut kernel_addrs: Vec<u64> = Vec::new();
     // (mapping_index, file_offset, original_addr)
-    let mut user_groups: std::collections::HashMap<usize, Vec<(u64, u64)>> =
-        std::collections::HashMap::new();
+    let mut user_groups: HashMap<usize, Vec<(u64, u64)>> = HashMap::new();
 
     for &addr in addresses {
         if addr >= crate::USER_ADDR_LIMIT {
