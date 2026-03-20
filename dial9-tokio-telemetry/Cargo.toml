@@ -63,6 +63,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 dial9-tokio-telemetry = { path = ".", features = ["cpu-profiling", "worker-s3"] }
+nix = { version = "0.29", features = ["process"] }
 
 [[bench]]
 name = "poll_overhead"
