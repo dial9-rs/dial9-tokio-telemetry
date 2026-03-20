@@ -26,7 +26,7 @@ pub enum FieldType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StackFrames(pub Vec<u64>);
 
-/// An interned string reference (pool ID). Created by [`Encoder::intern_string`].
+/// An interned string reference (pool ID). Created by [`Encoder::intern_string`](crate::encoder::Encoder::intern_string).
 /// On the wire this is a `PooledString` (u32 LE).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InternedString(pub(crate) u32);

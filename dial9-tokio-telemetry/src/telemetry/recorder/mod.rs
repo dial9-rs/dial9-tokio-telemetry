@@ -1095,7 +1095,12 @@ mod tests {
                 let dir = tempfile::TempDir::new().unwrap();
                 let base = dir.path().join("trace");
 
-                let writer = RotatingWriter::builder().base_path(&base).max_file_size(max_file_size).max_total_size(1_000_000).build().unwrap();
+                let writer = RotatingWriter::builder()
+                    .base_path(&base)
+                    .max_file_size(max_file_size)
+                    .max_total_size(1_000_000)
+                    .build()
+                    .unwrap();
 
                 let mut ew = EventWriter::new(Box::new(writer));
 

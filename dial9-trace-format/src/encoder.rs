@@ -3,7 +3,7 @@
 use crate::TraceEvent;
 use crate::codec::{self, PoolEntry, WireTypeId};
 use crate::schema::{SchemaEntry, SchemaRegistry};
-use crate::types::{EncodeState, EventEncoder};
+use crate::types::{EncodeState, EventEncoder, InternedString};
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -246,9 +246,9 @@ impl<W: Write> Encoder<W> {
     }
 
     /// Intern a string, emitting a pool frame if new. Returns an [`InternedString`] handle.
-    pub fn intern_string(&mut self, s: &str) -> io::Result<crate::types::InternedString> {
+    pub fn intern_string(&mut self, s: &str) -> io::Result<InternedString> {
         if let Some(&id) = self.string_pool.get(s) {
-            return Ok(crate::types::InternedString(id));
+            return Ok(InternedString(id));
         }
         let id = self.next_pool_id;
         self.next_pool_id += 1;
@@ -260,7 +260,7 @@ impl<W: Write> Encoder<W> {
             }],
             &mut self.state.writer,
         )?;
-        Ok(crate::types::InternedString(id))
+        Ok(InternedString(id))
     }
 
     pub fn write_string_pool(&mut self, entries: &[PoolEntry]) -> io::Result<()> {
