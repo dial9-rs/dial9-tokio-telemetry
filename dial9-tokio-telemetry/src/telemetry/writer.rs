@@ -503,9 +503,28 @@ impl Drop for RotatingWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::{TelemetryEvent, format};
-    use std::io::Read;
+    use crate::telemetry::TelemetryEvent;
+    use std::io::{self, Read};
     use tempfile::TempDir;
+
+    /// Decode all events from a `dial9-trace-format` byte slice into `TelemetryEvent`s.
+    fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
+        use crate::telemetry::format::decode_ref;
+        use dial9_trace_format::decoder::Decoder;
+
+        let mut dec = Decoder::new(data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
+        let mut events = Vec::new();
+
+        dec.for_each_event(|ev| {
+            if let Some(ev) = decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
+                events.push(ev);
+            }
+        })
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+        Ok(events.into_iter().map(TelemetryEvent::from).collect())
+    }
 
     fn park_event() -> RawEvent {
         RawEvent::WorkerPark {
@@ -523,7 +542,7 @@ mod tests {
     /// Read all non-metadata events from a trace file.
     fn read_trace_events(path: &str) -> Vec<TelemetryEvent> {
         let data = std::fs::read(path).unwrap();
-        format::decode_events_v2(&data)
+        decode_events(&data)
             .unwrap()
             .into_iter()
             .filter(|e| !matches!(e, TelemetryEvent::SegmentMetadata { .. }))
@@ -1039,8 +1058,7 @@ mod tests {
         writer.finalize().unwrap();
 
         let all_events =
-            format::decode_events_v2(&std::fs::read(format!("{}.0.bin", base.display())).unwrap())
-                .unwrap();
+            decode_events(&std::fs::read(format!("{}.0.bin", base.display())).unwrap()).unwrap();
         let metadata: Vec<_> = all_events
             .iter()
             .filter_map(|e| match e {
@@ -1087,7 +1105,7 @@ mod tests {
         assert!(files.len() >= 2, "expected at least 2 files from rotation");
 
         for file in &files {
-            let all_events = format::decode_events_v2(&std::fs::read(file).unwrap()).unwrap();
+            let all_events = decode_events(&std::fs::read(file).unwrap()).unwrap();
             let has_metadata = all_events.iter().any(|e| {
                 matches!(e, TelemetryEvent::SegmentMetadata { entries, .. }
                     if *entries == vec![("k".to_string(), "v".to_string())])
@@ -1104,7 +1122,7 @@ mod tests {
         writer.write_event(&park_event()).unwrap();
         writer.flush().unwrap();
 
-        let all_events = format::decode_events_v2(&std::fs::read(&path).unwrap()).unwrap();
+        let all_events = decode_events(&std::fs::read(&path).unwrap()).unwrap();
         let park_count = all_events
             .iter()
             .filter(|e| matches!(e, TelemetryEvent::WorkerPark { .. }))
