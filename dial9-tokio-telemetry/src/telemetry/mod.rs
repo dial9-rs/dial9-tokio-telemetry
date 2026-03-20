@@ -1,6 +1,6 @@
 pub mod analysis;
-pub mod buffer;
-pub mod collector;
+pub(crate) mod buffer;
+pub(crate) mod collector;
 #[cfg(feature = "cpu-profiling")]
 pub mod cpu_profile;
 pub mod events;

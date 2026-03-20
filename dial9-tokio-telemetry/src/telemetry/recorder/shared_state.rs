@@ -85,8 +85,8 @@ pub(crate) struct SharedState {
     pub(crate) enabled: AtomicBool,
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
-    /// All event timestamps are absolute values from the same clock.
     pub(crate) start_time_ns: u64,
+    /// Tokio metrics allow resolving the current worker id from a thread id
     pub(crate) metrics: ArcSwap<Option<RuntimeMetrics>>,
     /// Maps OS tid → thread role so that CPU samples returned from perf can be
     /// attributed to the correct worker or blocking-pool bucket at flush time.
