@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/dial9-tokio-telemetry.svg)](https://crates.io/crates/dial9-tokio-telemetry)
 [![Documentation](https://docs.rs/dial9-tokio-telemetry/badge.svg)](https://docs.rs/dial9-tokio-telemetry)
-[![License](https://img.shields.io/crates/l/dial9-tokio-telemetry.svg)]
+![License](https://img.shields.io/crates/l/dial9-tokio-telemetry.svg)
 
 **Low-overhead runtime telemetry for Tokio.** Records poll timing, worker park/unpark, wake events, queue depths, and (on Linux) CPU profile samples into a compact binary trace format. Traces can be analyzed offline to find long polls, scheduling delays, idle workers, and CPU hotspots.
 

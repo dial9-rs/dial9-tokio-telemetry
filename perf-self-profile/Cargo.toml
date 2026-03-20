@@ -1,6 +1,6 @@
 [package]
 name = "dial9-perf-self-profile"
-version.workspace = true
+version = "0.2.0"
 edition.workspace = true
 repository.workspace = true
 description = "Minimal self-profiling via Linux perf_event_open with frame-pointer-based stack traces"

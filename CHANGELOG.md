@@ -10,8 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.1.1...dial9-tokio-telemetry-v0.2.0) - 2026-03-20
 
 0.2.0 brings two major improvements:
-1. Support for an S3 destination
-2. Migration to the new trace format
+1. Support for publishing traces to S3
+2. Migration to the new trace format (dial9-trace-format). This format is self describing, extremely compact, compressible and fast to write. This will set us up to easily add application level telemetry in the future.
+
+For setting it up in production applications, the new `.install(true/false)` method makes it easy to have a single instantiation path for your runtime but set `install(false)` to make dial9 a complete no-op.
 
 ### Added
 
