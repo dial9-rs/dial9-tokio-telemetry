@@ -339,6 +339,66 @@ mod tests {
     }
 
     #[test]
+    fn symbolize_empty_trace_writes_nothing() {
+        let buf = Encoder::new().finish();
+        let mut output = Vec::new();
+        symbolize_trace_with_maps(&buf, &[], &mut output).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn symbolize_no_stack_frames_writes_nothing() {
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "count".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        enc.write_event(&schema, &[FieldValue::Varint(0), FieldValue::Varint(42)])
+            .unwrap();
+        let buf = enc.finish();
+
+        let maps = vec![MapsEntry {
+            start: 0x1000,
+            end: 0x2000,
+            file_offset: 0,
+            path: "/bin/test".into(),
+        }];
+        let mut output = Vec::new();
+        symbolize_trace_with_maps(&buf, &maps, &mut output).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn symbolize_empty_maps_writes_nothing() {
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "frames".into(),
+                    field_type: FieldType::StackFrames,
+                }],
+            )
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![0x1000])],
+        )
+        .unwrap();
+        let buf = enc.finish();
+
+        let mut output = Vec::new();
+        symbolize_trace_with_maps(&buf, &[], &mut output).unwrap();
+        // Addresses exist but none match any mapping, so no symbols are emitted.
+        assert!(output.is_empty());
+    }
+
+    #[test]
     fn symbolize_emits_placeholders_when_elf_missing() {
         use dial9_trace_format::TraceEvent;
 
