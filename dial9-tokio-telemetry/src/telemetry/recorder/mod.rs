@@ -6,7 +6,7 @@ pub(crate) use shared_state::SharedState;
 use event_writer::EventWriter;
 
 use crate::metrics::{FlushMetrics, Operation};
-use crate::telemetry::buffer::BUFFER;
+use crate::telemetry::buffer;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::writer::{RotatingWriter, TraceWriter};
@@ -29,6 +29,7 @@ enum ControlCommand {
 }
 
 /// Stats returned by flush for metrics publishing.
+// TODO: make this `#[metrics]` then flatten it
 pub(crate) struct FlushStats {
     pub event_count: u64,
     pub dropped_batches: u64,
@@ -39,6 +40,7 @@ pub(crate) struct FlushStats {
 /// events to disk, and flush the writer. This is the only code path that
 /// touches EventWriter, and it runs exclusively on the flush thread.
 fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStats {
+    let events_before = event_writer.events_written();
     let cpu_events_time = Instant::now();
     #[cfg(feature = "cpu-profiling")]
     {
@@ -49,13 +51,7 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     // Flush the current thread's buffer (the flush thread itself produces
     // queue-sample events via record_event) so those events reach the
     // collector before we drain it.
-    BUFFER.with(|buf| {
-        let mut buf = buf.borrow_mut();
-        let events = buf.flush();
-        if !events.is_empty() {
-            shared.collector.accept_flush(events);
-        }
-    });
+    buffer::drain_to_collector(&shared.collector);
 
     let dropped = shared.collector.take_dropped_batches();
     if dropped > 0 {
@@ -65,7 +61,6 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
         );
     }
 
-    let events_before = event_writer.events_written();
     while let Some(batch) = shared.collector.next() {
         for raw in batch {
             if let Err(e) = event_writer.write_raw_event(raw) {
@@ -268,13 +263,7 @@ impl TelemetryGuard {
     fn stop_flush_thread(&mut self) {
         // Drain the current thread's buffer (e.g. main thread in block_on)
         // which may contain TaskSpawn events that were never flushed.
-        BUFFER.with(|buf| {
-            let mut buf = buf.borrow_mut();
-            let events = buf.flush();
-            if !events.is_empty() {
-                self.handle.shared.collector.accept_flush(events);
-            }
-        });
+        buffer::drain_to_collector(&self.handle.shared.collector);
 
         // Tell the flush thread to do a final flush + finalize, then exit.
         let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(0);
