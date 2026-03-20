@@ -98,7 +98,7 @@ impl<F: Future> Future for Traced<F> {
 mod tests {
     use super::*;
     use crate::telemetry::analysis::TraceReader;
-    use crate::telemetry::buffer::BUFFER;
+    use crate::telemetry::buffer;
     use crate::telemetry::events::TelemetryEvent;
     use crate::telemetry::recorder::TracedRuntime;
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
@@ -152,16 +152,11 @@ mod tests {
             join.await.unwrap();
         });
 
-        // Wake events land in the thread-local BUFFER (capacity 1_024), so a
+        // Wake events land in the thread-local buffer (capacity 1_024), so a
         // single event will not auto-flush.  Manually drain the buffer into the
         // collector so that the guard flush below picks it up.
         let th = handle.traced_handle();
-        BUFFER.with(|buf| {
-            let batch = buf.borrow_mut().flush();
-            if !batch.is_empty() {
-                th.shared.collector.accept_flush(batch);
-            }
-        });
+        buffer::drain_to_collector(&th.shared.collector);
 
         // Dropping the guard stops the background flush thread, joins it, then
         // performs a final flush: collector → RotatingWriter → trace file.

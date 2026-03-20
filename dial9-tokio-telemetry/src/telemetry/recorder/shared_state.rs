@@ -1,4 +1,4 @@
-use crate::telemetry::buffer::BUFFER;
+use crate::telemetry::buffer;
 use crate::telemetry::collector::CentralCollector;
 #[cfg(feature = "cpu-profiling")]
 use crate::telemetry::events::ThreadRole;
@@ -137,14 +137,7 @@ impl SharedState {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
-        BUFFER.with(|buf| {
-            let mut buf = buf.borrow_mut();
-            buf.set_collector(&self.collector);
-            buf.record_event(event);
-            if buf.should_flush() {
-                self.collector.accept_flush(buf.flush());
-            }
-        });
+        buffer::record_event(event, &self.collector);
     }
 
     pub(super) fn make_poll_start(

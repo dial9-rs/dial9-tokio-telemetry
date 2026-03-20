@@ -21,7 +21,7 @@ impl Default for ThreadLocalBuffer {
 }
 
 impl ThreadLocalBuffer {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             events: Vec::with_capacity(BUFFER_CAPACITY),
             collector: None,
@@ -30,21 +30,21 @@ impl ThreadLocalBuffer {
 
     /// Ensure the collector reference is set. Called on every record_event;
     /// only the first call per thread actually stores the Arc.
-    pub fn set_collector(&mut self, collector: &Arc<CentralCollector>) {
+    fn set_collector(&mut self, collector: &Arc<CentralCollector>) {
         if self.collector.is_none() {
             self.collector = Some(Arc::clone(collector));
         }
     }
 
-    pub fn record_event(&mut self, event: RawEvent) {
+    fn record_event(&mut self, event: RawEvent) {
         self.events.push(event);
     }
 
-    pub fn should_flush(&self) -> bool {
+    fn should_flush(&self) -> bool {
         self.events.len() >= BUFFER_CAPACITY
     }
 
-    pub fn flush(&mut self) -> Vec<RawEvent> {
+    fn flush(&mut self) -> Vec<RawEvent> {
         std::mem::replace(&mut self.events, Vec::with_capacity(BUFFER_CAPACITY))
     }
 }
@@ -65,7 +65,34 @@ impl Drop for ThreadLocalBuffer {
 }
 
 thread_local! {
-    pub(crate) static BUFFER: RefCell<ThreadLocalBuffer> = RefCell::new(ThreadLocalBuffer::new());
+    static BUFFER: RefCell<ThreadLocalBuffer> = RefCell::new(ThreadLocalBuffer::new());
+}
+
+/// Record an event into the current thread's buffer. If the buffer is full,
+/// automatically flush the batch to `collector`.
+///
+/// This sets the collector on the buffer so that at some point in the future when the ThreadLocalBuffer itself is dropped, we know where to send events
+pub(crate) fn record_event(event: RawEvent, collector: &Arc<CentralCollector>) {
+    BUFFER.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        buf.set_collector(collector);
+        buf.record_event(event);
+        if buf.should_flush() {
+            collector.accept_flush(buf.flush());
+        }
+    });
+}
+
+/// Drain the current thread's buffer into `collector`, even if not full.
+/// Used at shutdown and before flush cycles to avoid losing events.
+pub(crate) fn drain_to_collector(collector: &CentralCollector) {
+    BUFFER.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        let events = buf.flush();
+        if !events.is_empty() {
+            collector.accept_flush(events);
+        }
+    });
 }
 
 #[cfg(test)]
