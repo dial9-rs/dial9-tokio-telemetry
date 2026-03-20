@@ -202,19 +202,6 @@ impl TelemetryRecorder {
 
         recorder
     }
-
-    pub fn start_flush_task(
-        recorder: Arc<Mutex<Self>>,
-        interval: Duration,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(interval);
-            loop {
-                interval.tick().await;
-                recorder.lock().unwrap().flush();
-            }
-        })
-    }
 }
 
 impl Drop for TelemetryRecorder {
