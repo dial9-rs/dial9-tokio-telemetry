@@ -284,19 +284,21 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     // ── spawn_blocking — also exits before flush ─────────────────────────
     let blocking_handle = runtime.spawn(async {
         tokio::task::spawn_blocking(|| burn_cpu(Duration::from_millis(400)));
-        tokio::task::spawn_blocking(|| burn_cpu(Duration::from_millis(400)))
-            .await
-            .unwrap();
+        tokio::task::spawn_blocking(|| {
+            let tid = nix::unistd::gettid().as_raw() as u32; // p_tid is i32
+            burn_cpu(Duration::from_millis(400));
+            tid
+        })
+        .await
+        .unwrap()
     });
 
     // Wait for both to finish — threads are gone after this point
     ext_handle.join().unwrap();
-    runtime.block_on(async {
-        blocking_handle.await.unwrap();
-        // Now let the flush cycle run. The threads have already exited,
-        // so /proc/self/task/<tid>/comm is no longer readable. Thread names
-        // must come from the eager cache populated during drain().
+    let blocking_tid = runtime.block_on(async {
+        let tid = blocking_handle.await.unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
+        tid
     });
 
     drop(runtime);
@@ -330,18 +332,15 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     );
     let ext_tid = ext_def.unwrap().0;
 
-    // ── Verify a tokio blocking-thread name appears ──────────────────────
-    // spawn_blocking threads are named "tokio-runtime-w" by tokio
-    let blocking_def = thread_defs
-        .iter()
-        .find(|(_, name)| name.starts_with("test-traced-run"));
+    // ── Verify the blocking thread has the expected name ────────────────
+    let blocking_name = unique_defs.get(&blocking_tid);
+    eprintln!("Blocking thread tid={blocking_tid}, name={blocking_name:?}");
     assert!(
-        blocking_def.is_some(),
-        "expected CpuSample with thread_name starting with 'test-traced-run', got: {unique_defs:?}"
+        blocking_name.is_some_and(|n| n.starts_with("test-traced-run")),
+        "expected blocking thread name starting with 'test-traced-run', got: {blocking_name:?} [{unique_defs:?}]"
     );
-    let blocking_tid = blocking_def.unwrap().0;
 
-    // ── Verify CpuSamples exist for both tids with UNKNOWN_WORKER ────────
+    // ── Verify CpuSamples exist for both tids with expected worker ids ────────────────────────────
     let ext_samples: Vec<_> = events
         .iter()
         .filter(|e| matches!(e, RawEvent::CpuSample(data) if data.tid == ext_tid && data.worker_id == WorkerId::UNKNOWN))
