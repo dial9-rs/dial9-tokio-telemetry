@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// so the most recent data is always preserved.
 const DEFAULT_CAPACITY: usize = 1024;
 
-pub struct CentralCollector {
+pub(crate) struct CentralCollector {
     queue: ArrayQueue<Vec<RawEvent>>,
     dropped_batches: AtomicUsize,
 }
@@ -40,22 +40,6 @@ impl CentralCollector {
         self.queue.pop()
     }
 
-    pub fn drain(&self) -> Vec<Vec<RawEvent>> {
-        let mut batches = Vec::new();
-        while let Some(batch) = self.queue.pop() {
-            batches.push(batch);
-        }
-        batches
-    }
-
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
     /// Returns the number of batches dropped since the last call.
     pub fn take_dropped_batches(&self) -> usize {
         self.dropped_batches.swap(0, Ordering::Relaxed)
@@ -75,26 +59,19 @@ mod tests {
     }
 
     #[test]
-    fn test_collector_creation() {
-        let collector = CentralCollector::new();
-        assert_eq!(collector.drain().len(), 0);
-    }
-
-    #[test]
-    fn test_accept_flush() {
-        let collector = CentralCollector::new();
-        collector.accept_flush(vec![poll_end()]);
-        let drained = collector.drain();
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].len(), 1);
-    }
-
-    #[test]
     fn test_drain_clears_buffers() {
         let collector = CentralCollector::new();
         collector.accept_flush(vec![poll_end()]);
-        assert_eq!(collector.drain().len(), 1);
-        assert_eq!(collector.drain().len(), 0);
+        assert!(collector.next().is_some());
+        assert!(collector.next().is_none());
+    }
+
+    fn drain(collector: &CentralCollector) -> Vec<Vec<RawEvent>> {
+        let mut out = vec![];
+        while let Some(ev) = collector.next() {
+            out.push(ev);
+        }
+        out
     }
 
     #[test]
@@ -104,7 +81,7 @@ mod tests {
         collector.accept_flush(vec![poll_end(), poll_end()]);
         collector.accept_flush(vec![poll_end(), poll_end(), poll_end()]); // evicts first
         assert_eq!(collector.take_dropped_batches(), 1);
-        let drained = collector.drain();
+        let drained = drain(&collector);
         assert_eq!(drained.len(), 2);
         // oldest (len=1) was evicted; remaining are len=2 and len=3
         assert_eq!(drained[0].len(), 2);
