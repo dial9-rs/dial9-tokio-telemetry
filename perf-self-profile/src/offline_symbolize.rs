@@ -145,8 +145,32 @@ fn write_symbol_data(
         let offsets: Vec<u64> = offsets_and_addrs.iter().map(|(o, _)| *o).collect();
         let addrs: Vec<u64> = offsets_and_addrs.iter().map(|(_, a)| *a).collect();
         let src = source::Source::Elf(source::Elf::new(&entry.path));
-        if let Ok(results) = symbolizer.symbolize(&src, Input::FileOffset(&offsets)) {
-            write_symbolized_batch(&results, &addrs, &mut encoder)?;
+        match symbolizer.symbolize(&src, Input::FileOffset(&offsets)) {
+            Ok(results) => {
+                write_symbolized_batch(&results, &addrs, &mut encoder)?;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %entry.path,
+                    count = addrs.len(),
+                    error = %err,
+                    "failed to symbolize batch for ELF mapping, using placeholders"
+                );
+                for &addr in &addrs {
+                    let name = format!("[symbolize-failed] {:#x}", addr);
+                    let symbol_name = encoder.intern_string(&name)?;
+                    let source_file = encoder.intern_string(&entry.path)?;
+                    encoder.write(&SymbolTableEntry {
+                        timestamp_ns: 0,
+                        addr,
+                        size: 0,
+                        symbol_name,
+                        inline_depth: 0,
+                        source_file,
+                        source_line: 0,
+                    })?;
+                }
+            }
         }
     }
 
@@ -312,6 +336,91 @@ mod tests {
         assert_eq!(
             dec.string_pool().get(InternedString::from_raw(0)),
             Some("my_function")
+        );
+    }
+
+    #[test]
+    fn symbolize_emits_placeholders_when_elf_missing() {
+        use dial9_trace_format::TraceEvent;
+
+        // Pick a userspace address that falls within our fake mapping.
+        let addr: u64 = 0x1000;
+        let fake_path = "/nonexistent/fake.so";
+
+        let maps = vec![MapsEntry {
+            start: 0x0,
+            end: 0x2000,
+            file_offset: 0,
+            path: fake_path.to_string(),
+        }];
+
+        // Build a minimal trace containing a single StackFrames event with our address.
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "frames".into(),
+                    field_type: FieldType::StackFrames,
+                }],
+            )
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![addr])],
+        )
+        .unwrap();
+        let buf = enc.finish();
+
+        let mut output = Vec::new();
+        symbolize_trace_with_maps(&buf, &maps, &mut output).unwrap();
+
+        assert!(!output.is_empty(), "expected symbol data to be written");
+
+        // Decode the output and verify we got placeholder symbols.
+        let mut combined = buf.clone();
+        combined.extend_from_slice(&output);
+        let mut dec = Decoder::new(&combined).unwrap();
+        let frames = dec.decode_all();
+
+        let has_symbol_schema = frames.iter().any(
+            |f| matches!(f, DecodedFrame::Schema(s) if s.name == SymbolTableEntry::event_name()),
+        );
+        assert!(
+            has_symbol_schema,
+            "expected SymbolTableEntry schema in output"
+        );
+
+        // There should be at least one event frame beyond the input schema+event.
+        let event_count = frames
+            .iter()
+            .filter(|f| matches!(f, DecodedFrame::Event { .. }))
+            .count();
+        // We expect the original input event + at least one SymbolTableEntry event.
+        assert!(
+            event_count >= 2,
+            "expected at least 2 events (input + placeholder), got {}",
+            event_count
+        );
+
+        // Verify the string pool contains the placeholder name and source file.
+        let pool = dec.string_pool();
+        let pool_strings: Vec<&str> = (0..100)
+            .filter_map(|i| pool.get(InternedString::from_raw(i)))
+            .collect();
+        let has_placeholder = pool_strings
+            .iter()
+            .any(|s| s.starts_with("[symbolize-failed]") && s.contains(&format!("{:#x}", addr)));
+        assert!(
+            has_placeholder,
+            "expected '[symbolize-failed] 0x1000' in string pool, got: {:?}",
+            pool_strings
+        );
+        let has_source_file = pool_strings.iter().any(|s| *s == fake_path);
+        assert!(
+            has_source_file,
+            "expected source file '{}' in string pool, got: {:?}",
+            fake_path, pool_strings
         );
     }
 }
