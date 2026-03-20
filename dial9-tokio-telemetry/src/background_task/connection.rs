@@ -12,6 +12,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Circuit breaker for S3 upload attempts.
 #[derive(Debug, Default)]
+#[allow(dead_code)] // methods used in tests
 pub enum CircuitBreaker {
     /// S3 is reachable. Normal upload + delete.
     #[default]
@@ -23,6 +24,7 @@ pub enum CircuitBreaker {
     },
 }
 
+#[allow(dead_code)] // methods used in tests
 impl CircuitBreaker {
     /// Create a new closed (healthy) circuit breaker.
     pub fn new() -> Self {
@@ -55,12 +57,12 @@ impl CircuitBreaker {
     }
 
     /// Whether the circuit is currently closed (healthy).
-    pub fn is_closed(&self) -> bool {
+    pub(crate) fn is_closed(&self) -> bool {
         matches!(self, Self::Closed)
     }
 
     /// Current backoff duration (for testing/logging). None if closed.
-    pub fn current_backoff(&self) -> Option<Duration> {
+    pub(crate) fn current_backoff(&self) -> Option<Duration> {
         match self {
             Self::Closed => None,
             Self::Open { backoff, .. } => Some(*backoff),

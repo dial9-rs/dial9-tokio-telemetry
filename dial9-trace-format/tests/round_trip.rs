@@ -1,4 +1,3 @@
-use dial9_trace_format::codec::{self, WireTypeId};
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::schema::FieldDef;
@@ -64,16 +63,11 @@ fn full_round_trip() {
 
     let sym_name_id = enc.intern_string("my_function").unwrap();
 
-    let mut data = enc.finish();
-
-    // Append symbol table as untimestamped schema-based events via low-level codec.
-    let sym_tid = WireTypeId(100);
-    codec::encode_schema(
-        sym_tid,
-        &dial9_trace_format::schema::SchemaEntry {
-            name: "SymbolTableEntry".into(),
-            has_timestamp: false,
-            fields: vec![
+    // Append symbol table as a schema-based event via the Encoder API.
+    let sym_schema = enc
+        .register_schema(
+            "SymbolTableEntry",
+            vec![
                 FieldDef {
                     name: "base_addr".into(),
                     field_type: FieldType::Varint,
@@ -87,29 +81,28 @@ fn full_round_trip() {
                     field_type: FieldType::PooledString,
                 },
             ],
-        },
-        &mut data,
-    )
-    .unwrap();
-    codec::encode_event(
-        sym_tid,
-        None,
+        )
+        .unwrap();
+    enc.write_event(
+        &sym_schema,
         &[
+            FieldValue::Varint(0), // timestamp
             FieldValue::Varint(0x5555_5555_0000),
             FieldValue::Varint(0x2000),
             FieldValue::PooledString(sym_name_id),
         ],
-        &mut data,
     )
     .unwrap();
+
+    let data = enc.finish();
 
     let mut dec = Decoder::new(&data).unwrap();
     assert_eq!(dec.version(), 1);
 
     let decoded = dec.decode_all();
 
-    // 2 schemas(PollStart,CpuSample) + 1 pool("worker-0") + 1 poll event + 1 cpu sample
-    // + 1 pool("my_function") + 1 schema(SymbolTableEntry) + 1 symbol event = 8
+    // 3 schemas(PollStart,CpuSample,SymbolTableEntry) + 1 pool("worker-0") + 1 poll event
+    // + 1 cpu sample + 1 pool("my_function") + 1 symbol event = 8
     assert_eq!(decoded.len(), 8, "got: {decoded:#?}");
 
     assert!(matches!(&decoded[0], DecodedFrame::Schema(s) if s.name == "PollStart"));

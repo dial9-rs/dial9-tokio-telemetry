@@ -1,6 +1,5 @@
 use assert2::check;
-use dial9_tokio_telemetry::telemetry::format::WorkerId;
-use dial9_tokio_telemetry::telemetry::{TelemetryEvent, TraceAnalysis};
+use dial9_tokio_telemetry::telemetry::{TelemetryEvent, TraceAnalysis, WorkerId};
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::runtime::RuntimeMetrics;

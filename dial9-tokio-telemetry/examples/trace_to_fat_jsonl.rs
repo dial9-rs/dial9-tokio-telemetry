@@ -3,7 +3,7 @@
 //! Usage:
 //!   cargo run --example trace_to_fat_jsonl -- <input.bin> [output.jsonl]
 
-use dial9_tokio_telemetry::telemetry::{TraceReader, events::TelemetryEvent};
+use dial9_tokio_telemetry::telemetry::{TelemetryEvent, TraceReader};
 use serde::Serialize;
 use std::io::{BufWriter, Write};
 

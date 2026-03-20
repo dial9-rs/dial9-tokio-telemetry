@@ -1,6 +1,6 @@
 #[cfg(feature = "worker-s3")]
-pub mod connection;
-pub mod instance_metadata;
+pub(crate) mod connection;
+pub(crate) mod instance_metadata;
 pub(crate) mod pipeline_metrics;
 #[cfg(feature = "worker-s3")]
 pub mod s3;
