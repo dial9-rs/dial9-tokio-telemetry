@@ -475,7 +475,7 @@ mod tests {
             "expected '[symbolize-failed] 0x1000' in string pool, got: {:?}",
             pool_strings
         );
-        let has_source_file = pool_strings.iter().any(|s| *s == fake_path);
+        let has_source_file = pool_strings.contains(&fake_path);
         assert!(
             has_source_file,
             "expected source file '{}' in string pool, got: {:?}",

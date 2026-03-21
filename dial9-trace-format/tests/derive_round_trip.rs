@@ -60,6 +60,7 @@ struct MultiPool {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Decode all ref frames, returning only events as (type_id, values) pairs.
+#[allow(clippy::type_complexity)]
 fn decode_events(data: &[u8]) -> (Decoder<'_>, Vec<(Option<u64>, Vec<FieldValueRef<'_>>)>) {
     let mut dec = Decoder::new(data).unwrap();
     let mut events = Vec::new();

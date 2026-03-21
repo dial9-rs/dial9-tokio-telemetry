@@ -522,12 +522,7 @@ fn stress_test_all_segments_uploaded_and_valid() {
     let entries = inspector.entries();
     let successes: Vec<_> = entries
         .iter()
-        .filter(|e| {
-            e.metrics
-                .contains_key("Success")
-                .then(|| e.metrics["Success"] == true)
-                .unwrap_or(false)
-        })
+        .filter(|e| e.metrics.get("Success").is_some_and(|v| *v == true))
         .collect();
     assert_eq!(
         successes.len(),

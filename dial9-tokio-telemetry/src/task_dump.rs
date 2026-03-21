@@ -441,7 +441,7 @@ mod tests {
 
         // Drain any traces that were sent before completion
         let mut trace_count = 0;
-        while let Some(_) = handle.rx.recv().await {
+        while handle.rx.recv().await.is_some() {
             trace_count += 1;
         }
 

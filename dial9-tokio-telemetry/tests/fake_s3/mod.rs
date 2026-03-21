@@ -151,7 +151,7 @@ impl<S> FlakyS3<S> {
         let n = self
             .fail_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n % self.fail_every_n == 0 {
+        if n.is_multiple_of(self.fail_every_n) {
             return Err(s3s::S3Error::with_message(
                 s3s::S3ErrorCode::InternalError,
                 "injected failure",

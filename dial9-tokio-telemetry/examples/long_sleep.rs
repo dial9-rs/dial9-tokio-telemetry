@@ -4,7 +4,7 @@ use tokio::time::Duration;
 #[tokio::main]
 async fn main() {
     let (tracker, mut handle) = LongPollTracker::new();
-    let _tracker_task = tracker.spawn();
+    tracker.spawn();
 
     let sleep_future = tokio::time::sleep(Duration::from_secs(10));
     let wrapped = DetectLongWait::new(sleep_future, handle.sentinel_tx.clone());
