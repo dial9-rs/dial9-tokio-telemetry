@@ -92,6 +92,9 @@ pub struct RotatingWriter {
     formatted_locations: HashMap<std::panic::Location<'static>, String>,
     /// Events silently dropped because the writer was finished/stopped.
     dropped_events: usize,
+    /// Whether any real (non-metadata) events have been written to the current segment.
+    /// Reset on rotation; used by `finalize()` to avoid sealing empty segments.
+    has_real_events: bool,
 }
 
 // the write side is obviously marge larger than the `Finished` size so clippy warns on this
@@ -152,6 +155,7 @@ impl RotatingWriter {
             segment_metadata,
             formatted_locations: HashMap::new(),
             dropped_events: 0,
+            has_real_events: false,
         };
         w.write_segment_metadata()?;
         Ok(w)
@@ -181,6 +185,7 @@ impl RotatingWriter {
             segment_metadata: None,
             formatted_locations: HashMap::new(),
             dropped_events: 0,
+            has_real_events: false,
         };
         w.write_segment_metadata()?;
         Ok(w)
@@ -240,6 +245,7 @@ impl RotatingWriter {
         self.state = WriterState::Active(Encoder::new_to(writer)?);
         self.active_path = new_path;
         self.did_rotate = true;
+        self.has_real_events = false;
         self.write_segment_metadata()?;
 
         tracing::info!(
@@ -408,6 +414,7 @@ impl RotatingWriter {
                 })
             }
         }?;
+        self.has_real_events = true;
         Ok(())
     }
 
@@ -458,9 +465,23 @@ impl TraceWriter for RotatingWriter {
             .extension()
             .is_some_and(|ext| ext == "active")
         {
-            let sealed = Self::file_path(&self.base_path, self.next_index - 1);
-            fs::rename(&self.active_path, &sealed)?;
-            self.active_path = sealed;
+            if self.has_real_events {
+                let sealed = Self::file_path(&self.base_path, self.next_index - 1);
+                fs::rename(&self.active_path, &sealed)?;
+                self.active_path = sealed;
+            } else {
+                // No real events — just header + metadata. Remove instead of
+                // sealing so the background worker doesn't upload an empty segment.
+                tracing::debug!(
+                    "removing empty final segment {}",
+                    self.active_path.display()
+                );
+                if let Err(e) = fs::remove_file(&self.active_path)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(e);
+                }
+            }
         }
         self.state = WriterState::Finished;
         Ok(())
@@ -597,8 +618,15 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, 1024, 4096).unwrap();
         writer.finalize().unwrap();
 
-        let events = read_trace_events(&rotating_file(&base, 0));
-        assert_eq!(events.len(), 0);
+        // No real events were written, so finalize removes the empty segment.
+        assert!(
+            !dir.path().join("trace.0.bin").exists(),
+            "empty segment should not be sealed"
+        );
+        assert!(
+            !dir.path().join("trace.0.bin.active").exists(),
+            "active file should be removed"
+        );
     }
 
     #[test]
@@ -951,6 +979,32 @@ mod tests {
             !dir.path().join("trace.0.bin.active").exists(),
             "active file should be gone after finalize()"
         );
+    }
+
+    #[test]
+    fn test_finalize_removes_empty_segment_after_rotation() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        // Small max_file_size so one event triggers rotation.
+        let mut writer = RotatingWriter::new(&base, 1, 100_000).unwrap();
+        // Write an event — this fills segment 0 and triggers rotation to segment 1.
+        writer.write_event(&park_event()).unwrap();
+        // Segment 0 is sealed, segment 1 is active with only header + metadata.
+        assert!(dir.path().join("trace.0.bin").exists());
+        assert!(dir.path().join("trace.1.bin.active").exists());
+
+        // Finalize should remove the empty segment 1 instead of sealing it.
+        writer.finalize().unwrap();
+        assert!(
+            !dir.path().join("trace.1.bin").exists(),
+            "empty segment should not be sealed"
+        );
+        assert!(
+            !dir.path().join("trace.1.bin.active").exists(),
+            "empty active file should be removed"
+        );
+        // Segment 0 should still exist.
+        assert!(dir.path().join("trace.0.bin").exists());
     }
 
     #[test]

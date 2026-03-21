@@ -7,6 +7,11 @@ on:
         required: false
         default: "60"
         type: string
+      test_filter:
+        description: "Optional nextest filter expression (e.g. test name) to focus the stress test"
+        required: false
+        default: ""
+        type: string
   schedule:
     - cron: "0 6 * * *"
 permissions:
@@ -33,4 +38,9 @@ jobs:
       - name: Run stress test
         run: |
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
-          cargo nextest run --all-features --stress-duration '${{ inputs.duration_minutes || '60' }}m'
+          FILTER="${{ inputs.test_filter }}"
+          if [ -n "$FILTER" ]; then
+            cargo nextest run --all-features --stress-duration '${{ inputs.duration_minutes || '60' }}m' -E "test($FILTER)"
+          else
+            cargo nextest run --all-features --stress-duration '${{ inputs.duration_minutes || '60' }}m'
+          fi
