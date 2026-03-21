@@ -223,8 +223,6 @@ struct WorkerHandle {
 }
 
 /// RAII guard returned by [`TracedRuntimeBuilder::build`].
-///
-/// Controls the flush thread via a channel — no shared mutex.
 pub struct TelemetryGuard {
     handle: TelemetryHandle,
     flush_thread: Option<std::thread::JoinHandle<()>>,
