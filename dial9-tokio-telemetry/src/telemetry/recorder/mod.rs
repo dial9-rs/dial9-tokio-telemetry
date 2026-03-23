@@ -71,6 +71,17 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
                 };
             }
         }
+        if !batch.encoded_bytes.is_empty()
+            && let Err(e) = event_writer.write_transcoded_batch(&batch.encoded_bytes)
+        {
+            tracing::warn!("failed to transcode batch: {e}");
+            shared.enabled.store(false, Ordering::Relaxed);
+            return FlushStats {
+                event_count: event_writer.events_written() - events_before,
+                dropped_batches: dropped as u64,
+                cpu_time,
+            };
+        }
     }
     if let Err(e) = event_writer.flush() {
         tracing::warn!("failed to flush trace data: {e}");

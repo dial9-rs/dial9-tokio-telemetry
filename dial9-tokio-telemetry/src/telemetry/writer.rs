@@ -32,6 +32,10 @@ pub trait TraceWriter: Send {
         }
         Ok(())
     }
+    /// Transcode encoded bytes into this writer.
+    fn write_encoded_batch(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
@@ -484,6 +488,18 @@ impl TraceWriter for RotatingWriter {
             }
         }
         self.state = WriterState::Finished;
+        Ok(())
+    }
+
+    fn write_encoded_batch(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        let WriterState::Active(encoder) = &mut self.state else {
+            self.dropped_events += bytes.len();
+            return Ok(());
+        };
+        dial9_trace_format::transcoder::transcode(bytes, encoder)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        self.has_real_events = true;
+        self.maybe_rotate()?;
         Ok(())
     }
 }

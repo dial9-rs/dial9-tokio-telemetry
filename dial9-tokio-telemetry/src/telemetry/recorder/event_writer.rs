@@ -43,6 +43,11 @@ impl EventWriter {
         Ok(())
     }
 
+    /// Transcode encoded bytes through the writer.
+    pub(crate) fn write_transcoded_batch(&mut self, encoded_bytes: &[u8]) -> std::io::Result<()> {
+        self.writer.write_encoded_batch(encoded_bytes)
+    }
+
     /// Write a single CPU sample event.
     #[cfg(feature = "cpu-profiling")]
     pub(crate) fn write_cpu_event(&mut self, data: &CpuSampleData) {
