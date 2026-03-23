@@ -109,3 +109,7 @@ required-features = ["cpu-profiling"]
 [[bench]]
 name = "writer_encode"
 harness = false
+
+[[bench]]
+name = "threadlocal_encode"
+harness = false
