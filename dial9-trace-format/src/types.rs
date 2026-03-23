@@ -656,6 +656,22 @@ impl<'a, W: Write> EventEncoder<'a, W> {
             }
         }
     }
+
+    /// Write a [`FieldValueRef`] with a specific [`FieldType`], preserving the
+    /// original encoding format. Used by the transcoder to maintain format fidelity.
+    pub fn write_field_value_ref_typed(
+        &mut self,
+        value: &FieldValueRef<'_>,
+        field_type: FieldType,
+    ) -> io::Result<()> {
+        match (value, field_type) {
+            (FieldValueRef::Varint(v), FieldType::U8) => self.write_u8(*v as u8),
+            (FieldValueRef::Varint(v), FieldType::U16) => self.write_u16(*v as u16),
+            (FieldValueRef::Varint(v), FieldType::U32) => self.write_u32(*v as u32),
+            (FieldValueRef::Varint(v), FieldType::Varint) => self.write_u64(*v),
+            _ => self.write_field_value_ref(value),
+        }
+    }
 }
 
 /// Trait for types that can be used as trace fields.

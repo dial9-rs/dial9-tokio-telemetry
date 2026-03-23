@@ -42,7 +42,8 @@ fn test_reset_to_returns_decodable_bytes() {
     dec.for_each_event(|ev| {
         count += 1;
         assert!(ev.timestamp_ns.is_some());
-    });
+    })
+    .unwrap();
     assert_eq!(count, 2);
 
     enc.write(&TestEvent {
@@ -53,7 +54,7 @@ fn test_reset_to_returns_decodable_bytes() {
     let bytes2 = enc.reset_to(Vec::new());
     let mut dec2 = Decoder::new(&bytes2).unwrap();
     let mut count2 = 0;
-    dec2.for_each_event(|_| count2 += 1);
+    dec2.for_each_event(|_| count2 += 1).unwrap();
     assert_eq!(count2, 1, "encoder should be ready for new session");
 }
 
@@ -69,7 +70,7 @@ fn test_reset_convenience_returns_decodable_bytes() {
     let bytes = enc.reset();
     let mut dec = Decoder::new(&bytes).unwrap();
     let mut count = 0;
-    dec.for_each_event(|_| count += 1);
+    dec.for_each_event(|_| count += 1).unwrap();
     assert_eq!(count, 1);
 }
 
@@ -98,7 +99,8 @@ fn test_transcode_round_trip_single_batch() {
     let mut events = Vec::new();
     dec.for_each_event(|ev| {
         events.push(ev.timestamp_ns);
-    });
+    })
+    .unwrap();
     assert_eq!(events, vec![Some(1000), Some(2000)]);
 }
 
@@ -127,7 +129,8 @@ fn test_transcode_string_pool_remapping() {
     dial9_trace_format::transcoder::transcode(&bytes2, &mut target).unwrap();
     let final_bytes = target.reset();
 
-    let dec = Decoder::new(&final_bytes).unwrap();
+    let mut dec = Decoder::new(&final_bytes).unwrap();
+    dec.for_each_event(|_| {}).unwrap();
     let pool_size = dec.string_pool().len();
     assert_eq!(pool_size, 1, "expected single pooled string");
 }
@@ -159,7 +162,8 @@ fn test_transcode_timestamp_rebasing() {
     let mut timestamps = Vec::new();
     dec.for_each_event(|ev| {
         timestamps.push(ev.timestamp_ns);
-    });
+    })
+    .unwrap();
     assert_eq!(timestamps, vec![Some(5000), Some(10000)]);
 }
 
@@ -186,7 +190,8 @@ fn test_transcode_schema_deduplication() {
     dial9_trace_format::transcoder::transcode(&bytes2, &mut target).unwrap();
     let final_bytes = target.reset();
 
-    let dec = Decoder::new(&final_bytes).unwrap();
+    let mut dec = Decoder::new(&final_bytes).unwrap();
+    dec.for_each_event(|_| {}).unwrap();
     let schema_count = dec.registry().entries().count();
     assert_eq!(schema_count, 1, "expected single schema");
 }
@@ -202,7 +207,7 @@ fn test_transcode_empty_batch() {
 
     let mut dec = Decoder::new(&final_bytes).unwrap();
     let mut count = 0;
-    dec.for_each_event(|_| count += 1);
+    dec.for_each_event(|_| count += 1).unwrap();
     assert_eq!(count, 0);
 }
 

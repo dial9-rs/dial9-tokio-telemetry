@@ -165,7 +165,7 @@ pub fn transcode<W: Write>(source: &[u8], target: &mut Encoder<W>) -> Result<(),
                         // by checking what was registered at the position we just consumed.
                         let type_id = find_new_schema_id(&decoder, &schemas);
                         if let Some(type_id) = type_id {
-                            let schema = Schema::new(&entry.name, entry.fields);
+                            let schema = Schema::from_entry(entry);
                             schemas.insert(type_id, schema);
                         }
                     }

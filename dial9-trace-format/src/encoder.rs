@@ -42,6 +42,15 @@ impl Schema {
         }
     }
 
+    /// Create a schema handle from a SchemaEntry, preserving all fields.
+    pub(crate) fn from_entry(entry: SchemaEntry) -> Self {
+        let name_key: Arc<str> = Arc::from(entry.name.as_str());
+        Self {
+            entry: Arc::new(entry),
+            name_key,
+        }
+    }
+
     /// Schema name.
     pub fn name(&self) -> &str {
         &self.entry.name
@@ -300,13 +309,20 @@ impl<W: Write> Encoder<W> {
                 ),
             ));
         }
-        let ts_delta = self.state.encode_timestamp_delta(timestamp_ns)?;
+        let ts_delta = if schema.entry.has_timestamp {
+            self.state.encode_timestamp_delta(timestamp_ns)?
+        } else {
+            0
+        };
         self.state.writer.write_all(&[codec::TAG_EVENT])?;
         self.state.writer.write_all(&type_id.0.to_le_bytes())?;
-        codec::encode_u24_le(ts_delta, &mut self.state.writer)?;
+        if schema.entry.has_timestamp {
+            codec::encode_u24_le(ts_delta, &mut self.state.writer)?;
+        }
         let mut enc = EventEncoder::new(&mut self.state);
-        for v in values {
-            enc.write_field_value_ref(v)?;
+        for (i, v) in values.iter().enumerate() {
+            let field_type = schema.entry.fields[i].field_type;
+            enc.write_field_value_ref_typed(v, field_type)?;
         }
         Ok(())
     }
