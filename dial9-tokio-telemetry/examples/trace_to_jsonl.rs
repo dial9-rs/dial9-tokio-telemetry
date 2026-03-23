@@ -5,7 +5,7 @@
 //!
 //! If output is omitted, writes to stdout.
 
-use dial9_tokio_telemetry::telemetry::TraceReader;
+use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 use std::io::{BufWriter, Write};
 
 fn main() -> std::io::Result<()> {
@@ -15,13 +15,8 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    let mut reader = TraceReader::new(&args[1])?;
-    let (magic, version) = reader.read_header()?;
-    if magic != "TOKIOTRC" {
-        eprintln!("not a TOKIOTRC file (got: {magic})");
-        std::process::exit(1);
-    }
-    eprintln!("TOKIOTRC v{version}, converting...");
+    let reader = TraceReader::new(&args[1])?;
+    eprintln!("converting...");
 
     let out: Box<dyn Write> = if let Some(path) = args.get(2) {
         Box::new(std::fs::File::create(path)?)
@@ -31,7 +26,7 @@ fn main() -> std::io::Result<()> {
     let mut w = BufWriter::new(out);
 
     let mut count = 0u64;
-    while let Some(e) = reader.read_raw_event()? {
+    for e in &reader.all_events {
         serde_json::to_writer(&mut w, &e).map_err(std::io::Error::other)?;
         w.write_all(b"\n")?;
         count += 1;

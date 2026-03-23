@@ -13,8 +13,9 @@ use std::io::Result;
 /// symbols, thread names, and segment metadata.
 pub struct TraceReader {
     /// All decoded events (including metadata like TaskSpawn).
-    pub events: Vec<TelemetryEvent>,
-    pos: usize,
+    pub all_events: Vec<TelemetryEvent>,
+    /// Runtime events only (excludes TaskSpawn, ThreadNameDef, SegmentMetadata).
+    pub runtime_events: Vec<TelemetryEvent>,
     /// Spawn location strings keyed by `InternedString` from the string pool.
     pub spawn_locations: HashMap<InternedString, String>,
     /// Task ID → spawn location mapping built from TaskSpawn events.
@@ -79,55 +80,30 @@ impl TraceReader {
             }
         }
 
-        let events: Vec<TelemetryEvent> =
+        let all_events: Vec<TelemetryEvent> =
             ref_events.into_iter().map(TelemetryEvent::from).collect();
 
+        let runtime_events = all_events
+            .iter()
+            .filter(|e| {
+                !matches!(
+                    e,
+                    TelemetryEvent::TaskSpawn { .. }
+                        | TelemetryEvent::ThreadNameDef { .. }
+                        | TelemetryEvent::SegmentMetadata { .. }
+                )
+            })
+            .cloned()
+            .collect();
+
         Ok(Self {
-            events,
-            pos: 0,
+            all_events,
+            runtime_events,
             spawn_locations,
             task_spawn_locs,
             thread_names,
             segment_metadata,
         })
-    }
-
-    /// No-op for compatibility. The new format header is consumed during `new()`.
-    pub fn read_header(&mut self) -> Result<(String, u32)> {
-        Ok(("D9TF".to_string(), 1))
-    }
-
-    /// Read the next event without filtering.
-    pub fn read_raw_event(&mut self) -> Result<Option<TelemetryEvent>> {
-        if self.pos >= self.events.len() {
-            return Ok(None);
-        }
-        let ev = self.events[self.pos].clone();
-        self.pos += 1;
-        Ok(Some(ev))
-    }
-
-    /// Read the next runtime telemetry event, skipping metadata-only records.
-    pub fn read_event(&mut self) -> Result<Option<TelemetryEvent>> {
-        loop {
-            match self.read_raw_event()? {
-                None => return Ok(None),
-                Some(
-                    TelemetryEvent::TaskSpawn { .. }
-                    | TelemetryEvent::ThreadNameDef { .. }
-                    | TelemetryEvent::SegmentMetadata { .. },
-                ) => continue,
-                Some(e) => return Ok(Some(e)),
-            }
-        }
-    }
-
-    pub fn read_all(&mut self) -> Result<Vec<TelemetryEvent>> {
-        let mut events = Vec::new();
-        while let Some(e) = self.read_event()? {
-            events.push(e);
-        }
-        Ok(events)
     }
 }
 

@@ -1,6 +1,7 @@
 //! Integration test: verify JS trace parser matches Rust parser
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TraceReader, TracedRuntime};
+use dial9_tokio_telemetry::analysis_unstable::TraceReader;
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::io::{BufWriter, Write};
 use std::process::Command;
 use tempfile::TempDir;
@@ -59,11 +60,10 @@ fn test_js_parser_matches_rust() {
 
     // Export to JSONL using Rust parser (in-process to avoid cargo subprocess overhead)
     {
-        let mut reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
-        reader.read_header().unwrap();
+        let reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
         let file = std::fs::File::create(&jsonl_path).unwrap();
         let mut w = BufWriter::new(file);
-        while let Some(e) = reader.read_raw_event().unwrap() {
+        for e in &reader.all_events {
             serde_json::to_writer(&mut w, &e).unwrap();
             w.write_all(b"\n").unwrap();
         }
@@ -103,7 +103,7 @@ fn test_js_parser_matches_rust() {
 #[test]
 fn test_js_parser_resolves_symbols_past_event_cap() {
     use dial9_perf_self_profile::offline_symbolize::SymbolTableEntry;
-    use dial9_tokio_telemetry::telemetry::format::{PollEndEvent, WorkerId};
+    use dial9_tokio_telemetry::telemetry::{PollEndEvent, WorkerId};
     use dial9_trace_format::encoder::Encoder;
 
     let temp_dir = TempDir::new().unwrap();

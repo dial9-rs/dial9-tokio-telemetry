@@ -1,7 +1,25 @@
+//! # dial9-trace-format
+//!
+//! A compact binary trace format for recording timestamped events with
+//! schema-driven encoding. Events are described by schemas (registered at
+//! write time) and encoded with delta-compressed timestamps, LEB128 varints,
+//! and an interned string pool.
+//!
+//! ## Crate layout
+//!
+//! - [`encoder`] — high-level [`Encoder`](encoder::Encoder) for writing traces
+//! - [`decoder`] — streaming [`Decoder`](decoder::Decoder) for reading traces
+//! - [`codec`]   — wire-format types ([`WireTypeId`](codec::WireTypeId),
+//!   [`PoolEntry`](codec::PoolEntry)) that appear in decoded frames
+//! - [`schema`]  — [`SchemaEntry`] and
+//!   [`FieldDef`] describing event layouts
+//! - [`types`]   — field value types, the [`TraceField`]
+//!   trait, and the [`EventEncoder`] used by derived code
+
 pub mod codec;
 pub mod decoder;
 pub mod encoder;
-pub mod leb128;
+pub(crate) mod leb128;
 pub mod schema;
 pub mod types;
 

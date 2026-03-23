@@ -1,8 +1,9 @@
 mod common;
 mod validation;
 
-use dial9_tokio_telemetry::telemetry::events::RawEvent;
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TraceReader, TracedRuntime, analyze_trace};
+use dial9_tokio_telemetry::analysis_unstable::{TraceReader, analyze_trace};
+use dial9_tokio_telemetry::telemetry::RawEvent;
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::time::Duration;
 
 /// Run a known workload under TracedRuntime, read the trace back, and verify
@@ -51,12 +52,11 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     drop(guard);
 
     // --- Read the trace back ---
-    let mut reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
-    reader.read_header().unwrap();
-    let events = reader.read_all().unwrap();
-    let analysis = analyze_trace(&events);
+    let reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
+    let events = &reader.runtime_events;
+    let analysis = analyze_trace(events);
 
-    validation::validate_trace_matches_metrics(&analysis, &events, &tokio_metrics);
+    validation::validate_trace_matches_metrics(&analysis, events, &tokio_metrics);
 }
 
 /// Regression test: TaskSpawn events emitted on the main thread (inside block_on)

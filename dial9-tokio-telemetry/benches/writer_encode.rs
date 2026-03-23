@@ -8,8 +8,7 @@
 //!   cargo bench --bench writer_encode
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use dial9_tokio_telemetry::telemetry::events::RawEvent;
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TaskId, TraceWriter, WorkerId};
+use dial9_tokio_telemetry::telemetry::{RawEvent, RotatingWriter, TaskId, TraceWriter, WorkerId};
 
 /// Build a realistic batch simulating a worker thread's activity.
 ///

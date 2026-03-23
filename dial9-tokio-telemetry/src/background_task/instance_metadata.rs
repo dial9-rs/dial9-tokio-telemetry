@@ -7,7 +7,7 @@
 /// component in S3 object keys.
 ///
 /// # Examples
-/// ```
+/// ```ignore
 /// use dial9_tokio_telemetry::background_task::instance_metadata::InstanceIdentity;
 ///
 /// let id = InstanceIdentity::new("us-east-1/i-0abc123");

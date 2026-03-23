@@ -17,9 +17,10 @@ mod common;
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
-    use dial9_tokio_telemetry::telemetry::events::{CpuSampleSource, RawEvent, clock_monotonic_ns};
-    use dial9_tokio_telemetry::telemetry::format::WorkerId;
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
+    use dial9_tokio_telemetry::telemetry::{
+        CpuSampleSource, RawEvent, WorkerId, clock_monotonic_ns,
+    };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -254,9 +255,7 @@ fn burn_cpu(duration: std::time::Duration) {
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn thread_name_attribution_for_external_and_blocking_threads() {
-    use dial9_tokio_telemetry::telemetry::events::RawEvent;
-    use dial9_tokio_telemetry::telemetry::format::WorkerId;
-    use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
+    use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RawEvent, TracedRuntime, WorkerId};
     use std::time::Duration;
 
     let (writer, events) = common::CapturingWriter::new();

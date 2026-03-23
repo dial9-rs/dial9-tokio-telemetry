@@ -183,32 +183,6 @@ pub struct SegmentMetadataEvent {
 
 // ── dial9-trace-format: decode ──────────────────────────────────────────────
 
-/// Decode all events from a `dial9-trace-format` byte slice into `TelemetryEvent`s.
-pub fn decode_events_v2(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
-    Ok(decode_events_ref(data)?
-        .into_iter()
-        .map(TelemetryEvent::from)
-        .collect())
-}
-
-/// Decode all events from a byte slice into zero-copy [`TelemetryEventRef`]s.
-pub fn decode_events_ref(data: &[u8]) -> io::Result<Vec<TelemetryEventRef<'_>>> {
-    use dial9_trace_format::decoder::Decoder;
-
-    let mut dec = Decoder::new(data)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
-    let mut events = Vec::new();
-
-    dec.for_each_event(|ev| {
-        if let Some(ev) = decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
-            events.push(ev);
-        }
-    })
-    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
-    Ok(events)
-}
-
 /// Zero-copy enum of all telemetry event types. Each variant wraps the
 /// derive-generated `*EventRef<'a>` that borrows directly from the decode buffer.
 #[derive(Debug, Clone)]
@@ -243,9 +217,10 @@ impl<'a> TelemetryEventRef<'a> {
     }
 }
 
+#[cfg(feature = "analysis")]
 /// Decode a single event from its schema name and zero-copy field values.
 /// Returns `None` for unknown event names.
-pub fn decode_ref<'a>(
+pub(crate) fn decode_ref<'a>(
     name: &str,
     timestamp_ns: Option<u64>,
     fields: &[FieldValueRef<'a>],

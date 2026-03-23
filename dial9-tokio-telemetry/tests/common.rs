@@ -1,5 +1,4 @@
-use dial9_tokio_telemetry::telemetry::events::RawEvent;
-use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
+use dial9_tokio_telemetry::telemetry::{RawEvent, TraceWriter};
 use std::sync::{Arc, Mutex};
 
 /// A [`TraceWriter`] that accumulates all events into a shared `Vec`.
