@@ -1,0 +1,33 @@
+{
+  "name": "maintainer",
+  "description": "Maintenance agent that verifies build, tests, and linter are clean, fixes any issues, and commits the results.",
+  "prompt": "file://./maintainer-prompt.md",
+  "tools": ["*"],
+  "allowedTools": [
+    "read",
+    "write",
+    "code*",
+    "grep",
+    "glob",
+    "fs_*"
+  ],
+  "toolsSettings": {
+    "execute_bash": {
+      "allowedCommands": [
+        "git add",
+        "git commit",
+        "git status",
+        "git diff",
+        "git config",
+        "git rev-parse"
+      ]
+    }
+  },
+  "resources": [
+    "file://AGENTS.md",
+    "skill://.kiro/skills/*/SKILL.md",
+    "skill://~/.kiro/skills/*/SKILL.md",
+    "file://.kiro/steering/**/*.md"
+  ],
+  "welcomeMessage": "Ready to run maintenance checks."
+}

@@ -1,0 +1,42 @@
+{
+  "name": "tasker",
+  "description": "Tasking agent that reads a design document, creates BDD-style tasks in tasks/, audits them for correctness, and commits the result.",
+  "prompt": "file://./tasker-prompt.md",
+  "tools": ["*"],
+  "allowedTools": [
+    "read",
+    "write",
+    "code*",
+    "grep",
+    "glob",
+    "fs_*",
+    "web_search",
+    "web_fetch"
+  ],
+  "toolsSettings": {
+    "execute_bash": {
+      "allowedCommands": [
+        "git add",
+        "git commit",
+        "git status",
+        "git diff",
+        "git config"
+      ]
+    },
+    "fs_write": {
+      "allowedPaths": [
+        "tasks/**/*"
+      ]
+    }
+  },
+  "resources": [
+    "file://AGENTS.md",
+    "file://tasks/README.md",
+    "file://docs/design/README.md",
+    "file://docs/design/*.md",
+    "skill://.kiro/skills/*/SKILL.md",
+    "skill://~/.kiro/skills/*/SKILL.md",
+    "file://.kiro/steering/**/*.md"
+  ],
+  "welcomeMessage": "Provide a design document and I'll create implementation tasks for it."
+}

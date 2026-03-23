@@ -5,11 +5,13 @@ Design: docs/design/threadlocal-encoding.md
 
 ## Objective
 
-Create end-to-end tests that validate the thread-local
+- Create end-to-end tests that validate the thread-local
 encoding pipeline: events encoded on worker threads via
 per-thread `Encoder<Vec<u8>>` are transcoded by the flush
 thread and produce identical trace output to the current
 direct-encode path.
+
+- Create proptests the validate the behavior across the entire input space
 
 ## Test File
 

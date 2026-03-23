@@ -1,0 +1,41 @@
+{
+  "name": "designer",
+  "description": "Design document agent that authors and audits design docs, then commits the result.",
+  "prompt": "file://./designer-prompt.md",
+  "tools": ["*"],
+  "allowedTools": [
+    "read",
+    "write",
+    "code*",
+    "grep",
+    "glob",
+    "fs_*",
+    "web_search",
+    "web_fetch"
+  ],
+  "toolsSettings": {
+    "execute_bash": {
+      "allowedCommands": [
+        "git add",
+        "git commit",
+        "git status",
+        "git diff",
+        "git config"
+      ]
+    },
+    "fs_write": {
+      "allowedPaths": [
+        "docs/design/**"
+      ]
+    }
+  },
+  "resources": [
+    "file://AGENTS.md",
+    "file://docs/design/README.md",
+    "file://docs/design/*.md",
+    "skill://.kiro/skills/*/SKILL.md",
+    "skill://~/.kiro/skills/*/SKILL.md",
+    "file://.kiro/steering/**/*.md"
+  ],
+  "welcomeMessage": "Describe a feature and I'll create a design document for it."
+}

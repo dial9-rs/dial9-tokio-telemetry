@@ -169,9 +169,9 @@ while let Some(batch) = shared.collector.next() {
         event_writer.write_raw_event(raw)?;
     }
     if !batch.encoded_bytes.is_empty() {
-        transcoder.transcode(
+        transcoder::transcode(
             &batch.encoded_bytes,
-            &mut event_writer,
+            &mut event_writer.encoder(),
         )?;
     }
 }
@@ -339,47 +339,36 @@ it through a different encoder — is a first-class operation
 in `dial9-trace-format`, not an ad-hoc implementation in
 the telemetry crate.
 
+Transcoding is a **free function**, not a struct. The key
+insight is that there is no useful state to carry across
+calls:
+
+- `values_buf: Vec<FieldValueRef<'_>>` borrows from the
+  `source` bytes, so its lifetime is tied to each call.
+  It cannot live on a struct.
+- A `Vec<FieldValue>` (owned) would work on a struct but
+  forces copying every string and byte slice from the
+  source — defeating the purpose of zero-copy decoding.
+- Caching a 10-element vec across calls saves nothing
+  meaningful.
+
 ```rust
 // dial9-trace-format/src/transcoder.rs
 
-/// Transcode a complete dial9-trace-format byte stream
-/// through a target encoder. Handles:
+/// Transcode all events from `source` bytes into
+/// `target` encoder. Handles:
 /// - Schema deduplication and type ID remapping
 /// - String pool ID remapping
 /// - Timestamp rebasing (decode to absolute, re-encode
 ///   as delta from target encoder's base)
-pub struct Transcoder {
-    /// Reusable decode buffer for field values.
-    values_buf: Vec<FieldValueRef<'static>>,
-}
-
-impl Transcoder {
-    pub fn new() -> Self {
-        Self {
-            values_buf: Vec::new(),
-        }
-    }
-
-    /// Transcode all events from `source` bytes into
-    /// `target` encoder.
-    pub fn transcode<W: Write>(
-        &mut self,
-        source: &[u8],
-        target: &mut Encoder<W>,
-    ) -> Result<(), TranscodeError> {
-        let mut decoder = Decoder::new(source)
-            .ok_or(TranscodeError::InvalidHeader)?;
-        decoder.for_each_event(|ev| {
-            // Re-intern pooled strings through target
-            // encoder. Remap field values containing
-            // InternedString references.
-            // Re-encode event through target encoder's
-            // write_event, which handles timestamp
-            // delta encoding and schema registration.
-        })?;
-        Ok(())
-    }
-}
+///
+/// Zero-copy: field values are re-encoded directly from
+/// FieldValueRef borrows into the source buffer. Only
+/// pooled string IDs are remapped (hash lookup, no copy).
+pub fn transcode<W: Write>(
+    source: &[u8],
+    target: &mut Encoder<W>,
+) -> Result<(), TranscodeError> { ... }
 
 #[derive(Debug)]
 pub enum TranscodeError {
@@ -389,22 +378,82 @@ pub enum TranscodeError {
 }
 ```
 
-The `Transcoder` is stateful to allow reusing allocations
-across batches. The telemetry crate's flush thread creates
-one `Transcoder` and reuses it for every batch.
+The function manually iterates decoder frames rather than
+using `try_for_each_event`. This is necessary because the
+transcoder needs simultaneous access to:
 
-The `for_each_event` callback receives
-`dial9_trace_format::decoder::RawEvent` refs whose fields
-contain `FieldValueRef::PooledString(InternedString)`. The
-decoder's `StringPool` resolves these to `&str`, and the
-target encoder re-interns them via `intern_string`.
+1. The decoder (to advance through frames and access the
+   string pool)
+2. A `HashMap<WireTypeId, Schema>` built incrementally as
+   schema frames are encountered
+3. The target encoder (to write events)
 
-Note: `for_each_event`'s callback returns `()`, so I/O
-errors from re-encoding must be captured in a local
-variable and checked after iteration. A
-`try_for_each_event` method that accepts `FnMut → Result`
-should be added alongside the `Transcoder` to support
-fallible callbacks cleanly.
+With `try_for_each_event`, the decoder is mutably borrowed
+for the entire iteration, preventing access to its registry
+from inside the callback. The manual loop avoids this by
+interleaving decoder state access with event processing.
+
+The implementation:
+
+1. Creates a `Decoder` from `source`.
+2. Iterates frames by tag byte:
+   - **Schema frames**: processed via `next_frame_ref()`
+     (which updates decoder state), then a `Schema` handle
+     is built from the `SchemaEntry` and stored in a local
+     `HashMap<WireTypeId, Schema>`.
+   - **String pool frames**: processed via
+     `next_frame_ref()` (decoder builds its pool).
+   - **Event frames**: decoded inline (same logic as
+     `for_each_event`), pooled string IDs remapped through
+     `target.intern_string()`, then re-encoded via
+     `target.write_event_ref(schema, timestamp, &values)`.
+   - **Timestamp resets**: update decoder's timestamp base.
+3. `values_buf: Vec<FieldValueRef<'_>>` is local to the
+   function, reused across events via `clear()`.
+
+#### New encoder APIs for transcoding
+
+`Encoder::write_event_ref` accepts `&[FieldValueRef<'_>]`
+directly, avoiding conversion to owned `FieldValue`:
+
+```rust
+impl<W: Write> Encoder<W> {
+    pub fn write_event_ref(
+        &mut self,
+        schema: &Schema,
+        timestamp_ns: u64,
+        values: &[FieldValueRef<'_>],
+    ) -> io::Result<()> { ... }
+}
+```
+
+Unlike `write_event` (which extracts the timestamp from
+`values[0]`), `write_event_ref` takes the timestamp as a
+separate argument since the decoder already provides it.
+
+`EventEncoder::write_field_value_ref` encodes each
+`FieldValueRef` variant directly. For `StackFrames` and
+`StringMap`, it writes the raw backing bytes via new
+`raw_data()` accessors on `StackFramesRef` and
+`StringMapRef`, achieving true zero-copy for these
+variable-length types.
+
+#### `try_for_each_event`
+
+Added alongside `for_each_event` on `Decoder` for other
+use cases that need fallible callbacks:
+
+```rust
+pub fn try_for_each_event<E>(
+    &mut self,
+    f: impl for<'f> FnMut(RawEvent<'a, 'f>)
+        -> Result<(), E>,
+) -> Result<(), TryForEachError<E>>
+```
+
+Not used by the transcoder itself (which needs the manual
+loop), but useful for consumers that don't need schema
+access during iteration.
 
 ### Event type ID overflow (>255 types)
 
@@ -494,9 +543,10 @@ change the `TraceWriter` trait signature.
 
 | File | Change |
 |------|--------|
-| `encoder.rs` | Add `reset_to(&mut self, W) -> W` and `reset(&mut self) -> Vec<u8>` methods. |
-| `transcoder.rs` (new) | `Transcoder` struct with `transcode(&mut self, &[u8], &mut Encoder<W>)`. |
-| `decoder.rs` | Add `try_for_each_event` with fallible callback (`FnMut → Result`). |
+| `encoder.rs` | Add `reset_to(&mut self, W) -> W` and `reset(&mut self) -> Vec<u8>` methods. Add `write_event_ref(&mut self, &Schema, u64, &[FieldValueRef])` for zero-copy transcoding. |
+| `types.rs` | Add `write_field_value_ref` to `EventEncoder`. Add `raw_data()` to `StackFramesRef` and `StringMapRef`. |
+| `transcoder.rs` (new) | Free function `transcode(&[u8], &mut Encoder<W>)` + `TranscodeError` enum. |
+| `decoder.rs` | Add `try_for_each_event` with fallible callback. Add `pub(crate)` accessors: `pos()`, `advance()`, `timestamp_base_ns()`, `set_timestamp_base()`, `schema_info()`. Add `TryForEachError<E>` enum. |
 | `lib.rs` | Export `pub mod transcoder`. |
 
 ### `dial9-tokio-telemetry` changes
@@ -506,8 +556,8 @@ change the `TraceWriter` trait signature.
 | `buffer.rs` | Add `Encoder<Vec<u8>>` path alongside `Vec<RawEvent>`. Change `flush` to return `Batch` struct with both `raw_events` and `encoded_bytes`. Add `should_encode` routing and `encode_event`. Cache formatted `String`s (not `InternedString`s) in `location_cache`. |
 | `collector.rs` | Add `Batch` struct (`raw_events: Vec<RawEvent>`, `encoded_bytes: Vec<u8>`). Change `ArrayQueue<Vec<RawEvent>>` to `ArrayQueue<Batch>`. Single `accept_flush(Batch)` method. |
 | `events.rs` | No change to `RawEvent` enum (still used by CPU profiler path and legacy dual-path). |
-| `recorder/mod.rs` | Update `flush_once` to process both `batch.raw_events` and `batch.encoded_bytes`, calling `transcode` for the encoded portion. |
-| `recorder/event_writer.rs` | Add `write_transcoded_batch` method that uses `Transcoder` to re-encode through the central writer. |
+| `recorder/mod.rs` | Update `flush_once` to process both `batch.raw_events` and `batch.encoded_bytes`, calling `transcoder::transcode` for the encoded portion. |
+| `recorder/event_writer.rs` | Add `write_transcoded_batch` method that calls `transcoder::transcode` through the central writer. |
 | `writer.rs` | No change — `RotatingWriter` continues to own the central `Encoder`. |
 | `recorder/shared_state.rs` | `record_event` still creates `RawEvent` and passes it to `buffer::record_event`. No change to the hot-path API. |
 | `format.rs` | No change — wire format event structs unchanged. |
@@ -517,8 +567,8 @@ change the `TraceWriter` trait signature.
 - `Batch` struct in `collector.rs`: contains both
   `raw_events: Vec<RawEvent>` and
   `encoded_bytes: Vec<u8>`.
-- `Transcoder` in `dial9-trace-format/src/transcoder.rs`.
 - `TranscodeError` in `dial9-trace-format/src/transcoder.rs`.
+- `TryForEachError<E>` in `dial9-trace-format/src/decoder.rs`.
 
 ### Removed types
 
@@ -533,13 +583,12 @@ architecture and CPU profiler events.
   (capacity of internal maps does not shrink) and produces
   a valid header on the new writer. Test `reset` returns
   decodable bytes.
-- **`transcoder.rs`**: Test that a batch encoded by one
-  encoder, when transcoded through a `Transcoder` into a
-  second encoder, produces identical decoded events. Test
-  string pool remapping (same string from two batches gets
-  the same global ID). Test timestamp rebasing (events from
-  batches with different bases produce correct absolute
-  timestamps in the output).
+- **`transcoder.rs`**: Test round-trip (encode → transcode
+  → decode yields identical events). Test string pool
+  remapping (same string from two batches gets the same
+  global ID). Test timestamp rebasing (events from batches
+  with different bases produce correct absolute timestamps).
+  Test empty batch (header only, no events).
 - **`buffer.rs`**: Test that `record_event` followed by
   `flush` produces a `Batch` whose `encoded_bytes` decode
   to the expected events (round-trip through
@@ -587,8 +636,10 @@ architecture and CPU profiler events.
    Unit test that it preserves allocations and produces
    valid output.
 
-3. **Add `Transcoder`** to `dial9-trace-format` as a
-   first-class module. Add `try_for_each_event` to
+3. **Add `transcode` free function** to
+   `dial9-trace-format` as a first-class module. Add
+   `Encoder::write_event_ref` for zero-copy re-encoding
+   with `&[FieldValueRef]`. Add `try_for_each_event` to
    `Decoder`. Unit test round-trip transcoding with string
    pool remapping and timestamp rebasing.
 
@@ -606,7 +657,7 @@ architecture and CPU profiler events.
 
 6. **Wire it together** in `flush_once`: process
    `batch.raw_events` through the existing path and
-   `batch.encoded_bytes` through the `Transcoder`.
+   `batch.encoded_bytes` through `transcoder::transcode`.
 
 7. **Benchmark**: run the MVP benchmark from step 1 to
    validate performance. Run `compare_overhead.sh` to

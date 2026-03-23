@@ -1,0 +1,6 @@
+{
+  "prompt": "docs/design/prompts/local-encoder.md",
+  "designs": [
+    "docs/design/threadlocal-encoding.md"
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "name": "dispatcher",
+  "description": "Task dispatcher that claims the next task, routes it to the appropriate implementation agent based on the task's Agent field, then cleans up and commits. Periodically triggers the maintainer agent.",
+  "prompt": "file://./dispatcher-prompt.md",
+  "tools": ["*"],
+  "allowedTools": [
+    "read",
+    "write",
+    "code*",
+    "grep",
+    "glob",
+    "fs_*",
+    "execute_bash"
+  ],
+  "toolsSettings": {
+    "execute_bash": {
+      "allowedCommands": [
+        "git add",
+        "git commit",
+        "git status",
+        "git diff",
+        "git config",
+        "git rev-list",
+        "git rev-parse",
+        "mkdir -p tasks/",
+        "mv tasks/",
+        "cat .maintainer-last-run",
+        "rring run-agent",
+        "rring status"
+      ]
+    },
+    "fs_write": {
+      "allowedPaths": [
+        "tasks/**/*",
+        ".maintainer-last-run"
+      ]
+    }
+  },
+  "resources": [
+    "file://AGENTS.md",
+    "file://tasks/README.md",
+    "file://.kiro/steering/**/*.md"
+  ],
+  "welcomeMessage": "Tell me which tasks/<subdir>/ to dispatch from."
+}

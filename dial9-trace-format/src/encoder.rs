@@ -258,6 +258,41 @@ impl<W: Write> Encoder<W> {
         Ok(())
     }
 
+    /// Write an event from zero-copy [`FieldValueRef`] values. Used by the
+    /// transcoder to re-encode events without converting to owned [`FieldValue`].
+    ///
+    /// `timestamp_ns` is the absolute timestamp. Field values must already have
+    /// pooled string IDs remapped to this encoder's string pool.
+    pub fn write_event_ref(
+        &mut self,
+        schema: &Schema,
+        timestamp_ns: u64,
+        values: &[crate::types::FieldValueRef<'_>],
+    ) -> io::Result<()> {
+        let type_id = self.ensure_registered(schema)?;
+        let expected_fields = schema.entry.fields.len();
+        if values.len() != expected_fields {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "value count ({}) does not match schema field count ({}) for schema '{}'",
+                    values.len(),
+                    expected_fields,
+                    schema.name(),
+                ),
+            ));
+        }
+        let ts_delta = self.state.encode_timestamp_delta(timestamp_ns)?;
+        self.state.writer.write_all(&[codec::TAG_EVENT])?;
+        self.state.writer.write_all(&type_id.0.to_le_bytes())?;
+        codec::encode_u24_le(ts_delta, &mut self.state.writer)?;
+        let mut enc = EventEncoder::new(&mut self.state);
+        for v in values {
+            enc.write_field_value_ref(v)?;
+        }
+        Ok(())
+    }
+
     /// Write a derived TraceEvent. Auto-registers the schema on first call for this type.
     /// Handles timestamp encoding: emits TimestampReset if needed, packs u24 delta in header.
     pub fn write<T: TraceEvent + 'static>(&mut self, event: &T) -> io::Result<()> {

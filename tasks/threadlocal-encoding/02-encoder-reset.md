@@ -42,8 +42,8 @@ This method:
 Add to `impl Encoder<Vec<u8>>`:
 
 ```rust
-pub fn reset(&mut self) -> Vec<u8> {
-    self.reset_to(Vec::new())
+pub fn reset(&mut self, sz: usize) -> Vec<u8> {
+    self.reset_to(Vec::with_capacity(sz))
 }
 ```
 

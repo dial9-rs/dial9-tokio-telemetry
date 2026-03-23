@@ -1,0 +1,43 @@
+{
+  "name": "bug-fixer",
+  "description": "Bug-fixing agent that takes a bug report, investigates the codebase, and creates BDD-style tasks: first a failing reproduction test, then incremental fix tasks.",
+  "prompt": "file://./bug-fixer-prompt.md",
+  "tools": ["*"],
+  "allowedTools": [
+    "read",
+    "write",
+    "code*",
+    "grep",
+    "glob",
+    "fs_*",
+    "web_search",
+    "web_fetch"
+  ],
+  "toolsSettings": {
+    "execute_bash": {
+      "allowedCommands": [
+        "git add",
+        "git commit",
+        "git status",
+        "git diff",
+        "git config",
+        "ls",
+        "cat",
+        "find"
+      ]
+    },
+    "fs_write": {
+      "allowedPaths": [
+        "tasks/**/*"
+      ]
+    }
+  },
+  "resources": [
+    "file://AGENTS.md",
+    "file://tasks/README.md",
+    "skill://.kiro/skills/*/SKILL.md",
+    "skill://~/.kiro/skills/*/SKILL.md",
+    "file://.kiro/steering/**/*.md"
+  ],
+  "welcomeMessage": "Describe a bug and I'll create reproduction tests and fix tasks for it."
+}
