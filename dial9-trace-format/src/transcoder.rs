@@ -6,8 +6,7 @@
 use crate::codec::{self, WireTypeId};
 use crate::decoder::{DecodeError, Decoder, StringPool};
 use crate::encoder::{Encoder, Schema};
-use crate::types::FieldValueRef;
-use std::collections::HashMap;
+use crate::types::{FieldType, FieldValueRef};
 use std::fmt;
 use std::io::{self, Write};
 
@@ -43,6 +42,16 @@ impl From<DecodeError> for TranscodeError {
     }
 }
 
+/// Cached schema info for fast per-event lookup during transcoding.
+/// Indexed by source WireTypeId, avoids HashMap lookups in the hot loop.
+struct TranscodeSchema {
+    /// Pre-resolved target WireTypeId (avoids ensure_registered per event)
+    target_type_id: WireTypeId,
+    has_timestamp: bool,
+    /// Field types for write_field_value_ref_typed (avoids schema.entry.fields[i].field_type)
+    field_types: Vec<FieldType>,
+}
+
 /// Transcode all events from `source` bytes into `target` encoder.
 ///
 /// Decodes the source stream, remaps pooled string IDs through the target
@@ -53,8 +62,8 @@ impl From<DecodeError> for TranscodeError {
 pub fn transcode<W: Write>(source: &[u8], target: &mut Encoder<W>) -> Result<(), TranscodeError> {
     let mut decoder = Decoder::new(source).ok_or(TranscodeError::InvalidHeader)?;
 
-    // Build schema map as we encounter schema frames, before events reference them.
-    let mut schemas: HashMap<WireTypeId, Schema> = HashMap::new();
+    // Vec-based schema lookup indexed by WireTypeId.0 — replaces HashMap.
+    let mut schemas: Vec<Option<TranscodeSchema>> = Vec::new();
     let mut values_buf: Vec<FieldValueRef<'_>> = Vec::new();
 
     while decoder.pos() < source.len() {
@@ -84,17 +93,18 @@ pub fn transcode<W: Write>(source: &[u8], target: &mut Encoder<W>) -> Result<(),
                     }
                 };
 
-                let schema = schemas.get(&type_id).ok_or_else(|| DecodeError {
-                    pos: ev_pos,
-                    message: format!("unknown type_id {type_id:?}"),
-                })?;
+                let idx = type_id.0 as usize;
+                let ts = schemas
+                    .get(idx)
+                    .and_then(|s| s.as_ref())
+                    .ok_or_else(|| DecodeError {
+                        pos: ev_pos,
+                        message: format!("unknown type_id {type_id:?}"),
+                    })?;
 
-                let schema_info = decoder.schema_info(type_id).ok_or_else(|| DecodeError {
-                    pos: ev_pos,
-                    message: format!("no schema info for type_id {type_id:?}"),
-                })?;
+                let has_timestamp = ts.has_timestamp;
 
-                let timestamp_ns = if schema_info.has_timestamp {
+                let timestamp_ns = if has_timestamp {
                     match codec::decode_u24_le(&remaining[pos..]) {
                         Some(delta) => {
                             pos += 3;
@@ -111,6 +121,11 @@ pub fn transcode<W: Write>(source: &[u8], target: &mut Encoder<W>) -> Result<(),
                 } else {
                     None
                 };
+
+                let schema_info = decoder.schema_info(type_id).ok_or_else(|| DecodeError {
+                    pos: ev_pos,
+                    message: format!("no schema info for type_id {type_id:?}"),
+                })?;
 
                 values_buf.clear();
                 for ft in schema_info.field_types {
@@ -130,15 +145,23 @@ pub fn transcode<W: Write>(source: &[u8], target: &mut Encoder<W>) -> Result<(),
                 }
 
                 decoder.advance(pos);
-                if let Some(ts) = timestamp_ns {
-                    decoder.set_timestamp_base(ts);
+                if let Some(ts_val) = timestamp_ns {
+                    decoder.set_timestamp_base(ts_val);
                 }
 
                 // Remap pooled strings through target encoder
                 remap_pooled_strings(&mut values_buf, decoder.string_pool(), target)?;
 
-                let ts = timestamp_ns.unwrap_or(0);
-                target.write_event_ref(schema, ts, &values_buf)?;
+                let abs_ts = timestamp_ns.unwrap_or(0);
+                // Re-read from schemas after mutable borrow of target is done
+                let ts = schemas[idx].as_ref().unwrap();
+                target.write_event_ref_raw(
+                    ts.target_type_id,
+                    ts.has_timestamp,
+                    abs_ts,
+                    &values_buf,
+                    &ts.field_types,
+                )?;
             }
             codec::TAG_TIMESTAMP_RESET => {
                 let ts = match source.get(decoder.pos() + 1..decoder.pos() + 9) {
@@ -161,12 +184,22 @@ pub fn transcode<W: Write>(source: &[u8], target: &mut Encoder<W>) -> Result<(),
                 match decoder.next_frame_ref() {
                     Ok(Some(crate::decoder::DecodedFrameRef::Schema(entry))) => {
                         // Build a Schema handle for this type_id.
-                        // The decoder just registered it, so we can find the type_id
-                        // by checking what was registered at the position we just consumed.
                         let type_id = find_new_schema_id(&decoder, &schemas);
                         if let Some(type_id) = type_id {
                             let schema = Schema::from_entry(entry);
-                            schemas.insert(type_id, schema);
+                            let target_type_id = target.ensure_registered(&schema)?;
+                            let field_types: Vec<FieldType> =
+                                schema.fields().iter().map(|f| f.field_type).collect();
+                            let has_timestamp = schema.entry.has_timestamp;
+                            let idx = type_id.0 as usize;
+                            if idx >= schemas.len() {
+                                schemas.resize_with(idx + 1, || None);
+                            }
+                            schemas[idx] = Some(TranscodeSchema {
+                                target_type_id,
+                                has_timestamp,
+                                field_types,
+                            });
                         }
                     }
                     Ok(Some(_)) => {} // string pool, symbol table — decoder handles state
@@ -186,13 +219,14 @@ pub fn transcode<W: Write>(source: &[u8], target: &mut Encoder<W>) -> Result<(),
 }
 
 /// Find the WireTypeId of a schema that was just registered in the decoder
-/// but isn't in our local schema map yet.
+/// but isn't in our local schema vec yet.
 fn find_new_schema_id(
     decoder: &Decoder<'_>,
-    known: &HashMap<WireTypeId, Schema>,
+    known: &[Option<TranscodeSchema>],
 ) -> Option<WireTypeId> {
     for (wire_id, _entry) in decoder.registry().entries() {
-        if !known.contains_key(&wire_id) {
+        let idx = wire_id.0 as usize;
+        if idx >= known.len() || known[idx].is_none() {
             return Some(wire_id);
         }
     }

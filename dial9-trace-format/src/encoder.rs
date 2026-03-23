@@ -6,8 +6,36 @@ use crate::schema::{SchemaEntry, SchemaRegistry};
 use crate::types::{EncodeState, EventEncoder, InternedString};
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{self, Write};
 use std::sync::Arc;
+
+/// A fast, non-cryptographic hasher using FxHash's multiply-shift strategy.
+/// Safe for HashMap keys that are already well-distributed (TypeId, Arc<str>).
+#[derive(Default)]
+struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x517cc1b727220a95);
+        }
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517cc1b727220a95);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type FxBuildHasher = BuildHasherDefault<FxHasher>;
+type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 /// A schema handle returned by [`Encoder::register_schema`] or created via
 /// [`Schema::new`].
@@ -19,7 +47,7 @@ use std::sync::Arc;
 /// `Schema` is cheap to clone (internally `Arc`-backed).
 #[derive(Clone, Debug)]
 pub struct Schema {
-    entry: Arc<SchemaEntry>,
+    pub(crate) entry: Arc<SchemaEntry>,
     /// Pre-computed `Arc<str>` of the schema name, used as a cheap HashMap key
     /// (clone is a pointer bump instead of a String allocation).
     name_key: Arc<str>,
@@ -73,9 +101,9 @@ enum SchemaKey {
 pub struct Encoder<W: Write = Vec<u8>> {
     state: EncodeState<W>,
     registry: SchemaRegistry,
-    string_pool: HashMap<String, u32>,
+    string_pool: FxHashMap<String, u32>,
     next_pool_id: u32,
-    schema_ids: HashMap<SchemaKey, WireTypeId>,
+    schema_ids: FxHashMap<SchemaKey, WireTypeId>,
 }
 
 impl Default for Encoder<Vec<u8>> {
@@ -91,9 +119,9 @@ impl Encoder<Vec<u8>> {
         Self {
             state: EncodeState::new(buf),
             registry: SchemaRegistry::new(),
-            string_pool: HashMap::new(),
+            string_pool: FxHashMap::default(),
             next_pool_id: 0,
-            schema_ids: HashMap::new(),
+            schema_ids: FxHashMap::default(),
         }
     }
 
@@ -116,9 +144,9 @@ impl<W: Write> Encoder<W> {
         Ok(Self {
             state: EncodeState::new(writer),
             registry: SchemaRegistry::new(),
-            string_pool: HashMap::new(),
+            string_pool: FxHashMap::default(),
             next_pool_id: 0,
-            schema_ids: HashMap::new(),
+            schema_ids: FxHashMap::default(),
         })
     }
 
@@ -130,7 +158,7 @@ impl<W: Write> Encoder<W> {
         timestamp_base_ns: u64,
         writer: W,
     ) -> Self {
-        let mut pool = HashMap::new();
+        let mut pool = FxHashMap::default();
         let mut next_pool_id: u32 = 0;
         for (id, value) in string_pool.0.into_iter() {
             pool.insert(value, id.raw_id());
@@ -139,7 +167,7 @@ impl<W: Write> Encoder<W> {
             }
         }
 
-        let mut schema_ids = HashMap::new();
+        let mut schema_ids = FxHashMap::default();
         for (wire_id, entry) in registry.entries() {
             schema_ids.insert(SchemaKey::Name(Arc::from(entry.name.as_str())), wire_id);
         }
@@ -190,7 +218,7 @@ impl<W: Write> Encoder<W> {
     ///
     /// Idempotent if the schema matches. Errors if a different schema was
     /// already registered under the same name.
-    fn ensure_registered(&mut self, schema: &Schema) -> io::Result<WireTypeId> {
+    pub(crate) fn ensure_registered(&mut self, schema: &Schema) -> io::Result<WireTypeId> {
         let key = SchemaKey::Name(Arc::clone(&schema.name_key));
         if let Some(&wire_id) = self.schema_ids.get(&key) {
             let existing = self.registry.get(wire_id).unwrap();
@@ -323,6 +351,39 @@ impl<W: Write> Encoder<W> {
         for (i, v) in values.iter().enumerate() {
             let field_type = schema.entry.fields[i].field_type;
             enc.write_field_value_ref_typed(v, field_type)?;
+        }
+        Ok(())
+    }
+
+    /// Fast path for transcoding: write an event with a pre-resolved target
+    /// `WireTypeId` and field types, bypassing `ensure_registered` and schema
+    /// field lookups.
+    ///
+    /// # Safety contract (not unsafe, but caller must ensure):
+    /// - `type_id` was previously registered via `ensure_registered`
+    /// - `field_types` matches the schema's field definitions
+    /// - `values.len() == field_types.len()`
+    pub(crate) fn write_event_ref_raw(
+        &mut self,
+        type_id: WireTypeId,
+        has_timestamp: bool,
+        timestamp_ns: u64,
+        values: &[crate::types::FieldValueRef<'_>],
+        field_types: &[crate::types::FieldType],
+    ) -> io::Result<()> {
+        let ts_delta = if has_timestamp {
+            self.state.encode_timestamp_delta(timestamp_ns)?
+        } else {
+            0
+        };
+        self.state.writer.write_all(&[codec::TAG_EVENT])?;
+        self.state.writer.write_all(&type_id.0.to_le_bytes())?;
+        if has_timestamp {
+            codec::encode_u24_le(ts_delta, &mut self.state.writer)?;
+        }
+        let mut enc = EventEncoder::new(&mut self.state);
+        for (v, &ft) in values.iter().zip(field_types) {
+            enc.write_field_value_ref_typed(v, ft)?;
         }
         Ok(())
     }
