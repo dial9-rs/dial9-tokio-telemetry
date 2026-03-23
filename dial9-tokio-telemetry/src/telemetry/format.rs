@@ -217,6 +217,7 @@ impl<'a> TelemetryEventRef<'a> {
     }
 }
 
+#[cfg(feature = "analysis")]
 /// Decode a single event from its schema name and zero-copy field values.
 /// Returns `None` for unknown event names.
 pub(crate) fn decode_ref<'a>(
