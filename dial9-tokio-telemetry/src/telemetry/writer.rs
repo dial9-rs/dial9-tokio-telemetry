@@ -34,7 +34,10 @@ pub trait TraceWriter: Send {
     }
     /// Transcode encoded bytes into this writer.
     fn write_encoded_batch(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
-        Ok(())
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "write_encoded_batch not implemented for this writer",
+        ))
     }
 }
 
@@ -54,6 +57,9 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
         (**self).write_event_batch(events)
     }
+    fn write_encoded_batch(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        (**self).write_encoded_batch(bytes)
+    }
 }
 
 /// A writer that discards all events. Useful for benchmarking hook overhead
@@ -62,6 +68,9 @@ pub struct NullWriter;
 
 impl TraceWriter for NullWriter {
     fn write_event(&mut self, _event: &RawEvent) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn write_encoded_batch(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
         Ok(())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -493,7 +502,7 @@ impl TraceWriter for RotatingWriter {
 
     fn write_encoded_batch(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let WriterState::Active(encoder) = &mut self.state else {
-            self.dropped_events += bytes.len();
+            self.dropped_events += 1;
             return Ok(());
         };
         dial9_trace_format::transcoder::transcode(bytes, encoder)

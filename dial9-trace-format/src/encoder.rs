@@ -29,6 +29,21 @@ impl Hasher for FxHasher {
     }
 
     #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(i as u64)
+    }
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.write_u64(i as u64)
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64)
+    }
+
+    #[inline]
     fn finish(&self) -> u64 {
         self.0
     }
@@ -435,6 +450,17 @@ impl<W: Write> Encoder<W> {
     /// Flush the underlying writer.
     pub fn flush(&mut self) -> io::Result<()> {
         self.state.writer.flush()
+    }
+}
+
+impl Encoder<Vec<u8>> {
+    pub fn write_infallible<T: TraceEvent + 'static>(&mut self, event: &T) {
+        self.write(event).expect("writing to Vec<u8> is infallible")
+    }
+
+    pub fn intern_string_infallible(&mut self, s: &str) -> InternedString {
+        self.intern_string(s)
+            .expect("interning into Vec<u8> is infallible")
     }
 }
 

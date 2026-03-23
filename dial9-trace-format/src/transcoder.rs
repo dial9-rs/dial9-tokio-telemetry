@@ -176,27 +176,27 @@ pub fn transcode<W: Write>(source: &[u8], target: &mut Encoder<W>) -> Result<(),
             _ => {
                 // Schema and string pool frames — let decoder process them
                 // and update its internal state.
+                let schema_count_before = schemas.iter().filter(|s| s.is_some()).count();
                 let before_pos = decoder.pos();
                 match decoder.next_frame_ref() {
                     Ok(Some(crate::decoder::DecodedFrameRef::Schema(entry))) => {
-                        // Build a Schema handle for this type_id.
-                        let type_id = find_new_schema_id(&decoder, &schemas);
-                        if let Some(type_id) = type_id {
-                            let schema = Schema::from_entry(entry);
-                            let target_type_id = target.ensure_registered(&schema)?;
-                            let field_types: Vec<FieldType> =
-                                schema.fields().iter().map(|f| f.field_type).collect();
-                            let has_timestamp = schema.entry.has_timestamp;
-                            let idx = type_id.0 as usize;
-                            if idx >= schemas.len() {
-                                schemas.resize_with(idx + 1, || None);
-                            }
-                            schemas[idx] = Some(TranscodeSchema {
-                                target_type_id,
-                                has_timestamp,
-                                field_types,
-                            });
+                        // The decoder assigns IDs sequentially starting from 0,
+                        // so the new schema's ID equals the count before registration.
+                        let type_id = WireTypeId(schema_count_before as u16);
+                        let schema = Schema::from_entry(entry);
+                        let target_type_id = target.ensure_registered(&schema)?;
+                        let field_types: Vec<FieldType> =
+                            schema.fields().iter().map(|f| f.field_type).collect();
+                        let has_timestamp = schema.entry.has_timestamp;
+                        let idx = type_id.0 as usize;
+                        if idx >= schemas.len() {
+                            schemas.resize_with(idx + 1, || None);
                         }
+                        schemas[idx] = Some(TranscodeSchema {
+                            target_type_id,
+                            has_timestamp,
+                            field_types,
+                        });
                     }
                     Ok(Some(_)) => {} // string pool, symbol table — decoder handles state
                     Ok(None) => {
@@ -212,21 +212,6 @@ pub fn transcode<W: Write>(source: &[u8], target: &mut Encoder<W>) -> Result<(),
         }
     }
     Ok(())
-}
-
-/// Find the WireTypeId of a schema that was just registered in the decoder
-/// but isn't in our local schema vec yet.
-fn find_new_schema_id(
-    decoder: &Decoder<'_>,
-    known: &[Option<TranscodeSchema>],
-) -> Option<WireTypeId> {
-    for (wire_id, _entry) in decoder.registry().entries() {
-        let idx = wire_id.0 as usize;
-        if idx >= known.len() || known[idx].is_none() {
-            return Some(wire_id);
-        }
-    }
-    None
 }
 
 /// Remap PooledString field values through the target encoder's string pool.

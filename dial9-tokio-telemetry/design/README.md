@@ -5,7 +5,7 @@ and changes to the project. Each design doc should be
 a single Markdown file named after the feature (e.g.,
 `some-feature.md`).
 
-Run `rring designs` to list all design documents.
+Run `ls designs/` to list all design documents.
 
 ## Structure
 

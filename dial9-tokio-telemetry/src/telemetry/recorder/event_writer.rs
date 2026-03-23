@@ -45,7 +45,9 @@ impl EventWriter {
 
     /// Transcode encoded bytes through the writer.
     pub(crate) fn write_transcoded_batch(&mut self, encoded_bytes: &[u8]) -> std::io::Result<()> {
-        self.writer.write_encoded_batch(encoded_bytes)
+        self.writer.write_encoded_batch(encoded_bytes)?;
+        self.events_written += 1;
+        Ok(())
     }
 
     /// Write a single CPU sample event.

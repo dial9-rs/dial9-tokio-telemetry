@@ -56,7 +56,7 @@ impl ThreadLocalBuffer {
     }
 
     fn encode_event(&mut self, event: &RawEvent) {
-        let result: std::io::Result<()> = (|| match event {
+        match event {
             RawEvent::PollStart {
                 timestamp_nanos,
                 worker_id,
@@ -64,19 +64,19 @@ impl ThreadLocalBuffer {
                 task_id,
                 location,
             } => {
-                let spawn_loc = self.intern_location(location)?;
-                self.encoder.write(&PollStartEvent {
+                let spawn_loc = self.intern_location(location);
+                self.encoder.write_infallible(&PollStartEvent {
                     timestamp_ns: *timestamp_nanos,
                     worker_id: *worker_id,
                     local_queue: *worker_local_queue_depth as u8,
                     task_id: *task_id,
                     spawn_loc,
-                })
+                });
             }
             RawEvent::PollEnd {
                 timestamp_nanos,
                 worker_id,
-            } => self.encoder.write(&PollEndEvent {
+            } => self.encoder.write_infallible(&PollEndEvent {
                 timestamp_ns: *timestamp_nanos,
                 worker_id: *worker_id,
             }),
@@ -85,7 +85,7 @@ impl ThreadLocalBuffer {
                 worker_id,
                 worker_local_queue_depth,
                 cpu_time_nanos,
-            } => self.encoder.write(&WorkerParkEvent {
+            } => self.encoder.write_infallible(&WorkerParkEvent {
                 timestamp_ns: *timestamp_nanos,
                 worker_id: *worker_id,
                 local_queue: *worker_local_queue_depth as u8,
@@ -97,7 +97,7 @@ impl ThreadLocalBuffer {
                 worker_local_queue_depth,
                 cpu_time_nanos,
                 sched_wait_delta_nanos,
-            } => self.encoder.write(&WorkerUnparkEvent {
+            } => self.encoder.write_infallible(&WorkerUnparkEvent {
                 timestamp_ns: *timestamp_nanos,
                 worker_id: *worker_id,
                 local_queue: *worker_local_queue_depth as u8,
@@ -107,7 +107,7 @@ impl ThreadLocalBuffer {
             RawEvent::QueueSample {
                 timestamp_nanos,
                 global_queue_depth,
-            } => self.encoder.write(&QueueSampleEvent {
+            } => self.encoder.write_infallible(&QueueSampleEvent {
                 timestamp_ns: *timestamp_nanos,
                 global_queue: *global_queue_depth as u8,
             }),
@@ -116,17 +116,17 @@ impl ThreadLocalBuffer {
                 task_id,
                 location,
             } => {
-                let spawn_loc = self.intern_location(location)?;
-                self.encoder.write(&TaskSpawnEvent {
+                let spawn_loc = self.intern_location(location);
+                self.encoder.write_infallible(&TaskSpawnEvent {
                     timestamp_ns: *timestamp_nanos,
                     task_id: *task_id,
                     spawn_loc,
-                })
+                });
             }
             RawEvent::TaskTerminate {
                 timestamp_nanos,
                 task_id,
-            } => self.encoder.write(&TaskTerminateEvent {
+            } => self.encoder.write_infallible(&TaskTerminateEvent {
                 timestamp_ns: *timestamp_nanos,
                 task_id: *task_id,
             }),
@@ -135,7 +135,7 @@ impl ThreadLocalBuffer {
                 waker_task_id,
                 woken_task_id,
                 target_worker,
-            } => self.encoder.write(&WakeEventEvent {
+            } => self.encoder.write_infallible(&WakeEventEvent {
                 timestamp_ns: *timestamp_nanos,
                 waker_task_id: *waker_task_id,
                 woken_task_id: *woken_task_id,
@@ -143,33 +143,27 @@ impl ThreadLocalBuffer {
             }),
             RawEvent::CpuSample(data) => {
                 let thread_name = match &data.thread_name {
-                    Some(name) => self.encoder.intern_string(name.as_str()),
-                    None => self.encoder.intern_string("<no thread name>"),
-                }?;
-                self.encoder.write(&CpuSampleEvent {
+                    Some(name) => self.encoder.intern_string_infallible(name.as_str()),
+                    None => self.encoder.intern_string_infallible("<no thread name>"),
+                };
+                self.encoder.write_infallible(&CpuSampleEvent {
                     timestamp_ns: data.timestamp_nanos,
                     worker_id: data.worker_id,
                     tid: data.tid,
                     source: data.source,
                     thread_name,
                     callchain: dial9_trace_format::StackFrames(data.callchain.clone()),
-                })
+                });
             }
-        })();
-        if let Err(e) = result {
-            tracing::warn!("dial9-tokio-telemetry: failed to encode event: {}", e);
         }
     }
 
-    fn intern_location(
-        &mut self,
-        location: &'static Location<'static>,
-    ) -> std::io::Result<InternedString> {
+    fn intern_location(&mut self, location: &'static Location<'static>) -> InternedString {
         let s = self
             .location_cache
             .entry(location)
             .or_insert_with(|| location.to_string());
-        self.encoder.intern_string(s)
+        self.encoder.intern_string_infallible(s)
     }
 
     fn record_event(&mut self, event: RawEvent) {

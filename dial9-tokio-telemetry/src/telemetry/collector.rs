@@ -9,7 +9,6 @@ const DEFAULT_CAPACITY: usize = 1024;
 
 pub(crate) struct Batch {
     pub raw_events: Vec<RawEvent>,
-    #[allow(dead_code)] // Used in future tasks
     pub encoded_bytes: Vec<u8>,
 }
 

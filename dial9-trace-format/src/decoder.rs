@@ -354,118 +354,14 @@ impl<'a> Decoder<'a> {
         &mut self,
         mut f: impl for<'f> FnMut(RawEvent<'a, 'f>),
     ) -> Result<(), DecodeError> {
-        let mut values_buf: Vec<FieldValueRef<'a>> = Vec::new();
-        while self.pos < self.data.len() {
-            let remaining = &self.data[self.pos..];
-            let tag = match remaining.first() {
-                Some(t) => *t,
-                None => break,
-            };
-            match tag {
-                codec::TAG_EVENT => {
-                    let mut pos = 1;
-                    let type_id = match remaining.get(pos..pos + 2) {
-                        Some(b) => {
-                            pos += 2;
-                            WireTypeId(u16::from_le_bytes(b.try_into().unwrap()))
-                        }
-                        None => {
-                            return Err(DecodeError {
-                                pos: self.pos,
-                                message: "truncated event frame".into(),
-                            });
-                        }
-                    };
-                    let cache = match self
-                        .schema_cache
-                        .get(type_id.0 as usize)
-                        .and_then(|s| s.as_ref())
-                    {
-                        Some(c) => c,
-                        None => {
-                            return Err(DecodeError {
-                                pos: self.pos,
-                                message: format!("unknown type_id {type_id:?}"),
-                            });
-                        }
-                    };
-
-                    let timestamp_ns = if cache.has_timestamp {
-                        match codec::decode_u24_le(&remaining[pos..]) {
-                            Some(delta) => {
-                                pos += 3;
-                                Some(self.timestamp_base_ns + delta as u64)
-                            }
-                            None => {
-                                return Err(DecodeError {
-                                    pos: self.pos + pos,
-                                    message: "truncated timestamp delta".into(),
-                                });
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
-                    values_buf.clear();
-                    for ft in &cache.field_types {
-                        match FieldValueRef::decode(*ft, remaining, pos) {
-                            Some((val, consumed)) => {
-                                values_buf.push(val);
-                                pos += consumed;
-                            }
-                            None => {
-                                return Err(DecodeError {
-                                    pos: self.pos + pos,
-                                    message: "truncated field value".into(),
-                                });
-                            }
-                        }
-                    }
-                    self.pos += pos;
-                    if let Some(ts) = timestamp_ns {
-                        self.timestamp_base_ns = ts;
-                    }
-                    f(RawEvent {
-                        type_id,
-                        name: &cache.name,
-                        timestamp_ns,
-                        fields: &values_buf,
-                        string_pool: &self.string_pool,
-                    });
-                }
-                codec::TAG_TIMESTAMP_RESET => {
-                    // Handle timestamp resets inline to avoid next_frame_ref's
-                    // recursive consumption of the following frame.
-                    let ts = match self.data.get(self.pos + 1..self.pos + 9) {
-                        Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
-                        None => {
-                            return Err(DecodeError {
-                                pos: self.pos,
-                                message: "truncated timestamp reset".into(),
-                            });
-                        }
-                    };
-                    self.timestamp_base_ns = ts;
-                    self.pos += 9;
-                }
-                _ => {
-                    // Use next_frame_ref for non-event frames (schema, pool, symbol table)
-                    // `next_frame_ref` will update the decoder state as we read the frames (e.g. the pooled strings)
-                    match self.next_frame_ref() {
-                        Ok(Some(_)) => {}
-                        Ok(None) => {
-                            return Err(DecodeError {
-                                pos: self.pos,
-                                message: format!("failed to decode frame with tag 0x{tag:02x}"),
-                            });
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.try_for_each_event(|ev| {
+            f(ev);
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map_err(|e| match e {
+            TryForEachError::Decode(d) => d,
+            TryForEachError::User(inf) => match inf {},
+        })
     }
 
     /// Like [`for_each_event`](Self::for_each_event), but the callback may

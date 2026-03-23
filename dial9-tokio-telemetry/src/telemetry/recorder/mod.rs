@@ -71,7 +71,7 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
                 };
             }
         }
-        if !batch.encoded_bytes.is_empty()
+        if batch.encoded_bytes.len() > dial9_trace_format::codec::HEADER_SIZE
             && let Err(e) = event_writer.write_transcoded_batch(&batch.encoded_bytes)
         {
             tracing::warn!("failed to transcode batch: {e}");
