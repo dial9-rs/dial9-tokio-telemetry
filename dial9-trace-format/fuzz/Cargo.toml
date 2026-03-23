@@ -36,10 +36,3 @@ path = "fuzz_targets/fuzz_structured_round_trip.rs"
 test = false
 doc = false
 bench = false
-
-[[bin]]
-name = "fuzz_transcode"
-path = "fuzz_targets/fuzz_transcode.rs"
-test = false
-doc = false
-bench = false

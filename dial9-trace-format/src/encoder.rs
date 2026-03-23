@@ -85,15 +85,6 @@ impl Schema {
         }
     }
 
-    /// Create a schema handle from a SchemaEntry, preserving all fields.
-    pub(crate) fn from_entry(entry: SchemaEntry) -> Self {
-        let name_key: Arc<str> = Arc::from(entry.name.as_str());
-        Self {
-            entry: Arc::new(entry),
-            name_key,
-        }
-    }
-
     /// Schema name.
     pub fn name(&self) -> &str {
         &self.entry.name
@@ -328,8 +319,7 @@ impl<W: Write> Encoder<W> {
         Ok(())
     }
 
-    /// Write an event from zero-copy [`FieldValueRef`] values. Used by the
-    /// transcoder to re-encode events without converting to owned [`FieldValue`].
+    /// Write an event from zero-copy [`FieldValueRef`] values.
     ///
     /// `timestamp_ns` is the absolute timestamp. Field values must already have
     /// pooled string IDs remapped to this encoder's string pool.
@@ -366,39 +356,6 @@ impl<W: Write> Encoder<W> {
         for (i, v) in values.iter().enumerate() {
             let field_type = schema.entry.fields[i].field_type;
             enc.write_field_value_ref_typed(v, field_type)?;
-        }
-        Ok(())
-    }
-
-    /// Fast path for transcoding: write an event with a pre-resolved target
-    /// `WireTypeId` and field types, bypassing `ensure_registered` and schema
-    /// field lookups.
-    ///
-    /// # Safety contract (not unsafe, but caller must ensure):
-    /// - `type_id` was previously registered via `ensure_registered`
-    /// - `field_types` matches the schema's field definitions
-    /// - `values.len() == field_types.len()`
-    pub(crate) fn write_event_ref_raw(
-        &mut self,
-        type_id: WireTypeId,
-        has_timestamp: bool,
-        timestamp_ns: u64,
-        values: &[crate::types::FieldValueRef<'_>],
-        field_types: &[crate::types::FieldType],
-    ) -> io::Result<()> {
-        let ts_delta = if has_timestamp {
-            self.state.encode_timestamp_delta(timestamp_ns)?
-        } else {
-            0
-        };
-        self.state.writer.write_all(&[codec::TAG_EVENT])?;
-        self.state.writer.write_all(&type_id.0.to_le_bytes())?;
-        if has_timestamp {
-            codec::encode_u24_le(ts_delta, &mut self.state.writer)?;
-        }
-        let mut enc = EventEncoder::new(&mut self.state);
-        for (v, &ft) in values.iter().zip(field_types) {
-            enc.write_field_value_ref_typed(v, ft)?;
         }
         Ok(())
     }
@@ -450,6 +407,24 @@ impl<W: Write> Encoder<W> {
     /// Flush the underlying writer.
     pub fn flush(&mut self) -> io::Result<()> {
         self.state.writer.flush()
+    }
+
+    /// Write raw bytes directly to the underlying writer, bypassing encoder
+    /// state. Byte count is tracked for rotation decisions.
+    pub fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.state.writer.write_all(bytes)
+    }
+
+    /// Reset encoder state (schemas, string pool, timestamp base) without
+    /// touching the underlying writer. Used after writing a raw batch that
+    /// includes its own header.
+    pub fn reset_state(&mut self) {
+        self.string_pool.clear();
+        self.next_pool_id = 0;
+        self.registry.schemas.clear();
+        self.registry.next_id = 0;
+        self.schema_ids.clear();
+        self.state.timestamp_base_ns = 0;
     }
 }
 

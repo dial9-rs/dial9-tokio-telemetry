@@ -105,6 +105,20 @@ class TraceDecoder {
     if (this._pos >= this._view.byteLength) return null;
     try {
       const tag = this._view.getUint8(this._pos);
+      // Mid-stream header = reset frame (concatenated thread-local batch)
+      if (tag === MAGIC[0] && this._pos + 5 <= this._view.byteLength) {
+        let isHeader = true;
+        for (let i = 1; i < 4; i++) {
+          if (this._view.getUint8(this._pos + i) !== MAGIC[i]) { isHeader = false; break; }
+        }
+        if (isHeader) {
+          this.schemas = new Map();
+          this.stringPool = new Map();
+          this._timestampBaseNs = 0n;
+          this._pos += 5; // skip header
+          return this.nextFrame();
+        }
+      }
       this._pos++;
       switch (tag) {
         case TAG_SCHEMA: return this._decodeSchema();

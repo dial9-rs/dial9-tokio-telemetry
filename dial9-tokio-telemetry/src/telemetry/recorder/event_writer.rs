@@ -37,6 +37,7 @@ impl EventWriter {
     }
 
     /// Write a RawEvent through the writer.
+    #[cfg(test)]
     pub(crate) fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
         self.writer.write_event(&raw)?;
         self.events_written += 1;

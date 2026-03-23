@@ -505,8 +505,13 @@ impl TraceWriter for RotatingWriter {
             self.dropped_events += 1;
             return Ok(());
         };
-        dial9_trace_format::transcoder::transcode(bytes, encoder)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        // Raw-copy the thread-local batch (its header acts as a reset frame
+        // for decoders). Then reset encoder state and write a trailing header
+        // so subsequent write_event calls start a clean encoding context.
+        encoder.write_raw(bytes)?;
+        encoder.reset_state();
+        encoder.write_raw(&dial9_trace_format::codec::MAGIC)?;
+        encoder.write_raw(&[dial9_trace_format::codec::VERSION])?;
         self.has_real_events = true;
         self.maybe_rotate()?;
         Ok(())

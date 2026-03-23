@@ -1,7 +1,8 @@
 //! `ThreadLocalBuffer` is the entrypoint for almost all dial9 events
 //!
-//! The TL buffer is created lazily the first time an event is sent. Events are buffered into a fixed-size Vec (currently 1024 items)
-//! before being flushed to the central collector.
+//! The TL buffer is created lazily the first time an event is sent. Events are encoded directly
+//! into a thread-local `Encoder<Vec<u8>>` and flushed to the central collector when the encoded
+//! batch reaches the configured batch size (default 1 MB).
 use crate::telemetry::collector::CentralCollector;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::format::*;
@@ -12,13 +13,13 @@ use std::collections::HashMap;
 use std::panic::Location;
 use std::sync::Arc;
 
-const BUFFER_CAPACITY: usize = 1024;
-const ESTIMATED_BATCH_SIZE: usize = 16 * 1024;
+/// Default maximum encoded batch size before flushing (64KB).
+const DEFAULT_BATCH_SIZE: usize = 63 * 1024;
 
 pub(crate) struct ThreadLocalBuffer {
-    pub(crate) events: Vec<RawEvent>,
     encoder: Encoder<Vec<u8>>,
     event_count: usize,
+    batch_size: usize,
     collector: Option<Arc<CentralCollector>>,
     location_cache: HashMap<&'static Location<'static>, String>,
 }
@@ -31,10 +32,17 @@ impl Default for ThreadLocalBuffer {
 
 impl ThreadLocalBuffer {
     fn new() -> Self {
+        Self::with_batch_size(DEFAULT_BATCH_SIZE)
+    }
+
+    fn with_batch_size(batch_size: usize) -> Self {
         Self {
-            events: Vec::with_capacity(BUFFER_CAPACITY),
-            encoder: Encoder::new(),
+            // make the Vec 1KB bigger to reduce the risk of reallocating
+            // TODO: harden this code, we should ensure we never have to re-allocate this buffer.
+            encoder: Encoder::new_to(Vec::with_capacity(batch_size + 1024))
+                .expect("Vec::write_all cannot fail"),
             event_count: 0,
+            batch_size,
             collector: None,
             location_cache: HashMap::new(),
         }
@@ -48,13 +56,7 @@ impl ThreadLocalBuffer {
         }
     }
 
-    /// Returns true for event types that have been migrated to thread-local encoding.
-    /// Initially returns false for all types; as each type is migrated, its match arm
-    /// flips to true.
-    fn should_encode(_event: &RawEvent) -> bool {
-        false
-    }
-
+    // todo: this is now really "encode tokio event"
     fn encode_event(&mut self, event: &RawEvent) {
         match event {
             RawEvent::PollStart {
@@ -167,28 +169,18 @@ impl ThreadLocalBuffer {
     }
 
     fn record_event(&mut self, event: RawEvent) {
-        if Self::should_encode(&event) {
-            self.encode_event(&event);
-        } else {
-            self.events.push(event);
-        }
+        self.encode_event(&event);
         self.event_count += 1;
     }
 
     fn should_flush(&self) -> bool {
-        self.event_count >= BUFFER_CAPACITY
+        self.encoder.bytes_written() as usize >= self.batch_size
     }
 
     fn flush(&mut self) -> crate::telemetry::collector::Batch {
-        let raw_events = std::mem::replace(&mut self.events, Vec::with_capacity(BUFFER_CAPACITY));
-        let encoded_bytes = self
-            .encoder
-            .reset_to(Vec::with_capacity(ESTIMATED_BATCH_SIZE));
+        let encoded_bytes = self.encoder.reset_to(Vec::with_capacity(self.batch_size));
         self.event_count = 0;
-        crate::telemetry::collector::Batch {
-            raw_events,
-            encoded_bytes,
-        }
+        crate::telemetry::collector::Batch { encoded_bytes }
     }
 }
 
@@ -250,27 +242,34 @@ mod tests {
     #[test]
     fn test_buffer_creation() {
         let buffer = ThreadLocalBuffer::new();
-        assert_eq!(buffer.events.len(), 0);
-        assert_eq!(buffer.events.capacity(), BUFFER_CAPACITY);
         assert_eq!(buffer.event_count, 0);
+        assert_eq!(buffer.batch_size, DEFAULT_BATCH_SIZE);
     }
 
     #[test]
     fn test_record_event() {
         let mut buffer = ThreadLocalBuffer::new();
         buffer.record_event(poll_end_event());
-        assert_eq!(buffer.events.len(), 1);
         assert_eq!(buffer.event_count, 1);
+        assert!(buffer.encoder.bytes_written() > 0);
     }
 
     #[test]
-    fn test_should_flush() {
+    fn test_should_flush_respects_batch_size() {
+        // Use a tiny batch size so a single event triggers flush.
+        let mut buffer = ThreadLocalBuffer::with_batch_size(1);
+        assert!(!buffer.should_flush());
+        buffer.record_event(poll_end_event());
+        assert!(buffer.should_flush());
+    }
+
+    #[test]
+    fn test_should_flush_default_batch_size() {
         let mut buffer = ThreadLocalBuffer::new();
         assert!(!buffer.should_flush());
-        for _ in 0..BUFFER_CAPACITY {
-            buffer.record_event(poll_end_event());
-        }
-        assert!(buffer.should_flush());
+        buffer.record_event(poll_end_event());
+        // A single small event should not exceed 1 MB.
+        assert!(!buffer.should_flush());
     }
 
     #[test]
@@ -278,9 +277,7 @@ mod tests {
         let mut buffer = ThreadLocalBuffer::new();
         buffer.record_event(poll_end_event());
         let batch = buffer.flush();
-        assert_eq!(batch.raw_events.len(), 1);
-        assert_eq!(buffer.events.len(), 0);
+        assert!(!batch.encoded_bytes.is_empty());
         assert_eq!(buffer.event_count, 0);
-        assert_eq!(buffer.events.capacity(), BUFFER_CAPACITY);
     }
 }

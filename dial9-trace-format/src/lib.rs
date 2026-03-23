@@ -3,7 +3,6 @@ pub mod decoder;
 pub mod encoder;
 pub mod leb128;
 pub mod schema;
-pub mod transcoder;
 pub mod types;
 
 pub use dial9_trace_format_derive::TraceEvent;

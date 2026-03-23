@@ -658,7 +658,7 @@ impl<'a, W: Write> EventEncoder<'a, W> {
     }
 
     /// Write a [`FieldValueRef`] with a specific [`FieldType`], preserving the
-    /// original encoding format. Used by the transcoder to maintain format fidelity.
+    /// original encoding format.
     pub fn write_field_value_ref_typed(
         &mut self,
         value: &FieldValueRef<'_>,

@@ -1,5 +1,5 @@
-//! End-to-end tests for thread-local encoding: encoder reset, transcoding,
-//! and fallible iteration.
+//! End-to-end tests for thread-local encoding: encoder reset, raw-copy
+//! concatenation (reset-frame pattern), and fallible iteration.
 
 use dial9_trace_format::decoder::Decoder;
 use dial9_trace_format::encoder::Encoder;
@@ -74,10 +74,10 @@ fn test_reset_convenience_returns_decodable_bytes() {
     assert_eq!(count, 1);
 }
 
-// ── Transcoding round-trip ──────────────────────────────────────────────
+// ── Raw-copy concatenation (reset-frame pattern) ────────────────────────
 
 #[test]
-fn test_transcode_round_trip_single_batch() {
+fn test_rawcopy_round_trip_single_batch() {
     let mut enc1 = Encoder::new();
     enc1.write(&TestEvent {
         timestamp_ns: 1000,
@@ -91,11 +91,12 @@ fn test_transcode_round_trip_single_batch() {
     .unwrap();
     let bytes1 = enc1.reset();
 
-    let mut enc2 = Encoder::new();
-    dial9_trace_format::transcoder::transcode(&bytes1, &mut enc2).unwrap();
-    let bytes2 = enc2.reset();
+    // Simulate raw-copy: just concatenate onto an output stream
+    let mut output = Vec::new();
+    dial9_trace_format::codec::encode_header(&mut output).unwrap();
+    output.extend_from_slice(&bytes1);
 
-    let mut dec = Decoder::new(&bytes2).unwrap();
+    let mut dec = Decoder::new(&output).unwrap();
     let mut events = Vec::new();
     dec.for_each_event(|ev| {
         events.push(ev.timestamp_ns);
@@ -105,7 +106,7 @@ fn test_transcode_round_trip_single_batch() {
 }
 
 #[test]
-fn test_transcode_string_pool_remapping() {
+fn test_rawcopy_string_pool_per_batch() {
     let mut enc1 = Encoder::new();
     let s1 = enc1.intern_string("shared").unwrap();
     enc1.write(&StringEvent {
@@ -124,19 +125,22 @@ fn test_transcode_string_pool_remapping() {
     .unwrap();
     let bytes2 = enc2.reset();
 
-    let mut target = Encoder::new();
-    dial9_trace_format::transcoder::transcode(&bytes1, &mut target).unwrap();
-    dial9_trace_format::transcoder::transcode(&bytes2, &mut target).unwrap();
-    let final_bytes = target.reset();
+    // Concatenate both batches (each has its own header)
+    let mut output = Vec::new();
+    dial9_trace_format::codec::encode_header(&mut output).unwrap();
+    output.extend_from_slice(&bytes1);
+    output.extend_from_slice(&bytes2);
 
-    let mut dec = Decoder::new(&final_bytes).unwrap();
-    dec.for_each_event(|_| {}).unwrap();
-    let pool_size = dec.string_pool().len();
-    assert_eq!(pool_size, 1, "expected single pooled string");
+    let mut dec = Decoder::new(&output).unwrap();
+    let mut count = 0;
+    dec.for_each_event(|_| count += 1).unwrap();
+    assert_eq!(count, 2);
+    // Each batch has its own pool, so after reset the pool only has the last batch's entries
+    // (the decoder resets on each mid-stream header)
 }
 
 #[test]
-fn test_transcode_timestamp_rebasing() {
+fn test_rawcopy_timestamp_preserved() {
     let mut enc1 = Encoder::new();
     enc1.write(&TestEvent {
         timestamp_ns: 5000,
@@ -153,12 +157,12 @@ fn test_transcode_timestamp_rebasing() {
     .unwrap();
     let bytes2 = enc2.reset();
 
-    let mut target = Encoder::new();
-    dial9_trace_format::transcoder::transcode(&bytes1, &mut target).unwrap();
-    dial9_trace_format::transcoder::transcode(&bytes2, &mut target).unwrap();
-    let final_bytes = target.reset();
+    let mut output = Vec::new();
+    dial9_trace_format::codec::encode_header(&mut output).unwrap();
+    output.extend_from_slice(&bytes1);
+    output.extend_from_slice(&bytes2);
 
-    let mut dec = Decoder::new(&final_bytes).unwrap();
+    let mut dec = Decoder::new(&output).unwrap();
     let mut timestamps = Vec::new();
     dec.for_each_event(|ev| {
         timestamps.push(ev.timestamp_ns);
@@ -168,44 +172,47 @@ fn test_transcode_timestamp_rebasing() {
 }
 
 #[test]
-fn test_transcode_schema_deduplication() {
+fn test_rawcopy_different_schemas() {
     let mut enc1 = Encoder::new();
     enc1.write(&TestEvent {
         timestamp_ns: 1000,
-        value: 1,
+        value: 42,
     })
     .unwrap();
-    let bytes1 = enc1.reset();
+    let bytes1 = enc1.finish();
 
     let mut enc2 = Encoder::new();
-    enc2.write(&TestEvent {
+    let name = enc2.intern_string("hello").unwrap();
+    enc2.write(&StringEvent {
         timestamp_ns: 2000,
-        value: 2,
+        name,
     })
     .unwrap();
-    let bytes2 = enc2.reset();
+    let bytes2 = enc2.finish();
 
-    let mut target = Encoder::new();
-    dial9_trace_format::transcoder::transcode(&bytes1, &mut target).unwrap();
-    dial9_trace_format::transcoder::transcode(&bytes2, &mut target).unwrap();
-    let final_bytes = target.reset();
+    // Concatenate: different schemas at type_id 0 in each batch
+    let mut combined = bytes1;
+    combined.extend_from_slice(&bytes2);
 
-    let mut dec = Decoder::new(&final_bytes).unwrap();
-    dec.for_each_event(|_| {}).unwrap();
-    let schema_count = dec.registry().entries().count();
-    assert_eq!(schema_count, 1, "expected single schema");
+    let mut dec = Decoder::new(&combined).unwrap();
+    let mut names = Vec::new();
+    dec.for_each_event(|ev| {
+        names.push(ev.name.to_string());
+    })
+    .unwrap();
+    assert_eq!(names, vec!["TestEvent", "StringEvent"]);
 }
 
 #[test]
-fn test_transcode_empty_batch() {
+fn test_rawcopy_empty_batch() {
     let mut enc1 = Encoder::new();
     let bytes1 = enc1.reset();
 
-    let mut target = Encoder::new();
-    dial9_trace_format::transcoder::transcode(&bytes1, &mut target).unwrap();
-    let final_bytes = target.reset();
+    let mut output = Vec::new();
+    dial9_trace_format::codec::encode_header(&mut output).unwrap();
+    output.extend_from_slice(&bytes1);
 
-    let mut dec = Decoder::new(&final_bytes).unwrap();
+    let mut dec = Decoder::new(&output).unwrap();
     let mut count = 0;
     dec.for_each_event(|_| count += 1).unwrap();
     assert_eq!(count, 0);

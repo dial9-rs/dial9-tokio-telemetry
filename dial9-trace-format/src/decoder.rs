@@ -158,24 +158,28 @@ impl<'a> Decoder<'a> {
         &self.string_pool
     }
 
-    /// Current read position in the input buffer.
-    pub(crate) fn pos(&self) -> usize {
-        self.pos
+    /// Reset decoder state (schemas, string pool, timestamp base) as if
+    /// starting a fresh stream. Used when a mid-stream header is encountered
+    /// (the "reset frame" pattern for concatenated thread-local batches).
+    fn reset_state(&mut self) {
+        self.registry = SchemaRegistry::new();
+        self.schema_cache.clear();
+        self.string_pool = StringPool::new();
+        self.timestamp_base_ns = 0;
     }
 
-    /// Advance the read position by `n` bytes.
-    pub(crate) fn advance(&mut self, n: usize) {
-        self.pos += n;
-    }
-
-    /// Current timestamp base for delta decoding.
-    pub(crate) fn timestamp_base_ns(&self) -> u64 {
-        self.timestamp_base_ns
-    }
-
-    /// Set the timestamp base (after decoding a timestamp reset or event).
-    pub(crate) fn set_timestamp_base(&mut self, ts: u64) {
-        self.timestamp_base_ns = ts;
+    /// If the current position starts with a valid header, reset state and
+    /// skip past it, returning true.
+    fn try_consume_reset_header(&mut self) -> bool {
+        if self.data.len() - self.pos >= HEADER_SIZE
+            && codec::decode_header(&self.data[self.pos..]).is_some()
+        {
+            self.reset_state();
+            self.pos += HEADER_SIZE;
+            true
+        } else {
+            false
+        }
     }
 
     /// Consume this decoder and create an [`Encoder`] that appends to the
@@ -222,6 +226,9 @@ impl<'a> Decoder<'a> {
     pub fn next_frame(&mut self) -> Result<Option<DecodedFrame>, DecodeError> {
         if self.pos >= self.data.len() {
             return Ok(None);
+        }
+        if self.try_consume_reset_header() {
+            return self.next_frame();
         }
         let remaining = &self.data[self.pos..];
         let base = self.timestamp_base_ns;
@@ -284,6 +291,9 @@ impl<'a> Decoder<'a> {
     pub fn next_frame_ref(&mut self) -> Result<Option<DecodedFrameRef<'a>>, DecodeError> {
         if self.pos >= self.data.len() {
             return Ok(None);
+        }
+        if self.try_consume_reset_header() {
+            return self.next_frame_ref();
         }
         let remaining = &self.data[self.pos..];
         let base = self.timestamp_base_ns;
@@ -464,16 +474,22 @@ impl<'a> Decoder<'a> {
                     self.timestamp_base_ns = ts;
                     self.pos += 9;
                 }
-                _ => match self.next_frame_ref() {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        return Err(TryForEachError::Decode(DecodeError {
-                            pos: self.pos,
-                            message: format!("failed to decode frame with tag 0x{tag:02x}"),
-                        }));
+                _ => {
+                    // Mid-stream header = reset frame (tag 0x54 = 'T' from TRC\0)
+                    if tag == codec::MAGIC[0] && self.try_consume_reset_header() {
+                        continue;
                     }
-                    Err(e) => return Err(TryForEachError::Decode(e)),
-                },
+                    match self.next_frame_ref() {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            return Err(TryForEachError::Decode(DecodeError {
+                                pos: self.pos,
+                                message: format!("failed to decode frame with tag 0x{tag:02x}"),
+                            }));
+                        }
+                        Err(e) => return Err(TryForEachError::Decode(e)),
+                    }
+                }
             }
         }
         Ok(())
