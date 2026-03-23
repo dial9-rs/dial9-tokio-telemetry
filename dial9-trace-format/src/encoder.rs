@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// A fast, non-cryptographic hasher using FxHash's multiply-shift strategy.
 /// Safe for HashMap keys that are already well-distributed (TypeId, Arc<str>).
 #[derive(Default)]
-struct FxHasher(u64);
+pub(crate) struct FxHasher(u64);
 
 impl Hasher for FxHasher {
     #[inline]
@@ -34,8 +34,8 @@ impl Hasher for FxHasher {
     }
 }
 
-type FxBuildHasher = BuildHasherDefault<FxHasher>;
-type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+pub(crate) type FxBuildHasher = BuildHasherDefault<FxHasher>;
+pub(crate) type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 /// A schema handle returned by [`Encoder::register_schema`] or created via
 /// [`Schema::new`].

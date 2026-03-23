@@ -103,6 +103,7 @@ pub fn transcode<W: Write>(source: &[u8], target: &mut Encoder<W>) -> Result<(),
                     })?;
 
                 let has_timestamp = ts.has_timestamp;
+                let field_types = &ts.field_types;
 
                 let timestamp_ns = if has_timestamp {
                     match codec::decode_u24_le(&remaining[pos..]) {
@@ -122,13 +123,8 @@ pub fn transcode<W: Write>(source: &[u8], target: &mut Encoder<W>) -> Result<(),
                     None
                 };
 
-                let schema_info = decoder.schema_info(type_id).ok_or_else(|| DecodeError {
-                    pos: ev_pos,
-                    message: format!("no schema info for type_id {type_id:?}"),
-                })?;
-
                 values_buf.clear();
-                for ft in schema_info.field_types {
+                for ft in field_types {
                     match FieldValueRef::decode(*ft, remaining, pos) {
                         Some((val, consumed)) => {
                             values_buf.push(val);

@@ -3,9 +3,9 @@
 use crate::codec::{
     self, Frame, FrameRef, HEADER_SIZE, PoolEntry, PoolEntryRef, SchemaInfo, WireTypeId,
 };
+use crate::encoder::FxHashMap;
 use crate::schema::{SchemaEntry, SchemaRegistry};
 use crate::types::{FieldType, FieldValueRef, InternedString};
-use std::collections::HashMap;
 use std::fmt;
 
 /// Error returned when the decoder cannot continue reading the stream.
@@ -62,11 +62,11 @@ pub struct RawEvent<'a, 'f> {
 /// Pass a reference to [`crate::TraceEvent::decode`] so that `InternedString` fields
 /// resolve to `&str` in derived `Ref` types.
 #[derive(Debug, Clone, Default)]
-pub struct StringPool(pub(crate) HashMap<InternedString, String>);
+pub struct StringPool(pub(crate) FxHashMap<InternedString, String>);
 
 impl StringPool {
     pub(crate) fn new() -> Self {
-        Self(HashMap::new())
+        Self(FxHashMap::default())
     }
 
     pub(crate) fn insert(&mut self, id: InternedString, value: String) {
@@ -126,7 +126,7 @@ pub struct Decoder<'a> {
     data: &'a [u8],
     pos: usize,
     registry: SchemaRegistry,
-    schema_cache: HashMap<WireTypeId, SchemaCache>,
+    schema_cache: Vec<Option<SchemaCache>>,
     string_pool: StringPool,
     version: u8,
     timestamp_base_ns: u64,
@@ -139,7 +139,7 @@ impl<'a> Decoder<'a> {
             data,
             pos: HEADER_SIZE,
             registry: SchemaRegistry::new(),
-            schema_cache: HashMap::new(),
+            schema_cache: Vec::new(),
             string_pool: StringPool::new(),
             version,
             timestamp_base_ns: 0,
@@ -194,21 +194,25 @@ impl<'a> Decoder<'a> {
     }
 
     pub(crate) fn schema_info(&self, type_id: WireTypeId) -> Option<SchemaInfo<'_>> {
-        self.schema_cache.get(&type_id).map(|c| SchemaInfo {
-            field_types: &c.field_types,
-            has_timestamp: c.has_timestamp,
-        })
+        self.schema_cache
+            .get(type_id.0 as usize)
+            .and_then(|s| s.as_ref())
+            .map(|c| SchemaInfo {
+                field_types: &c.field_types,
+                has_timestamp: c.has_timestamp,
+            })
     }
 
     fn register_schema(&mut self, type_id: WireTypeId, entry: SchemaEntry) -> Result<(), String> {
-        self.schema_cache.insert(
-            type_id,
-            SchemaCache {
-                name: entry.name.clone(),
-                field_types: entry.fields.iter().map(|f| f.field_type).collect(),
-                has_timestamp: entry.has_timestamp,
-            },
-        );
+        let idx = type_id.0 as usize;
+        if idx >= self.schema_cache.len() {
+            self.schema_cache.resize_with(idx + 1, || None);
+        }
+        self.schema_cache[idx] = Some(SchemaCache {
+            name: entry.name.clone(),
+            field_types: entry.fields.iter().map(|f| f.field_type).collect(),
+            has_timestamp: entry.has_timestamp,
+        });
         self.registry.register(type_id, entry)
     }
 
@@ -372,7 +376,11 @@ impl<'a> Decoder<'a> {
                             });
                         }
                     };
-                    let cache = match self.schema_cache.get(&type_id) {
+                    let cache = match self
+                        .schema_cache
+                        .get(type_id.0 as usize)
+                        .and_then(|s| s.as_ref())
+                    {
                         Some(c) => c,
                         None => {
                             return Err(DecodeError {
@@ -488,7 +496,11 @@ impl<'a> Decoder<'a> {
                             }));
                         }
                     };
-                    let cache = match self.schema_cache.get(&type_id) {
+                    let cache = match self
+                        .schema_cache
+                        .get(type_id.0 as usize)
+                        .and_then(|s| s.as_ref())
+                    {
                         Some(c) => c,
                         None => {
                             return Err(TryForEachError::Decode(DecodeError {
