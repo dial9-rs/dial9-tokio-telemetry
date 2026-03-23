@@ -7,8 +7,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// so the most recent data is always preserved.
 const DEFAULT_CAPACITY: usize = 1024;
 
+pub(crate) struct Batch {
+    pub raw_events: Vec<RawEvent>,
+    #[allow(dead_code)] // Used in future tasks
+    pub encoded_bytes: Vec<u8>,
+}
+
 pub(crate) struct CentralCollector {
-    queue: ArrayQueue<Vec<RawEvent>>,
+    queue: ArrayQueue<Batch>,
     dropped_batches: AtomicUsize,
 }
 
@@ -30,13 +36,13 @@ impl CentralCollector {
         }
     }
 
-    pub fn accept_flush(&self, buffer: Vec<RawEvent>) {
-        if let Some(_evicted) = self.queue.force_push(buffer) {
+    pub fn accept_flush(&self, batch: Batch) {
+        if let Some(_evicted) = self.queue.force_push(batch) {
             self.dropped_batches.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    pub fn next(&self) -> Option<Vec<RawEvent>> {
+    pub fn next(&self) -> Option<Batch> {
         self.queue.pop()
     }
 
@@ -61,15 +67,18 @@ mod tests {
     #[test]
     fn test_drain_clears_buffers() {
         let collector = CentralCollector::new();
-        collector.accept_flush(vec![poll_end()]);
+        collector.accept_flush(Batch {
+            raw_events: vec![poll_end()],
+            encoded_bytes: Vec::new(),
+        });
         assert!(collector.next().is_some());
         assert!(collector.next().is_none());
     }
 
     fn drain(collector: &CentralCollector) -> Vec<Vec<RawEvent>> {
         let mut out = vec![];
-        while let Some(ev) = collector.next() {
-            out.push(ev);
+        while let Some(batch) = collector.next() {
+            out.push(batch.raw_events);
         }
         out
     }
@@ -77,9 +86,18 @@ mod tests {
     #[test]
     fn test_bounded_evicts_oldest_when_full() {
         let collector = CentralCollector::with_capacity(2);
-        collector.accept_flush(vec![poll_end()]); // oldest — will be evicted
-        collector.accept_flush(vec![poll_end(), poll_end()]);
-        collector.accept_flush(vec![poll_end(), poll_end(), poll_end()]); // evicts first
+        collector.accept_flush(Batch {
+            raw_events: vec![poll_end()],
+            encoded_bytes: Vec::new(),
+        }); // oldest — will be evicted
+        collector.accept_flush(Batch {
+            raw_events: vec![poll_end(), poll_end()],
+            encoded_bytes: Vec::new(),
+        });
+        collector.accept_flush(Batch {
+            raw_events: vec![poll_end(), poll_end(), poll_end()],
+            encoded_bytes: Vec::new(),
+        }); // evicts first
         assert_eq!(collector.take_dropped_batches(), 1);
         let drained = drain(&collector);
         assert_eq!(drained.len(), 2);

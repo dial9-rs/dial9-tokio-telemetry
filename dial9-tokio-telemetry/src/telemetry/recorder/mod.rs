@@ -60,7 +60,7 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     }
 
     while let Some(batch) = shared.collector.next() {
-        for raw in batch {
+        for raw in batch.raw_events {
             if let Err(e) = event_writer.write_raw_event(raw) {
                 tracing::warn!("failed to write trace event: {e}");
                 shared.enabled.store(false, Ordering::Relaxed);

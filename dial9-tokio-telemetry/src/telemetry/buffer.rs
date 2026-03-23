@@ -53,7 +53,10 @@ impl Drop for ThreadLocalBuffer {
     fn drop(&mut self) {
         if !self.events.is_empty() {
             if let Some(collector) = self.collector.take() {
-                collector.accept_flush(std::mem::take(&mut self.events));
+                collector.accept_flush(crate::telemetry::collector::Batch {
+                    raw_events: std::mem::take(&mut self.events),
+                    encoded_bytes: Vec::new(),
+                });
             } else {
                 tracing::warn!(
                     "dial9-tokio-telemetry: dropping {} unflushed events (no collector registered on this thread)",
@@ -78,7 +81,10 @@ pub(crate) fn record_event(event: RawEvent, collector: &Arc<CentralCollector>) {
         buf.set_collector(collector);
         buf.record_event(event);
         if buf.should_flush() {
-            collector.accept_flush(buf.flush());
+            collector.accept_flush(crate::telemetry::collector::Batch {
+                raw_events: buf.flush(),
+                encoded_bytes: Vec::new(),
+            });
         }
     });
 }
@@ -90,7 +96,10 @@ pub(crate) fn drain_to_collector(collector: &CentralCollector) {
         let mut buf = buf.borrow_mut();
         let events = buf.flush();
         if !events.is_empty() {
-            collector.accept_flush(events);
+            collector.accept_flush(crate::telemetry::collector::Batch {
+                raw_events: events,
+                encoded_bytes: Vec::new(),
+            });
         }
     });
 }
