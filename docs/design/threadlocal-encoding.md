@@ -108,71 +108,89 @@ change are interchangeable.
 - **Dynamic event types**: any `#[derive(TraceEvent)]`
   struct can be encoded on a worker thread without changes
   to the central pipeline.
+- **Bounded memory consumption**: Since the exact buffer sizes (and the quantity of active bufffers is known) we can effectively put a hard cap on the amount of memory consumed by dial9.
+- **Prepares for decoupling from Tokio**: In the fullness of time, dial9 will operate as a centralized flight recording system where Tokio is just one participant
 
 ## Technical Design
 
 ### Dual-path architecture
 
-Both the `RawEvent` enum path and the encoded-bytes path
-will coexist. This enables:
+During incremental migration, each `ThreadLocalBuffer`
+holds both paths simultaneously:
 
-1. **Incremental migration**: existing event types can move
-   to thread-local encoding one at a time.
+- A `Vec<RawEvent>` for event types not yet migrated to
+  thread-local encoding.
+- An `Encoder<Vec<u8>>` for event types that have been
+  migrated.
+
+Each call to `record_event` routes the event to one path
+or the other based on the event variant. For example,
+`PollStart` might encode through the `Encoder` while
+`QueueSample` still goes into the `Vec<RawEvent>`. As
+event types are migrated one by one, the `Vec<RawEvent>`
+shrinks and the `Encoder` handles more. Eventually, only
+`CpuSample` events (produced on the flush thread, not
+worker threads) remain as `RawEvent`s.
+
+This enables:
+
+1. **Incremental migration**: existing event types move
+   to thread-local encoding one at a time, with no
+   flag-day cutover.
 2. **Benchmarking**: the `RawEvent` path serves as a
    baseline for measuring the performance impact of
    thread-local encoding.
-3. **CPU profiler events**: `CpuSample` events are produced
-   on the flush thread and written directly through the
-   central encoder — they never touch the thread-local path.
+3. **CPU profiler events**: `CpuSample` events are
+   produced on the flush thread and written directly
+   through the central encoder — they never touch the
+   thread-local path.
 
-The `CentralCollector` accepts both batch types:
+On flush, the buffer produces a `Batch` containing both
+the raw events and the encoded bytes from that session:
 
 ```rust
 // collector.rs
-pub(crate) enum Batch {
-    /// Legacy path: unencoded RawEvents.
-    Raw(Vec<RawEvent>),
-    /// New path: pre-encoded byte stream.
-    Encoded(EncodedBatch),
-}
-
-pub(crate) struct EncodedBatch {
-    /// Complete dial9-trace-format byte stream (header +
-    /// schemas + string pools + events) from one thread's
-    /// encoding session.
-    pub bytes: Vec<u8>,
+pub(crate) struct Batch {
+    /// Unencoded events (legacy path / not-yet-migrated).
+    pub raw_events: Vec<RawEvent>,
+    /// Pre-encoded byte stream from the thread-local
+    /// Encoder (migrated events). Empty if no events
+    /// were routed to the encoder this session.
+    pub encoded_bytes: Vec<u8>,
 }
 ```
 
-The flush thread handles both:
+The flush thread processes both halves of each batch:
 
 ```rust
 // flush_once (sketch)
 while let Some(batch) = shared.collector.next() {
-    match batch {
-        Batch::Raw(events) => {
-            for raw in events {
-                event_writer.write_raw_event(raw)?;
-            }
-        }
-        Batch::Encoded(batch) => {
-            transcoder.transcode(
-                &batch.bytes,
-                &mut event_writer,
-            )?;
-        }
+    for raw in &batch.raw_events {
+        event_writer.write_raw_event(raw)?;
+    }
+    if !batch.encoded_bytes.is_empty() {
+        transcoder.transcode(
+            &batch.encoded_bytes,
+            &mut event_writer,
+        )?;
     }
 }
 ```
 
 ### Phase 1: Thread-local `Encoder<Vec<u8>>`
 
-Replace `Vec<RawEvent>` in `ThreadLocalBuffer` with an
-`Encoder<Vec<u8>>` that encodes events into a byte buffer.
+Add an `Encoder<Vec<u8>>` alongside the existing
+`Vec<RawEvent>` in `ThreadLocalBuffer`. Both paths
+coexist in the same buffer:
 
 ```rust
 // buffer.rs (new)
 pub(crate) struct ThreadLocalBuffer {
+    /// Legacy path: events not yet migrated to
+    /// thread-local encoding.
+    events: Vec<RawEvent>,
+    /// New path: thread-local encoder for migrated
+    /// event types.
     encoder: Encoder<Vec<u8>>,
     event_count: usize,
     collector: Option<Arc<CentralCollector>>,
@@ -191,12 +209,29 @@ pub(crate) struct ThreadLocalBuffer {
 }
 ```
 
-`record_event` encodes immediately:
+`record_event` routes each event to the appropriate path:
 
 ```rust
 fn record_event(&mut self, event: RawEvent) {
-    self.encode_event(&event);
+    if Self::should_encode(&event) {
+        self.encode_event(&event);
+    } else {
+        self.events.push(event);
+    }
     self.event_count += 1;
+}
+
+/// Returns true for event types that have been migrated
+/// to thread-local encoding. Initially returns false for
+/// all types; as each type is migrated, its match arm
+/// flips to true.
+fn should_encode(event: &RawEvent) -> bool {
+    match event {
+        // Migrated events:
+        // RawEvent::PollStart { .. } => true,
+        // Not yet migrated:
+        _ => false,
+    }
 }
 ```
 
@@ -207,40 +242,41 @@ thread-local encoder's pool — each thread assigns its own
 pool IDs independently.
 
 On flush (when `event_count >= BUFFER_CAPACITY`), the
-buffer extracts the encoded bytes and resets the encoder
-into a fresh `Vec<u8>` using `reset_to`:
+buffer produces a `Batch` containing both halves and
+resets both paths:
 
 ```rust
-fn flush(&mut self) -> EncodedBatch {
-    let bytes = self.encoder.reset_to(
-        Vec::with_capacity(ESTIMATED_BATCH_SIZE)
+fn flush(&mut self) -> Batch {
+    let raw_events = std::mem::replace(
+        &mut self.events,
+        Vec::with_capacity(BUFFER_CAPACITY),
+    );
+    let encoded_bytes = self.encoder.reset_to(
+        Vec::with_capacity(ESTIMATED_BATCH_SIZE),
     );
     self.event_count = 0;
     // location_cache is preserved — it caches formatted
     // Strings, not InternedString IDs, so it survives
     // encoder resets.
-    EncodedBatch { bytes }
+    Batch { raw_events, encoded_bytes }
 }
 ```
 
-### Phase 2: `EncodedBatch` in `CentralCollector`
+### Phase 2: `Batch` in `CentralCollector`
 
 `CentralCollector` changes from
 `ArrayQueue<Vec<RawEvent>>` to `ArrayQueue<Batch>`:
 
 ```rust
-pub fn accept_flush_encoded(&self, batch: EncodedBatch) {
+pub fn accept_flush(&self, batch: Batch) {
     if let Some(_evicted) =
-        self.queue.force_push(Batch::Encoded(batch))
+        self.queue.force_push(batch)
     {
         self.dropped_batches
             .fetch_add(1, Ordering::Relaxed);
     }
 }
 ```
-
-The existing `accept_flush(Vec<RawEvent>)` wraps in
-`Batch::Raw` for backward compatibility.
 
 ### Phase 3: `Encoder::reset_to`
 
@@ -355,7 +391,7 @@ pub enum TranscodeError {
 
 The `Transcoder` is stateful to allow reusing allocations
 across batches. The telemetry crate's flush thread creates
-one `Transcoder` and reuses it for every `EncodedBatch`.
+one `Transcoder` and reuses it for every batch.
 
 The `for_each_event` callback receives
 `dial9_trace_format::decoder::RawEvent` refs whose fields
@@ -435,7 +471,7 @@ through the central encoder. No change needed.
 
 The `TraceWriter` trait currently accepts `&RawEvent`. After
 this change, the flush thread handles both `RawEvent`s (via
-the existing path) and `EncodedBatch`es (via the
+the existing path) and encoded bytes (via the
 `Transcoder`). Two options:
 
 **Option A (recommended)**: Add a `write_transcoded_batch`
@@ -467,10 +503,10 @@ change the `TraceWriter` trait signature.
 
 | File | Change |
 |------|--------|
-| `buffer.rs` | Add `Encoder<Vec<u8>>` path alongside `Vec<RawEvent>`. Change `flush` to return `Batch::Encoded` when using the encoded path. Cache formatted `String`s (not `InternedString`s) in `location_cache`. |
-| `collector.rs` | Add `Batch` enum (`Raw`/`Encoded`). Add `EncodedBatch` struct. Change `ArrayQueue<Vec<RawEvent>>` to `ArrayQueue<Batch>`. Add `accept_flush_encoded`. |
+| `buffer.rs` | Add `Encoder<Vec<u8>>` path alongside `Vec<RawEvent>`. Change `flush` to return `Batch` struct with both `raw_events` and `encoded_bytes`. Add `should_encode` routing and `encode_event`. Cache formatted `String`s (not `InternedString`s) in `location_cache`. |
+| `collector.rs` | Add `Batch` struct (`raw_events: Vec<RawEvent>`, `encoded_bytes: Vec<u8>`). Change `ArrayQueue<Vec<RawEvent>>` to `ArrayQueue<Batch>`. Single `accept_flush(Batch)` method. |
 | `events.rs` | No change to `RawEvent` enum (still used by CPU profiler path and legacy dual-path). |
-| `recorder/mod.rs` | Update `flush_once` to match on `Batch::Raw` / `Batch::Encoded`, calling `transcode` for encoded batches. |
+| `recorder/mod.rs` | Update `flush_once` to process both `batch.raw_events` and `batch.encoded_bytes`, calling `transcode` for the encoded portion. |
 | `recorder/event_writer.rs` | Add `write_transcoded_batch` method that uses `Transcoder` to re-encode through the central writer. |
 | `writer.rs` | No change — `RotatingWriter` continues to own the central `Encoder`. |
 | `recorder/shared_state.rs` | `record_event` still creates `RawEvent` and passes it to `buffer::record_event`. No change to the hot-path API. |
@@ -478,8 +514,9 @@ change the `TraceWriter` trait signature.
 
 ### New types
 
-- `Batch` enum in `collector.rs`.
-- `EncodedBatch` in `collector.rs`: wraps `Vec<u8>`.
+- `Batch` struct in `collector.rs`: contains both
+  `raw_events: Vec<RawEvent>` and
+  `encoded_bytes: Vec<u8>`.
 - `Transcoder` in `dial9-trace-format/src/transcoder.rs`.
 - `TranscodeError` in `dial9-trace-format/src/transcoder.rs`.
 
@@ -504,12 +541,14 @@ architecture and CPU profiler events.
   batches with different bases produce correct absolute
   timestamps in the output).
 - **`buffer.rs`**: Test that `record_event` followed by
-  `flush` produces an `EncodedBatch` whose bytes decode to
-  the expected events (round-trip through
-  `Decoder::for_each_event`).
-- **`collector.rs`**: Test `Batch::Encoded` flow through
-  `ArrayQueue` (accept, drain, eviction). Test
-  `Batch::Raw` backward compatibility.
+  `flush` produces a `Batch` whose `encoded_bytes` decode
+  to the expected events (round-trip through
+  `Decoder::for_each_event`), and whose `raw_events`
+  contain the not-yet-migrated events.
+- **`collector.rs`**: Test `Batch` flow through
+  `ArrayQueue` (accept, drain, eviction). Test that
+  batches with only `raw_events`, only `encoded_bytes`,
+  or both are handled correctly.
 
 ### Integration tests
 
@@ -553,18 +592,21 @@ architecture and CPU profiler events.
    `Decoder`. Unit test round-trip transcoding with string
    pool remapping and timestamp rebasing.
 
-4. **Add `Batch` enum and `EncodedBatch`** to
-   `collector.rs`. Keep the old `Vec<RawEvent>` path
-   working via `Batch::Raw`.
+4. **Add `Batch` struct** to `collector.rs`. Change
+   `ArrayQueue<Vec<RawEvent>>` to `ArrayQueue<Batch>`.
+   Initially, `encoded_bytes` is always empty and
+   `raw_events` carries all events — existing behavior
+   is preserved.
 
 5. **Add thread-local encoding** in `buffer.rs`: add
    `Encoder<Vec<u8>>` alongside `Vec<RawEvent>`, implement
-   `encode_event`, produce `EncodedBatch` on flush. Use
-   `reset_to` instead of creating a new encoder.
+   `should_encode` routing and `encode_event`, produce
+   `Batch` with both halves on flush. Use `reset_to`
+   instead of creating a new encoder.
 
-6. **Wire it together** in `flush_once`: match on
-   `Batch::Raw` / `Batch::Encoded`, calling `Transcoder`
-   for encoded batches.
+6. **Wire it together** in `flush_once`: process
+   `batch.raw_events` through the existing path and
+   `batch.encoded_bytes` through the `Transcoder`.
 
 7. **Benchmark**: run the MVP benchmark from step 1 to
    validate performance. Run `compare_overhead.sh` to
@@ -582,7 +624,7 @@ architecture and CPU profiler events.
    distinct spawn locations is small (one per
    `tokio::spawn` call site), so the cache stays small.
 
-2. **Batch header overhead**: Each `EncodedBatch` contains
+2. **Batch header overhead**: Each encoded batch contains
    a 5-byte file header, schema frames, and string pool
    frames in addition to event data. For 1024 events this
    overhead is negligible (~0.5%), but if `BUFFER_CAPACITY`
@@ -596,6 +638,6 @@ architecture and CPU profiler events.
    too. This is out of scope for the initial
    implementation.
 
-4. **Dual-path sunset**: The `Batch::Raw` path is retained
-   indefinitely for benchmarking and incremental migration.
-   No timeline for removing it.
+4. **Dual-path sunset**: The `raw_events` path in `Batch`
+   is retained indefinitely for benchmarking and
+   incremental migration. No timeline for removing it.
