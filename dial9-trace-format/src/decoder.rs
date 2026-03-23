@@ -25,6 +25,24 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+/// Error returned by [`Decoder::try_for_each_event`].
+#[derive(Debug)]
+pub enum TryForEachError<E> {
+    Decode(DecodeError),
+    User(E),
+}
+
+impl<E: fmt::Display> fmt::Display for TryForEachError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TryForEachError::Decode(e) => write!(f, "{e}"),
+            TryForEachError::User(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl<E: fmt::Display + fmt::Debug> std::error::Error for TryForEachError<E> {}
+
 /// A decoded event passed to [`Decoder::for_each_event`].
 ///
 /// `'a` is the lifetime of the input data buffer (strings, stack frames borrow from it).
@@ -140,6 +158,26 @@ impl<'a> Decoder<'a> {
         &self.string_pool
     }
 
+    /// Current read position in the input buffer.
+    pub(crate) fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Advance the read position by `n` bytes.
+    pub(crate) fn advance(&mut self, n: usize) {
+        self.pos += n;
+    }
+
+    /// Current timestamp base for delta decoding.
+    pub(crate) fn timestamp_base_ns(&self) -> u64 {
+        self.timestamp_base_ns
+    }
+
+    /// Set the timestamp base (after decoding a timestamp reset or event).
+    pub(crate) fn set_timestamp_base(&mut self, ts: u64) {
+        self.timestamp_base_ns = ts;
+    }
+
     /// Consume this decoder and create an [`Encoder`] that appends to the
     /// decoded trace. The encoder inherits the string pool, schema registry,
     /// and timestamp base so new frames are compatible with the existing data.
@@ -155,7 +193,7 @@ impl<'a> Decoder<'a> {
         )
     }
 
-    fn schema_info(&self, type_id: WireTypeId) -> Option<SchemaInfo<'_>> {
+    pub(crate) fn schema_info(&self, type_id: WireTypeId) -> Option<SchemaInfo<'_>> {
         self.schema_cache.get(&type_id).map(|c| SchemaInfo {
             field_types: &c.field_types,
             has_timestamp: c.has_timestamp,
@@ -417,6 +455,117 @@ impl<'a> Decoder<'a> {
                         Err(e) => return Err(e),
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Like [`for_each_event`](Self::for_each_event), but the callback may
+    /// return an error to stop iteration early.
+    pub fn try_for_each_event<E>(
+        &mut self,
+        mut f: impl for<'f> FnMut(RawEvent<'a, 'f>) -> Result<(), E>,
+    ) -> Result<(), TryForEachError<E>> {
+        let mut values_buf: Vec<FieldValueRef<'a>> = Vec::new();
+        while self.pos < self.data.len() {
+            let remaining = &self.data[self.pos..];
+            let tag = match remaining.first() {
+                Some(t) => *t,
+                None => break,
+            };
+            match tag {
+                codec::TAG_EVENT => {
+                    let mut pos = 1;
+                    let type_id = match remaining.get(pos..pos + 2) {
+                        Some(b) => {
+                            pos += 2;
+                            WireTypeId(u16::from_le_bytes(b.try_into().unwrap()))
+                        }
+                        None => {
+                            return Err(TryForEachError::Decode(DecodeError {
+                                pos: self.pos,
+                                message: "truncated event frame".into(),
+                            }));
+                        }
+                    };
+                    let cache = match self.schema_cache.get(&type_id) {
+                        Some(c) => c,
+                        None => {
+                            return Err(TryForEachError::Decode(DecodeError {
+                                pos: self.pos,
+                                message: format!("unknown type_id {type_id:?}"),
+                            }));
+                        }
+                    };
+
+                    let timestamp_ns = if cache.has_timestamp {
+                        match codec::decode_u24_le(&remaining[pos..]) {
+                            Some(delta) => {
+                                pos += 3;
+                                Some(self.timestamp_base_ns + delta as u64)
+                            }
+                            None => {
+                                return Err(TryForEachError::Decode(DecodeError {
+                                    pos: self.pos + pos,
+                                    message: "truncated timestamp delta".into(),
+                                }));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    values_buf.clear();
+                    for ft in &cache.field_types {
+                        match FieldValueRef::decode(*ft, remaining, pos) {
+                            Some((val, consumed)) => {
+                                values_buf.push(val);
+                                pos += consumed;
+                            }
+                            None => {
+                                return Err(TryForEachError::Decode(DecodeError {
+                                    pos: self.pos + pos,
+                                    message: "truncated field value".into(),
+                                }));
+                            }
+                        }
+                    }
+                    self.pos += pos;
+                    if let Some(ts) = timestamp_ns {
+                        self.timestamp_base_ns = ts;
+                    }
+                    f(RawEvent {
+                        type_id,
+                        name: &cache.name,
+                        timestamp_ns,
+                        fields: &values_buf,
+                        string_pool: &self.string_pool,
+                    })
+                    .map_err(TryForEachError::User)?;
+                }
+                codec::TAG_TIMESTAMP_RESET => {
+                    let ts = match self.data.get(self.pos + 1..self.pos + 9) {
+                        Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
+                        None => {
+                            return Err(TryForEachError::Decode(DecodeError {
+                                pos: self.pos,
+                                message: "truncated timestamp reset".into(),
+                            }));
+                        }
+                    };
+                    self.timestamp_base_ns = ts;
+                    self.pos += 9;
+                }
+                _ => match self.next_frame_ref() {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        return Err(TryForEachError::Decode(DecodeError {
+                            pos: self.pos,
+                            message: format!("failed to decode frame with tag 0x{tag:02x}"),
+                        }));
+                    }
+                    Err(e) => return Err(TryForEachError::Decode(e)),
+                },
             }
         }
         Ok(())
