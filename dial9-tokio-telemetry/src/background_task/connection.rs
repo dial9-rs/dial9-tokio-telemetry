@@ -1,3 +1,4 @@
+#![cfg(feature = "worker-s3")]
 //! Circuit breaker for S3 uploads.
 //!
 //! Tracks whether S3 is reachable and manages exponential backoff
@@ -11,8 +12,7 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Circuit breaker for S3 upload attempts.
-#[derive(Debug, Default)]
-#[allow(dead_code)] // methods used in tests
+#[derive(Debug, Default, PartialEq, Eq)]
 pub enum CircuitBreaker {
     /// S3 is reachable. Normal upload + delete.
     #[default]
@@ -24,7 +24,6 @@ pub enum CircuitBreaker {
     },
 }
 
-#[allow(dead_code)] // methods used in tests
 impl CircuitBreaker {
     /// Create a new closed (healthy) circuit breaker.
     pub fn new() -> Self {
@@ -55,19 +54,6 @@ impl CircuitBreaker {
             backoff,
         };
     }
-
-    /// Whether the circuit is currently closed (healthy).
-    pub(crate) fn is_closed(&self) -> bool {
-        matches!(self, Self::Closed)
-    }
-
-    /// Current backoff duration (for testing/logging). None if closed.
-    pub(crate) fn current_backoff(&self) -> Option<Duration> {
-        match self {
-            Self::Closed => None,
-            Self::Open { backoff, .. } => Some(*backoff),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -76,10 +62,18 @@ mod tests {
     use assert2::check;
     use std::time::Duration;
 
+    /// Extract the backoff duration from an open circuit breaker.
+    fn backoff_of(cb: &CircuitBreaker) -> Duration {
+        match cb {
+            CircuitBreaker::Open { backoff, .. } => *backoff,
+            CircuitBreaker::Closed => panic!("expected Open, got Closed"),
+        }
+    }
+
     #[test]
     fn starts_closed() {
         let cb = CircuitBreaker::new();
-        check!(cb.is_closed());
+        check!(cb == CircuitBreaker::Closed);
         check!(cb.should_attempt());
     }
 
@@ -87,8 +81,8 @@ mod tests {
     fn opens_on_failure() {
         let mut cb = CircuitBreaker::new();
         cb.on_failure();
-        check!(!cb.is_closed());
-        check!(cb.current_backoff() == Some(Duration::from_secs(1)));
+        check!(cb != CircuitBreaker::Closed);
+        check!(backoff_of(&cb) == Duration::from_secs(1));
     }
 
     #[test]
@@ -96,7 +90,7 @@ mod tests {
         let mut cb = CircuitBreaker::new();
         cb.on_failure();
         cb.on_success();
-        check!(cb.is_closed());
+        check!(cb == CircuitBreaker::Closed);
         check!(cb.should_attempt());
     }
 
@@ -104,11 +98,11 @@ mod tests {
     fn backoff_doubles_on_repeated_failures() {
         let mut cb = CircuitBreaker::new();
         cb.on_failure();
-        check!(cb.current_backoff() == Some(Duration::from_secs(1)));
+        check!(backoff_of(&cb) == Duration::from_secs(1));
         cb.on_failure();
-        check!(cb.current_backoff() == Some(Duration::from_secs(2)));
+        check!(backoff_of(&cb) == Duration::from_secs(2));
         cb.on_failure();
-        check!(cb.current_backoff() == Some(Duration::from_secs(4)));
+        check!(backoff_of(&cb) == Duration::from_secs(4));
     }
 
     #[test]
@@ -117,7 +111,7 @@ mod tests {
         for _ in 0..20 {
             cb.on_failure();
         }
-        check!(cb.current_backoff() == Some(Duration::from_secs(300)));
+        check!(backoff_of(&cb) == Duration::from_secs(300));
     }
 
     #[test]
@@ -126,9 +120,8 @@ mod tests {
         cb.on_failure();
         cb.on_failure();
         cb.on_success();
-        check!(cb.is_closed());
-        check!(cb.current_backoff() == None);
+        check!(cb == CircuitBreaker::Closed);
         cb.on_failure();
-        check!(cb.current_backoff() == Some(Duration::from_secs(1)));
+        check!(backoff_of(&cb) == Duration::from_secs(1));
     }
 }
