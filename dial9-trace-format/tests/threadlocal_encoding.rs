@@ -193,7 +193,7 @@ fn test_transcode_schema_deduplication() {
 
 #[test]
 fn test_transcode_empty_batch() {
-    let enc1 = Encoder::new();
+    let mut enc1 = Encoder::new();
     let bytes1 = enc1.reset();
 
     let mut target = Encoder::new();

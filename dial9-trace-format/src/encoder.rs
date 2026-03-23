@@ -92,6 +92,11 @@ impl Encoder<Vec<u8>> {
     pub fn finish(self) -> Vec<u8> {
         self.state.writer.into_inner()
     }
+
+    /// Reset the encoder, returning the encoded bytes and starting a fresh session.
+    pub fn reset(&mut self) -> Vec<u8> {
+        self.reset_to(Vec::new())
+    }
 }
 
 impl<W: Write> Encoder<W> {
@@ -156,6 +161,19 @@ impl<W: Write> Encoder<W> {
     /// Total bytes written through this encoder (including the file header).
     pub fn bytes_written(&self) -> u64 {
         self.state.writer.bytes_written()
+    }
+
+    /// Reset the encoder to a new writer, preserving internal allocations.
+    /// Returns the old writer. Writes a file header to the new writer.
+    pub fn reset_to(&mut self, mut new_writer: W) -> W {
+        codec::encode_header(&mut new_writer).expect("header write failed");
+        self.string_pool.clear();
+        self.next_pool_id = 0;
+        self.registry.schemas.clear();
+        self.registry.next_id = 0;
+        self.schema_ids.clear();
+        let old_state = std::mem::replace(&mut self.state, EncodeState::new(new_writer));
+        old_state.writer.into_inner()
     }
 
     /// Ensure a schema is registered with this encoder. Returns the wire type
@@ -775,5 +793,20 @@ mod tests {
             })
             .collect();
         assert_eq!(events, vec![ts1, ts2]);
+    }
+
+    #[test]
+    fn reset_to_preserves_capacity() {
+        let mut enc = Encoder::new();
+        for i in 0..100 {
+            enc.intern_string(&format!("string_{}", i)).unwrap();
+        }
+        let cap_before = enc.string_pool.capacity();
+        let _bytes = enc.reset_to(Vec::new());
+        let cap_after = enc.string_pool.capacity();
+        assert_eq!(
+            cap_before, cap_after,
+            "string_pool capacity should be preserved after reset_to"
+        );
     }
 }
