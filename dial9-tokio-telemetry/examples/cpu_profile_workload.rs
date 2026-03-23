@@ -60,7 +60,7 @@ fn main() {
 
     // Read back and report
     eprintln!("\n=== Reading trace from {trace_path} ===");
-    let reader = dial9_tokio_telemetry::telemetry::TraceReader::new(trace_path).unwrap();
+    let reader = dial9_tokio_telemetry::analysis_unstable::TraceReader::new(trace_path).unwrap();
     let events = &reader.runtime_events;
     let mut cpu_samples = 0;
     let mut polls = 0;

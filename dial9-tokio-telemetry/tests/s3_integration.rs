@@ -98,7 +98,7 @@ async fn graceful_shutdown_seals_segments() {
 /// real trace events are present.
 #[test]
 fn end_to_end_trace_to_s3_roundtrip() {
-    use dial9_tokio_telemetry::telemetry::TraceReader;
+    use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
@@ -218,7 +218,7 @@ fn end_to_end_trace_to_s3_roundtrip() {
 /// and corrects the client, even when the initial client has the wrong region.
 #[test]
 fn region_auto_detection_corrects_wrong_client_region() {
-    use dial9_tokio_telemetry::telemetry::TraceReader;
+    use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
@@ -334,7 +334,7 @@ fn region_auto_detection_corrects_wrong_client_region() {
 /// the worker would pick up any leftover segments.
 #[test]
 fn stress_test_all_segments_uploaded_and_valid() {
-    use dial9_tokio_telemetry::telemetry::TraceReader;
+    use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();

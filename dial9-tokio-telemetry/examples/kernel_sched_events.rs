@@ -42,8 +42,9 @@
 //!   ...
 //!   start_thread
 
+use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 use dial9_tokio_telemetry::telemetry::{
-    CpuSampleSource, RotatingWriter, SchedEventConfig, TelemetryEvent, TraceReader, TracedRuntime,
+    CpuSampleSource, RotatingWriter, SchedEventConfig, TelemetryEvent, TracedRuntime,
 };
 use std::time::Duration;
 

@@ -1,6 +1,7 @@
 //! Integration test: verify JS trace parser matches Rust parser
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TraceReader, TracedRuntime};
+use dial9_tokio_telemetry::analysis_unstable::TraceReader;
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::io::{BufWriter, Write};
 use std::process::Command;
 use tempfile::TempDir;

@@ -5,7 +5,7 @@
 //!
 //! If output is omitted, writes to stdout.
 
-use dial9_tokio_telemetry::telemetry::TraceReader;
+use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 use std::io::{BufWriter, Write};
 
 fn main() -> std::io::Result<()> {

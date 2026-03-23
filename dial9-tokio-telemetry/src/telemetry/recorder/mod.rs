@@ -811,6 +811,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "analysis")]
     fn test_spawn_locations_resolve_after_rotation() {
         use crate::telemetry::analysis::TraceReader;
         use crate::telemetry::format::WorkerId;
@@ -902,7 +903,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "cpu-profiling")]
+    #[cfg(all(feature = "cpu-profiling", feature = "analysis"))]
     mod rotation_proptest {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
