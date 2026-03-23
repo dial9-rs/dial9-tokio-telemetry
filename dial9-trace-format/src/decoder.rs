@@ -150,7 +150,7 @@ impl<'a> Decoder<'a> {
         &self.string_pool
     }
 
-    /// Consume this decoder and create an [`Encoder`] that appends to the
+    /// Consume this decoder and create an [`Encoder`](crate::encoder::Encoder) that appends to the
     /// decoded trace. The encoder inherits the string pool, schema registry,
     /// and timestamp base so new frames are compatible with the existing data.
     ///

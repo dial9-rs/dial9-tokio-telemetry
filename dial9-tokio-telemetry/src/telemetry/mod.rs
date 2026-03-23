@@ -20,9 +20,7 @@ pub use cpu_profile::CpuProfilingConfig;
 #[cfg(feature = "cpu-profiling")]
 pub use cpu_profile::SchedEventConfig;
 pub use dial9_trace_format::InternedString;
-pub use events::{
-    CpuSampleData, CpuSampleSource, RawEvent, SchedStat, TelemetryEvent, clock_monotonic_ns,
-};
+pub use events::{CpuSampleSource, RawEvent, TelemetryEvent, clock_monotonic_ns};
 pub use format::{PollEndEvent, WorkerId};
 pub use recorder::{
     HasTracePath, NoTracePath, TelemetryGuard, TelemetryHandle, TracedRuntime, TracedRuntimeBuilder,

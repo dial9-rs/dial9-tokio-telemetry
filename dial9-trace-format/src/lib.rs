@@ -11,10 +11,10 @@
 //! - [`decoder`] — streaming [`Decoder`](decoder::Decoder) for reading traces
 //! - [`codec`]   — wire-format types ([`WireTypeId`](codec::WireTypeId),
 //!   [`PoolEntry`](codec::PoolEntry)) that appear in decoded frames
-//! - [`schema`]  — [`SchemaEntry`](schema::SchemaEntry) and
-//!   [`FieldDef`](schema::FieldDef) describing event layouts
-//! - [`types`]   — field value types, the [`TraceField`](types::TraceField)
-//!   trait, and the [`EventEncoder`](types::EventEncoder) used by derived code
+//! - [`schema`]  — [`SchemaEntry`] and
+//!   [`FieldDef`] describing event layouts
+//! - [`types`]   — field value types, the [`TraceField`]
+//!   trait, and the [`EventEncoder`] used by derived code
 
 pub mod codec;
 pub mod decoder;
