@@ -1,6 +1,0 @@
-- The motivation is actually not right. we aren't bottlenecking on the central thread. the motivation is actually to allow dynamic events
-- As part of this work, I want to make sure we have a task to breakout and do a MVP benchmark of how this will impact performance
-- Add an optimized path to `reset_to(T)` the encoder that resets the encoder into a new impl write (preserving allocations)
-- transcoding should be baked directly into the `dial9-trace-format` crate as a first class feature
-- I right now we can only have 255 unique event types. I think the trace format will need the ability to define an overflow event type (if id == 255, then look _after_ the timestamp frame. alternatively, if perf is OK we could consider leb128 ing the event id but that complicates packing with the 24-bit timestamp delta.)
-- I think there is a world where we actually preserve RawEvent (potentially indefinitely) that makes it easy to benchmark the performance as well, so lets plan on keeping a dual-path for now.

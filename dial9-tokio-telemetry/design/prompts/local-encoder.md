@@ -1,1 +1,0 @@
-Move encoding into the ThreadLocal buffers, then Transcode the buffers into the central buffer when persisting data

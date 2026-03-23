@@ -1,1 +1,0 @@
-the dual-path diesng isn't quite right. I think TLBuffers need to have both RawEvent (for some events) and the Raw encoder (for events as we migrate them, slowly, to the raw encoder format). So we need to be preserving both in the TL buffer right?
