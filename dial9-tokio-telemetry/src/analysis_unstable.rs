@@ -12,8 +12,8 @@
 //! use dial9_tokio_telemetry::analysis_unstable::{TraceReader, analyze_trace, print_analysis};
 //!
 //! let reader = TraceReader::new("trace.0.bin")?;
-//! let analysis = analyze_trace(&reader);
-//! print_analysis(&analysis);
+//! let analysis = analyze_trace(&reader.runtime_events);
+//! print_analysis(&analysis, &reader.spawn_locations);
 //! ```
 
 pub use crate::telemetry::analysis::{

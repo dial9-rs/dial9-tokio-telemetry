@@ -1,4 +1,3 @@
-#![cfg(feature = "worker-s3")]
 //! Circuit breaker for S3 uploads.
 //!
 //! Tracks whether S3 is reachable and manages exponential backoff

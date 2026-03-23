@@ -558,4 +558,28 @@ mod tests {
     fn unknown_tag_returns_none() {
         assert!(decode_frame(&[0xFF], |_| None, 0).is_none());
     }
+
+    #[test]
+    fn truncated_event_frame() {
+        let types = vec![FieldType::Varint];
+        let data = [TAG_EVENT, 0x01];
+        let result = decode_frame(
+            &data,
+            |_| {
+                Some(SchemaInfo {
+                    field_types: &types,
+                    has_timestamp: false,
+                })
+            },
+            0,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn truncated_schema_frame() {
+        let data = [TAG_SCHEMA, 0x00, 0x00];
+        let result = decode_frame(&data, |_: WireTypeId| None, 0);
+        assert!(result.is_none());
+    }
 }
