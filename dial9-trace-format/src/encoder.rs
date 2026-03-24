@@ -6,8 +6,51 @@ use crate::schema::{SchemaEntry, SchemaRegistry};
 use crate::types::{EncodeState, EventEncoder, InternedString};
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{self, Write};
 use std::sync::Arc;
+
+/// A fast, non-cryptographic hasher using FxHash's multiply-shift strategy.
+/// Safe for HashMap keys that are already well-distributed (TypeId, Arc<str>).
+#[derive(Default)]
+pub(crate) struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x517cc1b727220a95);
+        }
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517cc1b727220a95);
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(i as u64)
+    }
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.write_u64(i as u64)
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64)
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub(crate) type FxBuildHasher = BuildHasherDefault<FxHasher>;
+pub(crate) type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 /// A schema handle returned by [`Encoder::register_schema`] or created via
 /// [`Schema::new`].
@@ -19,7 +62,7 @@ use std::sync::Arc;
 /// `Schema` is cheap to clone (internally `Arc`-backed).
 #[derive(Clone, Debug)]
 pub struct Schema {
-    entry: Arc<SchemaEntry>,
+    pub(crate) entry: Arc<SchemaEntry>,
     /// Pre-computed `Arc<str>` of the schema name, used as a cheap HashMap key
     /// (clone is a pointer bump instead of a String allocation).
     name_key: Arc<str>,
@@ -64,9 +107,9 @@ enum SchemaKey {
 pub struct Encoder<W: Write = Vec<u8>> {
     state: EncodeState<W>,
     registry: SchemaRegistry,
-    string_pool: HashMap<String, u32>,
+    string_pool: FxHashMap<String, u32>,
     next_pool_id: u32,
-    schema_ids: HashMap<SchemaKey, WireTypeId>,
+    schema_ids: FxHashMap<SchemaKey, WireTypeId>,
 }
 
 impl Default for Encoder<Vec<u8>> {
@@ -82,9 +125,9 @@ impl Encoder<Vec<u8>> {
         Self {
             state: EncodeState::new(buf),
             registry: SchemaRegistry::new(),
-            string_pool: HashMap::new(),
+            string_pool: FxHashMap::default(),
             next_pool_id: 0,
-            schema_ids: HashMap::new(),
+            schema_ids: FxHashMap::default(),
         }
     }
 
@@ -102,9 +145,9 @@ impl<W: Write> Encoder<W> {
         Ok(Self {
             state: EncodeState::new(writer),
             registry: SchemaRegistry::new(),
-            string_pool: HashMap::new(),
+            string_pool: FxHashMap::default(),
             next_pool_id: 0,
-            schema_ids: HashMap::new(),
+            schema_ids: FxHashMap::default(),
         })
     }
 
@@ -116,7 +159,7 @@ impl<W: Write> Encoder<W> {
         timestamp_base_ns: u64,
         writer: W,
     ) -> Self {
-        let mut pool = HashMap::new();
+        let mut pool = FxHashMap::default();
         let mut next_pool_id: u32 = 0;
         for (id, value) in string_pool.0.into_iter() {
             pool.insert(value, id.raw_id());
@@ -125,7 +168,7 @@ impl<W: Write> Encoder<W> {
             }
         }
 
-        let mut schema_ids = HashMap::new();
+        let mut schema_ids = FxHashMap::default();
         for (wire_id, entry) in registry.entries() {
             schema_ids.insert(SchemaKey::Name(Arc::from(entry.name.as_str())), wire_id);
         }
@@ -156,6 +199,19 @@ impl<W: Write> Encoder<W> {
     /// Total bytes written through this encoder (including the file header).
     pub fn bytes_written(&self) -> u64 {
         self.state.writer.bytes_written()
+    }
+
+    /// Reset the encoder to a new writer, preserving internal allocations.
+    /// Returns the old writer. Writes a file header to the new writer.
+    pub fn reset_to(&mut self, mut new_writer: W) -> W {
+        codec::encode_header(&mut new_writer).expect("header write failed");
+        self.string_pool.clear();
+        self.next_pool_id = 0;
+        self.registry.schemas.clear();
+        self.registry.next_id = 0;
+        self.schema_ids.clear();
+        let old_state = std::mem::replace(&mut self.state, EncodeState::new(new_writer));
+        old_state.writer.into_inner()
     }
 
     /// Ensure a schema is registered with this encoder. Returns the wire type
@@ -305,6 +361,35 @@ impl<W: Write> Encoder<W> {
     /// Flush the underlying writer.
     pub fn flush(&mut self) -> io::Result<()> {
         self.state.writer.flush()
+    }
+
+    /// Write raw bytes directly to the underlying writer, bypassing encoder
+    /// state. Byte count is tracked for rotation decisions.
+    pub fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.state.writer.write_all(bytes)
+    }
+
+    /// Reset encoder state (schemas, string pool, timestamp base) without
+    /// touching the underlying writer. Used after writing a raw batch that
+    /// includes its own header.
+    pub fn reset_state(&mut self) {
+        self.string_pool.clear();
+        self.next_pool_id = 0;
+        self.registry.schemas.clear();
+        self.registry.next_id = 0;
+        self.schema_ids.clear();
+        self.state.timestamp_base_ns = 0;
+    }
+}
+
+impl Encoder<Vec<u8>> {
+    pub fn write_infallible<T: TraceEvent + 'static>(&mut self, event: &T) {
+        self.write(event).expect("writing to Vec<u8> is infallible")
+    }
+
+    pub fn intern_string_infallible(&mut self, s: &str) -> InternedString {
+        self.intern_string(s)
+            .expect("interning into Vec<u8> is infallible")
     }
 }
 
@@ -740,5 +825,20 @@ mod tests {
             })
             .collect();
         assert_eq!(events, vec![ts1, ts2]);
+    }
+
+    #[test]
+    fn reset_to_preserves_capacity() {
+        let mut enc = Encoder::new();
+        for i in 0..100 {
+            enc.intern_string(&format!("string_{}", i)).unwrap();
+        }
+        let cap_before = enc.string_pool.capacity();
+        let _bytes = enc.reset_to(Vec::new());
+        let cap_after = enc.string_pool.capacity();
+        assert_eq!(
+            cap_before, cap_after,
+            "string_pool capacity should be preserved after reset_to"
+        );
     }
 }

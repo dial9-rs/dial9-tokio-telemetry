@@ -1,8 +1,8 @@
 // Schema types and registry
 
 use crate::codec::WireTypeId;
+use crate::encoder::FxHashMap;
 use crate::types::FieldType;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldDef {
@@ -22,7 +22,7 @@ pub struct SchemaEntry {
 
 #[derive(Debug, Default, Clone)]
 pub struct SchemaRegistry {
-    pub(crate) schemas: HashMap<WireTypeId, SchemaEntry>,
+    pub(crate) schemas: FxHashMap<WireTypeId, SchemaEntry>,
     pub(crate) next_id: u16,
 }
 
