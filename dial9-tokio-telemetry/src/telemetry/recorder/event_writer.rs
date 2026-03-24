@@ -37,8 +37,16 @@ impl EventWriter {
     }
 
     /// Write a RawEvent through the writer.
+    #[cfg(test)]
     pub(crate) fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
         self.writer.write_event(&raw)?;
+        self.events_written += 1;
+        Ok(())
+    }
+
+    /// Transcode encoded bytes through the writer.
+    pub(crate) fn write_transcoded_batch(&mut self, encoded_bytes: &[u8]) -> std::io::Result<()> {
+        self.writer.write_encoded_batch(encoded_bytes)?;
         self.events_written += 1;
         Ok(())
     }

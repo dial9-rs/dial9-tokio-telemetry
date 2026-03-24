@@ -1,4 +1,3 @@
-use crate::telemetry::events::RawEvent;
 use crossbeam_queue::ArrayQueue;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -7,8 +6,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// so the most recent data is always preserved.
 const DEFAULT_CAPACITY: usize = 1024;
 
+pub(crate) struct Batch {
+    pub encoded_bytes: Vec<u8>,
+}
+
 pub(crate) struct CentralCollector {
-    queue: ArrayQueue<Vec<RawEvent>>,
+    queue: ArrayQueue<Batch>,
     dropped_batches: AtomicUsize,
 }
 
@@ -30,13 +33,13 @@ impl CentralCollector {
         }
     }
 
-    pub fn accept_flush(&self, buffer: Vec<RawEvent>) {
-        if let Some(_evicted) = self.queue.force_push(buffer) {
+    pub fn accept_flush(&self, batch: Batch) {
+        if let Some(_evicted) = self.queue.force_push(batch) {
             self.dropped_batches.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    pub fn next(&self) -> Option<Vec<RawEvent>> {
+    pub fn next(&self) -> Option<Batch> {
         self.queue.pop()
     }
 
@@ -49,27 +52,25 @@ impl CentralCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::events::RawEvent;
 
-    fn poll_end() -> RawEvent {
-        RawEvent::PollEnd {
-            timestamp_nanos: 1000,
-            worker_id: crate::telemetry::format::WorkerId::from(0usize),
+    fn dummy_batch(size: usize) -> Batch {
+        Batch {
+            encoded_bytes: vec![0u8; size],
         }
     }
 
     #[test]
     fn test_drain_clears_buffers() {
         let collector = CentralCollector::new();
-        collector.accept_flush(vec![poll_end()]);
+        collector.accept_flush(dummy_batch(10));
         assert!(collector.next().is_some());
         assert!(collector.next().is_none());
     }
 
-    fn drain(collector: &CentralCollector) -> Vec<Vec<RawEvent>> {
+    fn drain(collector: &CentralCollector) -> Vec<Vec<u8>> {
         let mut out = vec![];
-        while let Some(ev) = collector.next() {
-            out.push(ev);
+        while let Some(batch) = collector.next() {
+            out.push(batch.encoded_bytes);
         }
         out
     }
@@ -77,9 +78,9 @@ mod tests {
     #[test]
     fn test_bounded_evicts_oldest_when_full() {
         let collector = CentralCollector::with_capacity(2);
-        collector.accept_flush(vec![poll_end()]); // oldest — will be evicted
-        collector.accept_flush(vec![poll_end(), poll_end()]);
-        collector.accept_flush(vec![poll_end(), poll_end(), poll_end()]); // evicts first
+        collector.accept_flush(dummy_batch(1)); // oldest — will be evicted
+        collector.accept_flush(dummy_batch(2));
+        collector.accept_flush(dummy_batch(3)); // evicts first
         assert_eq!(collector.take_dropped_batches(), 1);
         let drained = drain(&collector);
         assert_eq!(drained.len(), 2);

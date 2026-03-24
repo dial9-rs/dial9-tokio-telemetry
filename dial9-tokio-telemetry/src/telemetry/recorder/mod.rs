@@ -60,16 +60,16 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     }
 
     while let Some(batch) = shared.collector.next() {
-        for raw in batch {
-            if let Err(e) = event_writer.write_raw_event(raw) {
-                tracing::warn!("failed to write trace event: {e}");
-                shared.enabled.store(false, Ordering::Relaxed);
-                return FlushStats {
-                    event_count: event_writer.events_written() - events_before,
-                    dropped_batches: dropped as u64,
-                    cpu_time,
-                };
-            }
+        if batch.encoded_bytes.len() > dial9_trace_format::codec::HEADER_SIZE
+            && let Err(e) = event_writer.write_transcoded_batch(&batch.encoded_bytes)
+        {
+            tracing::warn!("failed to transcode batch: {e}");
+            shared.enabled.store(false, Ordering::Relaxed);
+            return FlushStats {
+                event_count: event_writer.events_written() - events_before,
+                dropped_batches: dropped as u64,
+                cpu_time,
+            };
         }
     }
     if let Err(e) = event_writer.flush() {
