@@ -82,17 +82,14 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     }
 }
 
-/// Install telemetry hooks on the runtime builder. Returns the shared state
-/// (for the hot-path callbacks) and the event writer (to be moved into the
-/// flush thread). No shared mutex is created.
-fn install_hooks(
+/// Register telemetry callbacks on a runtime builder using the given shared state.
+/// This is the common hook registration logic used by both `install_hooks` (new
+/// telemetry session) and `install_hooks_reuse` (attaching to an existing session).
+fn register_hooks(
     builder: &mut tokio::runtime::Builder,
-    writer: Box<dyn TraceWriter>,
+    shared: &Arc<SharedState>,
     task_tracking_enabled: bool,
-    start_time_ns: u64,
-) -> (Arc<SharedState>, EventWriter) {
-    let shared = Arc::new(SharedState::new(start_time_ns));
-
+) {
     let s1 = shared.clone();
     let s2 = shared.clone();
     let s3 = shared.clone();
@@ -173,9 +170,32 @@ fn install_hooks(
                 }
             });
     }
+}
 
+/// Install telemetry hooks on the runtime builder. Returns the shared state
+/// (for the hot-path callbacks) and the event writer (to be moved into the
+/// flush thread). No shared mutex is created.
+fn install_hooks(
+    builder: &mut tokio::runtime::Builder,
+    writer: Box<dyn TraceWriter>,
+    task_tracking_enabled: bool,
+    start_time_ns: u64,
+) -> (Arc<SharedState>, EventWriter) {
+    let shared = Arc::new(SharedState::new(start_time_ns));
+    register_hooks(builder, &shared, task_tracking_enabled);
     let event_writer = EventWriter::new(writer);
     (shared, event_writer)
+}
+
+/// Install telemetry hooks on a runtime builder using an existing shared state.
+/// Does not create a new EventWriter or CPU profiler — only registers the
+/// callbacks so the new runtime's threads feed events into the existing collector.
+fn install_hooks_reuse(
+    builder: &mut tokio::runtime::Builder,
+    shared: &Arc<SharedState>,
+    task_tracking_enabled: bool,
+) {
+    register_hooks(builder, shared, task_tracking_enabled);
 }
 
 /// Cheap, cloneable handle for controlling telemetry from anywhere.
@@ -244,6 +264,11 @@ impl TelemetryGuard {
 
     pub fn disable(&self) {
         self.handle.disable();
+    }
+
+    /// Access the shared state for reuse by additional runtimes.
+    pub(crate) fn shared(&self) -> &Arc<SharedState> {
+        &self.handle.shared
     }
 
     /// Send FinalizeAndStop to the flush thread, join it, then drain the
@@ -319,6 +344,7 @@ pub struct TracedRuntimeBuilder<P = NoTracePath> {
     enabled: bool,
     task_tracking_enabled: bool,
     trace_path: Option<PathBuf>,
+    runtime_name: Option<String>,
     #[cfg(feature = "cpu-profiling")]
     cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
     #[cfg(feature = "cpu-profiling")]
@@ -347,6 +373,13 @@ impl<P> TracedRuntimeBuilder<P> {
 
     pub fn with_task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking_enabled = enabled;
+        self
+    }
+
+    /// Set a human-readable name for this runtime. Used in segment metadata
+    /// to map runtime indices to names for the trace viewer.
+    pub fn with_runtime_name(mut self, name: impl Into<String>) -> Self {
+        self.runtime_name = Some(name.into());
         self
     }
 
@@ -392,11 +425,39 @@ impl<P> TracedRuntimeBuilder<P> {
         self
     }
 
+    /// Attach a new runtime to an existing telemetry session.
+    ///
+    /// This reuses the `SharedState`, flush thread, writer, and CPU profiler
+    /// from the original `TelemetryGuard`. Only the tokio callbacks are
+    /// registered on the new builder. The new runtime's workers get a unique
+    /// runtime index so their `WorkerId`s don't collide with existing runtimes.
+    pub fn build_with_reuse(
+        self,
+        mut builder: tokio::runtime::Builder,
+        guard: &TelemetryGuard,
+    ) -> std::io::Result<tokio::runtime::Runtime> {
+        let shared = guard.shared().clone();
+
+        install_hooks_reuse(&mut builder, &shared, self.task_tracking_enabled);
+
+        let runtime = builder.build()?;
+
+        // Allocate a unique runtime index and register the new runtime's metrics.
+        let runtime_index = shared.alloc_runtime_index();
+        shared.register_runtime_metrics(runtime_index, runtime.handle().metrics());
+        if let Some(name) = &self.runtime_name {
+            shared.register_runtime_name(runtime_index, name.clone());
+        }
+
+        Ok(runtime)
+    }
+
     fn into_state<Q>(self) -> TracedRuntimeBuilder<Q> {
         TracedRuntimeBuilder {
             enabled: self.enabled,
             task_tracking_enabled: self.task_tracking_enabled,
             trace_path: self.trace_path,
+            runtime_name: self.runtime_name,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: self.cpu_profiling_config,
             #[cfg(feature = "cpu-profiling")]
@@ -558,10 +619,12 @@ impl TracedRuntimeBuilder<HasTracePath> {
 
         let runtime = builder.build()?;
 
-        // Store runtime metrics so worker-id resolution works.
-        shared
-            .metrics
-            .store(Arc::new(Some(runtime.handle().metrics())));
+        // Allocate a runtime index and register this runtime's metrics.
+        let runtime_index = shared.alloc_runtime_index();
+        shared.register_runtime_metrics(runtime_index, runtime.handle().metrics());
+        if let Some(name) = &self.runtime_name {
+            shared.register_runtime_name(runtime_index, name.clone());
+        }
 
         // Channel for TelemetryHandle/Guard → flush thread communication.
         // Bounded(1) so senders don't pile up commands.
@@ -608,9 +671,11 @@ impl TracedRuntimeBuilder<HasTracePath> {
                         let now = Instant::now();
                         if now.duration_since(last_sample) >= sample_interval {
                             last_sample = now;
-                            let metrics_guard = shared.metrics.load();
-                            if let Some(ref metrics) = **metrics_guard {
-                                shared.record_queue_sample(metrics.global_queue_depth());
+                            let runtimes = shared.metrics.load();
+                            let total_global_queue: usize =
+                                runtimes.values().map(|m| m.global_queue_depth()).sum();
+                            if !runtimes.is_empty() {
+                                shared.record_queue_sample(total_global_queue);
                             }
                         }
 
@@ -721,6 +786,7 @@ impl TracedRuntime {
             enabled: true,
             task_tracking_enabled: false,
             trace_path: None,
+            runtime_name: None,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
             #[cfg(feature = "cpu-profiling")]
@@ -899,6 +965,127 @@ mod tests {
         assert_eq!(
             total_events, 6,
             "all PollStart events should be readable across files"
+        );
+    }
+
+    #[test]
+    fn build_with_reuse_attaches_second_runtime() {
+        let builder_a = tokio::runtime::Builder::new_multi_thread();
+        let (runtime_a, guard) = TracedRuntime::builder()
+            .build_and_start_with_writer(builder_a, NullWriter)
+            .unwrap();
+
+        let builder_b = tokio::runtime::Builder::new_multi_thread();
+        let runtime_b = TracedRuntime::builder()
+            .build_with_reuse(builder_b, &guard)
+            .unwrap();
+
+        // Both runtimes should work
+        runtime_a.block_on(async {
+            let r = tokio::spawn(async { 1 }).await.unwrap();
+            assert_eq!(r, 1);
+        });
+        runtime_b.block_on(async {
+            let r = tokio::spawn(async { 2 }).await.unwrap();
+            assert_eq!(r, 2);
+        });
+    }
+
+    #[test]
+    fn build_with_reuse_produces_unique_worker_ids() {
+        use crate::telemetry::format::WorkerId;
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+
+        // Use a capturing writer to collect events
+        struct CapturingWriter {
+            events: Arc<Mutex<Vec<crate::telemetry::events::RawEvent>>>,
+        }
+        impl crate::telemetry::writer::TraceWriter for CapturingWriter {
+            fn write_event(
+                &mut self,
+                event: &crate::telemetry::events::RawEvent,
+            ) -> std::io::Result<()> {
+                self.events.lock().unwrap().push(event.clone());
+                Ok(())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturingWriter {
+            events: events.clone(),
+        };
+
+        let mut builder_a = tokio::runtime::Builder::new_multi_thread();
+        builder_a.worker_threads(2);
+        let (runtime_a, guard) = TracedRuntime::builder()
+            .with_task_tracking(true)
+            .build_and_start_with_writer(builder_a, writer)
+            .unwrap();
+
+        let mut builder_b = tokio::runtime::Builder::new_multi_thread();
+        builder_b.worker_threads(2);
+        let runtime_b = TracedRuntime::builder()
+            .with_task_tracking(true)
+            .build_with_reuse(builder_b, &guard)
+            .unwrap();
+
+        // Generate poll events on both runtimes. Spawn many concurrent tasks
+        // to ensure work lands on actual worker threads (not just block_on's thread).
+        runtime_a.block_on(async {
+            let mut handles = Vec::new();
+            for _ in 0..50 {
+                handles.push(tokio::spawn(async {
+                    tokio::task::yield_now().await;
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+        });
+        runtime_b.block_on(async {
+            let mut handles = Vec::new();
+            for _ in 0..50 {
+                handles.push(tokio::spawn(async {
+                    tokio::task::yield_now().await;
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+        });
+
+        // Drop runtimes, then guard to flush
+        drop(runtime_a);
+        drop(runtime_b);
+        drop(guard);
+
+        let captured = events.lock().unwrap();
+        let mut worker_ids: HashSet<u64> = HashSet::new();
+        for event in captured.iter() {
+            match event {
+                crate::telemetry::events::RawEvent::PollStart { worker_id, .. }
+                | crate::telemetry::events::RawEvent::PollEnd { worker_id, .. }
+                | crate::telemetry::events::RawEvent::WorkerPark { worker_id, .. }
+                | crate::telemetry::events::RawEvent::WorkerUnpark { worker_id, .. } => {
+                    if *worker_id != WorkerId::UNKNOWN {
+                        worker_ids.insert(worker_id.as_u64());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Runtime A has 2 workers → IDs 0,1. Runtime B → IDs 2,3.
+        // We should see at least one ID from each runtime's range.
+        let has_runtime_a = worker_ids.iter().any(|&id| id < 2);
+        let has_runtime_b = worker_ids.iter().any(|&id| (2..4).contains(&id));
+        assert!(
+            has_runtime_a && has_runtime_b,
+            "expected worker IDs from both runtimes (0..2 and 2..4), got: {worker_ids:?}"
         );
     }
 
