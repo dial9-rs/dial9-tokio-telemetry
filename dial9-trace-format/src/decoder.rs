@@ -171,7 +171,7 @@ impl<'a> Decoder<'a> {
     /// If the current position starts with a valid header, reset state and
     /// skip past it, returning true.
     fn try_consume_reset_header(&mut self) -> bool {
-        if self.data.len() - self.pos >= HEADER_SIZE
+        if self.pos + HEADER_SIZE <= self.data.len()
             && codec::decode_header(&self.data[self.pos..]).is_some()
         {
             self.reset_state();
