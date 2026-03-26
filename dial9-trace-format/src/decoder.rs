@@ -25,6 +25,24 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+/// Error returned by [`Decoder::try_for_each_event`].
+#[derive(Debug)]
+pub enum TryForEachError<E> {
+    Decode(DecodeError),
+    User(E),
+}
+
+impl<E: fmt::Display> fmt::Display for TryForEachError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TryForEachError::Decode(e) => write!(f, "{e}"),
+            TryForEachError::User(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl<E: fmt::Display + fmt::Debug> std::error::Error for TryForEachError<E> {}
+
 /// A decoded event passed to [`Decoder::for_each_event`].
 ///
 /// `'a` is the lifetime of the input data buffer (strings, stack frames borrow from it).
@@ -48,7 +66,7 @@ pub struct StringPool(pub(crate) HashMap<InternedString, String>);
 
 impl StringPool {
     pub(crate) fn new() -> Self {
-        Self(HashMap::new())
+        Self(HashMap::default())
     }
 
     pub(crate) fn insert(&mut self, id: InternedString, value: String) {
@@ -108,7 +126,7 @@ pub struct Decoder<'a> {
     data: &'a [u8],
     pos: usize,
     registry: SchemaRegistry,
-    schema_cache: HashMap<WireTypeId, SchemaCache>,
+    schema_cache: Vec<Option<SchemaCache>>,
     string_pool: StringPool,
     version: u8,
     timestamp_base_ns: u64,
@@ -121,7 +139,7 @@ impl<'a> Decoder<'a> {
             data,
             pos: HEADER_SIZE,
             registry: SchemaRegistry::new(),
-            schema_cache: HashMap::new(),
+            schema_cache: Vec::new(),
             string_pool: StringPool::new(),
             version,
             timestamp_base_ns: 0,
@@ -140,6 +158,30 @@ impl<'a> Decoder<'a> {
         &self.string_pool
     }
 
+    /// Reset decoder state (schemas, string pool, timestamp base) as if
+    /// starting a fresh stream. Used when a mid-stream header is encountered
+    /// (the "reset frame" pattern for concatenated thread-local batches).
+    fn reset_state(&mut self) {
+        self.registry = SchemaRegistry::new();
+        self.schema_cache.clear();
+        self.string_pool = StringPool::new();
+        self.timestamp_base_ns = 0;
+    }
+
+    /// If the current position starts with a valid header, reset state and
+    /// skip past it, returning true.
+    fn try_consume_reset_header(&mut self) -> bool {
+        if self.pos + HEADER_SIZE <= self.data.len()
+            && codec::decode_header(&self.data[self.pos..]).is_some()
+        {
+            self.reset_state();
+            self.pos += HEADER_SIZE;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Consume this decoder and create an [`Encoder`] that appends to the
     /// decoded trace. The encoder inherits the string pool, schema registry,
     /// and timestamp base so new frames are compatible with the existing data.
@@ -155,22 +197,26 @@ impl<'a> Decoder<'a> {
         )
     }
 
-    fn schema_info(&self, type_id: WireTypeId) -> Option<SchemaInfo<'_>> {
-        self.schema_cache.get(&type_id).map(|c| SchemaInfo {
-            field_types: &c.field_types,
-            has_timestamp: c.has_timestamp,
-        })
+    pub(crate) fn schema_info(&self, type_id: WireTypeId) -> Option<SchemaInfo<'_>> {
+        self.schema_cache
+            .get(type_id.0 as usize)
+            .and_then(|s| s.as_ref())
+            .map(|c| SchemaInfo {
+                field_types: &c.field_types,
+                has_timestamp: c.has_timestamp,
+            })
     }
 
     fn register_schema(&mut self, type_id: WireTypeId, entry: SchemaEntry) -> Result<(), String> {
-        self.schema_cache.insert(
-            type_id,
-            SchemaCache {
-                name: entry.name.clone(),
-                field_types: entry.fields.iter().map(|f| f.field_type).collect(),
-                has_timestamp: entry.has_timestamp,
-            },
-        );
+        let idx = type_id.0 as usize;
+        if idx >= self.schema_cache.len() {
+            self.schema_cache.resize_with(idx + 1, || None);
+        }
+        self.schema_cache[idx] = Some(SchemaCache {
+            name: entry.name.clone(),
+            field_types: entry.fields.iter().map(|f| f.field_type).collect(),
+            has_timestamp: entry.has_timestamp,
+        });
         self.registry.register(type_id, entry)
     }
 
@@ -180,6 +226,9 @@ impl<'a> Decoder<'a> {
     pub fn next_frame(&mut self) -> Result<Option<DecodedFrame>, DecodeError> {
         if self.pos >= self.data.len() {
             return Ok(None);
+        }
+        if self.try_consume_reset_header() {
+            return self.next_frame();
         }
         let remaining = &self.data[self.pos..];
         let base = self.timestamp_base_ns;
@@ -242,6 +291,9 @@ impl<'a> Decoder<'a> {
     pub fn next_frame_ref(&mut self) -> Result<Option<DecodedFrameRef<'a>>, DecodeError> {
         if self.pos >= self.data.len() {
             return Ok(None);
+        }
+        if self.try_consume_reset_header() {
+            return self.next_frame_ref();
         }
         let remaining = &self.data[self.pos..];
         let base = self.timestamp_base_ns;
@@ -312,6 +364,22 @@ impl<'a> Decoder<'a> {
         &mut self,
         mut f: impl for<'f> FnMut(RawEvent<'a, 'f>),
     ) -> Result<(), DecodeError> {
+        self.try_for_each_event(|ev| {
+            f(ev);
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map_err(|e| match e {
+            TryForEachError::Decode(d) => d,
+            TryForEachError::User(inf) => match inf {},
+        })
+    }
+
+    /// Like [`for_each_event`](Self::for_each_event), but the callback may
+    /// return an error to stop iteration early.
+    pub fn try_for_each_event<E>(
+        &mut self,
+        mut f: impl for<'f> FnMut(RawEvent<'a, 'f>) -> Result<(), E>,
+    ) -> Result<(), TryForEachError<E>> {
         let mut values_buf: Vec<FieldValueRef<'a>> = Vec::new();
         while self.pos < self.data.len() {
             let remaining = &self.data[self.pos..];
@@ -328,19 +396,23 @@ impl<'a> Decoder<'a> {
                             WireTypeId(u16::from_le_bytes(b.try_into().unwrap()))
                         }
                         None => {
-                            return Err(DecodeError {
+                            return Err(TryForEachError::Decode(DecodeError {
                                 pos: self.pos,
                                 message: "truncated event frame".into(),
-                            });
+                            }));
                         }
                     };
-                    let cache = match self.schema_cache.get(&type_id) {
+                    let cache = match self
+                        .schema_cache
+                        .get(type_id.0 as usize)
+                        .and_then(|s| s.as_ref())
+                    {
                         Some(c) => c,
                         None => {
-                            return Err(DecodeError {
+                            return Err(TryForEachError::Decode(DecodeError {
                                 pos: self.pos,
                                 message: format!("unknown type_id {type_id:?}"),
-                            });
+                            }));
                         }
                     };
 
@@ -351,10 +423,10 @@ impl<'a> Decoder<'a> {
                                 Some(self.timestamp_base_ns + delta as u64)
                             }
                             None => {
-                                return Err(DecodeError {
+                                return Err(TryForEachError::Decode(DecodeError {
                                     pos: self.pos + pos,
                                     message: "truncated timestamp delta".into(),
-                                });
+                                }));
                             }
                         }
                     } else {
@@ -369,10 +441,10 @@ impl<'a> Decoder<'a> {
                                 pos += consumed;
                             }
                             None => {
-                                return Err(DecodeError {
+                                return Err(TryForEachError::Decode(DecodeError {
                                     pos: self.pos + pos,
                                     message: "truncated field value".into(),
-                                });
+                                }));
                             }
                         }
                     }
@@ -386,35 +458,36 @@ impl<'a> Decoder<'a> {
                         timestamp_ns,
                         fields: &values_buf,
                         string_pool: &self.string_pool,
-                    });
+                    })
+                    .map_err(TryForEachError::User)?;
                 }
                 codec::TAG_TIMESTAMP_RESET => {
-                    // Handle timestamp resets inline to avoid next_frame_ref's
-                    // recursive consumption of the following frame.
                     let ts = match self.data.get(self.pos + 1..self.pos + 9) {
                         Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
                         None => {
-                            return Err(DecodeError {
+                            return Err(TryForEachError::Decode(DecodeError {
                                 pos: self.pos,
                                 message: "truncated timestamp reset".into(),
-                            });
+                            }));
                         }
                     };
                     self.timestamp_base_ns = ts;
                     self.pos += 9;
                 }
                 _ => {
-                    // Use next_frame_ref for non-event frames (schema, pool, symbol table)
-                    // `next_frame_ref` will update the decoder state as we read the frames (e.g. the pooled strings)
+                    // Mid-stream header = reset frame (tag 0x54 = 'T' from TRC\0)
+                    if tag == codec::MAGIC[0] && self.try_consume_reset_header() {
+                        continue;
+                    }
                     match self.next_frame_ref() {
                         Ok(Some(_)) => {}
                         Ok(None) => {
-                            return Err(DecodeError {
+                            return Err(TryForEachError::Decode(DecodeError {
                                 pos: self.pos,
                                 message: format!("failed to decode frame with tag 0x{tag:02x}"),
-                            });
+                            }));
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => return Err(TryForEachError::Decode(e)),
                     }
                 }
             }
