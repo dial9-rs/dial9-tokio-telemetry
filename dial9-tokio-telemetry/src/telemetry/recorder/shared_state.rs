@@ -69,6 +69,14 @@ pub(super) fn resolve_worker_id(
                         worker_index: i,
                     };
                     cell.set(Some(resolved));
+                    // Record which runtime this worker belongs to.
+                    if let Some(shared) = shared {
+                        shared
+                            .worker_runtimes
+                            .write()
+                            .unwrap()
+                            .insert(global_id, *runtime_index);
+                    }
                     #[cfg(feature = "cpu-profiling")]
                     if let Some(shared) = shared {
                         TID_EMITTED.with(|emitted| {
@@ -118,6 +126,8 @@ pub(crate) struct SharedState {
     pub(crate) next_worker_id: AtomicU64,
     /// Maps runtime_index → human-readable runtime name (for segment metadata).
     pub(crate) runtime_names: RwLock<HashMap<u64, String>>,
+    /// Maps worker_id → runtime_index. Populated lazily as workers are resolved.
+    pub(crate) worker_runtimes: RwLock<HashMap<u64, u64>>,
     /// Maps OS tid → thread role so that CPU samples returned from perf can be
     /// attributed to the correct worker or blocking-pool bucket at flush time.
     /// Entries are inserted in `on_thread_start` and removed in `on_thread_stop`.
@@ -137,6 +147,7 @@ impl SharedState {
             next_runtime_index: AtomicU64::new(0),
             next_worker_id: AtomicU64::new(0),
             runtime_names: RwLock::new(HashMap::new()),
+            worker_runtimes: RwLock::new(HashMap::new()),
             #[cfg(feature = "cpu-profiling")]
             thread_roles: Mutex::new(HashMap::new()),
             #[cfg(feature = "cpu-profiling")]
@@ -163,12 +174,33 @@ impl SharedState {
         names.insert(runtime_index, name);
     }
 
-    /// Get all runtime name mappings (for segment metadata).
-    pub(crate) fn runtime_name_entries(&self) -> Vec<(String, String)> {
+    /// Build segment metadata entries mapping each named runtime to its
+    /// comma-separated list of worker IDs, e.g. `("runtime.main", "0,1,2,3")`.
+    pub(crate) fn runtime_worker_entries(&self) -> Vec<(String, String)> {
         let names = self.runtime_names.read().unwrap();
+        let workers = self.worker_runtimes.read().unwrap();
+        // Invert worker_runtimes: runtime_index → sorted list of worker IDs
+        let mut runtime_workers: HashMap<u64, Vec<u64>> = HashMap::new();
+        for (&worker_id, &runtime_index) in workers.iter() {
+            runtime_workers
+                .entry(runtime_index)
+                .or_default()
+                .push(worker_id);
+        }
+        for ids in runtime_workers.values_mut() {
+            ids.sort_unstable();
+        }
         names
             .iter()
-            .map(|(idx, name)| (format!("runtime.{idx}.name"), name.clone()))
+            .filter_map(|(idx, name)| {
+                let ids = runtime_workers.get(idx)?;
+                let csv = ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Some((format!("runtime.{name}"), csv))
+            })
             .collect()
     }
 

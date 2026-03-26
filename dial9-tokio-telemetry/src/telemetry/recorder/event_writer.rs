@@ -102,6 +102,14 @@ impl EventWriter {
         }
     }
 
+    pub(crate) fn segment_metadata(&self) -> &[(String, String)] {
+        self.writer.segment_metadata()
+    }
+
+    pub(crate) fn update_segment_metadata(&mut self, entries: Vec<(String, String)>) {
+        self.writer.update_segment_metadata(entries);
+    }
+
     pub(crate) fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
     }

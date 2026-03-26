@@ -651,6 +651,9 @@ impl TracedRuntimeBuilder<HasTracePath> {
 
                     let sample_interval = Duration::from_millis(10);
                     let mut last_sample = Instant::now();
+                    // Snapshot the user-provided segment metadata so we can
+                    // merge it with runtime names on each flush cycle.
+                    let static_metadata = event_writer.segment_metadata().to_vec();
 
                     loop {
                         let mut ack_tx = None;
@@ -677,6 +680,15 @@ impl TracedRuntimeBuilder<HasTracePath> {
                             if !runtimes.is_empty() {
                                 shared.record_queue_sample(total_global_queue);
                             }
+                        }
+
+                        // Merge user-provided metadata with runtime→worker mappings
+                        // so the next rotated segment is fully self-describing.
+                        let runtime_entries = shared.runtime_worker_entries();
+                        if !runtime_entries.is_empty() {
+                            let mut merged = static_metadata.clone();
+                            merged.extend(runtime_entries);
+                            event_writer.update_segment_metadata(merged);
                         }
 
                         let mut flush_timer = Timer::start_now();
