@@ -3206,7 +3206,9 @@
                     const total = hit.totalSamples;
                     const pct = ((hit.node.count / total) * 100).toFixed(1);
                     const selfPct = ((hit.node.self / total) * 100).toFixed(1);
-                    tip.innerHTML = `<b>${hit.node.name}</b><br>${hit.node.count} samples (${pct}%) · ${hit.node.self} self (${selfPct}%)`;
+                    const nameElt = document.createElement('b');
+                    nameElt.innerText = hit.node.name;
+                    tip.innerHTML = `${nameElt.outerHTML}<br>${hit.node.count} samples (${pct}%) · ${hit.node.self} self (${selfPct}%)`;
                     tip.style.display = "block";
                     tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 620) + "px";
                     tip.style.top = (e.clientY - 50) + "px";
