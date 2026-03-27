@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::panic::Location;
 use std::sync::Arc;
 
-/// Default maximum encoded batch size before flushing (64KB).
-const DEFAULT_BATCH_SIZE: usize = 63 * 1024;
+/// Default maximum encoded batch size before flushing (~1MB).
+const DEFAULT_BATCH_SIZE: usize = 1023 * 1024;
 
 pub(crate) struct ThreadLocalBuffer {
     encoder: Encoder<Vec<u8>>,

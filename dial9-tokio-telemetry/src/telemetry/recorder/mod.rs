@@ -37,7 +37,11 @@ pub(crate) struct FlushStats {
 /// Perform one flush cycle: drain CPU profilers, drain the collector, write
 /// events to disk, and flush the writer. This is the only code path that
 /// touches EventWriter, and it runs exclusively on the flush thread.
-fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStats {
+fn flush_once(
+    event_writer: &mut EventWriter,
+    shared: &SharedState,
+    force_self_drain: bool,
+) -> FlushStats {
     let events_before = event_writer.events_written();
     let cpu_events_time = Instant::now();
     #[cfg(feature = "cpu-profiling")]
@@ -46,8 +50,10 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     }
     let cpu_time = cpu_events_time.elapsed();
 
-    // Flush the current thread's buffer (the CPU events are now sitting in it)
-    buffer::drain_to_collector(&shared.collector);
+    if force_self_drain {
+        // Flush the current thread's buffer (the CPU events are now sitting in it)
+        buffer::drain_to_collector(&shared.collector);
+    }
 
     let dropped = shared.collector.take_dropped_batches();
     if dropped > 0 {
@@ -584,9 +590,6 @@ impl TracedRuntimeBuilder<HasTracePath> {
                         let _ = libc::nice(10);
                     }
 
-                    let sample_interval = Duration::from_millis(10);
-                    let mut last_sample = Instant::now();
-
                     loop {
                         let mut ack_tx = None;
                         let mut exit = false;
@@ -603,17 +606,14 @@ impl TracedRuntimeBuilder<HasTracePath> {
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                         }
 
-                        let now = Instant::now();
-                        if now.duration_since(last_sample) >= sample_interval {
-                            last_sample = now;
-                            let metrics_guard = shared.metrics.load();
-                            if let Some(ref metrics) = **metrics_guard {
-                                shared.record_queue_sample(metrics.global_queue_depth());
-                            }
+                        let metrics_guard = shared.metrics.load();
+                        if let Some(ref metrics) = **metrics_guard {
+                            shared.record_queue_sample(metrics.global_queue_depth());
                         }
 
                         let mut flush_timer = Timer::start_now();
-                        let stats = flush_once(&mut event_writer, &shared);
+                        // if we are going to exit, force draining the TL buffer of the flush thead (that accumulates CPU events & global queue length samples)
+                        let stats = flush_once(&mut event_writer, &shared, exit);
                         flush_timer.stop();
                         if stats.event_count > 0 || stats.dropped_batches > 0 {
                             let _guard = FlushMetrics {
