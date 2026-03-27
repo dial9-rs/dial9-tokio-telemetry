@@ -229,12 +229,9 @@ impl<W: Write> Encoder<W> {
         if let Some(&wire_id) = self.schema_ids.get(&key) {
             // TODO: unify registry and schema_ids to avoid this error case
             let Some(existing) = self.registry.get(wire_id) else {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "corrupted internal state. {wire_id:?} in schema_ids but not in registry."
-                    ),
-                ));
+                return Err(io::Error::other(format!(
+                    "corrupted internal state. {wire_id:?} in schema_ids but not in registry."
+                )));
             };
             if *existing == *schema.entry {
                 return Ok(wire_id);
