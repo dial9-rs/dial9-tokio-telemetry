@@ -850,24 +850,30 @@
                 console.log(`Found ${queueSamples.length} global queue samples`);
 
                 // Attach CPU samples to poll spans they fall within
+                // Use binary search: polls are sorted by start time per worker
                 if (trace.cpuSamples.length > 0) {
                     for (const sample of trace.cpuSamples) {
                         const spans = workerSpans[sample.workerId];
                         if (!spans) { sample.spawnLoc = null; continue; }
                         if (sample.source !== 1) spans.cpuSampleTimes.push(sample.timestamp);
-                        let found = false;
-                        for (const poll of spans.polls) {
-                            if (sample.timestamp >= poll.start && sample.timestamp <= poll.end) {
-                                if (sample.source === 1) {
-                                    // SchedEvent — kernel descheduled this worker during a poll (blocking!)
-                                    (poll.schedSamples ??= []).push(sample);
-                                } else {
-                                    (poll.cpuSamples ??= []).push(sample);
-                                }
-                                sample.spawnLoc = poll.spawnLoc;
-                                found = true;
-                                break;
+                        const polls = spans.polls;
+                        const ts = sample.timestamp;
+                        // Binary search for rightmost poll with start <= ts
+                        let lo = 0, hi = polls.length - 1, found = false;
+                        while (lo <= hi) {
+                            const mid = (lo + hi) >> 1;
+                            if (polls[mid].start <= ts) { lo = mid + 1; } else { hi = mid - 1; }
+                        }
+                        // hi is now the index of the last poll with start <= ts
+                        if (hi >= 0 && ts <= polls[hi].end) {
+                            const poll = polls[hi];
+                            if (sample.source === 1) {
+                                (poll.schedSamples ??= []).push(sample);
+                            } else {
+                                (poll.cpuSamples ??= []).push(sample);
                             }
+                            sample.spawnLoc = poll.spawnLoc;
+                            found = true;
                         }
                         if (!found) sample.spawnLoc = null;
                     }
