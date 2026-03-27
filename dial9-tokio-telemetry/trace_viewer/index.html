@@ -196,6 +196,19 @@
             #info-panel .ip-label { color: #888; }
             #info-panel .ip-value { color: #fff; font-weight: 600; }
 
+            .runtime-header {
+                height: 24px;
+                display: flex;
+                align-items: center;
+                padding-left: 12px;
+                font-size: 0.75em;
+                font-weight: 600;
+                color: #6c63ff;
+                background: #1a1a3a;
+                border-bottom: 1px solid #333;
+                letter-spacing: 0.5px;
+                text-transform: uppercase;
+            }
             .lane {
                 height: 60px;
                 border-bottom: 1px solid #222;
@@ -1018,8 +1031,10 @@
                 document.getElementById("tb-filename").textContent = filename;
                 const durMs = durationNs / 1e6;
                 const truncNote = trace.truncated ? " (truncated)" : "";
+                const runtimeCount = trace.runtimeWorkers && trace.runtimeWorkers.size > 0
+                    ? ` · ${trace.runtimeWorkers.size} runtimes` : "";
                 document.getElementById("tb-stats").textContent =
-                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durMs.toFixed(1)}ms${truncNote}`;
+                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers${runtimeCount} · ${durMs.toFixed(1)}ms${truncNote}`;
 
                 buildLanes();
                 updatePointsOfInterest();
@@ -1157,36 +1172,78 @@
                 }
                 
                 // Scroll to worker lane
-                const laneIdx = workerIds.indexOf(poi.worker);
-                if (laneIdx >= 0) {
-                    const scrollTop = laneIdx * LANE_H;
-                    lanesContainer.scrollTop = scrollTop;
-                }
+                scrollToWorker(poi.worker);
                 
                 updatePoiCounter();
                 renderAll();
             }
 
             // ── Lane DOM ──
+            function addWorkerLane(w) {
+                const lane = document.createElement("div");
+                lane.className = "lane";
+                const label = document.createElement("div");
+                label.className = "lane-label";
+                label.textContent = `Worker ${w}`;
+                const content = document.createElement("div");
+                content.className = "lane-content";
+                const canvas = document.createElement("canvas");
+                canvas.id = `worker-${w}-canvas`;
+                content.appendChild(canvas);
+                lane.appendChild(label);
+                lane.appendChild(content);
+                lanesContainer.appendChild(lane);
+                laneCanvases[w] = canvas;
+            }
+
             function buildLanes() {
                 lanesContainer.innerHTML = "";
                 laneCanvases = {};
-                for (const w of workerIds) {
-                    const lane = document.createElement("div");
-                    lane.className = "lane";
-                    const label = document.createElement("div");
-                    label.className = "lane-label";
-                    label.textContent = `Worker ${w}`;
-                    const content = document.createElement("div");
-                    content.className = "lane-content";
-                    const canvas = document.createElement("canvas");
-                    canvas.id = `worker-${w}-canvas`;
-                    content.appendChild(canvas);
-                    lane.appendChild(label);
-                    lane.appendChild(content);
-                    lanesContainer.appendChild(lane);
-                    laneCanvases[w] = canvas;
+                const rw = trace.runtimeWorkers;
+                if (rw && rw.size > 0) {
+                    // Group workers by runtime; track which workers are claimed
+                    const claimed = new Set();
+                    for (const [name, ids] of rw) {
+                        const header = document.createElement("div");
+                        header.className = "runtime-header";
+                        header.textContent = `${name} (${ids.length} workers)`;
+                        lanesContainer.appendChild(header);
+                        for (const w of ids) {
+                            if (workerSpans[w]) { addWorkerLane(w); claimed.add(w); }
+                        }
+                    }
+                    // Unclaimed workers (e.g. unnamed runtimes or old traces)
+                    const unclaimed = workerIds.filter(w => !claimed.has(w));
+                    if (unclaimed.length > 0) {
+                        const header = document.createElement("div");
+                        header.className = "runtime-header";
+                        header.textContent = `other (${unclaimed.length} workers)`;
+                        lanesContainer.appendChild(header);
+                        for (const w of unclaimed) addWorkerLane(w);
+                    }
+                } else {
+                    for (const w of workerIds) addWorkerLane(w);
                 }
+            }
+
+            // ── Lane helpers (account for runtime-header rows) ──
+            function workerFromY(mouseY) {
+                const absY = mouseY + lanesContainer.scrollTop;
+                for (const w of workerIds) {
+                    const c = laneCanvases[w];
+                    if (!c) continue;
+                    const lane = c.closest('.lane');
+                    if (!lane) continue;
+                    const top = lane.offsetTop;
+                    if (absY >= top && absY < top + LANE_H) return w;
+                }
+                return null;
+            }
+            function scrollToWorker(w) {
+                const c = laneCanvases[w];
+                if (!c) return;
+                const lane = c.closest('.lane');
+                if (lane) lanesContainer.scrollTop = lane.offsetTop;
             }
 
             // ── Rendering ──
@@ -2325,10 +2382,9 @@
                 if (mouseX < 0 || mouseX > drawW) { selectedTaskId = null; renderAll(); return; }
 
                 const ns = viewStart + (mouseX / drawW) * (viewEnd - viewStart);
-                const laneIdx = Math.floor((mouseY + lanesContainer.scrollTop) / LANE_H);
-                if (laneIdx < 0 || laneIdx >= workerIds.length) { selectedTaskId = null; renderAll(); return; }
+                const w = workerFromY(mouseY);
+                if (w == null) { selectedTaskId = null; renderAll(); return; }
 
-                const w = workerIds[laneIdx];
                 const spans = workerSpans[w];
                 let found = null;
                 let foundSpan = null;
@@ -2600,8 +2656,7 @@
                         viewEnd = Math.min(maxTs, viewStart + pad);
                         document.getElementById("sched-panel").style.display = "none";
                         // Scroll to worker lane
-                        const laneIdx = workerIds.indexOf(w);
-                        if (laneIdx >= 0) lanesContainer.scrollTop = laneIdx * LANE_H;
+                        scrollToWorker(w);
                         renderAll();
                     });
                 });
@@ -2767,15 +2822,12 @@
                         });
                     }
 
-                    const laneIdx = Math.floor(
-                        (mouseY + lanesContainer.scrollTop) / LANE_H,
-                    );
-                    if (laneIdx < 0 || laneIdx >= workerIds.length) {
+                    const w = workerFromY(mouseY);
+                    if (w == null) {
                         tooltip.style.display = "none";
                         return;
                     }
 
-                    const w = workerIds[laneIdx];
                     const spans = workerSpans[w];
                     const relMs = (ns - minTs) / 1e6;
 
