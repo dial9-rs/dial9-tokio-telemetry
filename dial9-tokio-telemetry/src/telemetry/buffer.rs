@@ -173,6 +173,15 @@ impl ThreadLocalBuffer {
         self.event_count += 1;
     }
 
+    /// Encode a single event into a self-contained batch (header + event).
+    /// Used by tests that need to write individual events through the batch API.
+    #[cfg(test)]
+    pub(crate) fn encode_single(event: &RawEvent) -> Vec<u8> {
+        let mut buf = Self::with_batch_size(1024);
+        buf.encode_event(event);
+        buf.flush().encoded_bytes
+    }
+
     fn should_flush(&self) -> bool {
         self.encoder.bytes_written() as usize >= self.batch_size
     }
@@ -255,7 +264,7 @@ mod tests {
     #[test]
     fn test_record_event() {
         let mut buffer = ThreadLocalBuffer::new();
-        buffer.record_event(poll_end_event());
+        buffer.record_event(&poll_end_event());
         assert_eq!(buffer.event_count, 1);
         assert!(buffer.encoder.bytes_written() > 0);
     }
@@ -265,7 +274,7 @@ mod tests {
         // Use a tiny batch size so a single event triggers flush.
         let mut buffer = ThreadLocalBuffer::with_batch_size(1);
         assert!(!buffer.should_flush());
-        buffer.record_event(poll_end_event());
+        buffer.record_event(&poll_end_event());
         assert!(buffer.should_flush());
     }
 
@@ -273,7 +282,7 @@ mod tests {
     fn test_should_flush_default_batch_size() {
         let mut buffer = ThreadLocalBuffer::new();
         assert!(!buffer.should_flush());
-        buffer.record_event(poll_end_event());
+        buffer.record_event(&poll_end_event());
         // A single small event should not exceed 1 MB.
         assert!(!buffer.should_flush());
     }
@@ -281,7 +290,7 @@ mod tests {
     #[test]
     fn test_flush() {
         let mut buffer = ThreadLocalBuffer::new();
-        buffer.record_event(poll_end_event());
+        buffer.record_event(&poll_end_event());
         let batch = buffer.flush();
         assert!(!batch.encoded_bytes.is_empty());
         assert_eq!(buffer.event_count, 0);

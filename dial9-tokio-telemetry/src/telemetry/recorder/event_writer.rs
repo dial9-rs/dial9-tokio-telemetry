@@ -11,7 +11,7 @@ use crate::telemetry::writer::TraceWriter;
 ///
 /// Owns the writer and the CPU profiler. Its API is roughly:
 ///
-/// - `write_raw_event(raw)` — write event through the writer
+/// - `write_raw_event(raw)` — encode and write a single event (test only)
 /// - `write_cpu_event(event)` — write a CPU sample event
 /// - `flush_cpu(shared)` — drain CPU/sched profilers into the trace via `write_cpu_event`
 /// - `flush()` — flush the underlying writer
@@ -36,10 +36,15 @@ impl EventWriter {
         self.events_written
     }
 
-    /// Write a RawEvent through the writer.
+    /// Encode a RawEvent into a batch and write it through the writer.
     #[cfg(test)]
-    pub(crate) fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
-        self.writer.write_event(&raw)?;
+    pub(crate) fn write_raw_event(
+        &mut self,
+        raw: crate::telemetry::events::RawEvent,
+    ) -> std::io::Result<()> {
+        use crate::telemetry::buffer::ThreadLocalBuffer;
+        let batch = ThreadLocalBuffer::encode_single(&raw);
+        self.writer.write_encoded_batch(&batch)?;
         self.events_written += 1;
         Ok(())
     }
@@ -56,6 +61,7 @@ impl EventWriter {
     #[cfg(feature = "cpu-profiling")]
     pub(crate) fn flush_cpu(&mut self, shared: &SharedState) {
         // Snapshot thread_roles once per flush cycle.
+
         let roles = shared.thread_roles.lock().unwrap().clone();
 
         let resolve = |tid: u32| -> WorkerId {

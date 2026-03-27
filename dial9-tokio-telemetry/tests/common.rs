@@ -1,4 +1,4 @@
-use dial9_tokio_telemetry::telemetry::events::RawEvent;
+use dial9_tokio_telemetry::telemetry::events::{CpuSampleData, CpuSampleSource, RawEvent};
 use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
 use dial9_trace_format::decoder::Decoder;
 use dial9_trace_format::types::FieldValueRef;
@@ -73,7 +73,27 @@ impl TraceWriter for CapturingWriter {
                         timestamp_nanos: ts,
                         task_id: Default::default(),
                     }),
-                    _ => None,
+                    "CpuSampleEvent" => {
+                        let worker_id = WorkerId::from(varint(f, 0) as usize);
+                        let tid = varint(f, 1) as u32;
+                        let source = CpuSampleSource::from_u8(varint(f, 2) as u8);
+                        let callchain = match f.get(4) {
+                            Some(FieldValueRef::StackFrames(frames)) => {
+                                frames.iter().collect()
+                            }
+                            _ => vec![],
+                        };
+                        Some(RawEvent::CpuSample(Box::new(CpuSampleData {
+                            timestamp_nanos: ts,
+                            worker_id,
+                            tid,
+                            source,
+                            thread_name: None,
+                            callchain,
+                        })))
+                    }
+                    "SegmentMetadataEvent" | "WakeEventEvent" | "QueueSampleEvent" => None,
+                    other => panic!("unhandled event type in CapturingWriter: {other}"),
                 };
                 if let Some(e) = raw {
                     evs.push(e);

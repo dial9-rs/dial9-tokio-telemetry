@@ -46,9 +46,7 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     }
     let cpu_time = cpu_events_time.elapsed();
 
-    // Flush the current thread's buffer (the flush thread itself produces
-    // queue-sample events via record_event) so those events reach the
-    // collector before we drain it.
+    // Flush the current thread's buffer (the CPU events are now sitting in it)
     buffer::drain_to_collector(&shared.collector);
 
     let dropped = shared.collector.take_dropped_batches();
@@ -991,7 +989,8 @@ mod tests {
                         callchain: callchain.clone(),
                     };
                     *timestamp += 1;
-                    ew.write_cpu_event(&data);
+                    ew.write_raw_event(RawEvent::CpuSample(Box::new(data)))
+                        .unwrap();
                 }
             }
 

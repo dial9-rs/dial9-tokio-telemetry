@@ -1,12 +1,7 @@
 use dial9_trace_format::encoder::Encoder;
-use dial9_trace_format::{InternedString, StackFrames};
 
-use crate::telemetry::events::RawEvent;
-use crate::telemetry::format::{
-    CpuSampleEvent, PollEndEvent, PollStartEvent, QueueSampleEvent, SegmentMetadataEvent,
-    TaskSpawnEvent, TaskTerminateEvent, WakeEventEvent, WorkerParkEvent, WorkerUnparkEvent,
-};
-use std::collections::{HashMap, VecDeque};
+use crate::telemetry::format::SegmentMetadataEvent;
+use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -330,13 +325,11 @@ impl TraceWriter for RotatingWriter {
             self.dropped_events += 1;
             return Ok(());
         };
-        // Raw-copy the thread-local batch (its header acts as a reset frame
-        // for decoders). Then reset encoder state and write a trailing header
-        // so subsequent write_event calls start a clean encoding context.
+        // Raw-copy the thread-local batch. Each batch is self-contained
+        // (starts with its own header), so the next batch's header acts as
+        // the reset frame for decoders.
         encoder.write_raw(bytes)?;
         encoder.reset_registry_and_pools();
-        encoder.write_raw(&dial9_trace_format::codec::MAGIC)?;
-        encoder.write_raw(&[dial9_trace_format::codec::VERSION])?;
         self.has_real_events = true;
         self.maybe_rotate()?;
         Ok(())
@@ -358,17 +351,22 @@ impl Drop for RotatingWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::format::WorkerParkEvent;
     use crate::telemetry::{TelemetryEvent, format};
     use std::io::Read;
     use tempfile::TempDir;
 
-    fn park_event() -> RawEvent {
-        RawEvent::WorkerPark {
-            timestamp_nanos: 1000,
+    /// Encode a single park event into a self-contained batch (header + event),
+    /// matching the format produced by ThreadLocalBuffer.
+    fn test_batch() -> Vec<u8> {
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write_infallible(&WorkerParkEvent {
+            timestamp_ns: 1000,
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            worker_local_queue_depth: 2,
-            cpu_time_nanos: 0,
-        }
+            local_queue: 2,
+            cpu_time_ns: 0,
+        });
+        enc.into_inner()
     }
 
     fn rotating_file(base: &std::path::Path, i: u32) -> String {
@@ -399,14 +397,14 @@ mod tests {
             .sum()
     }
 
-    /// Write one park event to a temp file and return the file size.
+    /// Write one batch to a temp file and return the file size.
     /// This captures the actual overhead (header + schema + event) so tests
     /// don't depend on hardcoded format sizes.
     fn single_event_file_size() -> u64 {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("probe.bin");
         let mut w = RotatingWriter::single_file(&path).unwrap();
-        w.write_event(&park_event()).unwrap();
+        w.write_encoded_batch(&test_batch()).unwrap();
         w.flush().unwrap();
         std::fs::metadata(&path).unwrap().len()
     }
@@ -425,7 +423,7 @@ mod tests {
         let path = dir.path().join("test_event_v2.bin");
         let mut writer = RotatingWriter::single_file(&path).unwrap();
 
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
         let metadata = std::fs::metadata(&path).unwrap();
@@ -444,7 +442,7 @@ mod tests {
         let one_event_size = single_event_file_size();
 
         for _ in 0..2 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.flush().unwrap();
 
@@ -493,7 +491,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         for _ in 0..3 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -521,7 +519,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, max_total_size).unwrap();
 
         for _ in 0..10 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -543,7 +541,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, max_total_size).unwrap();
 
         for _ in 0..100 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -564,10 +562,10 @@ mod tests {
         );
     }
 
-    /// Bug: write_event_inner sets stopped=true when total_size slightly exceeds
+    /// Bug: write_encoded_batch sets stopped=true when total_size slightly exceeds
     /// max_total_size, without attempting eviction. This happens right after
     /// rotate() + evict_oldest() brings total_size just under budget, then the
-    /// first event in the new file pushes it a few bytes over. The writer
+    /// first batch in the new file pushes it a few bytes over. The writer
     /// permanently stops even though eviction could free space.
     ///
     /// Reproduces the stress test failure: 64-worker runtime with 1MB segments
@@ -576,7 +574,7 @@ mod tests {
     fn test_writer_stops_on_tiny_overshoot_after_eviction() {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
-        // Use max_file_size that doesn't evenly divide by event size,
+        // Use max_file_size that doesn't evenly divide by batch size,
         // so files end up slightly under max_file_size (with leftover bytes).
         // Over 100 files, these leftovers accumulate and push total_size
         // past max_total_size after eviction.
@@ -585,16 +583,16 @@ mod tests {
         let max_total_size = max_file_size * num_files;
         let mut writer = RotatingWriter::new(&base, max_file_size, max_total_size).unwrap();
 
-        // Write many events. The event size (11 bytes for park_event) doesn't
-        // divide evenly into (max_file_size - header), so each file wastes a
-        // few bytes. After 100 rotations, total_size drifts above max_total_size.
+        // Write many batches. The batch size doesn't divide evenly into
+        // (max_file_size - header), so each file wastes a few bytes. After
+        // 100 rotations, total_size drifts above max_total_size.
         for i in 0..5000 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
             if matches!(writer.state, WriterState::Finished) {
                 panic!(
-                    "Writer stopped at event {i}! total_size={}, max_total_size={}, \
+                    "Writer stopped at batch {i}! total_size={}, max_total_size={}, \
                      closed_files={}. \
-                     write_event_inner should try eviction before stopping.",
+                     write_encoded_batch should try eviction before stopping.",
                     writer.total_size(),
                     max_total_size,
                     writer.closed_files.len()
@@ -611,7 +609,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         for _ in 0..5 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -642,7 +640,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         for _ in 0..3 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -668,7 +666,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         for _ in 0..3 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -694,7 +692,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, 10_000, 50).unwrap();
 
         for _ in 0..5 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         // Repeated flush after stop should not error
         assert!(writer.flush().is_ok());
@@ -708,29 +706,8 @@ mod tests {
         let one_event = single_event_file_size();
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
-        let events = [
-            RawEvent::WorkerPark {
-                timestamp_nanos: 1000,
-                worker_id: crate::telemetry::format::WorkerId::from(0usize),
-                worker_local_queue_depth: 2,
-                cpu_time_nanos: 0,
-            },
-            RawEvent::WorkerPark {
-                timestamp_nanos: 2000,
-                worker_id: crate::telemetry::format::WorkerId::from(1usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-            },
-            RawEvent::WorkerUnpark {
-                timestamp_nanos: 3000,
-                worker_id: crate::telemetry::format::WorkerId::from(0usize),
-                worker_local_queue_depth: 2,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        ];
-        for e in &events {
-            writer.write_event(e).unwrap();
+        for _ in 0..3 {
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -754,7 +731,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         for _ in 0..2 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -777,7 +754,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let mut writer = RotatingWriter::new(&base, 1024, 100000).unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
         // Current file should have .active suffix
@@ -795,8 +772,8 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         // Write 2 events — triggers rotation after first
-        writer.write_event(&park_event()).unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
         // First file should be sealed (.bin), second should be active
@@ -823,7 +800,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let mut writer = RotatingWriter::new(&base, 1024, 100000).unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.finalize().unwrap();
 
         assert!(
@@ -843,7 +820,7 @@ mod tests {
         // Small max_file_size so one event triggers rotation.
         let mut writer = RotatingWriter::new(&base, 1, 100_000).unwrap();
         // Write an event — this fills segment 0 and triggers rotation to segment 1.
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         // Segment 0 is sealed, segment 1 is active with only header + metadata.
         assert!(dir.path().join("trace.0.bin").exists());
         assert!(dir.path().join("trace.1.bin.active").exists());
@@ -867,7 +844,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.bin");
         let mut writer = RotatingWriter::single_file(&path).unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
         // single_file writes directly to the given path, no .active suffix
@@ -889,7 +866,7 @@ mod tests {
             ])
             .build()
             .unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
         writer.finalize().unwrap();
 
@@ -927,7 +904,7 @@ mod tests {
             .unwrap();
 
         for _ in 0..5 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.flush().unwrap();
         writer.finalize().unwrap();
@@ -956,7 +933,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("trace.bin");
         let mut writer = RotatingWriter::single_file(&path).unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
         let all_events = format::decode_events_v2(&std::fs::read(&path).unwrap()).unwrap();
