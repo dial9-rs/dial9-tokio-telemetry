@@ -32,11 +32,6 @@ fn varint(fields: &[FieldValueRef<'_>], idx: usize) -> u64 {
 }
 
 impl TraceWriter for CapturingWriter {
-    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
-        self.events.lock().unwrap().push(event.clone());
-        Ok(())
-    }
-
     fn write_encoded_batch(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         if let Some(mut decoder) = Decoder::new(bytes) {
             let mut evs = self.events.lock().unwrap();

@@ -35,7 +35,7 @@ fn test_reset_to_returns_decodable_bytes() {
     })
     .unwrap();
 
-    let bytes = enc.reset_to(Vec::new());
+    let bytes = enc.reset_to_infallible(Vec::new());
 
     let mut dec = Decoder::new(&bytes).unwrap();
     let mut count = 0;
@@ -51,7 +51,7 @@ fn test_reset_to_returns_decodable_bytes() {
         value: 1,
     })
     .unwrap();
-    let bytes2 = enc.reset_to(Vec::new());
+    let bytes2 = enc.reset_to_infallible(Vec::new());
     let mut dec2 = Decoder::new(&bytes2).unwrap();
     let mut count2 = 0;
     dec2.for_each_event(|_| count2 += 1).unwrap();
@@ -67,7 +67,7 @@ fn test_reset_convenience_returns_decodable_bytes() {
     })
     .unwrap();
 
-    let bytes = enc.reset_to(Vec::new());
+    let bytes = enc.reset_to_infallible(Vec::new());
     let mut dec = Decoder::new(&bytes).unwrap();
     let mut count = 0;
     dec.for_each_event(|_| count += 1).unwrap();
@@ -89,7 +89,7 @@ fn test_rawcopy_round_trip_single_batch() {
         value: 99,
     })
     .unwrap();
-    let bytes1 = enc1.reset_to(Vec::new());
+    let bytes1 = enc1.reset_to_infallible(Vec::new());
 
     // Simulate raw-copy: just concatenate onto an output stream
     let mut output = Vec::new();
@@ -114,7 +114,7 @@ fn test_rawcopy_string_pool_per_batch() {
         name: s1,
     })
     .unwrap();
-    let bytes1 = enc1.reset_to(Vec::new());
+    let bytes1 = enc1.reset_to_infallible(Vec::new());
 
     let mut enc2 = Encoder::new();
     let s2 = enc2.intern_string("shared").unwrap();
@@ -123,7 +123,7 @@ fn test_rawcopy_string_pool_per_batch() {
         name: s2,
     })
     .unwrap();
-    let bytes2 = enc2.reset_to(Vec::new());
+    let bytes2 = enc2.reset_to_infallible(Vec::new());
 
     // Concatenate both batches (each has its own header)
     let mut output = Vec::new();
@@ -147,7 +147,7 @@ fn test_rawcopy_timestamp_preserved() {
         value: 1,
     })
     .unwrap();
-    let bytes1 = enc1.reset_to(Vec::new());
+    let bytes1 = enc1.reset_to_infallible(Vec::new());
 
     let mut enc2 = Encoder::new();
     enc2.write(&TestEvent {
@@ -155,7 +155,7 @@ fn test_rawcopy_timestamp_preserved() {
         value: 2,
     })
     .unwrap();
-    let bytes2 = enc2.reset_to(Vec::new());
+    let bytes2 = enc2.reset_to_infallible(Vec::new());
 
     let mut output = Vec::new();
     dial9_trace_format::codec::encode_header(&mut output).unwrap();
@@ -206,7 +206,7 @@ fn test_rawcopy_different_schemas() {
 #[test]
 fn test_rawcopy_empty_batch() {
     let mut enc1 = Encoder::new();
-    let bytes1 = enc1.reset_to(Vec::new());
+    let bytes1 = enc1.reset_to_infallible(Vec::new());
 
     let mut output = Vec::new();
     dial9_trace_format::codec::encode_header(&mut output).unwrap();
@@ -238,7 +238,7 @@ fn test_try_for_each_event_propagates_error() {
         value: 3,
     })
     .unwrap();
-    let bytes = enc.reset_to(Vec::new());
+    let bytes = enc.reset_to_infallible(Vec::new());
 
     let mut dec = Decoder::new(&bytes).unwrap();
     let mut processed = 0;
@@ -264,7 +264,7 @@ fn test_try_for_each_event_success() {
         value: 2,
     })
     .unwrap();
-    let bytes = enc.reset_to(Vec::new());
+    let bytes = enc.reset_to_infallible(Vec::new());
 
     let mut dec = Decoder::new(&bytes).unwrap();
     let mut count = 0;

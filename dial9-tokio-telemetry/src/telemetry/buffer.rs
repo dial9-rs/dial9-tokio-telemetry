@@ -168,7 +168,7 @@ impl ThreadLocalBuffer {
         self.encoder.intern_string_infallible(s)
     }
 
-    fn record_event(&mut self, event: RawEvent) {
+    fn record_event(&mut self, event: &RawEvent) {
         self.encode_event(&event);
         self.event_count += 1;
     }
@@ -178,9 +178,15 @@ impl ThreadLocalBuffer {
     }
 
     fn flush(&mut self) -> crate::telemetry::collector::Batch {
-        let encoded_bytes = self.encoder.reset_to(Vec::with_capacity(self.batch_size));
+        let event_count = self.event_count as u64;
+        let encoded_bytes = self
+            .encoder
+            .reset_to_infallible(Vec::with_capacity(self.batch_size));
         self.event_count = 0;
-        crate::telemetry::collector::Batch { encoded_bytes }
+        crate::telemetry::collector::Batch {
+            encoded_bytes,
+            event_count,
+        }
     }
 }
 
@@ -211,7 +217,7 @@ pub(crate) fn record_event(event: RawEvent, collector: &Arc<CentralCollector>) {
     BUFFER.with(|buf| {
         let mut buf = buf.borrow_mut();
         buf.set_collector(collector);
-        buf.record_event(event);
+        buf.record_event(&event);
         if buf.should_flush() {
             collector.accept_flush(buf.flush());
         }

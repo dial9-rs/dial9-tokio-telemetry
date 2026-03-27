@@ -12,7 +12,6 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 pub trait TraceWriter: Send {
-    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()>;
     fn flush(&mut self) -> std::io::Result<()>;
     /// Returns true if the writer rotated to a new file since the last call to this method.
     fn take_rotated(&mut self) -> bool {
@@ -24,27 +23,11 @@ pub trait TraceWriter: Send {
     fn finalize(&mut self) -> std::io::Result<()> {
         self.flush()
     }
-    /// Write a batch of events atomically — rotation is deferred until after
-    /// the entire batch, so all events land in the same file.
-    fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
-        for event in events {
-            self.write_event(event)?;
-        }
-        Ok(())
-    }
     /// Transcode encoded bytes into this writer.
-    fn write_encoded_batch(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "write_encoded_batch not implemented for this writer",
-        ))
-    }
+    fn write_encoded_batch(&mut self, bytes: &[u8]) -> std::io::Result<()>;
 }
 
 impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
-    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
-        (**self).write_event(event)
-    }
     fn flush(&mut self) -> std::io::Result<()> {
         (**self).flush()
     }
@@ -53,9 +36,6 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     }
     fn finalize(&mut self) -> std::io::Result<()> {
         (**self).finalize()
-    }
-    fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
-        (**self).write_event_batch(events)
     }
     fn write_encoded_batch(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         (**self).write_encoded_batch(bytes)
@@ -67,9 +47,6 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
 pub struct NullWriter;
 
 impl TraceWriter for NullWriter {
-    fn write_event(&mut self, _event: &RawEvent) -> std::io::Result<()> {
-        Ok(())
-    }
     fn write_encoded_batch(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
         Ok(())
     }
@@ -100,9 +77,6 @@ pub struct RotatingWriter {
     did_rotate: bool,
     /// Optional metadata written at the start of each segment.
     segment_metadata: Option<Vec<(String, String)>>,
-    /// Cache from Location → formatted string, to avoid
-    /// reformatting on every event.
-    formatted_locations: HashMap<std::panic::Location<'static>, String>,
     /// Events silently dropped because the writer was finished/stopped.
     dropped_events: usize,
     /// Whether any real (non-metadata) events have been written to the current segment.
@@ -166,7 +140,6 @@ impl RotatingWriter {
             next_index: 1,
             did_rotate: false,
             segment_metadata,
-            formatted_locations: HashMap::new(),
             dropped_events: 0,
             has_real_events: false,
         };
@@ -196,7 +169,6 @@ impl RotatingWriter {
             next_index: 1,
             did_rotate: false,
             segment_metadata: None,
-            formatted_locations: HashMap::new(),
             dropped_events: 0,
             has_real_events: false,
         };
@@ -296,141 +268,6 @@ impl RotatingWriter {
         Ok(())
     }
 
-    /// Intern a `&'static Location` via the encoder's string pool, using
-    /// the location_cache to avoid reformatting the same pointer repeatedly.
-    fn intern_location(
-        encoder: &mut Encoder<BufWriter<File>>,
-        cache: &mut HashMap<std::panic::Location<'static>, String>,
-        location: &'static std::panic::Location<'static>,
-    ) -> std::io::Result<InternedString> {
-        let s = cache
-            .entry(*location)
-            .or_insert_with(|| location.to_string());
-        encoder.intern_string(s)
-    }
-
-    /// Resolve a RawEvent and write it. Rotation is deferred until after
-    /// the complete logical unit (defs + event) is written, so they always
-    /// land in the same file.
-    fn write_resolved(&mut self, event: &RawEvent) -> std::io::Result<()> {
-        self.write_resolved_no_rotate(event)?;
-        self.maybe_rotate()?;
-        Ok(())
-    }
-
-    /// Write a resolved event without triggering rotation.
-    fn write_resolved_no_rotate(&mut self, event: &RawEvent) -> std::io::Result<()> {
-        let WriterState::Active(encoder) = &mut self.state else {
-            self.dropped_events += 1;
-            return Ok(());
-        };
-        match event {
-            RawEvent::PollStart {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                task_id,
-                location,
-            } => {
-                let spawn_loc =
-                    Self::intern_location(encoder, &mut self.formatted_locations, location)?;
-                encoder.write(&PollStartEvent {
-                    timestamp_ns: *timestamp_nanos,
-                    worker_id: *worker_id,
-                    local_queue: *worker_local_queue_depth as u8,
-                    task_id: *task_id,
-                    spawn_loc,
-                })
-            }
-            RawEvent::PollEnd {
-                timestamp_nanos,
-                worker_id,
-            } => encoder.write(&PollEndEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-            }),
-            RawEvent::WorkerPark {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                cpu_time_nanos,
-            } => encoder.write(&WorkerParkEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-                local_queue: *worker_local_queue_depth as u8,
-                cpu_time_ns: *cpu_time_nanos,
-            }),
-            RawEvent::WorkerUnpark {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                cpu_time_nanos,
-                sched_wait_delta_nanos,
-            } => encoder.write(&WorkerUnparkEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-                local_queue: *worker_local_queue_depth as u8,
-                cpu_time_ns: *cpu_time_nanos,
-                sched_wait_ns: *sched_wait_delta_nanos,
-            }),
-            RawEvent::QueueSample {
-                timestamp_nanos,
-                global_queue_depth,
-            } => encoder.write(&QueueSampleEvent {
-                timestamp_ns: *timestamp_nanos,
-                global_queue: *global_queue_depth as u8,
-            }),
-            RawEvent::TaskSpawn {
-                timestamp_nanos,
-                task_id,
-                location,
-            } => {
-                let spawn_loc =
-                    Self::intern_location(encoder, &mut self.formatted_locations, location)?;
-                encoder.write(&TaskSpawnEvent {
-                    timestamp_ns: *timestamp_nanos,
-                    task_id: *task_id,
-                    spawn_loc,
-                })
-            }
-            RawEvent::TaskTerminate {
-                timestamp_nanos,
-                task_id,
-            } => encoder.write(&TaskTerminateEvent {
-                timestamp_ns: *timestamp_nanos,
-                task_id: *task_id,
-            }),
-            RawEvent::WakeEvent {
-                timestamp_nanos,
-                waker_task_id,
-                woken_task_id,
-                target_worker,
-            } => encoder.write(&WakeEventEvent {
-                timestamp_ns: *timestamp_nanos,
-                waker_task_id: *waker_task_id,
-                woken_task_id: *woken_task_id,
-                target_worker: *target_worker,
-            }),
-            RawEvent::CpuSample(data) => {
-                let thread_name = match &data.thread_name {
-                    Some(name) => encoder.intern_string(name.as_str()),
-                    None => encoder.intern_string("<no thread name>"),
-                }?;
-
-                encoder.write(&CpuSampleEvent {
-                    timestamp_ns: data.timestamp_nanos,
-                    worker_id: data.worker_id,
-                    tid: data.tid,
-                    source: data.source,
-                    thread_name,
-                    callchain: StackFrames(data.callchain.clone()),
-                })
-            }
-        }?;
-        self.has_real_events = true;
-        Ok(())
-    }
-
     /// Rotate if the current file exceeds max_file_size.
     /// Called after writing a complete logical unit (def + event).
     fn maybe_rotate(&mut self) -> std::io::Result<()> {
@@ -444,18 +281,6 @@ impl RotatingWriter {
 }
 
 impl TraceWriter for RotatingWriter {
-    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
-        self.write_resolved(event)
-    }
-
-    fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
-        for event in events {
-            self.write_resolved_no_rotate(event)?;
-        }
-        self.maybe_rotate()?;
-        Ok(())
-    }
-
     fn flush(&mut self) -> std::io::Result<()> {
         if let WriterState::Active(encoder) = &mut self.state {
             encoder.flush()?;
@@ -509,7 +334,7 @@ impl TraceWriter for RotatingWriter {
         // for decoders). Then reset encoder state and write a trailing header
         // so subsequent write_event calls start a clean encoding context.
         encoder.write_raw(bytes)?;
-        encoder.reset_state();
+        encoder.reset_registry_and_pools();
         encoder.write_raw(&dial9_trace_format::codec::MAGIC)?;
         encoder.write_raw(&[dial9_trace_format::codec::VERSION])?;
         self.has_real_events = true;

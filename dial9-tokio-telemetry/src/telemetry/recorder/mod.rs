@@ -60,8 +60,8 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     }
 
     while let Some(batch) = shared.collector.next() {
-        if batch.encoded_bytes.len() > dial9_trace_format::codec::HEADER_SIZE
-            && let Err(e) = event_writer.write_transcoded_batch(&batch.encoded_bytes)
+        if batch.event_count > 0
+            && let Err(e) = event_writer.write_transcoded_batch(&batch)
         {
             tracing::warn!("failed to transcode batch: {e}");
             shared.enabled.store(false, Ordering::Relaxed);

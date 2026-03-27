@@ -8,6 +8,7 @@ const DEFAULT_CAPACITY: usize = 1024;
 
 pub(crate) struct Batch {
     pub encoded_bytes: Vec<u8>,
+    pub event_count: u64,
 }
 
 pub(crate) struct CentralCollector {
@@ -56,6 +57,7 @@ mod tests {
     fn dummy_batch(size: usize) -> Batch {
         Batch {
             encoded_bytes: vec![0u8; size],
+            event_count: 1,
         }
     }
 
