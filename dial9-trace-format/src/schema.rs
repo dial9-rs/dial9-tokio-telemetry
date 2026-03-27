@@ -1,8 +1,8 @@
 // Schema types and registry
 
 use crate::codec::WireTypeId;
+use crate::encoder::FxHashMap;
 use crate::types::FieldType;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldDef {
@@ -22,13 +22,19 @@ pub struct SchemaEntry {
 
 #[derive(Debug, Default, Clone)]
 pub struct SchemaRegistry {
-    pub(crate) schemas: HashMap<WireTypeId, SchemaEntry>,
+    pub(crate) schemas: FxHashMap<WireTypeId, SchemaEntry>,
     pub(crate) next_id: u16,
 }
 
 impl SchemaRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Resets the schema registry to a blank slate without releasing the allocations
+    pub fn clear(&mut self) {
+        self.next_id = 0;
+        self.schemas.clear();
     }
 
     /// Register a schema under the given wire type ID.

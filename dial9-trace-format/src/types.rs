@@ -264,6 +264,11 @@ impl<'a> StackFramesRef<'a> {
     pub fn count(&self) -> u32 {
         self.count
     }
+
+    /// Raw packed bytes (u64 LE addresses). Used for zero-copy re-encoding.
+    pub fn raw_data(&self) -> &'a [u8] {
+        self.data
+    }
 }
 
 /// Zero-copy wrapper for string map data.
@@ -280,6 +285,11 @@ impl<'a> StringMapRef<'a> {
 
     pub fn count(&self) -> u32 {
         self.count
+    }
+
+    /// Raw packed bytes (length-prefixed key-value pairs). Used for zero-copy re-encoding.
+    pub fn raw_data(&self) -> &'a [u8] {
+        self.data
     }
 }
 
@@ -489,7 +499,7 @@ impl<W: Write> Write for CountingWriter<W> {
 pub(crate) struct EncodeState<W: Write> {
     pub(crate) writer: CountingWriter<W>,
     /// Current timestamp base (set by TimestampReset frames).
-    pub(crate) timestamp_base_ns: u64,
+    timestamp_base_ns: u64,
 }
 
 impl<W: Write> EncodeState<W> {
@@ -498,6 +508,14 @@ impl<W: Write> EncodeState<W> {
             writer: CountingWriter::new(writer),
             timestamp_base_ns: 0,
         }
+    }
+
+    /// Explicitly override the timestamp base of this decoder.
+    ///
+    /// This function should only be used by internals that are attempting to partially resume an encoder
+    /// on an already existing stream
+    pub(crate) fn set_ts_base_unchecked(&mut self, new_base: u64) {
+        self.timestamp_base_ns = new_base;
     }
 
     /// Compute the timestamp delta, emitting a TimestampReset frame if needed

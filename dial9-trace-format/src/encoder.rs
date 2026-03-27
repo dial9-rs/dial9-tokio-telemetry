@@ -6,8 +6,59 @@ use crate::schema::{SchemaEntry, SchemaRegistry};
 use crate::types::{EncodeState, EventEncoder, InternedString};
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{self, Write};
 use std::sync::Arc;
+
+/// A fast, non-cryptographic hasher using FxHash's multiply-shift strategy.
+///
+/// For HashMap keys that are already well-distributed (TypeId, Arc<str>), this
+/// avoids hash collisions.
+#[derive(Default)]
+pub(crate) struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x517cc1b727220a95);
+        }
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517cc1b727220a95);
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(i as u64)
+    }
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.write_u64(i as u64)
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64)
+    }
+
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        self.write_u64(i as u64);
+        self.write_u64((i >> 64) as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub(crate) type FxBuildHasher = BuildHasherDefault<FxHasher>;
+pub(crate) type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 /// A schema handle returned by [`Encoder::register_schema`] or created via
 /// [`Schema::new`].
@@ -19,7 +70,7 @@ use std::sync::Arc;
 /// `Schema` is cheap to clone (internally `Arc`-backed).
 #[derive(Clone, Debug)]
 pub struct Schema {
-    entry: Arc<SchemaEntry>,
+    pub(crate) entry: Arc<SchemaEntry>,
     /// Pre-computed `Arc<str>` of the schema name, used as a cheap HashMap key
     /// (clone is a pointer bump instead of a String allocation).
     name_key: Arc<str>,
@@ -64,9 +115,9 @@ enum SchemaKey {
 pub struct Encoder<W: Write = Vec<u8>> {
     state: EncodeState<W>,
     registry: SchemaRegistry,
-    string_pool: HashMap<String, u32>,
+    string_pool: FxHashMap<String, u32>,
     next_pool_id: u32,
-    schema_ids: HashMap<SchemaKey, WireTypeId>,
+    schema_ids: FxHashMap<SchemaKey, WireTypeId>,
 }
 
 impl Default for Encoder<Vec<u8>> {
@@ -82,9 +133,9 @@ impl Encoder<Vec<u8>> {
         Self {
             state: EncodeState::new(buf),
             registry: SchemaRegistry::new(),
-            string_pool: HashMap::new(),
+            string_pool: FxHashMap::default(),
             next_pool_id: 0,
-            schema_ids: HashMap::new(),
+            schema_ids: FxHashMap::default(),
         }
     }
 
@@ -102,9 +153,9 @@ impl<W: Write> Encoder<W> {
         Ok(Self {
             state: EncodeState::new(writer),
             registry: SchemaRegistry::new(),
-            string_pool: HashMap::new(),
+            string_pool: FxHashMap::default(),
             next_pool_id: 0,
-            schema_ids: HashMap::new(),
+            schema_ids: FxHashMap::default(),
         })
     }
 
@@ -116,7 +167,7 @@ impl<W: Write> Encoder<W> {
         timestamp_base_ns: u64,
         writer: W,
     ) -> Self {
-        let mut pool = HashMap::new();
+        let mut pool = FxHashMap::default();
         let mut next_pool_id: u32 = 0;
         for (id, value) in string_pool.0.into_iter() {
             pool.insert(value, id.raw_id());
@@ -125,14 +176,14 @@ impl<W: Write> Encoder<W> {
             }
         }
 
-        let mut schema_ids = HashMap::new();
+        let mut schema_ids = FxHashMap::default();
         for (wire_id, entry) in registry.entries() {
             schema_ids.insert(SchemaKey::Name(Arc::from(entry.name.as_str())), wire_id);
         }
         registry.sync_next_id();
 
         let mut state = EncodeState::new(writer);
-        state.timestamp_base_ns = timestamp_base_ns;
+        state.set_ts_base_unchecked(timestamp_base_ns);
 
         Self {
             state,
@@ -158,6 +209,16 @@ impl<W: Write> Encoder<W> {
         self.state.writer.bytes_written()
     }
 
+    /// Reset the encoder to a new writer, preserving internal allocations.
+    /// Returns the old writer. Writes a file header to the new writer.
+    pub fn reset_to(&mut self, mut new_writer: W) -> io::Result<W> {
+        codec::encode_header(&mut new_writer)?;
+        self.reset_registry_and_pools();
+        // creating a new EncodeState resets the timestamp delta
+        let old_state = std::mem::replace(&mut self.state, EncodeState::new(new_writer));
+        Ok(old_state.writer.into_inner())
+    }
+
     /// Ensure a schema is registered with this encoder. Returns the wire type
     /// ID for this encoder's output stream.
     ///
@@ -166,7 +227,12 @@ impl<W: Write> Encoder<W> {
     fn ensure_registered(&mut self, schema: &Schema) -> io::Result<WireTypeId> {
         let key = SchemaKey::Name(Arc::clone(&schema.name_key));
         if let Some(&wire_id) = self.schema_ids.get(&key) {
-            let existing = self.registry.get(wire_id).unwrap();
+            // TODO: unify registry and schema_ids to avoid this error case
+            let Some(existing) = self.registry.get(wire_id) else {
+                return Err(io::Error::other(format!(
+                    "corrupted internal state. {wire_id:?} in schema_ids but not in registry."
+                )));
+            };
             if *existing == *schema.entry {
                 return Ok(wire_id);
             }
@@ -305,6 +371,39 @@ impl<W: Write> Encoder<W> {
     /// Flush the underlying writer.
     pub fn flush(&mut self) -> io::Result<()> {
         self.state.writer.flush()
+    }
+
+    /// Write raw bytes directly to the underlying writer, bypassing encoder
+    /// state. Byte count is tracked for rotation decisions.
+    pub fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.state.writer.write_all(bytes)
+    }
+
+    /// Reset encoder state (schemas, string pool, timestamp base) without
+    /// touching the underlying writer. Used after writing a raw batch that
+    /// includes its own header.
+    pub fn reset_registry_and_pools(&mut self) {
+        self.string_pool.clear();
+        self.next_pool_id = 0;
+        self.registry.clear();
+        self.schema_ids.clear();
+    }
+}
+
+impl Encoder<Vec<u8>> {
+    pub fn write_infallible<T: TraceEvent + 'static>(&mut self, event: &T) {
+        self.write(event).expect("writing to Vec<u8> is infallible")
+    }
+
+    pub fn intern_string_infallible(&mut self, s: &str) -> InternedString {
+        self.intern_string(s)
+            .expect("interning into Vec<u8> is infallible")
+    }
+
+    /// Resets the encoder to point to a new backing Vec returning the old one
+    pub fn reset_to_infallible(&mut self, data: Vec<u8>) -> Vec<u8> {
+        self.reset_to(data)
+            .expect("writing to Vec<u8> is infallible")
     }
 }
 
@@ -740,5 +839,115 @@ mod tests {
             })
             .collect();
         assert_eq!(events, vec![ts1, ts2]);
+    }
+
+    #[test]
+    fn reset_to_preserves_capacity() {
+        let mut enc = Encoder::new();
+        for i in 0..100 {
+            enc.intern_string(&format!("string_{}", i)).unwrap();
+        }
+        let cap_before = enc.string_pool.capacity();
+        let _bytes = enc.reset_to(Vec::new());
+        let cap_after = enc.string_pool.capacity();
+        assert_eq!(
+            cap_before, cap_after,
+            "string_pool capacity should be preserved after reset_to"
+        );
+    }
+
+    #[test]
+    fn reset_to_returns_old_data_and_clears_state() {
+        use crate::decoder::{DecodedFrame, Decoder};
+
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
+        )
+        .unwrap();
+        let _s = enc.intern_string("hello").unwrap();
+
+        let old_bytes_written = enc.bytes_written();
+        assert!(old_bytes_written > 0);
+
+        // --- reset ---
+        let old = enc.reset_to_infallible(Vec::new());
+
+        // Invariant 1: old writer contains the data we wrote (decodable)
+        let mut dec = Decoder::new(&old).unwrap();
+        let frames = dec.decode_all();
+        assert!(frames.iter().any(|f| matches!(f, DecodedFrame::Schema(_))));
+        assert!(
+            frames
+                .iter()
+                .any(|f| matches!(f, DecodedFrame::Event { .. }))
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|f| matches!(f, DecodedFrame::StringPool(_)))
+        );
+
+        // Invariant 2: bytes_written resets to just the header size
+        assert!(
+            enc.bytes_written() < old_bytes_written,
+            "bytes_written should reset (got {} vs old {})",
+            enc.bytes_written(),
+            old_bytes_written
+        );
+
+        // Invariant 3: schemas are cleared — same schema must re-register
+        // (write_event auto-registers, so we verify a new schema frame appears)
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(2_000), FieldValue::Varint(99)],
+        )
+        .unwrap();
+
+        // Invariant 4: string pool is cleared — re-interning emits a new pool frame
+        let _s2 = enc.intern_string("hello").unwrap();
+
+        // Invariant 5: new output is a valid standalone trace
+        let new_bytes = enc.reset_to_infallible(Vec::new());
+        let mut dec2 = Decoder::new(&new_bytes).unwrap();
+        let new_frames = dec2.decode_all();
+        // Must have its own schema definition (not relying on old encoder state)
+        assert!(
+            new_frames
+                .iter()
+                .any(|f| matches!(f, DecodedFrame::Schema(s) if s.name == "Ev")),
+            "new trace must contain schema definition"
+        );
+        // Must have its own string pool entry
+        assert!(
+            new_frames
+                .iter()
+                .any(|f| matches!(f, DecodedFrame::StringPool(_))),
+            "new trace must contain string pool"
+        );
+        // Event must decode with correct timestamp (timestamp_base was reset)
+        let event = new_frames
+            .iter()
+            .find_map(|f| match f {
+                DecodedFrame::Event {
+                    timestamp_ns,
+                    values,
+                    ..
+                } => Some((timestamp_ns, values)),
+                _ => None,
+            })
+            .expect("new trace must contain event");
+        assert_eq!(*event.0, Some(2_000));
+        assert_eq!(event.1[0], FieldValue::Varint(99));
     }
 }
