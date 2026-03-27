@@ -183,7 +183,7 @@ impl<W: Write> Encoder<W> {
         registry.sync_next_id();
 
         let mut state = EncodeState::new(writer);
-        state.timestamp_base_ns = timestamp_base_ns;
+        state.set_ts_base_unchecked(timestamp_base_ns);
 
         Self {
             state,
@@ -213,7 +213,8 @@ impl<W: Write> Encoder<W> {
     /// Returns the old writer. Writes a file header to the new writer.
     pub fn reset_to(&mut self, mut new_writer: W) -> io::Result<W> {
         codec::encode_header(&mut new_writer)?;
-        self.reset_state();
+        self.reset_registry_and_pools();
+        // creating a new EncodeState resets the timestamp delta
         let old_state = std::mem::replace(&mut self.state, EncodeState::new(new_writer));
         Ok(old_state.writer.into_inner())
     }
@@ -226,7 +227,15 @@ impl<W: Write> Encoder<W> {
     fn ensure_registered(&mut self, schema: &Schema) -> io::Result<WireTypeId> {
         let key = SchemaKey::Name(Arc::clone(&schema.name_key));
         if let Some(&wire_id) = self.schema_ids.get(&key) {
-            let existing = self.registry.get(wire_id).unwrap();
+            // TODO: unify registry and schema_ids to avoid this error case
+            let Some(existing) = self.registry.get(wire_id) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "corrupted internal state. {wire_id:?} in schema_ids but not in registry."
+                    ),
+                ));
+            };
             if *existing == *schema.entry {
                 return Ok(wire_id);
             }
@@ -376,12 +385,11 @@ impl<W: Write> Encoder<W> {
     /// Reset encoder state (schemas, string pool, timestamp base) without
     /// touching the underlying writer. Used after writing a raw batch that
     /// includes its own header.
-    pub fn reset_state(&mut self) {
+    pub fn reset_registry_and_pools(&mut self) {
         self.string_pool.clear();
         self.next_pool_id = 0;
         self.registry.clear();
         self.schema_ids.clear();
-        self.state.timestamp_base_ns = 0;
     }
 }
 
@@ -849,5 +857,100 @@ mod tests {
             cap_before, cap_after,
             "string_pool capacity should be preserved after reset_to"
         );
+    }
+
+    #[test]
+    fn reset_to_returns_old_data_and_clears_state() {
+        use crate::decoder::{DecodedFrame, Decoder};
+
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
+        )
+        .unwrap();
+        let _s = enc.intern_string("hello").unwrap();
+
+        let old_bytes_written = enc.bytes_written();
+        assert!(old_bytes_written > 0);
+
+        // --- reset ---
+        let old = enc.reset_to_infallible(Vec::new());
+
+        // Invariant 1: old writer contains the data we wrote (decodable)
+        let mut dec = Decoder::new(&old).unwrap();
+        let frames = dec.decode_all();
+        assert!(frames.iter().any(|f| matches!(f, DecodedFrame::Schema(_))));
+        assert!(
+            frames
+                .iter()
+                .any(|f| matches!(f, DecodedFrame::Event { .. }))
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|f| matches!(f, DecodedFrame::StringPool(_)))
+        );
+
+        // Invariant 2: bytes_written resets to just the header size
+        assert!(
+            enc.bytes_written() < old_bytes_written,
+            "bytes_written should reset (got {} vs old {})",
+            enc.bytes_written(),
+            old_bytes_written
+        );
+
+        // Invariant 3: schemas are cleared — same schema must re-register
+        // (write_event auto-registers, so we verify a new schema frame appears)
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(2_000), FieldValue::Varint(99)],
+        )
+        .unwrap();
+
+        // Invariant 4: string pool is cleared — re-interning emits a new pool frame
+        let _s2 = enc.intern_string("hello").unwrap();
+
+        // Invariant 5: new output is a valid standalone trace
+        let new_bytes = enc.reset_to_infallible(Vec::new());
+        let mut dec2 = Decoder::new(&new_bytes).unwrap();
+        let new_frames = dec2.decode_all();
+        // Must have its own schema definition (not relying on old encoder state)
+        assert!(
+            new_frames
+                .iter()
+                .any(|f| matches!(f, DecodedFrame::Schema(s) if s.name == "Ev")),
+            "new trace must contain schema definition"
+        );
+        // Must have its own string pool entry
+        assert!(
+            new_frames
+                .iter()
+                .any(|f| matches!(f, DecodedFrame::StringPool(_))),
+            "new trace must contain string pool"
+        );
+        // Event must decode with correct timestamp (timestamp_base was reset)
+        let event = new_frames
+            .iter()
+            .find_map(|f| match f {
+                DecodedFrame::Event {
+                    timestamp_ns,
+                    values,
+                    ..
+                } => Some((timestamp_ns, values)),
+                _ => None,
+            })
+            .expect("new trace must contain event");
+        assert_eq!(*event.0, Some(2_000));
+        assert_eq!(event.1[0], FieldValue::Varint(99));
     }
 }

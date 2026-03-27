@@ -499,7 +499,7 @@ impl<W: Write> Write for CountingWriter<W> {
 pub(crate) struct EncodeState<W: Write> {
     pub(crate) writer: CountingWriter<W>,
     /// Current timestamp base (set by TimestampReset frames).
-    pub(crate) timestamp_base_ns: u64,
+    timestamp_base_ns: u64,
 }
 
 impl<W: Write> EncodeState<W> {
@@ -508,6 +508,14 @@ impl<W: Write> EncodeState<W> {
             writer: CountingWriter::new(writer),
             timestamp_base_ns: 0,
         }
+    }
+
+    /// Explicitly override the timestamp base of this decoder.
+    ///
+    /// This function should only be used by internals that are attempting to partially resume an encoder
+    /// on an already existing stream
+    pub(crate) fn set_ts_base_unchecked(&mut self, new_base: u64) {
+        self.timestamp_base_ns = new_base;
     }
 
     /// Compute the timestamp delta, emitting a TimestampReset frame if needed
