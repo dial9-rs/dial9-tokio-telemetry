@@ -622,56 +622,6 @@ impl<'a, W: Write> EventEncoder<'a, W> {
     pub fn write_field_value(&mut self, value: &FieldValue) -> io::Result<()> {
         value.encode(&mut self.state.writer)
     }
-
-    /// Write a [`FieldValueRef`] directly, avoiding owned-type conversion.
-    pub fn write_field_value_ref(&mut self, value: &FieldValueRef<'_>) -> io::Result<()> {
-        match value {
-            FieldValueRef::I64(v) => self.state.writer.write_all(&v.to_le_bytes()),
-            FieldValueRef::F64(v) => self.state.writer.write_all(&v.to_le_bytes()),
-            FieldValueRef::Bool(v) => self.state.writer.write_all(&[if *v { 1 } else { 0 }]),
-            FieldValueRef::String(v) => {
-                let bytes = v.as_bytes();
-                self.state
-                    .writer
-                    .write_all(&(bytes.len() as u32).to_le_bytes())?;
-                self.state.writer.write_all(bytes)
-            }
-            FieldValueRef::Bytes(v) => {
-                self.state
-                    .writer
-                    .write_all(&(v.len() as u32).to_le_bytes())?;
-                self.state.writer.write_all(v)
-            }
-            FieldValueRef::PooledString(id) => self.state.writer.write_all(&id.0.to_le_bytes()),
-            FieldValueRef::StackFrames(sf) => {
-                self.state.writer.write_all(&sf.count().to_le_bytes())?;
-                // Raw frame data is already packed u64 LE — write directly
-                self.state.writer.write_all(sf.raw_data())
-            }
-            FieldValueRef::Varint(v) => crate::leb128::encode_unsigned(*v, &mut self.state.writer),
-            FieldValueRef::StringMap(sm) => {
-                self.state.writer.write_all(&sm.count().to_le_bytes())?;
-                // Raw map data is already length-prefixed pairs — write directly
-                self.state.writer.write_all(sm.raw_data())
-            }
-        }
-    }
-
-    /// Write a [`FieldValueRef`] with a specific [`FieldType`], preserving the
-    /// original encoding format.
-    pub fn write_field_value_ref_typed(
-        &mut self,
-        value: &FieldValueRef<'_>,
-        field_type: FieldType,
-    ) -> io::Result<()> {
-        match (value, field_type) {
-            (FieldValueRef::Varint(v), FieldType::U8) => self.write_u8(*v as u8),
-            (FieldValueRef::Varint(v), FieldType::U16) => self.write_u16(*v as u16),
-            (FieldValueRef::Varint(v), FieldType::U32) => self.write_u32(*v as u32),
-            (FieldValueRef::Varint(v), FieldType::Varint) => self.write_u64(*v),
-            _ => self.write_field_value_ref(value),
-        }
-    }
 }
 
 /// Trait for types that can be used as trace fields.

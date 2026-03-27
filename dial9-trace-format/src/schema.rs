@@ -31,6 +31,12 @@ impl SchemaRegistry {
         Self::default()
     }
 
+    /// Resets the schema registry to a blank slate without releasing the allocations
+    pub fn clear(&mut self) {
+        self.next_id = 0;
+        self.schemas.clear();
+    }
+
     /// Register a schema under the given wire type ID.
     pub fn register(&mut self, type_id: WireTypeId, entry: SchemaEntry) -> Result<(), String> {
         if let Some(existing) = self.schemas.get(&type_id) {

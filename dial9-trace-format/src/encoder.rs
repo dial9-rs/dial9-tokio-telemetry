@@ -11,7 +11,9 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 /// A fast, non-cryptographic hasher using FxHash's multiply-shift strategy.
-/// Safe for HashMap keys that are already well-distributed (TypeId, Arc<str>).
+///
+/// For HashMap keys that are already well-distributed (TypeId, Arc<str>), this
+/// avoids hash collisions.
 #[derive(Default)]
 pub(crate) struct FxHasher(u64);
 
@@ -41,6 +43,12 @@ impl Hasher for FxHasher {
     #[inline]
     fn write_usize(&mut self, i: usize) {
         self.write_u64(i as u64)
+    }
+
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        self.write_u64(i as u64);
+        self.write_u64((i >> 64) as u64);
     }
 
     #[inline]
@@ -203,15 +211,11 @@ impl<W: Write> Encoder<W> {
 
     /// Reset the encoder to a new writer, preserving internal allocations.
     /// Returns the old writer. Writes a file header to the new writer.
-    pub fn reset_to(&mut self, mut new_writer: W) -> W {
-        codec::encode_header(&mut new_writer).expect("header write failed");
-        self.string_pool.clear();
-        self.next_pool_id = 0;
-        self.registry.schemas.clear();
-        self.registry.next_id = 0;
-        self.schema_ids.clear();
+    pub fn reset_to(&mut self, mut new_writer: W) -> io::Result<W> {
+        codec::encode_header(&mut new_writer)?;
+        self.reset_state();
         let old_state = std::mem::replace(&mut self.state, EncodeState::new(new_writer));
-        old_state.writer.into_inner()
+        Ok(old_state.writer.into_inner())
     }
 
     /// Ensure a schema is registered with this encoder. Returns the wire type
@@ -375,8 +379,7 @@ impl<W: Write> Encoder<W> {
     pub fn reset_state(&mut self) {
         self.string_pool.clear();
         self.next_pool_id = 0;
-        self.registry.schemas.clear();
-        self.registry.next_id = 0;
+        self.registry.clear();
         self.schema_ids.clear();
         self.state.timestamp_base_ns = 0;
     }
@@ -390,6 +393,12 @@ impl Encoder<Vec<u8>> {
     pub fn intern_string_infallible(&mut self, s: &str) -> InternedString {
         self.intern_string(s)
             .expect("interning into Vec<u8> is infallible")
+    }
+
+    /// Resets the encoder to point to a new backing Vec returning the old one
+    pub fn reset_to_infallible(&mut self, data: Vec<u8>) -> Vec<u8> {
+        self.reset_to(data)
+            .expect("writing to Vec<u8> is infallible")
     }
 }
 
