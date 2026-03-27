@@ -6,7 +6,7 @@ mod common;
 #[test]
 fn sched_events_capture_context_switches() {
     use dial9_tokio_telemetry::telemetry::events::CpuSampleSource;
-    use dial9_tokio_telemetry::telemetry::events::RawEvent;
+    use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
     use dial9_tokio_telemetry::telemetry::{SchedEventConfig, TracedRuntime};
     use std::time::Duration;
 
@@ -43,8 +43,8 @@ fn sched_events_capture_context_switches() {
     let worker_samples: Vec<_> = events
         .iter()
         .filter(|e| {
-            matches!(e, RawEvent::CpuSample(data)
-            if data.worker_id.as_u64() < num_workers as u64 && data.source == CpuSampleSource::SchedEvent)
+            matches!(e, TelemetryEvent::CpuSample { worker_id, source, .. }
+            if worker_id.as_u64() < num_workers as u64 && *source == CpuSampleSource::SchedEvent)
         })
         .collect();
     assert!(
@@ -56,8 +56,8 @@ fn sched_events_capture_context_switches() {
     let cpu_profile_samples = events
         .iter()
         .filter(|e| {
-            matches!(e, RawEvent::CpuSample(data)
-            if data.source == CpuSampleSource::CpuProfile)
+            matches!(e, TelemetryEvent::CpuSample { source, .. }
+            if *source == CpuSampleSource::CpuProfile)
         })
         .count();
     assert_eq!(cpu_profile_samples, 0, "should have no CpuProfile samples");

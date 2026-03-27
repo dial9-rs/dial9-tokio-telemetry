@@ -1138,6 +1138,7 @@ mod tests {
                 timestamp_nanos: 1_500_000,
                 worker_id: WorkerId::from(0usize),
                 tid: 100,
+                thread_name: None,
                 source: CpuSampleSource::CpuProfile,
                 callchain: vec![],
             },
@@ -1145,6 +1146,7 @@ mod tests {
                 timestamp_nanos: 1_800_000,
                 worker_id: WorkerId::from(0usize),
                 tid: 100,
+                thread_name: None,
                 source: CpuSampleSource::SchedEvent,
                 callchain: vec![],
             },
@@ -1197,6 +1199,7 @@ mod tests {
                 timestamp_nanos: 3_000_000, // after poll ended
                 worker_id: WorkerId::from(0usize),
                 tid: 100,
+                thread_name: None,
                 source: CpuSampleSource::CpuProfile,
                 callchain: vec![],
             },

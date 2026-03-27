@@ -169,7 +169,7 @@ impl ThreadLocalBuffer {
     }
 
     fn record_event(&mut self, event: &RawEvent) {
-        self.encode_event(&event);
+        self.encode_event(event);
         self.event_count += 1;
     }
 

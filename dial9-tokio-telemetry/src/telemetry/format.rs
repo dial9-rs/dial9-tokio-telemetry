@@ -184,11 +184,46 @@ pub struct SegmentMetadataEvent {
 // ── dial9-trace-format: decode ──────────────────────────────────────────────
 
 /// Decode all events from a `dial9-trace-format` byte slice into `TelemetryEvent`s.
+///
+/// Unlike [`From<TelemetryEventRef>`], this resolves `InternedString` fields
+/// (e.g. `CpuSample.thread_name`) via the decoder's string pool.
 pub fn decode_events_v2(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
-    Ok(decode_events_ref(data)?
+    use dial9_trace_format::decoder::Decoder;
+
+    let mut dec = Decoder::new(data)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
+    let mut ref_events = Vec::new();
+
+    dec.for_each_event(|ev| {
+        if let Some(ev) = decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
+            ref_events.push(ev);
+        }
+    })
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+    let string_pool = dec.string_pool();
+    let events = ref_events
         .into_iter()
-        .map(TelemetryEvent::from)
-        .collect())
+        .map(|r| match &r {
+            TelemetryEventRef::CpuSample(e) => {
+                let thread_name = string_pool
+                    .get(e.thread_name)
+                    .filter(|n| *n != "<no thread name>")
+                    .map(|n| n.to_string());
+                let mut ev = TelemetryEvent::from(r);
+                if let TelemetryEvent::CpuSample {
+                    thread_name: ref mut tn,
+                    ..
+                } = ev
+                {
+                    *tn = thread_name;
+                }
+                ev
+            }
+            _ => TelemetryEvent::from(r),
+        })
+        .collect();
+    Ok(events)
 }
 
 /// Decode all events from a byte slice into zero-copy [`TelemetryEventRef`]s.
@@ -329,6 +364,7 @@ impl From<TelemetryEventRef<'_>> for TelemetryEvent {
                 timestamp_nanos: e.timestamp_ns,
                 worker_id: e.worker_id,
                 tid: e.tid,
+                thread_name: None,
                 source: e.source,
                 callchain: e.callchain.iter().collect(),
             },

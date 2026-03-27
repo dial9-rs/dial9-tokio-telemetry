@@ -773,8 +773,19 @@ impl TracedRuntime {
 mod tests {
     use super::*;
     use crate::telemetry::NullWriter;
+    use crate::telemetry::collector::CentralCollector;
     use std::panic::Location;
+    use std::sync::Arc;
 
+    /// Drain all pending batches from a `CentralCollector` into an `EventWriter`.
+    /// Call `buffer::drain_to_collector` first to flush the thread-local buffer.
+    fn drain_collector_to_writer(collector: &CentralCollector, ew: &mut EventWriter) {
+        while let Some(batch) = collector.next() {
+            if batch.event_count > 0 {
+                ew.write_transcoded_batch(&batch).unwrap();
+            }
+        }
+    }
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
         let _shared = SharedState::new(crate::telemetry::events::clock_monotonic_ns());
@@ -834,26 +845,35 @@ mod tests {
             .build()
             .unwrap();
         let mut ew = EventWriter::new(Box::new(writer));
+        let collector = Arc::new(CentralCollector::new());
 
         let locations = [
             location_a, location_b, location_a, location_b, location_a, location_b,
         ];
         for (i, loc) in locations.iter().enumerate() {
             let task_id = crate::telemetry::task_metadata::TaskId::from_u32(i as u32);
-            ew.write_raw_event(RawEvent::TaskSpawn {
-                timestamp_nanos: (i as u64 + 1) * 1000,
-                task_id,
-                location: loc,
-            })
-            .unwrap();
-            ew.write_raw_event(RawEvent::PollStart {
-                timestamp_nanos: (i as u64 + 1) * 1000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id,
-                location: loc,
-            })
-            .unwrap();
+            buffer::record_event(
+                RawEvent::TaskSpawn {
+                    timestamp_nanos: (i as u64 + 1) * 1000,
+                    task_id,
+                    location: loc,
+                },
+                &collector,
+            );
+            buffer::record_event(
+                RawEvent::PollStart {
+                    timestamp_nanos: (i as u64 + 1) * 1000,
+                    worker_id: WorkerId::from(0usize),
+                    worker_local_queue_depth: 0,
+                    task_id,
+                    location: loc,
+                },
+                &collector,
+            );
+            // Drain after each iteration to produce separate small batches
+            // that trigger file rotation (max_file_size is 100 bytes).
+            buffer::drain_to_collector(&collector);
+            drain_collector_to_writer(&collector, &mut ew);
         }
         ew.flush().unwrap();
         ew.finalize().unwrap();
