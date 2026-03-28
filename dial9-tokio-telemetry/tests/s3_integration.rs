@@ -13,6 +13,7 @@ use fake_s3::{
 };
 use flate2::read::GzDecoder;
 use std::io::Read;
+use std::time::Duration;
 
 /// Create a dummy S3 config + client for tests.
 fn dummy_s3(s3_root: &std::path::Path) -> (S3Config, aws_sdk_s3::Client) {
@@ -133,22 +134,21 @@ fn end_to_end_trace_to_s3_roundtrip() {
         .unwrap();
 
     // Run a workload that generates enough events to trigger rotation.
-    runtime.block_on(async {
-        let mut handles = Vec::new();
-        for _ in 0..50 {
-            handles.push(tokio::spawn(async {
-                tokio::task::yield_now().await;
-            }));
-        }
-        for h in handles {
-            let _ = h.await;
-        }
-        // Give the flush thread time to write events and the worker time to upload
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    });
+    runtime
+        .block_on(async {
+            let mut handles = Vec::new();
+            for _ in 0..50 {
+                handles.push(tokio::spawn(async {
+                    tokio::task::yield_now().await;
+                }));
+            }
+            for h in handles {
+                let _ = h.await;
+            }
+            guard.graceful_shutdown(Duration::from_secs(1)).await
+        })
+        .unwrap();
 
-    // Drop guard: stops flush, seals final segment, worker drains to S3
-    drop(guard);
     drop(runtime);
 
     // List objects in the bucket — should have at least one uploaded segment
@@ -267,10 +267,12 @@ fn region_auto_detection_corrects_wrong_client_region() {
         for _ in 0..50 {
             tokio::spawn(async { tokio::task::yield_now().await });
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        guard
+            .graceful_shutdown(Duration::from_secs(1))
+            .await
+            .unwrap();
     });
 
-    drop(guard);
     drop(runtime);
 
     // Verify objects were uploaded despite the wrong initial region.
