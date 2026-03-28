@@ -308,9 +308,8 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         tid
     });
 
-    runtime
-        .block_on(guard.graceful_shutdown(Duration::from_secs(1)))
-        .unwrap();
+    drop(runtime);
+    guard.graceful_shutdown(Duration::from_secs(1)).unwrap();
 
     let events = events.lock().unwrap();
 

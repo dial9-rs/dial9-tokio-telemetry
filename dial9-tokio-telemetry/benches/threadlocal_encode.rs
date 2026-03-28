@@ -104,7 +104,7 @@ fn bench_threadlocal_rawcopy(c: &mut Criterion) {
                     for batch in batches {
                         let mut local = Encoder::new();
                         encode_batch(&mut local, batch);
-                        let bytes = local.reset_to(Vec::new());
+                        let bytes = local.reset_to(Vec::new()).unwrap();
                         output.extend_from_slice(&bytes);
                     }
                     output

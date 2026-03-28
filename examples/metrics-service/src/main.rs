@@ -257,9 +257,13 @@ fn main() -> std::io::Result<()> {
             .with_graceful_shutdown(async move { shutdown.cancelled().await })
             .await
             .unwrap();
-        let shutdown = guard.graceful_shutdown(Duration::from_secs(5)).await;
-        tracing::info!("dial9 shutdown: {shutdown:?}");
     });
+
+    // Drop the runtime first so worker threads exit and flush their
+    // thread-local telemetry buffers, then run graceful_shutdown.
+    drop(runtime);
+    let shutdown = guard.graceful_shutdown(Duration::from_secs(5));
+    tracing::info!("dial9 shutdown: {shutdown:?}");
 
     Ok(())
 }

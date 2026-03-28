@@ -274,11 +274,28 @@ impl TelemetryGuard {
     }
 
     /// Flush remaining events, seal the final segment, and wait for the
-    /// worker to drain. Returns `Ok(())` if the worker finishes within the
-    /// timeout, `Err` if it times out or the worker panics.
+    /// background worker to drain (symbolize, compress, upload to S3).
+    ///
+    /// **Call this after the runtime has been dropped** so that Tokio worker
+    /// threads have exited and their thread-local telemetry buffers have been
+    /// flushed to the central collector.
+    ///
+    /// ```rust,no_run
+    /// # use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+    /// # use std::time::Duration;
+    /// # fn main() -> std::io::Result<()> {
+    /// # let writer = RotatingWriter::new("/tmp/t.bin", 1024, 4096)?;
+    /// # let builder = tokio::runtime::Builder::new_multi_thread();
+    /// let (runtime, guard) = TracedRuntime::build_and_start(builder, writer)?;
+    /// runtime.block_on(async { /* ... */ });
+    /// drop(runtime); // worker threads exit, flushing thread-local buffers
+    /// guard.graceful_shutdown(Duration::from_secs(5))?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// Consumes the guard so `Drop` becomes a no-op.
-    pub async fn graceful_shutdown(mut self, timeout: Duration) -> Result<(), std::io::Error> {
+    pub fn graceful_shutdown(mut self, timeout: Duration) -> Result<(), std::io::Error> {
         tracing::debug!(target: "dial9_telemetry", "graceful_shutdown starting");
 
         // 1. Stop flush thread (flushes + finalizes the last segment)
@@ -292,7 +309,7 @@ impl TelemetryGuard {
                 let _ = tx.send(timeout);
             }
             if let Some(t) = w.thread.take() {
-                let _ = tokio::task::spawn_blocking(move || t.join()).await;
+                let _ = t.join();
             }
             tracing::debug!(target: "dial9_telemetry", "worker finished");
         }
