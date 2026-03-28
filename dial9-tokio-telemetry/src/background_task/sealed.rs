@@ -215,7 +215,12 @@ mod tests {
             local_queue: 0,
             cpu_time_ns: 0,
         });
-        writer.write_encoded_batch(&enc.into_inner()).unwrap();
+        writer
+            .write_encoded_batch(&crate::telemetry::collector::Batch {
+                encoded_bytes: enc.into_inner(),
+                event_count: 1,
+            })
+            .unwrap();
         writer.flush().unwrap();
 
         let data = std::fs::read(&base).unwrap();
@@ -249,7 +254,12 @@ mod tests {
             local_queue: 0,
             cpu_time_ns: 0,
         });
-        writer.write_encoded_batch(&enc.into_inner()).unwrap();
+        writer
+            .write_encoded_batch(&crate::telemetry::collector::Batch {
+                encoded_bytes: enc.into_inner(),
+                event_count: 1,
+            })
+            .unwrap();
         writer.flush().unwrap();
 
         let data = std::fs::read(&base).unwrap();
@@ -300,7 +310,12 @@ mod tests {
             local_queue: 0,
             cpu_time_ns: 0,
         });
-        writer.write_encoded_batch(&enc.into_inner()).unwrap();
+        writer
+            .write_encoded_batch(&crate::telemetry::collector::Batch {
+                encoded_bytes: enc.into_inner(),
+                event_count: 1,
+            })
+            .unwrap();
         writer.flush().unwrap();
 
         let data = std::fs::read(&base).unwrap();

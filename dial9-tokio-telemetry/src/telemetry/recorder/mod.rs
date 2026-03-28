@@ -40,7 +40,7 @@ pub(crate) struct FlushStats {
 fn flush_once(
     event_writer: &mut EventWriter,
     shared: &SharedState,
-    force_self_drain: bool,
+    drain_self: bool,
 ) -> FlushStats {
     let events_before = event_writer.events_written();
     let cpu_events_time = Instant::now();
@@ -50,8 +50,10 @@ fn flush_once(
     }
     let cpu_time = cpu_events_time.elapsed();
 
-    if force_self_drain {
-        // Flush the current thread's buffer (the CPU events are now sitting in it)
+    if drain_self {
+        // Periodically flush the flush thread's own TL buffer (queue samples + CPU events).
+        // We don't drain every cycle because each batch becomes its own trace segment;
+        // batching ~1s worth avoids writing tiny segments every 5ms.
         buffer::drain_to_collector(&shared.collector);
     }
 
@@ -607,6 +609,11 @@ impl TracedRuntimeBuilder<HasTracePath> {
                         let _ = libc::nice(10);
                     }
 
+                    // Drain the flush thread's own TL buffer every ~1s (200 × 5ms)
+                    // rather than every cycle, so queue samples and CPU events
+                    // are batched into reasonably-sized segments.
+                    let mut cycle_count: u64 = 0;
+                    const SELF_DRAIN_INTERVAL: u64 = 200;
                     loop {
                         let mut ack_tx = None;
                         let mut exit = false;
@@ -628,9 +635,10 @@ impl TracedRuntimeBuilder<HasTracePath> {
                             shared.record_queue_sample(metrics.global_queue_depth());
                         }
 
+                        cycle_count += 1;
+                        let drain_self = exit || cycle_count.is_multiple_of(SELF_DRAIN_INTERVAL);
                         let mut flush_timer = Timer::start_now();
-                        // if we are going to exit, force draining the TL buffer of the flush thead (that accumulates CPU events & global queue length samples)
-                        let stats = flush_once(&mut event_writer, &shared, exit);
+                        let stats = flush_once(&mut event_writer, &shared, drain_self);
                         flush_timer.stop();
                         if stats.event_count > 0 || stats.dropped_batches > 0 {
                             let _guard = FlushMetrics {

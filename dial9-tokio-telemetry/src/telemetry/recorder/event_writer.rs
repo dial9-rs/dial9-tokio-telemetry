@@ -43,7 +43,11 @@ impl EventWriter {
         raw: crate::telemetry::events::RawEvent,
     ) -> std::io::Result<()> {
         use crate::telemetry::buffer::ThreadLocalBuffer;
-        let batch = ThreadLocalBuffer::encode_single(&raw);
+        let encoded_bytes = ThreadLocalBuffer::encode_single(&raw);
+        let batch = Batch {
+            encoded_bytes,
+            event_count: 1,
+        };
         self.writer.write_encoded_batch(&batch)?;
         self.events_written += 1;
         Ok(())
@@ -52,7 +56,7 @@ impl EventWriter {
     /// Transcode an entire batch through the writer, correctly accounting for
     /// the number of events the batch contains.
     pub(crate) fn write_transcoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
-        self.writer.write_encoded_batch(&batch.encoded_bytes)?;
+        self.writer.write_encoded_batch(batch)?;
         self.events_written += batch.event_count;
         Ok(())
     }
@@ -61,7 +65,6 @@ impl EventWriter {
     #[cfg(feature = "cpu-profiling")]
     pub(crate) fn flush_cpu(&mut self, shared: &SharedState) {
         // Snapshot thread_roles once per flush cycle.
-
         let roles = shared.thread_roles.lock().unwrap().clone();
 
         let resolve = |tid: u32| -> WorkerId {

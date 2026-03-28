@@ -1,5 +1,6 @@
 use dial9_trace_format::encoder::Encoder;
 
+use crate::telemetry::collector::Batch;
 use crate::telemetry::format::SegmentMetadataEvent;
 use std::collections::VecDeque;
 use std::fs::{self, File};
@@ -19,7 +20,7 @@ pub trait TraceWriter: Send {
         self.flush()
     }
     /// Transcode encoded bytes into this writer.
-    fn write_encoded_batch(&mut self, bytes: &[u8]) -> std::io::Result<()>;
+    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()>;
 }
 
 impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
@@ -32,8 +33,8 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     fn finalize(&mut self) -> std::io::Result<()> {
         (**self).finalize()
     }
-    fn write_encoded_batch(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        (**self).write_encoded_batch(bytes)
+    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
+        (**self).write_encoded_batch(batch)
     }
 }
 
@@ -42,7 +43,7 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
 pub struct NullWriter;
 
 impl TraceWriter for NullWriter {
-    fn write_encoded_batch(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+    fn write_encoded_batch(&mut self, _batch: &Batch) -> std::io::Result<()> {
         Ok(())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -320,15 +321,15 @@ impl TraceWriter for RotatingWriter {
         Ok(())
     }
 
-    fn write_encoded_batch(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
         let WriterState::Active(encoder) = &mut self.state else {
-            self.dropped_events += 1;
+            self.dropped_events += batch.event_count as usize;
             return Ok(());
         };
         // Raw-copy the thread-local batch. Each batch is self-contained
         // (starts with its own header), so the next batch's header acts as
         // the reset frame for decoders.
-        encoder.write_raw(bytes)?;
+        encoder.write_raw(&batch.encoded_bytes)?;
         encoder.reset_registry_and_pools();
         self.has_real_events = true;
         self.maybe_rotate()?;
@@ -358,7 +359,7 @@ mod tests {
 
     /// Encode a single park event into a self-contained batch (header + event),
     /// matching the format produced by ThreadLocalBuffer.
-    fn test_batch() -> Vec<u8> {
+    fn test_batch() -> Batch {
         let mut enc = Encoder::new_to(Vec::new()).unwrap();
         enc.write_infallible(&WorkerParkEvent {
             timestamp_ns: 1000,
@@ -366,7 +367,10 @@ mod tests {
             local_queue: 2,
             cpu_time_ns: 0,
         });
-        enc.into_inner()
+        Batch {
+            encoded_bytes: enc.into_inner(),
+            event_count: 1,
+        }
     }
 
     fn rotating_file(base: &std::path::Path, i: u32) -> String {
