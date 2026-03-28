@@ -37,7 +37,11 @@ pub(crate) struct FlushStats {
 /// Perform one flush cycle: drain CPU profilers, drain the collector, write
 /// events to disk, and flush the writer. This is the only code path that
 /// touches EventWriter, and it runs exclusively on the flush thread.
-fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStats {
+fn flush_once(
+    event_writer: &mut EventWriter,
+    shared: &SharedState,
+    drain_self: bool,
+) -> FlushStats {
     let events_before = event_writer.events_written();
     let cpu_events_time = Instant::now();
     #[cfg(feature = "cpu-profiling")]
@@ -46,10 +50,12 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     }
     let cpu_time = cpu_events_time.elapsed();
 
-    // Flush the current thread's buffer (the flush thread itself produces
-    // queue-sample events via record_event) so those events reach the
-    // collector before we drain it.
-    buffer::drain_to_collector(&shared.collector);
+    if drain_self {
+        // Periodically flush the flush thread's own TL buffer (queue samples + CPU events).
+        // We don't drain every cycle because each batch becomes its own trace segment;
+        // batching ~1s worth avoids writing tiny segments every 5ms.
+        buffer::drain_to_collector(&shared.collector);
+    }
 
     let dropped = shared.collector.take_dropped_batches();
     if dropped > 0 {
@@ -60,16 +66,16 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     }
 
     while let Some(batch) = shared.collector.next() {
-        for raw in batch {
-            if let Err(e) = event_writer.write_raw_event(raw) {
-                tracing::warn!("failed to write trace event: {e}");
-                shared.enabled.store(false, Ordering::Relaxed);
-                return FlushStats {
-                    event_count: event_writer.events_written() - events_before,
-                    dropped_batches: dropped as u64,
-                    cpu_time,
-                };
-            }
+        if batch.event_count > 0
+            && let Err(e) = event_writer.write_transcoded_batch(&batch)
+        {
+            tracing::warn!("failed to transcode batch: {e}");
+            shared.enabled.store(false, Ordering::Relaxed);
+            return FlushStats {
+                event_count: event_writer.events_written() - events_before,
+                dropped_batches: dropped as u64,
+                cpu_time,
+            };
         }
     }
     if let Err(e) = event_writer.flush() {
@@ -270,11 +276,28 @@ impl TelemetryGuard {
     }
 
     /// Flush remaining events, seal the final segment, and wait for the
-    /// worker to drain. Returns `Ok(())` if the worker finishes within the
-    /// timeout, `Err` if it times out or the worker panics.
+    /// background worker to drain (symbolize, compress, upload to S3).
+    ///
+    /// **Call this after the runtime has been dropped** so that Tokio worker
+    /// threads have exited and their thread-local telemetry buffers have been
+    /// flushed to the central collector.
+    ///
+    /// ```rust,no_run
+    /// # use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+    /// # use std::time::Duration;
+    /// # fn main() -> std::io::Result<()> {
+    /// # let writer = RotatingWriter::new("/tmp/t.bin", 1024, 4096)?;
+    /// # let builder = tokio::runtime::Builder::new_multi_thread();
+    /// let (runtime, guard) = TracedRuntime::build_and_start(builder, writer)?;
+    /// runtime.block_on(async { /* ... */ });
+    /// drop(runtime); // worker threads exit, flushing thread-local buffers
+    /// guard.graceful_shutdown(Duration::from_secs(5))?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// Consumes the guard so `Drop` becomes a no-op.
-    pub async fn graceful_shutdown(mut self, timeout: Duration) -> Result<(), std::io::Error> {
+    pub fn graceful_shutdown(mut self, timeout: Duration) -> Result<(), std::io::Error> {
         tracing::debug!(target: "dial9_telemetry", "graceful_shutdown starting");
 
         // 1. Stop flush thread (flushes + finalizes the last segment)
@@ -288,7 +311,7 @@ impl TelemetryGuard {
                 let _ = tx.send(timeout);
             }
             if let Some(t) = w.thread.take() {
-                let _ = tokio::task::spawn_blocking(move || t.join()).await;
+                let _ = t.join();
             }
             tracing::debug!(target: "dial9_telemetry", "worker finished");
         }
@@ -586,9 +609,11 @@ impl TracedRuntimeBuilder<HasTracePath> {
                         let _ = libc::nice(10);
                     }
 
-                    let sample_interval = Duration::from_millis(10);
-                    let mut last_sample = Instant::now();
-
+                    // Drain the flush thread's own TL buffer every ~1s (200 × 5ms)
+                    // rather than every cycle, so queue samples and CPU events
+                    // are batched into reasonably-sized segments.
+                    let mut cycle_count: u64 = 0;
+                    const SELF_DRAIN_INTERVAL: u64 = 200;
                     loop {
                         let mut ack_tx = None;
                         let mut exit = false;
@@ -605,17 +630,15 @@ impl TracedRuntimeBuilder<HasTracePath> {
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                         }
 
-                        let now = Instant::now();
-                        if now.duration_since(last_sample) >= sample_interval {
-                            last_sample = now;
-                            let metrics_guard = shared.metrics.load();
-                            if let Some(ref metrics) = **metrics_guard {
-                                shared.record_queue_sample(metrics.global_queue_depth());
-                            }
+                        let metrics_guard = shared.metrics.load();
+                        if let Some(ref metrics) = **metrics_guard {
+                            shared.record_queue_sample(metrics.global_queue_depth());
                         }
 
+                        cycle_count += 1;
+                        let drain_self = exit || cycle_count.is_multiple_of(SELF_DRAIN_INTERVAL);
                         let mut flush_timer = Timer::start_now();
-                        let stats = flush_once(&mut event_writer, &shared);
+                        let stats = flush_once(&mut event_writer, &shared, drain_self);
                         flush_timer.stop();
                         if stats.event_count > 0 || stats.dropped_batches > 0 {
                             let _guard = FlushMetrics {
@@ -775,8 +798,19 @@ impl TracedRuntime {
 mod tests {
     use super::*;
     use crate::telemetry::NullWriter;
+    use crate::telemetry::collector::CentralCollector;
     use std::panic::Location;
+    use std::sync::Arc;
 
+    /// Drain all pending batches from a `CentralCollector` into an `EventWriter`.
+    /// Call `buffer::drain_to_collector` first to flush the thread-local buffer.
+    fn drain_collector_to_writer(collector: &CentralCollector, ew: &mut EventWriter) {
+        while let Some(batch) = collector.next() {
+            if batch.event_count > 0 {
+                ew.write_transcoded_batch(&batch).unwrap();
+            }
+        }
+    }
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
         let _shared = SharedState::new(crate::telemetry::events::clock_monotonic_ns());
@@ -836,26 +870,35 @@ mod tests {
             .build()
             .unwrap();
         let mut ew = EventWriter::new(Box::new(writer));
+        let collector = Arc::new(CentralCollector::new());
 
         let locations = [
             location_a, location_b, location_a, location_b, location_a, location_b,
         ];
         for (i, loc) in locations.iter().enumerate() {
             let task_id = crate::telemetry::task_metadata::TaskId::from_u32(i as u32);
-            ew.write_raw_event(RawEvent::TaskSpawn {
-                timestamp_nanos: (i as u64 + 1) * 1000,
-                task_id,
-                location: loc,
-            })
-            .unwrap();
-            ew.write_raw_event(RawEvent::PollStart {
-                timestamp_nanos: (i as u64 + 1) * 1000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id,
-                location: loc,
-            })
-            .unwrap();
+            buffer::record_event(
+                RawEvent::TaskSpawn {
+                    timestamp_nanos: (i as u64 + 1) * 1000,
+                    task_id,
+                    location: loc,
+                },
+                &collector,
+            );
+            buffer::record_event(
+                RawEvent::PollStart {
+                    timestamp_nanos: (i as u64 + 1) * 1000,
+                    worker_id: WorkerId::from(0usize),
+                    worker_local_queue_depth: 0,
+                    task_id,
+                    location: loc,
+                },
+                &collector,
+            );
+            // Drain after each iteration to produce separate small batches
+            // that trigger file rotation (max_file_size is 100 bytes).
+            buffer::drain_to_collector(&collector);
+            drain_collector_to_writer(&collector, &mut ew);
         }
         ew.flush().unwrap();
         ew.finalize().unwrap();
@@ -991,7 +1034,8 @@ mod tests {
                         callchain: callchain.clone(),
                     };
                     *timestamp += 1;
-                    ew.write_cpu_event(&data);
+                    ew.write_raw_event(RawEvent::CpuSample(Box::new(data)))
+                        .unwrap();
                 }
             }
 

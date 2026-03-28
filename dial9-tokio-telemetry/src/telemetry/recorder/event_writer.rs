@@ -1,6 +1,6 @@
 #[cfg(feature = "cpu-profiling")]
 use super::shared_state::SharedState;
-use crate::telemetry::events::RawEvent;
+use crate::telemetry::collector::Batch;
 #[cfg(feature = "cpu-profiling")]
 use crate::telemetry::events::{CpuSampleData, ThreadRole};
 #[cfg(feature = "cpu-profiling")]
@@ -11,7 +11,7 @@ use crate::telemetry::writer::TraceWriter;
 ///
 /// Owns the writer and the CPU profiler. Its API is roughly:
 ///
-/// - `write_raw_event(raw)` — write event through the writer
+/// - `write_raw_event(raw)` — encode and write a single event (test only)
 /// - `write_cpu_event(event)` — write a CPU sample event
 /// - `flush_cpu(shared)` — drain CPU/sched profilers into the trace via `write_cpu_event`
 /// - `flush()` — flush the underlying writer
@@ -36,20 +36,29 @@ impl EventWriter {
         self.events_written
     }
 
-    /// Write a RawEvent through the writer.
-    pub(crate) fn write_raw_event(&mut self, raw: RawEvent) -> std::io::Result<()> {
-        self.writer.write_event(&raw)?;
+    /// Encode a RawEvent into a batch and write it through the writer.
+    #[cfg(test)]
+    pub(crate) fn write_raw_event(
+        &mut self,
+        raw: crate::telemetry::events::RawEvent,
+    ) -> std::io::Result<()> {
+        use crate::telemetry::buffer::ThreadLocalBuffer;
+        let encoded_bytes = ThreadLocalBuffer::encode_single(&raw);
+        let batch = Batch {
+            encoded_bytes,
+            event_count: 1,
+        };
+        self.writer.write_encoded_batch(&batch)?;
         self.events_written += 1;
         Ok(())
     }
 
-    /// Write a single CPU sample event.
-    #[cfg(feature = "cpu-profiling")]
-    pub(crate) fn write_cpu_event(&mut self, data: &CpuSampleData) {
-        let event = RawEvent::CpuSample(Box::new(data.clone()));
-        if let Err(e) = self.writer.write_event(&event) {
-            tracing::warn!("failed to write CPU trace event: {e}");
-        }
+    /// Transcode an entire batch through the writer, correctly accounting for
+    /// the number of events the batch contains.
+    pub(crate) fn write_transcoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
+        self.writer.write_encoded_batch(batch)?;
+        self.events_written += batch.event_count;
+        Ok(())
     }
 
     /// Drain CPU/sched profilers and write their events into the trace.
@@ -68,6 +77,8 @@ impl EventWriter {
 
         if let Some(mut profiler) = self.cpu_profiler.take() {
             profiler.drain(|raw, thread_name| {
+                use crate::telemetry::{buffer::record_event, events::RawEvent};
+
                 let worker_id = resolve(raw.tid);
                 let data = CpuSampleData {
                     timestamp_nanos: raw.timestamp_nanos,
@@ -77,7 +88,7 @@ impl EventWriter {
                     callchain: raw.callchain,
                     thread_name: thread_name.cloned(),
                 };
-                self.write_cpu_event(&data);
+                record_event(RawEvent::CpuSample(Box::new(data)), &shared.collector);
             });
             self.cpu_profiler = Some(profiler);
         }
@@ -86,6 +97,8 @@ impl EventWriter {
             let mut shared_profiler = shared.sched_profiler.lock().unwrap();
             if let Some(ref mut profiler) = *shared_profiler {
                 profiler.drain(|raw| {
+                    use crate::telemetry::{buffer::record_event, events::RawEvent};
+
                     let data = CpuSampleData {
                         timestamp_nanos: raw.timestamp_nanos,
                         worker_id: resolve(raw.tid),
@@ -96,7 +109,7 @@ impl EventWriter {
                         // sampler is running on worker threads so no thread name
                         thread_name: None,
                     };
-                    self.write_cpu_event(&data);
+                    record_event(RawEvent::CpuSample(Box::new(data)), &shared.collector);
                 });
             }
         }

@@ -468,7 +468,7 @@ impl WorkerLoop {
                 return false;
             }
         };
-        tracing::debug!(target: "dial9_worker", dir = %self.dir.display(), stem = %self.stem, count = segments.len(), "scanned for sealed segments");
+        tracing::trace!(target: "dial9_worker", dir = %self.dir.display(), stem = %self.stem, count = segments.len(), "scanned for sealed segments");
         let found = !segments.is_empty();
         self.process_segments(&segments).await;
         found

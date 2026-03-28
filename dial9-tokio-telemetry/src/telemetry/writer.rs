@@ -1,18 +1,13 @@
 use dial9_trace_format::encoder::Encoder;
-use dial9_trace_format::{InternedString, StackFrames};
 
-use crate::telemetry::events::RawEvent;
-use crate::telemetry::format::{
-    CpuSampleEvent, PollEndEvent, PollStartEvent, QueueSampleEvent, SegmentMetadataEvent,
-    TaskSpawnEvent, TaskTerminateEvent, WakeEventEvent, WorkerParkEvent, WorkerUnparkEvent,
-};
-use std::collections::{HashMap, VecDeque};
+use crate::telemetry::collector::Batch;
+use crate::telemetry::format::SegmentMetadataEvent;
+use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 pub trait TraceWriter: Send {
-    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()>;
     fn flush(&mut self) -> std::io::Result<()>;
     /// Returns true if the writer rotated to a new file since the last call to this method.
     fn take_rotated(&mut self) -> bool {
@@ -24,20 +19,11 @@ pub trait TraceWriter: Send {
     fn finalize(&mut self) -> std::io::Result<()> {
         self.flush()
     }
-    /// Write a batch of events atomically — rotation is deferred until after
-    /// the entire batch, so all events land in the same file.
-    fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
-        for event in events {
-            self.write_event(event)?;
-        }
-        Ok(())
-    }
+    /// Transcode encoded bytes into this writer.
+    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()>;
 }
 
 impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
-    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
-        (**self).write_event(event)
-    }
     fn flush(&mut self) -> std::io::Result<()> {
         (**self).flush()
     }
@@ -47,8 +33,8 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     fn finalize(&mut self) -> std::io::Result<()> {
         (**self).finalize()
     }
-    fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
-        (**self).write_event_batch(events)
+    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
+        (**self).write_encoded_batch(batch)
     }
 }
 
@@ -57,7 +43,7 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
 pub struct NullWriter;
 
 impl TraceWriter for NullWriter {
-    fn write_event(&mut self, _event: &RawEvent) -> std::io::Result<()> {
+    fn write_encoded_batch(&mut self, _batch: &Batch) -> std::io::Result<()> {
         Ok(())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -87,9 +73,6 @@ pub struct RotatingWriter {
     did_rotate: bool,
     /// Optional metadata written at the start of each segment.
     segment_metadata: Option<Vec<(String, String)>>,
-    /// Cache from Location → formatted string, to avoid
-    /// reformatting on every event.
-    formatted_locations: HashMap<std::panic::Location<'static>, String>,
     /// Events silently dropped because the writer was finished/stopped.
     dropped_events: usize,
     /// Whether any real (non-metadata) events have been written to the current segment.
@@ -153,7 +136,6 @@ impl RotatingWriter {
             next_index: 1,
             did_rotate: false,
             segment_metadata,
-            formatted_locations: HashMap::new(),
             dropped_events: 0,
             has_real_events: false,
         };
@@ -183,7 +165,6 @@ impl RotatingWriter {
             next_index: 1,
             did_rotate: false,
             segment_metadata: None,
-            formatted_locations: HashMap::new(),
             dropped_events: 0,
             has_real_events: false,
         };
@@ -283,141 +264,6 @@ impl RotatingWriter {
         Ok(())
     }
 
-    /// Intern a `&'static Location` via the encoder's string pool, using
-    /// the location_cache to avoid reformatting the same pointer repeatedly.
-    fn intern_location(
-        encoder: &mut Encoder<BufWriter<File>>,
-        cache: &mut HashMap<std::panic::Location<'static>, String>,
-        location: &'static std::panic::Location<'static>,
-    ) -> std::io::Result<InternedString> {
-        let s = cache
-            .entry(*location)
-            .or_insert_with(|| location.to_string());
-        encoder.intern_string(s)
-    }
-
-    /// Resolve a RawEvent and write it. Rotation is deferred until after
-    /// the complete logical unit (defs + event) is written, so they always
-    /// land in the same file.
-    fn write_resolved(&mut self, event: &RawEvent) -> std::io::Result<()> {
-        self.write_resolved_no_rotate(event)?;
-        self.maybe_rotate()?;
-        Ok(())
-    }
-
-    /// Write a resolved event without triggering rotation.
-    fn write_resolved_no_rotate(&mut self, event: &RawEvent) -> std::io::Result<()> {
-        let WriterState::Active(encoder) = &mut self.state else {
-            self.dropped_events += 1;
-            return Ok(());
-        };
-        match event {
-            RawEvent::PollStart {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                task_id,
-                location,
-            } => {
-                let spawn_loc =
-                    Self::intern_location(encoder, &mut self.formatted_locations, location)?;
-                encoder.write(&PollStartEvent {
-                    timestamp_ns: *timestamp_nanos,
-                    worker_id: *worker_id,
-                    local_queue: *worker_local_queue_depth as u8,
-                    task_id: *task_id,
-                    spawn_loc,
-                })
-            }
-            RawEvent::PollEnd {
-                timestamp_nanos,
-                worker_id,
-            } => encoder.write(&PollEndEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-            }),
-            RawEvent::WorkerPark {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                cpu_time_nanos,
-            } => encoder.write(&WorkerParkEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-                local_queue: *worker_local_queue_depth as u8,
-                cpu_time_ns: *cpu_time_nanos,
-            }),
-            RawEvent::WorkerUnpark {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                cpu_time_nanos,
-                sched_wait_delta_nanos,
-            } => encoder.write(&WorkerUnparkEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-                local_queue: *worker_local_queue_depth as u8,
-                cpu_time_ns: *cpu_time_nanos,
-                sched_wait_ns: *sched_wait_delta_nanos,
-            }),
-            RawEvent::QueueSample {
-                timestamp_nanos,
-                global_queue_depth,
-            } => encoder.write(&QueueSampleEvent {
-                timestamp_ns: *timestamp_nanos,
-                global_queue: *global_queue_depth as u8,
-            }),
-            RawEvent::TaskSpawn {
-                timestamp_nanos,
-                task_id,
-                location,
-            } => {
-                let spawn_loc =
-                    Self::intern_location(encoder, &mut self.formatted_locations, location)?;
-                encoder.write(&TaskSpawnEvent {
-                    timestamp_ns: *timestamp_nanos,
-                    task_id: *task_id,
-                    spawn_loc,
-                })
-            }
-            RawEvent::TaskTerminate {
-                timestamp_nanos,
-                task_id,
-            } => encoder.write(&TaskTerminateEvent {
-                timestamp_ns: *timestamp_nanos,
-                task_id: *task_id,
-            }),
-            RawEvent::WakeEvent {
-                timestamp_nanos,
-                waker_task_id,
-                woken_task_id,
-                target_worker,
-            } => encoder.write(&WakeEventEvent {
-                timestamp_ns: *timestamp_nanos,
-                waker_task_id: *waker_task_id,
-                woken_task_id: *woken_task_id,
-                target_worker: *target_worker,
-            }),
-            RawEvent::CpuSample(data) => {
-                let thread_name = match &data.thread_name {
-                    Some(name) => encoder.intern_string(name.as_str()),
-                    None => encoder.intern_string("<no thread name>"),
-                }?;
-
-                encoder.write(&CpuSampleEvent {
-                    timestamp_ns: data.timestamp_nanos,
-                    worker_id: data.worker_id,
-                    tid: data.tid,
-                    source: data.source,
-                    thread_name,
-                    callchain: StackFrames(data.callchain.clone()),
-                })
-            }
-        }?;
-        self.has_real_events = true;
-        Ok(())
-    }
-
     /// Rotate if the current file exceeds max_file_size.
     /// Called after writing a complete logical unit (def + event).
     fn maybe_rotate(&mut self) -> std::io::Result<()> {
@@ -431,18 +277,6 @@ impl RotatingWriter {
 }
 
 impl TraceWriter for RotatingWriter {
-    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
-        self.write_resolved(event)
-    }
-
-    fn write_event_batch(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
-        for event in events {
-            self.write_resolved_no_rotate(event)?;
-        }
-        self.maybe_rotate()?;
-        Ok(())
-    }
-
     fn flush(&mut self) -> std::io::Result<()> {
         if let WriterState::Active(encoder) = &mut self.state {
             encoder.flush()?;
@@ -486,6 +320,21 @@ impl TraceWriter for RotatingWriter {
         self.state = WriterState::Finished;
         Ok(())
     }
+
+    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
+        let WriterState::Active(encoder) = &mut self.state else {
+            self.dropped_events += batch.event_count as usize;
+            return Ok(());
+        };
+        // Raw-copy the thread-local batch. Each batch is self-contained
+        // (starts with its own header), so the next batch's header acts as
+        // the reset frame for decoders.
+        encoder.write_raw(&batch.encoded_bytes)?;
+        encoder.reset_registry_and_pools();
+        self.has_real_events = true;
+        self.maybe_rotate()?;
+        Ok(())
+    }
 }
 
 impl Drop for RotatingWriter {
@@ -503,16 +352,24 @@ impl Drop for RotatingWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::format::WorkerParkEvent;
     use crate::telemetry::{TelemetryEvent, format};
     use std::io::Read;
     use tempfile::TempDir;
 
-    fn park_event() -> RawEvent {
-        RawEvent::WorkerPark {
-            timestamp_nanos: 1000,
+    /// Encode a single park event into a self-contained batch (header + event),
+    /// matching the format produced by ThreadLocalBuffer.
+    fn test_batch() -> Batch {
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write_infallible(&WorkerParkEvent {
+            timestamp_ns: 1000,
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            worker_local_queue_depth: 2,
-            cpu_time_nanos: 0,
+            local_queue: 2,
+            cpu_time_ns: 0,
+        });
+        Batch {
+            encoded_bytes: enc.into_inner(),
+            event_count: 1,
         }
     }
 
@@ -544,14 +401,14 @@ mod tests {
             .sum()
     }
 
-    /// Write one park event to a temp file and return the file size.
+    /// Write one batch to a temp file and return the file size.
     /// This captures the actual overhead (header + schema + event) so tests
     /// don't depend on hardcoded format sizes.
     fn single_event_file_size() -> u64 {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("probe.bin");
         let mut w = RotatingWriter::single_file(&path).unwrap();
-        w.write_event(&park_event()).unwrap();
+        w.write_encoded_batch(&test_batch()).unwrap();
         w.flush().unwrap();
         std::fs::metadata(&path).unwrap().len()
     }
@@ -570,7 +427,7 @@ mod tests {
         let path = dir.path().join("test_event_v2.bin");
         let mut writer = RotatingWriter::single_file(&path).unwrap();
 
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
         let metadata = std::fs::metadata(&path).unwrap();
@@ -589,7 +446,7 @@ mod tests {
         let one_event_size = single_event_file_size();
 
         for _ in 0..2 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.flush().unwrap();
 
@@ -638,7 +495,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         for _ in 0..3 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -666,7 +523,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, max_total_size).unwrap();
 
         for _ in 0..10 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -688,7 +545,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, max_file_size, max_total_size).unwrap();
 
         for _ in 0..100 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -709,10 +566,10 @@ mod tests {
         );
     }
 
-    /// Bug: write_event_inner sets stopped=true when total_size slightly exceeds
+    /// Bug: write_encoded_batch sets stopped=true when total_size slightly exceeds
     /// max_total_size, without attempting eviction. This happens right after
     /// rotate() + evict_oldest() brings total_size just under budget, then the
-    /// first event in the new file pushes it a few bytes over. The writer
+    /// first batch in the new file pushes it a few bytes over. The writer
     /// permanently stops even though eviction could free space.
     ///
     /// Reproduces the stress test failure: 64-worker runtime with 1MB segments
@@ -721,7 +578,7 @@ mod tests {
     fn test_writer_stops_on_tiny_overshoot_after_eviction() {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
-        // Use max_file_size that doesn't evenly divide by event size,
+        // Use max_file_size that doesn't evenly divide by batch size,
         // so files end up slightly under max_file_size (with leftover bytes).
         // Over 100 files, these leftovers accumulate and push total_size
         // past max_total_size after eviction.
@@ -730,16 +587,16 @@ mod tests {
         let max_total_size = max_file_size * num_files;
         let mut writer = RotatingWriter::new(&base, max_file_size, max_total_size).unwrap();
 
-        // Write many events. The event size (11 bytes for park_event) doesn't
-        // divide evenly into (max_file_size - header), so each file wastes a
-        // few bytes. After 100 rotations, total_size drifts above max_total_size.
+        // Write many batches. The batch size doesn't divide evenly into
+        // (max_file_size - header), so each file wastes a few bytes. After
+        // 100 rotations, total_size drifts above max_total_size.
         for i in 0..5000 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
             if matches!(writer.state, WriterState::Finished) {
                 panic!(
-                    "Writer stopped at event {i}! total_size={}, max_total_size={}, \
+                    "Writer stopped at batch {i}! total_size={}, max_total_size={}, \
                      closed_files={}. \
-                     write_event_inner should try eviction before stopping.",
+                     write_encoded_batch should try eviction before stopping.",
                     writer.total_size(),
                     max_total_size,
                     writer.closed_files.len()
@@ -756,7 +613,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         for _ in 0..5 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -787,7 +644,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         for _ in 0..3 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -813,7 +670,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         for _ in 0..3 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -839,7 +696,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, 10_000, 50).unwrap();
 
         for _ in 0..5 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         // Repeated flush after stop should not error
         assert!(writer.flush().is_ok());
@@ -853,29 +710,8 @@ mod tests {
         let one_event = single_event_file_size();
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
-        let events = [
-            RawEvent::WorkerPark {
-                timestamp_nanos: 1000,
-                worker_id: crate::telemetry::format::WorkerId::from(0usize),
-                worker_local_queue_depth: 2,
-                cpu_time_nanos: 0,
-            },
-            RawEvent::WorkerPark {
-                timestamp_nanos: 2000,
-                worker_id: crate::telemetry::format::WorkerId::from(1usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-            },
-            RawEvent::WorkerUnpark {
-                timestamp_nanos: 3000,
-                worker_id: crate::telemetry::format::WorkerId::from(0usize),
-                worker_local_queue_depth: 2,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
-            },
-        ];
-        for e in &events {
-            writer.write_event(e).unwrap();
+        for _ in 0..3 {
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -899,7 +735,7 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         for _ in 0..2 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
@@ -922,7 +758,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let mut writer = RotatingWriter::new(&base, 1024, 100000).unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
         // Current file should have .active suffix
@@ -940,8 +776,8 @@ mod tests {
         let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
 
         // Write 2 events — triggers rotation after first
-        writer.write_event(&park_event()).unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
         // First file should be sealed (.bin), second should be active
@@ -968,7 +804,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let mut writer = RotatingWriter::new(&base, 1024, 100000).unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.finalize().unwrap();
 
         assert!(
@@ -988,7 +824,7 @@ mod tests {
         // Small max_file_size so one event triggers rotation.
         let mut writer = RotatingWriter::new(&base, 1, 100_000).unwrap();
         // Write an event — this fills segment 0 and triggers rotation to segment 1.
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         // Segment 0 is sealed, segment 1 is active with only header + metadata.
         assert!(dir.path().join("trace.0.bin").exists());
         assert!(dir.path().join("trace.1.bin.active").exists());
@@ -1012,7 +848,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.bin");
         let mut writer = RotatingWriter::single_file(&path).unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
         // single_file writes directly to the given path, no .active suffix
@@ -1034,7 +870,7 @@ mod tests {
             ])
             .build()
             .unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
         writer.finalize().unwrap();
 
@@ -1072,7 +908,7 @@ mod tests {
             .unwrap();
 
         for _ in 0..5 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.flush().unwrap();
         writer.finalize().unwrap();
@@ -1101,7 +937,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("trace.bin");
         let mut writer = RotatingWriter::single_file(&path).unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
         let all_events = format::decode_events_v2(&std::fs::read(&path).unwrap()).unwrap();

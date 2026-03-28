@@ -32,55 +32,46 @@ impl TraceReader {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid trace header")
         })?;
 
-        let mut ref_events = Vec::new();
-        dec.for_each_event(|ev| {
-            if let Some(ev) = format::decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
-                ref_events.push(ev);
-            }
-        })
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-
-        let string_pool = dec.string_pool();
-
         let mut spawn_locations = HashMap::new();
         let mut task_spawn_locs = HashMap::new();
         let mut thread_names = HashMap::new();
         let mut segment_metadata = Vec::new();
+        let mut events = Vec::new();
 
-        // Build spawn_locations from the string pool: every interned string
-        // that was used as a spawn_loc gets an entry.
-        for ev in &ref_events {
-            match ev {
-                TelemetryEventRef::PollStart(e) => {
-                    populate_spawn_loc(&mut spawn_locations, e.spawn_loc, string_pool);
+        // Resolve InternedString fields (spawn_loc, thread_name) inside the
+        // callback where the string pool is still valid for the current batch.
+        // After a mid-stream header the pool resets, so deferred resolution
+        // would use the wrong pool for earlier batches.
+        dec.for_each_event(|ev| {
+            if let Some(r) = format::decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
+                match &r {
+                    TelemetryEventRef::PollStart(e) => {
+                        populate_spawn_loc(&mut spawn_locations, e.spawn_loc, ev.string_pool);
+                    }
+                    TelemetryEventRef::TaskSpawn(e) => {
+                        populate_spawn_loc(&mut spawn_locations, e.spawn_loc, ev.string_pool);
+                        task_spawn_locs.insert(e.task_id, e.spawn_loc);
+                    }
+                    TelemetryEventRef::CpuSample(e) => {
+                        if let Some(name) = ev.string_pool.get(e.thread_name)
+                            && name != "<no thread name>"
+                        {
+                            thread_names.insert(e.tid, name.to_string());
+                        }
+                    }
+                    TelemetryEventRef::SegmentMetadata(e) => {
+                        segment_metadata = e
+                            .entries
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect();
+                    }
+                    _ => {}
                 }
-                TelemetryEventRef::TaskSpawn(e) => {
-                    populate_spawn_loc(&mut spawn_locations, e.spawn_loc, string_pool);
-                    task_spawn_locs.insert(e.task_id, e.spawn_loc);
-                }
-                TelemetryEventRef::SegmentMetadata(e) => {
-                    segment_metadata = e
-                        .entries
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect();
-                }
-                _ => {}
+                events.push(TelemetryEvent::from(r));
             }
-        }
-
-        // Thread names come from CpuSample events' thread_name field
-        for ev in &ref_events {
-            if let TelemetryEventRef::CpuSample(e) = ev
-                && let Some(name) = string_pool.get(e.thread_name)
-                && name != "<no thread name>"
-            {
-                thread_names.insert(e.tid, name.to_string());
-            }
-        }
-
-        let events: Vec<TelemetryEvent> =
-            ref_events.into_iter().map(TelemetryEvent::from).collect();
+        })
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         Ok(Self {
             events,
@@ -1138,6 +1129,7 @@ mod tests {
                 timestamp_nanos: 1_500_000,
                 worker_id: WorkerId::from(0usize),
                 tid: 100,
+                thread_name: None,
                 source: CpuSampleSource::CpuProfile,
                 callchain: vec![],
             },
@@ -1145,6 +1137,7 @@ mod tests {
                 timestamp_nanos: 1_800_000,
                 worker_id: WorkerId::from(0usize),
                 tid: 100,
+                thread_name: None,
                 source: CpuSampleSource::SchedEvent,
                 callchain: vec![],
             },
@@ -1197,6 +1190,7 @@ mod tests {
                 timestamp_nanos: 3_000_000, // after poll ended
                 worker_id: WorkerId::from(0usize),
                 tid: 100,
+                thread_name: None,
                 source: CpuSampleSource::CpuProfile,
                 callchain: vec![],
             },

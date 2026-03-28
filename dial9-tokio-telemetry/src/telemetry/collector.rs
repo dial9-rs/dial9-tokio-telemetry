@@ -1,14 +1,41 @@
-use crate::telemetry::events::RawEvent;
 use crossbeam_queue::ArrayQueue;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Maximum number of batches (each up to 1024 events) that can be buffered.
+/// Maximum number of encoded batches that can be buffered.
 /// Beyond this, the oldest batch is evicted — the queue acts as a ring buffer
 /// so the most recent data is always preserved.
+/// With ~1MB batches, 1024 slots is generous; the flush thread drains every
+/// 5ms so in practice the queue rarely has more than a handful of entries.
 const DEFAULT_CAPACITY: usize = 1024;
 
+#[non_exhaustive]
+pub struct Batch {
+    pub(crate) encoded_bytes: Vec<u8>,
+    pub(crate) event_count: u64,
+}
+
+impl Batch {
+    /// Create a new batch from encoded bytes and an event count.
+    pub fn new(encoded_bytes: Vec<u8>, event_count: u64) -> Self {
+        Self {
+            encoded_bytes,
+            event_count,
+        }
+    }
+
+    /// The encoded trace bytes for this batch.
+    pub fn encoded_bytes(&self) -> &[u8] {
+        &self.encoded_bytes
+    }
+
+    /// Number of events in this batch.
+    pub fn event_count(&self) -> u64 {
+        self.event_count
+    }
+}
+
 pub(crate) struct CentralCollector {
-    queue: ArrayQueue<Vec<RawEvent>>,
+    queue: ArrayQueue<Batch>,
     dropped_batches: AtomicUsize,
 }
 
@@ -30,13 +57,13 @@ impl CentralCollector {
         }
     }
 
-    pub fn accept_flush(&self, buffer: Vec<RawEvent>) {
-        if let Some(_evicted) = self.queue.force_push(buffer) {
+    pub fn accept_flush(&self, batch: Batch) {
+        if let Some(_evicted) = self.queue.force_push(batch) {
             self.dropped_batches.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    pub fn next(&self) -> Option<Vec<RawEvent>> {
+    pub fn next(&self) -> Option<Batch> {
         self.queue.pop()
     }
 
@@ -49,27 +76,26 @@ impl CentralCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::events::RawEvent;
 
-    fn poll_end() -> RawEvent {
-        RawEvent::PollEnd {
-            timestamp_nanos: 1000,
-            worker_id: crate::telemetry::format::WorkerId::from(0usize),
+    fn dummy_batch(size: usize) -> Batch {
+        Batch {
+            encoded_bytes: vec![0u8; size],
+            event_count: 1,
         }
     }
 
     #[test]
     fn test_drain_clears_buffers() {
         let collector = CentralCollector::new();
-        collector.accept_flush(vec![poll_end()]);
+        collector.accept_flush(dummy_batch(10));
         assert!(collector.next().is_some());
         assert!(collector.next().is_none());
     }
 
-    fn drain(collector: &CentralCollector) -> Vec<Vec<RawEvent>> {
+    fn drain(collector: &CentralCollector) -> Vec<Vec<u8>> {
         let mut out = vec![];
-        while let Some(ev) = collector.next() {
-            out.push(ev);
+        while let Some(batch) = collector.next() {
+            out.push(batch.encoded_bytes);
         }
         out
     }
@@ -77,9 +103,9 @@ mod tests {
     #[test]
     fn test_bounded_evicts_oldest_when_full() {
         let collector = CentralCollector::with_capacity(2);
-        collector.accept_flush(vec![poll_end()]); // oldest — will be evicted
-        collector.accept_flush(vec![poll_end(), poll_end()]);
-        collector.accept_flush(vec![poll_end(), poll_end(), poll_end()]); // evicts first
+        collector.accept_flush(dummy_batch(1)); // oldest — will be evicted
+        collector.accept_flush(dummy_batch(2));
+        collector.accept_flush(dummy_batch(3)); // evicts first
         assert_eq!(collector.take_dropped_batches(), 1);
         let drained = drain(&collector);
         assert_eq!(drained.len(), 2);

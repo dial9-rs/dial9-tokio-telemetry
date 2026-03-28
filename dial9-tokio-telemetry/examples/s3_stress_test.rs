@@ -239,17 +239,25 @@ fn main() -> std::io::Result<()> {
         eprintln!();
         eprintln!("Load complete, waiting for worker to drain...");
         let _ = monitor.await;
+    });
 
-        eprintln!("Calling graceful_shutdown...");
-        guard
-            .graceful_shutdown(Duration::from_secs(30))
-            .await
-            .expect("graceful shutdown");
-        eprintln!("Done.");
+    eprintln!("Calling graceful_shutdown...");
+    drop(runtime);
+    guard
+        .graceful_shutdown(Duration::from_secs(30))
+        .expect("graceful shutdown");
+    eprintln!("Done.");
 
-        // Count uploaded objects in S3
-        eprintln!();
-        eprintln!("Counting S3 objects under s3://{}/{}/ ...", args.bucket, args.prefix);
+    // Count uploaded objects in S3
+    eprintln!();
+    eprintln!(
+        "Counting S3 objects under s3://{}/{}/ ...",
+        args.bucket, args.prefix
+    );
+    let count_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    count_rt.block_on(async {
         let mut sdk_conf = aws_config::defaults(aws_config::BehaviorVersion::latest());
         if let Some(region) = &args.region {
             sdk_conf = sdk_conf.region(aws_config::Region::new(region.clone()));

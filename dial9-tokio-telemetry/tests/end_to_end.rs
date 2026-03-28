@@ -1,7 +1,7 @@
 mod common;
 mod validation;
 
-use dial9_tokio_telemetry::telemetry::events::RawEvent;
+use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TraceReader, TracedRuntime, analyze_trace};
 use std::time::Duration;
 
@@ -94,7 +94,7 @@ fn task_spawn_events_from_main_thread_are_captured() {
     let events = events.lock().unwrap();
     let task_spawn_count = events
         .iter()
-        .filter(|e| matches!(e, RawEvent::TaskSpawn { .. }))
+        .filter(|e| matches!(e, TelemetryEvent::TaskSpawn { .. }))
         .count();
 
     assert_eq!(
@@ -133,7 +133,7 @@ fn task_terminate_events_are_captured() {
     let events = events.lock().unwrap();
     let terminate_count = events
         .iter()
-        .filter(|e| matches!(e, RawEvent::TaskTerminate { .. }))
+        .filter(|e| matches!(e, TelemetryEvent::TaskTerminate { .. }))
         .count();
 
     // Tokio may emit TaskTerminate for internal tasks (e.g. worker threads),

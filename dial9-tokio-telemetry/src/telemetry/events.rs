@@ -122,6 +122,8 @@ pub enum TelemetryEvent {
         worker_id: WorkerId,
         /// OS thread ID that was sampled.
         tid: u32,
+        /// Thread name from `/proc/self/task/<tid>/comm`, if known.
+        thread_name: Option<String>,
         /// What triggered this sample.
         source: CpuSampleSource,
         /// Raw instruction pointer addresses (leaf first). Symbolized offline.
