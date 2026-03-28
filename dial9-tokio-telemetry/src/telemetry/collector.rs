@@ -1,14 +1,37 @@
 use crossbeam_queue::ArrayQueue;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Maximum number of batches (each up to 1024 events) that can be buffered.
+/// Maximum number of encoded batches that can be buffered.
 /// Beyond this, the oldest batch is evicted — the queue acts as a ring buffer
 /// so the most recent data is always preserved.
+/// With ~1MB batches, 1024 slots is generous; the flush thread drains every
+/// 5ms so in practice the queue rarely has more than a handful of entries.
 const DEFAULT_CAPACITY: usize = 1024;
 
-pub(crate) struct Batch {
-    pub encoded_bytes: Vec<u8>,
-    pub event_count: u64,
+#[non_exhaustive]
+pub struct Batch {
+    pub(crate) encoded_bytes: Vec<u8>,
+    pub(crate) event_count: u64,
+}
+
+impl Batch {
+    /// Create a new batch from encoded bytes and an event count.
+    pub fn new(encoded_bytes: Vec<u8>, event_count: u64) -> Self {
+        Self {
+            encoded_bytes,
+            event_count,
+        }
+    }
+
+    /// The encoded trace bytes for this batch.
+    pub fn encoded_bytes(&self) -> &[u8] {
+        &self.encoded_bytes
+    }
+
+    /// Number of events in this batch.
+    pub fn event_count(&self) -> u64 {
+        self.event_count
+    }
 }
 
 pub(crate) struct CentralCollector {

@@ -1,4 +1,5 @@
 use dial9_tokio_telemetry::telemetry::TelemetryEvent;
+use dial9_tokio_telemetry::telemetry::collector::Batch;
 use dial9_tokio_telemetry::telemetry::format::decode_events_v2;
 use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
 use std::sync::{Arc, Mutex};
@@ -24,8 +25,8 @@ impl CapturingWriter {
 }
 
 impl TraceWriter for CapturingWriter {
-    fn write_encoded_batch(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        let events = decode_events_v2(bytes).expect("invalid batch");
+    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
+        let events = decode_events_v2(batch.encoded_bytes()).expect("invalid batch");
         self.events.lock().unwrap().extend_from_slice(&events);
         Ok(())
     }

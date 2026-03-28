@@ -8,6 +8,7 @@
 //!   cargo bench --bench writer_encode
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use dial9_tokio_telemetry::telemetry::collector::Batch;
 use dial9_tokio_telemetry::telemetry::format::{
     PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerParkEvent,
     WorkerUnparkEvent,
@@ -21,7 +22,7 @@ use dial9_trace_format::encoder::Encoder;
 /// We simulate ~170 polls per batch (340 events) plus park/unpark and a few
 /// spawns and wakes, totalling ~350 events. The batch is repeated ~3× to fill
 /// close to 1024 events.
-fn make_encoded_batch(worker: usize) -> Vec<u8> {
+fn make_encoded_batch(worker: usize) -> Batch {
     let wid = WorkerId::from(worker);
     let task = TaskId::from_u32(1);
     let mut enc = Encoder::new();
@@ -75,7 +76,7 @@ fn make_encoded_batch(worker: usize) -> Vec<u8> {
         });
     }
 
-    enc.reset_to_infallible(Vec::new())
+    Batch::new(enc.reset_to_infallible(Vec::new()), 1024)
 }
 
 fn bench_writer_encode(c: &mut Criterion) {

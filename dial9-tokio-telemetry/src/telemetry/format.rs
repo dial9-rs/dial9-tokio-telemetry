@@ -192,37 +192,35 @@ pub fn decode_events_v2(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
 
     let mut dec = Decoder::new(data)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
-    let mut ref_events = Vec::new();
+    let mut events = Vec::new();
 
+    // Resolve InternedString fields (thread_name) inside the callback where
+    // the string pool is still valid for the current batch. After a
+    // mid-stream header the pool resets, so deferred resolution would use
+    // the wrong pool for earlier batches.
     dec.for_each_event(|ev| {
-        if let Some(ev) = decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
-            ref_events.push(ev);
+        if let Some(r) = decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
+            let resolved_thread_name = if let TelemetryEventRef::CpuSample(ref e) = r {
+                Some(
+                    ev.string_pool
+                        .get(e.thread_name)
+                        .filter(|n| *n != "<no thread name>")
+                        .map(|n| n.to_string()),
+                )
+            } else {
+                None
+            };
+            let mut owned = TelemetryEvent::from(r);
+            if let (TelemetryEvent::CpuSample { thread_name, .. }, Some(resolved)) =
+                (&mut owned, resolved_thread_name)
+            {
+                *thread_name = resolved;
+            }
+            events.push(owned);
         }
     })
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-    let string_pool = dec.string_pool();
-    let events = ref_events
-        .into_iter()
-        .map(|r| match &r {
-            TelemetryEventRef::CpuSample(e) => {
-                let thread_name = string_pool
-                    .get(e.thread_name)
-                    .filter(|n| *n != "<no thread name>")
-                    .map(|n| n.to_string());
-                let mut ev = TelemetryEvent::from(r);
-                if let TelemetryEvent::CpuSample {
-                    thread_name: ref mut tn,
-                    ..
-                } = ev
-                {
-                    *tn = thread_name;
-                }
-                ev
-            }
-            _ => TelemetryEvent::from(r),
-        })
-        .collect();
     Ok(events)
 }
 

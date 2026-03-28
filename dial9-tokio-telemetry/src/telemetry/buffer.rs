@@ -21,6 +21,9 @@ pub(crate) struct ThreadLocalBuffer {
     event_count: usize,
     batch_size: usize,
     collector: Option<Arc<CentralCollector>>,
+    /// Caches `Location::to_string()` to avoid re-formatting on every event.
+    /// Bounded by the number of `#[track_caller]` call sites in the program,
+    /// which is fixed at compile time, so this does not grow unboundedly.
     location_cache: HashMap<&'static Location<'static>, String>,
 }
 
@@ -37,8 +40,7 @@ impl ThreadLocalBuffer {
 
     fn with_batch_size(batch_size: usize) -> Self {
         Self {
-            // make the Vec 1KB bigger to reduce the risk of reallocating
-            // TODO: harden this code, we should ensure we never have to re-allocate this buffer.
+            // Allocate 1KB extra headroom so typical events never trigger a realloc.
             encoder: Encoder::new_to(Vec::with_capacity(batch_size + 1024))
                 .expect("Vec::write_all cannot fail"),
             event_count: 0,
@@ -56,7 +58,6 @@ impl ThreadLocalBuffer {
         }
     }
 
-    // todo: this is now really "encode tokio event"
     fn encode_event(&mut self, event: &RawEvent) {
         match event {
             RawEvent::PollStart {
