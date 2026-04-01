@@ -4,7 +4,7 @@ use crate::telemetry::task_metadata::TaskId;
 use dial9_trace_format::InternedString;
 use dial9_trace_format::decoder::{Decoder, StringPool};
 use std::collections::HashMap;
-use std::io::Result;
+use std::io::{Read as _, Result};
 
 /// Reads a trace file written in the `dial9-trace-format` binary format.
 ///
@@ -27,7 +27,7 @@ pub struct TraceReader {
 
 impl TraceReader {
     pub fn new(path: &str) -> Result<Self> {
-        let data = std::fs::read(path)?;
+        let data = read_trace_file(path)?;
         let mut dec = Decoder::new(&data).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid trace header")
         })?;
@@ -120,6 +120,29 @@ impl TraceReader {
         }
         Ok(events)
     }
+}
+
+fn read_trace_file(path: &str) -> Result<Vec<u8>> {
+    let data = std::fs::read(path)?;
+    maybe_decompress_gzip(data)
+}
+
+fn maybe_decompress_gzip(data: Vec<u8>) -> Result<Vec<u8>> {
+    const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+    if !data.starts_with(&GZIP_MAGIC) {
+        return Ok(data);
+    }
+
+    let mut decoder = flate2::read::GzDecoder::new(&data[..]);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to decompress gzip trace: {error}"),
+        )
+    })?;
+    Ok(decompressed)
 }
 
 fn populate_spawn_loc(
