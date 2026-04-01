@@ -52,13 +52,6 @@ impl TraceReader {
                         populate_spawn_loc(&mut spawn_locations, e.spawn_loc, ev.string_pool);
                         task_spawn_locs.insert(e.task_id, e.spawn_loc);
                     }
-                    TelemetryEventRef::CpuSample(e) => {
-                        if let Some(name) = ev.string_pool.get(e.thread_name)
-                            && name != "<no thread name>"
-                        {
-                            thread_names.insert(e.tid, name.to_string());
-                        }
-                    }
                     TelemetryEventRef::SegmentMetadata(e) => {
                         segment_metadata = e
                             .entries
@@ -68,7 +61,16 @@ impl TraceReader {
                     }
                     _ => {}
                 }
-                events.push(TelemetryEvent::from(r));
+                let owned = format::to_owned_event(r, ev.string_pool);
+                if let TelemetryEvent::CpuSample {
+                    tid,
+                    thread_name: Some(ref name),
+                    ..
+                } = owned
+                {
+                    thread_names.insert(tid, name.clone());
+                }
+                events.push(owned);
             }
         })
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
