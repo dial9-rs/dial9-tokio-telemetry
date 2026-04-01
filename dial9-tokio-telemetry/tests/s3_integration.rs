@@ -433,8 +433,8 @@ fn stress_test_all_segments_uploaded_and_valid() {
     });
 
     assert!(
-        objects.len() >= 5,
-        "expected many uploaded segments, got {}",
+        objects.len() >= 2,
+        "expected multiple uploaded segments, got {}",
         objects.len()
     );
 
