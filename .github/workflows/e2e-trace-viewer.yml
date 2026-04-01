@@ -19,6 +19,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate demo trace
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: |
+          cargo run --release -p dial9-tokio-telemetry --example simple_workload
+          cp workload_trace.bin dial9-tokio-telemetry/trace_viewer/demo-trace.bin
       - uses: actions/setup-node@v4
         with:
           node-version: 24
