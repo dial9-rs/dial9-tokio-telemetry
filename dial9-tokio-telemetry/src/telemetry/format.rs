@@ -1,8 +1,8 @@
 use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
 use crate::telemetry::task_metadata::TaskId;
+use dial9_trace_format::decoder::StringPool;
 use dial9_trace_format::types::{EventEncoder, FieldType, FieldValueRef};
 use dial9_trace_format::{InternedString, StackFrames, TraceEvent, TraceField};
-use dial9_trace_format::decoder::StringPool;
 use serde::Serialize;
 use std::fmt;
 use std::io::{self, Write};
