@@ -3,3 +3,6 @@
 # except the demo trace
 !dial9-tokio-telemetry/trace_viewer/demo-trace.bin
 target/
+node_modules/
+playwright-report/
+test-results/

@@ -1,0 +1,89 @@
+name: Trace Viewer E2E
+on:
+  pull_request:
+    paths:
+      - "dial9-trace-format/**"
+      - "dial9-trace-format-derive/**"
+      - "dial9-tokio-telemetry/trace_viewer/**"
+      - "dial9-tokio-telemetry/src/telemetry/events.rs"
+      - "dial9-tokio-telemetry/src/telemetry/format.rs"
+      - ".github/workflows/e2e-trace-viewer.yml"
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  parser-sanity:
+    name: Parser Sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run parser sanity test
+        working-directory: dial9-tokio-telemetry/trace_viewer
+        run: node test_sanity.js
+
+  ui-sanity:
+    name: UI Sanity (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        working-directory: dial9-tokio-telemetry/trace_viewer
+        run: npm ci
+      - name: Install Playwright Chromium
+        working-directory: dial9-tokio-telemetry/trace_viewer
+        run: npx playwright install --with-deps chromium
+      - name: Run Playwright tests
+        working-directory: dial9-tokio-telemetry/trace_viewer
+        run: npx playwright test
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: dial9-tokio-telemetry/trace_viewer/playwright-report/
+
+  regenerate-and-test:
+    name: Regenerate Trace & Test
+    runs-on: ubuntu-latest
+    # Only run when binary format or event definitions change
+    if: >-
+      github.event_name == 'merge_group' ||
+      contains(join(github.event.pull_request.labels.*.name, ','), 'trace-format')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build and run simple_workload
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: |
+          cargo run --release -p dial9-tokio-telemetry --example simple_workload
+          cp workload_trace.bin dial9-tokio-telemetry/trace_viewer/demo-trace.bin
+      - name: Run parser sanity test
+        working-directory: dial9-tokio-telemetry/trace_viewer
+        run: node test_sanity.js
+      - name: Install Playwright
+        working-directory: dial9-tokio-telemetry/trace_viewer
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run Playwright tests
+        working-directory: dial9-tokio-telemetry/trace_viewer
+        run: npx playwright test
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-regenerated
+          path: dial9-tokio-telemetry/trace_viewer/playwright-report/
