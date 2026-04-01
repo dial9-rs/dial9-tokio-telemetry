@@ -745,7 +745,6 @@ fn permanently_broken_s3_produces_failure_metrics() {
             tokio::spawn(async { tokio::task::yield_now().await });
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
     });
 
     drop(runtime);
