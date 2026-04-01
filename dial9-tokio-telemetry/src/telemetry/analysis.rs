@@ -4,7 +4,7 @@ use crate::telemetry::task_metadata::TaskId;
 use dial9_trace_format::InternedString;
 use dial9_trace_format::decoder::{Decoder, StringPool};
 use std::collections::HashMap;
-use std::io::Result;
+use std::io::{Read as _, Result};
 
 /// Reads a trace file written in the `dial9-trace-format` binary format.
 ///
@@ -27,7 +27,7 @@ pub struct TraceReader {
 
 impl TraceReader {
     pub fn new(path: &str) -> Result<Self> {
-        let data = std::fs::read(path)?;
+        let data = read_trace_file(path)?;
         let mut dec = Decoder::new(&data).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid trace header")
         })?;
@@ -129,6 +129,29 @@ impl TraceReader {
         }
         Ok(events)
     }
+}
+
+fn read_trace_file(path: &str) -> Result<Vec<u8>> {
+    let data = std::fs::read(path)?;
+    maybe_decompress_gzip(data)
+}
+
+fn maybe_decompress_gzip(data: Vec<u8>) -> Result<Vec<u8>> {
+    const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+    if !data.starts_with(&GZIP_MAGIC) {
+        return Ok(data);
+    }
+
+    let mut decoder = flate2::read::GzDecoder::new(&data[..]);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to decompress gzip trace: {error}"),
+        )
+    })?;
+    Ok(decompressed)
 }
 
 fn populate_spawn_loc(
@@ -771,9 +794,14 @@ pub fn detect_sampled_polls(events: &[TelemetryEvent]) -> Vec<SampledPoll> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::events::RawEvent;
     use crate::telemetry::format::WorkerId;
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
+    use crate::telemetry::writer::{RotatingWriter, TraceWriter};
     use dial9_trace_format::InternedString;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
     const UNKNOWN_SPAWN_LOC: InternedString = InternedString::from_raw(0);
 
     #[test]
@@ -828,6 +856,45 @@ mod tests {
         let analysis = analyze_trace(&events);
         let stats = analysis.worker_stats.get(&WorkerId::from(0usize)).unwrap();
         assert_eq!(stats.max_local_queue, 10);
+    }
+
+    #[test]
+    fn trace_reader_reads_gzip_trace_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw_path = dir.path().join("trace.bin");
+
+        let mut writer = RotatingWriter::single_file(&raw_path).unwrap();
+        writer
+            .write_event(&RawEvent::WorkerPark {
+                timestamp_nanos: 1_000,
+                worker_id: WorkerId::from(7usize),
+                worker_local_queue_depth: 3,
+                cpu_time_nanos: 11,
+            })
+            .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        let raw = std::fs::read(&raw_path).unwrap();
+        let gzip_path = dir.path().join("trace.bin.gz");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&raw).unwrap();
+        let compressed = encoder.finish().unwrap();
+        std::fs::write(&gzip_path, compressed).unwrap();
+
+        let mut reader = TraceReader::new(gzip_path.to_str().unwrap()).unwrap();
+        let events = reader.read_all().unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos: 1_000,
+                worker_id,
+                worker_local_queue_depth: 3,
+                cpu_time_nanos: 11,
+            } if worker_id == WorkerId::from(7usize)
+        ));
     }
 
     #[test]
