@@ -71,12 +71,8 @@ fn main() {
     // Graceful shutdown: flush + seal the segment, then wait for the background
     // worker to symbolize and gzip-compress it. Drop impl is a hard shutdown
     // (worker exits without draining), so we must use graceful_shutdown here.
-    let drain_rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
     eprintln!("Waiting for background worker to symbolize trace (up to 30s)...");
-    if let Err(e) = drain_rt.block_on(guard.graceful_shutdown(Duration::from_secs(30))) {
+    if let Err(e) = guard.graceful_shutdown(Duration::from_secs(30)) {
         eprintln!("Worker shutdown warning: {e}");
     }
 
