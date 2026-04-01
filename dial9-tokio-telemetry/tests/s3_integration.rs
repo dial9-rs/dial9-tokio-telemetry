@@ -55,8 +55,8 @@ fn worker_thread_starts_and_stops_cleanly() {
     drop(runtime);
 }
 
-#[tokio::test]
-async fn graceful_shutdown_seals_segments() {
+#[test]
+fn graceful_shutdown_seals_segments() {
     let trace_dir = tempfile::tempdir().unwrap();
     let s3_root = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().join("trace.bin");
@@ -75,9 +75,8 @@ async fn graceful_shutdown_seals_segments() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    let result = guard
-        .graceful_shutdown(std::time::Duration::from_secs(5))
-        .await;
+    drop(runtime);
+    let result = guard.graceful_shutdown(std::time::Duration::from_secs(5));
 
     assert!(result.is_ok());
 
@@ -87,10 +86,6 @@ async fn graceful_shutdown_seals_segments() {
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "active"))
         .collect();
     assert!(active_files.is_empty(), "no .active files should remain");
-
-    tokio::task::spawn_blocking(move || drop(runtime))
-        .await
-        .unwrap();
 }
 
 /// End-to-end: TracedRuntime → RotatingWriter → rotation → worker uploads to
@@ -403,13 +398,12 @@ fn stress_test_all_segments_uploaded_and_valid() {
         // Graceful shutdown: seals final segment, worker drains what it can
         // within the timeout. Some segments may remain — the worker is a "good
         // citizen" that loses data rather than blocking the application.
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(10))
-            .await
-            .expect("graceful shutdown");
     });
 
     drop(runtime);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(10))
+        .expect("graceful shutdown");
 
     // List all uploaded objects.
     let list_rt = tokio::runtime::Builder::new_current_thread()
@@ -553,8 +547,8 @@ fn stress_test_all_segments_uploaded_and_valid() {
 
 /// When S3 hangs permanently (put_object never returns), graceful_shutdown
 /// must still complete within its timeout instead of blocking forever.
-#[tokio::test]
-async fn graceful_shutdown_completes_when_s3_hangs() {
+#[test]
+fn graceful_shutdown_completes_when_s3_hangs() {
     let trace_dir = tempfile::tempdir().unwrap();
     let s3_root = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().join("trace.bin");
@@ -587,25 +581,26 @@ async fn graceful_shutdown_completes_when_s3_hangs() {
 
     // Generate trace data on the TracedRuntime, then let the worker pick it up.
     let handle = guard.handle();
-    let rt_handle = runtime.handle().clone();
-    tokio::task::spawn_blocking(move || {
-        rt_handle.block_on(async {
-            for _ in 0..50 {
-                handle.spawn(async { tokio::task::yield_now().await });
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        });
-    })
-    .await
-    .unwrap();
+    runtime.block_on(async {
+        for _ in 0..50 {
+            handle.spawn(async { tokio::task::yield_now().await });
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    });
+
+    drop(runtime);
 
     // graceful_shutdown should complete within the timeout, not hang forever.
-    // We use a test-level timeout to detect the hang.
     let shutdown_timeout = std::time::Duration::from_secs(3);
     let test_deadline = std::time::Duration::from_secs(10);
 
-    let result =
-        tokio::time::timeout(test_deadline, guard.graceful_shutdown(shutdown_timeout)).await;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let t = std::thread::spawn(move || {
+        let result = guard.graceful_shutdown(shutdown_timeout);
+        let _ = tx.send(result);
+    });
+
+    let result = rx.recv_timeout(test_deadline);
 
     // If the test-level timeout fires, graceful_shutdown hung — that's the bug.
     assert!(
@@ -613,12 +608,8 @@ async fn graceful_shutdown_completes_when_s3_hangs() {
         "graceful_shutdown hung beyond {test_deadline:?} — it did not respect its own {shutdown_timeout:?} timeout"
     );
 
-    // Consume the result to verify it didn't error.
     let _ = result.unwrap();
-
-    tokio::task::spawn_blocking(move || drop(runtime))
-        .await
-        .unwrap();
+    let _ = t.join();
 }
 
 /// Stress test with injected S3 failures.
@@ -679,14 +670,12 @@ fn stress_test_with_s3_failures() {
                 let _ = j.await;
             }
         }
-
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(10))
-            .await
-            .expect("graceful shutdown");
     });
 
     drop(runtime);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(10))
+        .expect("graceful shutdown");
 
     // Verify some objects landed in S3 despite failures.
     let verify_client = fake_s3_client(s3_root.path());
@@ -757,13 +746,12 @@ fn permanently_broken_s3_produces_failure_metrics() {
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(5))
-            .await
-            .expect("graceful shutdown");
     });
 
     drop(runtime);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(5))
+        .expect("graceful shutdown");
 
     let entries = inspector.entries();
     // Filter to pipeline metrics only (FlushMetrics entries don't have Failure/Success keys).
