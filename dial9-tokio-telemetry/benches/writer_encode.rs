@@ -8,7 +8,7 @@
 //!   cargo bench --bench writer_encode
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use dial9_tokio_telemetry::telemetry::collector::Batch;
+use dial9_tokio_telemetry::telemetry::Batch;
 use dial9_tokio_telemetry::telemetry::format::{
     PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerParkEvent,
     WorkerUnparkEvent,

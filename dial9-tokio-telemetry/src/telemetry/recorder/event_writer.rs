@@ -55,7 +55,7 @@ impl EventWriter {
 
     /// Transcode an entire batch through the writer, correctly accounting for
     /// the number of events the batch contains.
-    pub(crate) fn write_transcoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
+    pub(crate) fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
         self.writer.write_encoded_batch(batch)?;
         self.events_written += batch.event_count;
         Ok(())

@@ -309,7 +309,7 @@ fn resolve_thread_name(pool: &StringPool, interned: InternedString) -> Option<St
 /// Convert a zero-copy `TelemetryEventRef` into an owned `TelemetryEvent`,
 /// resolving any `InternedString` fields (e.g. `thread_name`) via the
 /// string pool that was active when the event was decoded.
-pub fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> TelemetryEvent {
+pub(crate) fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> TelemetryEvent {
     match r {
         TelemetryEventRef::PollStart(e) => TelemetryEvent::PollStart {
             timestamp_nanos: e.timestamp_ns,

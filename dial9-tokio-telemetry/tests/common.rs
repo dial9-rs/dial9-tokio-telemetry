@@ -1,5 +1,5 @@
+use dial9_tokio_telemetry::telemetry::Batch;
 use dial9_tokio_telemetry::telemetry::TelemetryEvent;
-use dial9_tokio_telemetry::telemetry::collector::Batch;
 use dial9_tokio_telemetry::telemetry::format::decode_events;
 use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
 use std::sync::{Arc, Mutex};

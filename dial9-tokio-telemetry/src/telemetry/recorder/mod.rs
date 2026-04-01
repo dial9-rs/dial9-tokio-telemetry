@@ -67,7 +67,7 @@ fn flush_once(
 
     while let Some(batch) = shared.collector.next() {
         if batch.event_count > 0
-            && let Err(e) = event_writer.write_transcoded_batch(&batch)
+            && let Err(e) = event_writer.write_encoded_batch(&batch)
         {
             tracing::warn!("failed to transcode batch: {e}");
             shared.enabled.store(false, Ordering::Relaxed);
@@ -809,7 +809,7 @@ mod tests {
     fn drain_collector_to_writer(collector: &CentralCollector, ew: &mut EventWriter) {
         while let Some(batch) = collector.next() {
             if batch.event_count > 0 {
-                ew.write_transcoded_batch(&batch).unwrap();
+                ew.write_encoded_batch(&batch).unwrap();
             }
         }
     }
