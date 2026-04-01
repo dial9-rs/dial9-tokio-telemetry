@@ -188,7 +188,7 @@ pub struct SegmentMetadataEvent {
 ///
 /// Resolves `InternedString` fields (e.g. `CpuSample.thread_name`) via the
 /// decoder's string pool while it is still valid for each batch.
-pub fn decode_events_v2(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
+pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
     use dial9_trace_format::decoder::Decoder;
 
     let mut dec = Decoder::new(data)

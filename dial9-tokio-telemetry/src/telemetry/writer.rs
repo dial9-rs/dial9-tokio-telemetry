@@ -380,7 +380,7 @@ mod tests {
     /// Read all non-metadata events from a trace file.
     fn read_trace_events(path: &str) -> Vec<TelemetryEvent> {
         let data = std::fs::read(path).unwrap();
-        format::decode_events_v2(&data)
+        format::decode_events(&data)
             .unwrap()
             .into_iter()
             .filter(|e| !matches!(e, TelemetryEvent::SegmentMetadata { .. }))
@@ -875,7 +875,7 @@ mod tests {
         writer.finalize().unwrap();
 
         let all_events =
-            format::decode_events_v2(&std::fs::read(format!("{}.0.bin", base.display())).unwrap())
+            format::decode_events(&std::fs::read(format!("{}.0.bin", base.display())).unwrap())
                 .unwrap();
         let metadata: Vec<_> = all_events
             .iter()
@@ -923,7 +923,7 @@ mod tests {
         assert!(files.len() >= 2, "expected at least 2 files from rotation");
 
         for file in &files {
-            let all_events = format::decode_events_v2(&std::fs::read(file).unwrap()).unwrap();
+            let all_events = format::decode_events(&std::fs::read(file).unwrap()).unwrap();
             let has_metadata = all_events.iter().any(|e| {
                 matches!(e, TelemetryEvent::SegmentMetadata { entries, .. }
                     if *entries == vec![("k".to_string(), "v".to_string())])
@@ -940,7 +940,7 @@ mod tests {
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
-        let all_events = format::decode_events_v2(&std::fs::read(&path).unwrap()).unwrap();
+        let all_events = format::decode_events(&std::fs::read(&path).unwrap()).unwrap();
         let park_count = all_events
             .iter()
             .filter(|e| matches!(e, TelemetryEvent::WorkerPark { .. }))
