@@ -723,12 +723,12 @@ dependencies = [
 [[package]]
 name = "axum"
 version = "0.8.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b52af3cb4058c895d37317bb27508dccc8e5f2d39454016b297bf4a400597b8"
+source = "git+https://github.com/yulnr/axum?branch=feat%2Fcustom-serve-executor#3c215dbf7c36a7cf875ab3120b8f311e855cad05"
 dependencies = [
  "axum-core",
  "bytes",
  "form_urlencoded",
+ "futures-core",
  "futures-util",
  "http 1.4.0",
  "http-body 1.0.1",
@@ -742,9 +742,9 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_html_form",
  "serde_json",
  "serde_path_to_error",
- "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -756,8 +756,7 @@ dependencies = [
 [[package]]
 name = "axum-core"
 version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
+source = "git+https://github.com/yulnr/axum?branch=feat%2Fcustom-serve-executor#3c215dbf7c36a7cf875ab3120b8f311e855cad05"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1417,6 +1416,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-sdk-s3-transfer-manager",
+ "axum",
  "bon",
  "clap",
  "criterion",
@@ -3632,6 +3632,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "serde_html_form"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0946d52b4b7e28823148aebbeceb901012c595ad737920d504fa8634bb099e6f"
+dependencies = [
+ "form_urlencoded",
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde_core",
 ]
 
 [[package]]

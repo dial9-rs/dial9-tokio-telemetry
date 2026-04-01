@@ -216,6 +216,18 @@ impl TelemetryHandle {
     }
 }
 
+/// Implement `axum::serve::Executor` for `TelemetryHandle` to allow it to be
+/// used as an executor for axum's serve.
+#[cfg(feature = "axum")]
+impl axum::serve::Executor for TelemetryHandle {
+    fn execute<Fut>(&self, fut: Fut)
+    where
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.spawn(fut);
+    }
+}
+
 /// Holds the background worker thread and its stop signal.
 struct WorkerHandle {
     shutdown: Option<tokio::sync::oneshot::Sender<Duration>>,

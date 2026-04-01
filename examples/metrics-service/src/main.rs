@@ -1,4 +1,3 @@
-mod axum_traced;
 mod buffer;
 mod ddb;
 mod routes;
@@ -253,10 +252,11 @@ fn main() -> std::io::Result<()> {
             }
         });
 
-        axum_traced::serve(listener, app.into_make_service(), handle.clone())
+        axum::serve(listener, app.into_make_service())
+            .with_executor(handle.clone())
             .with_graceful_shutdown(async move { shutdown.cancelled().await })
-            .await
-            .unwrap();
+            .await;
+
         let shutdown = guard.graceful_shutdown(Duration::from_secs(5)).await;
         tracing::info!("dial9 shutdown: {shutdown:?}");
     });
