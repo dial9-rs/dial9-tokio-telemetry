@@ -4,7 +4,7 @@
 //! and prints any CpuSample events found.
 //!
 //! Run with:
-//!   RUSTFLAGS="-C force-frame-pointers=yes" cargo run --release --features cpu-profiling --example cpu_profile_workload
+//!   RUSTFLAGS="--cfg tokio_unstable -C force-frame-pointers=yes" cargo run --release --features cpu-profiling --example cpu_profile_workload
 //!
 //! You may need:
 //!   echo 2 | sudo tee /proc/sys/kernel/perf_event_paranoid
@@ -14,38 +14,49 @@ use dial9_tokio_telemetry::telemetry::{
 };
 use std::time::Duration;
 
-#[inline(never)]
-fn burn_cpu(iterations: u64) -> u64 {
-    let mut result = 0u64;
-    for i in 0..iterations {
-        result = result.wrapping_add(i.wrapping_mul(i));
+fn burn_cpu(duration: Duration) {
+    let start = std::time::Instant::now();
+    let mut x: u64 = 1;
+    while start.elapsed() < duration {
+        for _ in 0..1000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+        }
+        std::hint::black_box(x);
     }
-    result
 }
 
 async fn cpu_heavy_task(id: usize) {
     for _ in 0..5 {
         // This poll will show up as a long poll with CPU samples inside it
-        let _ = burn_cpu(5_000_000);
+        burn_cpu(Duration::from_millis(20));
         tokio::task::yield_now().await;
     }
     eprintln!("Task {id} done");
 }
 
 fn main() {
-    let trace_path = "cpu_profile_trace.bin";
+    // Base path without extension: writer produces cpu_profile_trace.0.bin,
+    // which the background worker can detect, symbolize, and gzip-compress.
+    let trace_base = "cpu_profile_trace.bin";
+    let segment_path = "cpu_profile_trace.0.bin";
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let writer = RotatingWriter::single_file(trace_path).unwrap();
+    let writer = RotatingWriter::builder()
+        .base_path(trace_base)
+        .max_file_size(1024 * 1024 * 20) // rotate after 20 MiB per file
+        .max_total_size(1024 * 1024 * 100) // keep at most 100 MiB on disk
+        .build()
+        .unwrap();
     let (runtime, guard) = TracedRuntime::builder()
+        .with_trace_path(trace_base)
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig::default())
         .build_and_start(builder, writer)
         .unwrap();
 
-    eprintln!("Running workload with CPU profiling at {} Hz...", 99);
+    eprintln!("Running workload with CPU profiling at 99 Hz...");
     runtime.block_on(async {
         let tasks: Vec<_> = (0..200).map(|i| tokio::spawn(cpu_heavy_task(i))).collect();
         for task in tasks {
@@ -56,11 +67,23 @@ fn main() {
     });
 
     drop(runtime);
-    drop(guard);
 
-    // Read back and report
-    eprintln!("\n=== Reading trace from {trace_path} ===");
-    let mut reader = dial9_tokio_telemetry::telemetry::TraceReader::new(trace_path).unwrap();
+    // Graceful shutdown: flush + seal the segment, then wait for the background
+    // worker to symbolize and gzip-compress it. Drop impl is a hard shutdown
+    // (worker exits without draining), so we must use graceful_shutdown here.
+    let drain_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    eprintln!("Waiting for background worker to symbolize trace (up to 30s)...");
+    if let Err(e) = drain_rt.block_on(guard.graceful_shutdown(Duration::from_secs(30))) {
+        eprintln!("Worker shutdown warning: {e}");
+    }
+
+    // Read back and report. TraceReader auto-detects gzip and parses
+    // SymbolTableEntry events into callframe_symbols.
+    eprintln!("\n=== Reading trace from {segment_path} ===");
+    let mut reader = dial9_tokio_telemetry::telemetry::TraceReader::new(segment_path).unwrap();
     let (magic, version) = reader.read_header().unwrap();
     eprintln!("Format: {magic} v{version}");
 
@@ -99,6 +122,7 @@ fn main() {
     eprintln!("\nTotal events: {}", events.len());
     eprintln!("Poll starts: {polls}");
     eprintln!("CPU samples: {cpu_samples}");
+    // eprintln!("Resolved symbols: {}", syms.len());
     for (worker, count) in &samples_by_worker {
         eprintln!("  worker {worker}: {count} samples");
     }
