@@ -34,12 +34,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: dial9-tokio-telemetry/trace_viewer/package-lock.json
       - name: Install dependencies
         working-directory: dial9-tokio-telemetry/trace_viewer
         run: npm ci
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('dial9-tokio-telemetry/trace_viewer/package-lock.json') }}
       - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         working-directory: dial9-tokio-telemetry/trace_viewer
         run: npx playwright install --with-deps chromium
+      - name: Install Playwright system deps
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: dial9-tokio-telemetry/trace_viewer
+        run: npx playwright install-deps chromium
       - name: Run Playwright tests
         working-directory: dial9-tokio-telemetry/trace_viewer
         run: npx playwright test
@@ -64,6 +77,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: dial9-tokio-telemetry/trace_viewer/package-lock.json
       - name: Build and run simple_workload
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
@@ -73,11 +88,23 @@ jobs:
       - name: Run parser sanity test
         working-directory: dial9-tokio-telemetry/trace_viewer
         run: node test_sanity.js
-      - name: Install Playwright
+      - name: Install npm dependencies
         working-directory: dial9-tokio-telemetry/trace_viewer
-        run: |
-          npm ci
-          npx playwright install --with-deps chromium
+        run: npm ci
+      - name: Cache Playwright browsers
+        id: playwright-cache-regen
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('dial9-tokio-telemetry/trace_viewer/package-lock.json') }}
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache-regen.outputs.cache-hit != 'true'
+        working-directory: dial9-tokio-telemetry/trace_viewer
+        run: npx playwright install --with-deps chromium
+      - name: Install Playwright system deps
+        if: steps.playwright-cache-regen.outputs.cache-hit == 'true'
+        working-directory: dial9-tokio-telemetry/trace_viewer
+        run: npx playwright install-deps chromium
       - name: Run Playwright tests
         working-directory: dial9-tokio-telemetry/trace_viewer
         run: npx playwright test
