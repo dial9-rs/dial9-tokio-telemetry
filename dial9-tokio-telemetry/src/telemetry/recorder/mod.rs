@@ -304,10 +304,10 @@ impl TelemetryGuard {
             if let Some(tx) = w.shutdown.take() {
                 let _ = tx.send(timeout);
             }
-            if let Some(t) = w.thread.take() {
-                if let Err(e) = t.join() {
-                    tracing::error!(target: "dial9_telemetry", panic = ?e, "worker thread panicked during shutdown");
-                }
+            if let Some(t) = w.thread.take()
+                && let Err(e) = t.join()
+            {
+                tracing::error!(target: "dial9_telemetry", panic = ?e, "worker thread panicked during shutdown");
             }
             tracing::debug!(target: "dial9_telemetry", "worker finished");
         }
