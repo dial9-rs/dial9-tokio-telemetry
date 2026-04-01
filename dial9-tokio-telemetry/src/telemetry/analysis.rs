@@ -791,6 +791,54 @@ mod tests {
     const UNKNOWN_SPAWN_LOC: InternedString = InternedString::from_raw(0);
 
     #[test]
+    fn trace_reader_reads_gzip_trace_files() {
+        use crate::telemetry::buffer::ThreadLocalBuffer;
+        use crate::telemetry::events::RawEvent;
+        use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let raw_path = dir.path().join("trace.bin");
+
+        let mut writer = RotatingWriter::single_file(&raw_path).unwrap();
+        let batch = crate::telemetry::collector::Batch::new(
+            ThreadLocalBuffer::encode_single(&RawEvent::WorkerPark {
+                timestamp_nanos: 1_000,
+                worker_id: WorkerId::from(7usize),
+                worker_local_queue_depth: 3,
+                cpu_time_nanos: 11,
+            }),
+            1,
+        );
+        writer.write_encoded_batch(&batch).unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        let raw = std::fs::read(&raw_path).unwrap();
+        let gzip_path = dir.path().join("trace.bin.gz");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&raw).unwrap();
+        let compressed = encoder.finish().unwrap();
+        std::fs::write(&gzip_path, compressed).unwrap();
+
+        let mut reader = TraceReader::new(gzip_path.to_str().unwrap()).unwrap();
+        let events = reader.read_all().unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos: 1_000,
+                worker_id,
+                worker_local_queue_depth: 3,
+                cpu_time_nanos: 11,
+            } if worker_id == WorkerId::from(7usize)
+        ));
+    }
+
+    #[test]
     fn test_analyze_empty() {
         let events = vec![];
         let analysis = analyze_trace(&events);
