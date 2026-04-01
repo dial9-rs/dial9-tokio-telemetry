@@ -4,7 +4,7 @@
 //! and prints any CpuSample events found.
 //!
 //! Run with:
-//!   RUSTFLAGS="-C force-frame-pointers=yes" cargo run --release --features cpu-profiling --example cpu_profile_workload
+//!   RUSTFLAGS="--cfg tokio_unstable -C force-frame-pointers=yes" cargo run --release --features cpu-profiling --example cpu_profile_workload
 //!
 //! You may need:
 //!   echo 2 | sudo tee /proc/sys/kernel/perf_event_paranoid
@@ -45,8 +45,8 @@ fn main() {
 
     let writer = RotatingWriter::builder()
         .base_path(trace_base)
-        .max_file_size(1024 * 1024 * 500) // rotate after 20 MiB per file
-        .max_total_size(1024 * 1024 * 2000) // keep at most 100 MiB on disk
+        .max_file_size(1024 * 1024 * 20) // rotate after 20 MiB per file
+        .max_total_size(1024 * 1024 * 100) // keep at most 100 MiB on disk
         .build()
         .unwrap();
     let (runtime, guard) = TracedRuntime::builder()
@@ -88,7 +88,6 @@ fn main() {
     eprintln!("Format: {magic} v{version}");
 
     let events = reader.read_all().unwrap();
-    // let syms = &reader.callframe_symbols;
     let mut cpu_samples = 0;
     let mut polls = 0;
     let mut samples_by_worker: std::collections::HashMap<u64, usize> =
@@ -111,7 +110,6 @@ fn main() {
                         callchain.len()
                     );
                     for (i, addr) in callchain.iter().take(8).enumerate() {
-                        // let sym = syms.get(addr).map(|s| s.as_str()).unwrap_or("<unknown>");
                         eprintln!("    [{i}] {addr:#x}");
                     }
                 }
