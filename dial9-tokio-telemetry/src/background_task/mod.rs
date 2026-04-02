@@ -283,6 +283,8 @@ impl SegmentProcessor for GzipCompressor {
             if data.bytes.starts_with(&[0x1f, 0x8b]) {
                 data.metadata
                     .insert("content_encoding".into(), "gzip".into());
+                data.metadata
+                    .insert("write_back_extension".into(), ".gz".into());
                 return Ok(data);
             }
             let raw = data.bytes;
@@ -300,6 +302,8 @@ impl SegmentProcessor for GzipCompressor {
                     data.bytes = bytes;
                     data.metadata
                         .insert("content_encoding".into(), "gzip".into());
+                    data.metadata
+                        .insert("write_back_extension".into(), ".gz".into());
                     Ok(data)
                 }
                 Ok(Err(e)) => {
@@ -396,11 +400,26 @@ impl SegmentProcessor for WriteBackProcessor {
         data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
-            let path = data.segment.path.clone();
+            let original_path = data.segment.path.clone();
+            let dest_path = match data.metadata.get("write_back_extension") {
+                Some(ext) => {
+                    let mut p = original_path.as_os_str().to_owned();
+                    p.push(ext);
+                    std::path::PathBuf::from(p)
+                }
+                None => original_path.clone(),
+            };
             let bytes = data.bytes.clone();
-            let result = tokio::task::spawn_blocking(move || std::fs::write(&path, &bytes)).await;
+            let write_dest = dest_path.clone();
+            let result =
+                tokio::task::spawn_blocking(move || std::fs::write(&write_dest, &bytes)).await;
             match result {
-                Ok(Ok(())) => Ok(data),
+                Ok(Ok(())) => {
+                    if dest_path != original_path {
+                        let _ = std::fs::remove_file(&original_path);
+                    }
+                    Ok(data)
+                }
                 Ok(Err(e)) => Err(ProcessError {
                     data,
                     kind: ProcessErrorKind::Io(e),
@@ -1175,5 +1194,120 @@ mod worker_pipeline_tests {
 
         // The captured bytes should be identical to the input (not double-gzipped).
         check!(output_bytes.lock().unwrap().as_slice() == gzip_data.as_slice());
+    }
+
+    /// WriteBackProcessor writes to a new path when `write_back_extension` is
+    /// set and removes the original file, preventing re-discovery on the next
+    /// poll cycle.
+    #[tokio::test]
+    async fn write_back_renames_when_extension_metadata_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let seg_path = dir.path().join("trace.0.bin");
+        std::fs::write(&seg_path, b"payload").unwrap();
+
+        let segment = sealed::SealedSegment {
+            path: seg_path.clone(),
+            index: 0,
+        };
+
+        let metrics = SegmentProcessMetrics {
+            operation: Operation::ProcessSegment,
+            total_time: metrique::timers::Timer::start_now(),
+            status: None,
+            segment_index: 0,
+            uncompressed_size: 7,
+            compressed_size: None,
+            invalid_file_header: false,
+            pipeline: PipelineMetrics::default(),
+        }
+        .append_on_drop(metrique_writer::sink::DevNullSink::boxed());
+
+        let data = SegmentData {
+            segment,
+            bytes: b"payload".to_vec(),
+            metadata: HashMap::from([("write_back_extension".into(), ".gz".into())]),
+            metrics,
+        };
+
+        let mut processor = WriteBackProcessor;
+        let result = processor.process(data).await;
+        check!(result.is_ok());
+
+        // Original .bin should be gone, .bin.gz should exist with the payload.
+        check!(!seg_path.exists());
+        let gz_path = dir.path().join("trace.0.bin.gz");
+        check!(gz_path.exists());
+        check!(std::fs::read(&gz_path).unwrap() == b"payload");
+    }
+
+    /// WriteBackProcessor writes to the original path when no
+    /// `write_back_extension` metadata is set.
+    #[tokio::test]
+    async fn write_back_overwrites_in_place_without_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let seg_path = dir.path().join("trace.0.bin");
+        std::fs::write(&seg_path, b"old").unwrap();
+
+        let segment = sealed::SealedSegment {
+            path: seg_path.clone(),
+            index: 0,
+        };
+
+        let metrics = SegmentProcessMetrics {
+            operation: Operation::ProcessSegment,
+            total_time: metrique::timers::Timer::start_now(),
+            status: None,
+            segment_index: 0,
+            uncompressed_size: 3,
+            compressed_size: None,
+            invalid_file_header: false,
+            pipeline: PipelineMetrics::default(),
+        }
+        .append_on_drop(metrique_writer::sink::DevNullSink::boxed());
+
+        let data = SegmentData {
+            segment,
+            bytes: b"new".to_vec(),
+            metadata: HashMap::new(),
+            metrics,
+        };
+
+        let mut processor = WriteBackProcessor;
+        let result = processor.process(data).await;
+        check!(result.is_ok());
+
+        check!(std::fs::read(&seg_path).unwrap() == b"new");
+    }
+
+    /// The full GzipCompressor → WriteBackProcessor pipeline writes a `.bin.gz`
+    /// file and removes the original `.bin`, so `find_sealed_segments` will not
+    /// re-discover it on the next poll.
+    #[tokio::test]
+    async fn gzip_write_back_pipeline_prevents_rediscovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let seg_path = dir.path().join("trace.0.bin");
+        std::fs::write(&seg_path, b"raw trace data").unwrap();
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+
+        let processors: Vec<Box<dyn SegmentProcessor>> =
+            vec![Box::new(GzipCompressor), Box::new(WriteBackProcessor)];
+
+        let mut worker = WorkerLoop::new(
+            config_for(dir.path()),
+            processors,
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+        worker.run().await;
+
+        // Original .bin removed; .bin.gz written.
+        check!(!seg_path.exists());
+        check!(dir.path().join("trace.0.bin.gz").exists());
+
+        // A subsequent scan should find no sealed segments.
+        let segments = sealed::find_sealed_segments(dir.path(), "trace").unwrap();
+        check!(segments.is_empty());
     }
 }

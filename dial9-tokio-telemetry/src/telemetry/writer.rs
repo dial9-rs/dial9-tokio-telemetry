@@ -269,11 +269,48 @@ impl RotatingWriter {
     fn evict_oldest(&mut self) -> std::io::Result<()> {
         // Always keep at least the current file.
         while self.total_size() > self.max_total_size && !self.closed_files.is_empty() {
-            if let Some((path, _size)) = self.closed_files.pop_front()
-                && let Err(e) = fs::remove_file(&path)
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!("failed to evict old trace segment {}: {e}", path.display());
+            if let Some((path, _size)) = self.closed_files.pop_front() {
+                // Try to remove the sealed `.bin` file directly.  If a
+                // background worker has already renamed it (e.g. appended an
+                // extension like `.gz`), scan the parent directory for any
+                // file whose name starts with the original filename so we
+                // stay agnostic to future write-back extensions.
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // NOTE: This directory scan is more expensive than a
+                        // direct remove, but it keeps us agnostic to whatever
+                        // extension the background worker appends. In practice
+                        // eviction is infrequent and the directory is small, so
+                        // the cost is hopefully negligible.
+                        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                            if let Some(parent) = path.parent() {
+                                if let Ok(entries) = fs::read_dir(parent) {
+                                    for entry in entries.flatten() {
+                                        let name = entry.file_name();
+                                        if let Some(name_str) = name.to_str()
+                                            && name_str.starts_with(file_name)
+                                            && name_str != file_name
+                                        {
+                                            if let Err(e2) = fs::remove_file(entry.path()) {
+                                                tracing::warn!(
+                                                    "failed to evict old trace segment {}: {e2}",
+                                                    entry.path().display()
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "failed to evict old trace segment {}: {e}",
+                            path.display()
+                        );
+                    }
+                }
             }
         }
         // If even the current file alone exceeds total budget, stop writing.
@@ -1120,5 +1157,44 @@ mod tests {
             .collect();
         assert_eq!(metadata.len(), 1);
         assert!(metadata[0].is_empty());
+    }
+
+    /// When the background worker has renamed a sealed `.bin` to `.bin.gz`,
+    /// eviction should clean up the `.gz` variant instead of silently leaking it.
+    #[test]
+    fn test_eviction_removes_gz_variant() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let one_event = single_event_file_size();
+        let max_file_size = one_event;
+        // Budget fits many files so segment 0 is not immediately evicted.
+        let max_total_size = max_file_size * 100;
+        let mut writer = RotatingWriter::new(&base, max_file_size, max_total_size).unwrap();
+
+        // Write two events: the first fills segment 0, the second triggers
+        // rotation (sealing segment 0 as trace.0.bin) and starts segment 1.
+        writer.write_event(&park_event()).unwrap();
+        writer.write_event(&park_event()).unwrap();
+        // Segment 0 is now sealed as trace.0.bin.
+
+        // Simulate the background worker renaming trace.0.bin → trace.0.bin.gz.
+        let seg0 = dir.path().join("trace.0.bin");
+        let seg0_gz = dir.path().join("trace.0.bin.gz");
+        assert!(seg0.exists(), "trace.0.bin should exist after rotation");
+        std::fs::rename(&seg0, &seg0_gz).unwrap();
+
+        // Now shrink the budget so the next rotation triggers eviction of
+        // segment 0 (which has been renamed to .bin.gz on disk).
+        writer.max_total_size = max_file_size;
+        for _ in 0..3 {
+            writer.write_event(&park_event()).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        // The .bin.gz file should have been cleaned up by eviction.
+        assert!(
+            !seg0_gz.exists(),
+            "trace.0.bin.gz should have been evicted"
+        );
     }
 }
