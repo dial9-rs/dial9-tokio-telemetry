@@ -283,32 +283,27 @@ impl RotatingWriter {
                         // extension the background worker appends. In practice
                         // eviction is infrequent and the directory is small, so
                         // the cost is hopefully negligible.
-                        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                            if let Some(parent) = path.parent() {
-                                if let Ok(entries) = fs::read_dir(parent) {
-                                    for entry in entries.flatten() {
-                                        let name = entry.file_name();
-                                        if let Some(name_str) = name.to_str()
-                                            && name_str.starts_with(file_name)
-                                            && name_str != file_name
-                                        {
-                                            if let Err(e2) = fs::remove_file(entry.path()) {
-                                                tracing::warn!(
-                                                    "failed to evict old trace segment {}: {e2}",
-                                                    entry.path().display()
-                                                );
-                                            }
-                                        }
-                                    }
+                        if let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+                            && let Some(parent) = path.parent()
+                            && let Ok(entries) = fs::read_dir(parent)
+                        {
+                            for entry in entries.flatten() {
+                                let name = entry.file_name();
+                                if let Some(name_str) = name.to_str()
+                                    && name_str.starts_with(file_name)
+                                    && name_str != file_name
+                                    && let Err(e2) = fs::remove_file(entry.path())
+                                {
+                                    tracing::warn!(
+                                        "failed to evict old trace segment {}: {e2}",
+                                        entry.path().display()
+                                    );
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "failed to evict old trace segment {}: {e}",
-                            path.display()
-                        );
+                        tracing::warn!("failed to evict old trace segment {}: {e}", path.display());
                     }
                 }
             }
@@ -1192,9 +1187,6 @@ mod tests {
         writer.finalize().unwrap();
 
         // The .bin.gz file should have been cleaned up by eviction.
-        assert!(
-            !seg0_gz.exists(),
-            "trace.0.bin.gz should have been evicted"
-        );
+        assert!(!seg0_gz.exists(), "trace.0.bin.gz should have been evicted");
     }
 }
