@@ -416,7 +416,14 @@ impl SegmentProcessor for WriteBackProcessor {
             match result {
                 Ok(Ok(())) => {
                     if dest_path != original_path {
-                        let _ = std::fs::remove_file(&original_path);
+                        // If the original is already gone, the writer evicted
+                        // it while we were processing.  Remove the dest file
+                        // we just wrote so it doesn't leak on disk.
+                        if let Err(e) = std::fs::remove_file(&original_path)
+                            && e.kind() == std::io::ErrorKind::NotFound
+                        {
+                            let _ = std::fs::remove_file(&dest_path);
+                        }
                     }
                     Ok(data)
                 }
