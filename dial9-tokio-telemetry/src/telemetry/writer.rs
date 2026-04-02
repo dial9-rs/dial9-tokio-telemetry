@@ -1,4 +1,4 @@
-use dial9_trace_format::encoder::Encoder;
+use dial9_trace_format::encoder::{Encoder, RawEncoder};
 
 use crate::telemetry::collector::Batch;
 use crate::telemetry::format::SegmentMetadataEvent;
@@ -84,7 +84,7 @@ pub struct RotatingWriter {
 // but we don't want to force going through a pointer every time we want to write.
 #[allow(clippy::large_enum_variant)]
 enum WriterState {
-    Active(Encoder<BufWriter<File>>),
+    Active(RawEncoder<BufWriter<File>>),
     /// Writer has been finalized or stopped — no encoder, no fd, no writes.
     Finished,
 }
@@ -124,23 +124,21 @@ impl RotatingWriter {
         let first_path = Self::active_path(&base_path, 0);
         let file = File::create(&first_path)?;
         let writer = BufWriter::new(file);
-        let encoder = Encoder::new_to(writer)?;
+        let raw = Self::write_header_and_metadata(writer, &segment_metadata)?;
 
-        let mut w = Self {
+        Ok(Self {
             base_path,
             max_file_size,
             max_total_size,
             closed_files: VecDeque::new(),
             active_path: first_path,
-            state: WriterState::Active(encoder),
+            state: WriterState::Active(raw),
             next_index: 1,
             did_rotate: false,
             segment_metadata,
             dropped_events: 0,
             has_real_events: false,
-        };
-        w.write_segment_metadata()?;
-        Ok(w)
+        })
     }
 
     /// Create a writer that writes to a single file with no rotation or eviction.
@@ -154,22 +152,21 @@ impl RotatingWriter {
         }
         let file = File::create(&path)?;
         let writer = BufWriter::new(file);
+        let raw = Self::write_header_and_metadata(writer, &None)?;
 
-        let mut w = Self {
+        Ok(Self {
             base_path: path.clone(),
             max_file_size: u64::MAX,
             max_total_size: u64::MAX,
             closed_files: VecDeque::new(),
             active_path: path,
-            state: WriterState::Active(Encoder::new_to(writer)?),
+            state: WriterState::Active(raw),
             next_index: 1,
             did_rotate: false,
             segment_metadata: None,
             dropped_events: 0,
             has_real_events: false,
-        };
-        w.write_segment_metadata()?;
-        Ok(w)
+        })
     }
 
     /// The base path used for trace segment files.
@@ -177,13 +174,14 @@ impl RotatingWriter {
         &self.base_path
     }
 
-    /// Write the segment metadata event. Always writes — uses configured
-    /// entries or empty vec if none set. Called on construction and rotation.
-    fn write_segment_metadata(&mut self) -> std::io::Result<()> {
-        let WriterState::Active(encoder) = &mut self.state else {
-            return Ok(());
-        };
-        let entries = self.segment_metadata.clone().unwrap_or_default();
+    /// Create an encoder, write the file header and segment metadata, then
+    /// convert to a [`RawEncoder`] for the remainder of the file's lifetime.
+    fn write_header_and_metadata(
+        writer: BufWriter<File>,
+        segment_metadata: &Option<Vec<(String, String)>>,
+    ) -> std::io::Result<RawEncoder<BufWriter<File>>> {
+        let mut encoder = Encoder::new_to(writer)?;
+        let entries = segment_metadata.clone().unwrap_or_default();
         let timestamp_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -192,7 +190,7 @@ impl RotatingWriter {
             timestamp_ns,
             entries,
         })?;
-        Ok(())
+        Ok(encoder.into_raw_encoder())
     }
 
     fn file_path(base: &Path, index: u32) -> PathBuf {
@@ -209,12 +207,12 @@ impl RotatingWriter {
     }
 
     fn rotate(&mut self) -> std::io::Result<()> {
-        let WriterState::Active(encoder) = &mut self.state else {
+        let WriterState::Active(raw) = &mut self.state else {
             return Ok(());
         };
-        encoder.flush()?;
+        raw.flush()?;
         // Seal the current segment: snapshot size and rename .active → .bin
-        let closed_size = encoder.bytes_written();
+        let closed_size = raw.bytes_written();
         let sealed = Self::file_path(&self.base_path, self.next_index - 1);
         fs::rename(&self.active_path, &sealed)?;
         self.closed_files.push_back((sealed, closed_size));
@@ -223,11 +221,13 @@ impl RotatingWriter {
         self.next_index += 1;
         let file = File::create(&new_path)?;
         let writer = BufWriter::new(file);
-        self.state = WriterState::Active(Encoder::new_to(writer)?);
+        self.state = WriterState::Active(Self::write_header_and_metadata(
+            writer,
+            &self.segment_metadata,
+        )?);
         self.active_path = new_path;
         self.did_rotate = true;
         self.has_real_events = false;
-        self.write_segment_metadata()?;
 
         tracing::info!(
             segment_index = self.next_index - 1,
@@ -241,7 +241,7 @@ impl RotatingWriter {
     fn total_size(&self) -> u64 {
         let closed: u64 = self.closed_files.iter().map(|(_, s)| s).sum();
         let active = match &self.state {
-            WriterState::Active(encoder) => encoder.bytes_written(),
+            WriterState::Active(raw) => raw.bytes_written(),
             WriterState::Finished => 0,
         };
         closed + active
@@ -267,8 +267,8 @@ impl RotatingWriter {
     /// Rotate if the current file exceeds max_file_size.
     /// Called after writing a complete logical unit (def + event).
     fn maybe_rotate(&mut self) -> std::io::Result<()> {
-        if let WriterState::Active(encoder) = &self.state
-            && encoder.bytes_written() > self.max_file_size
+        if let WriterState::Active(raw) = &self.state
+            && raw.bytes_written() > self.max_file_size
         {
             self.rotate()?;
         }
@@ -278,8 +278,8 @@ impl RotatingWriter {
 
 impl TraceWriter for RotatingWriter {
     fn flush(&mut self) -> std::io::Result<()> {
-        if let WriterState::Active(encoder) = &mut self.state {
-            encoder.flush()?;
+        if let WriterState::Active(raw) = &mut self.state {
+            raw.flush()?;
         }
         Ok(())
     }
@@ -322,15 +322,14 @@ impl TraceWriter for RotatingWriter {
     }
 
     fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
-        let WriterState::Active(encoder) = &mut self.state else {
+        let WriterState::Active(raw) = &mut self.state else {
             self.dropped_events += batch.event_count as usize;
             return Ok(());
         };
         // Raw-copy the thread-local batch. Each batch is self-contained
         // (starts with its own header), so the next batch's header acts as
         // the reset frame for decoders.
-        encoder.write_raw(&batch.encoded_bytes)?;
-        encoder.reset_registry_and_pools();
+        raw.write_raw(&batch.encoded_bytes)?;
         self.has_real_events = true;
         self.maybe_rotate()?;
         Ok(())
