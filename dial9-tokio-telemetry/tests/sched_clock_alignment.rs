@@ -12,7 +12,9 @@ mod common;
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn sched_event_timestamps_align_with_wall_clock() {
-    use dial9_tokio_telemetry::telemetry::events::{CpuSampleSource, RawEvent, clock_monotonic_ns};
+    use dial9_tokio_telemetry::telemetry::events::{
+        CpuSampleSource, TelemetryEvent, clock_monotonic_ns,
+    };
     use dial9_tokio_telemetry::telemetry::{SchedEventConfig, TracedRuntime};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -82,11 +84,15 @@ fn sched_event_timestamps_align_with_wall_clock() {
     let sched_timestamps: Vec<u64> = events
         .iter()
         .filter_map(|e| match e {
-            RawEvent::CpuSample(data)
-                if data.source == CpuSampleSource::SchedEvent
-                    && data.worker_id.as_u64() < num_workers as u64 =>
+            TelemetryEvent::CpuSample {
+                timestamp_nanos,
+                source,
+                worker_id,
+                ..
+            } if *source == CpuSampleSource::SchedEvent
+                && worker_id.as_u64() < num_workers as u64 =>
             {
-                Some(data.timestamp_nanos)
+                Some(*timestamp_nanos)
             }
             _ => None,
         })
