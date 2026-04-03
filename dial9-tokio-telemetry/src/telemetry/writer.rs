@@ -21,6 +21,19 @@ pub trait TraceWriter: Send {
     }
     /// Transcode encoded bytes into this writer.
     fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()>;
+    /// Return the current segment metadata entries. Default returns empty.
+    fn segment_metadata(&self) -> &[(String, String)] {
+        &[]
+    }
+    /// Replace the segment metadata entries that will be written into the next
+    /// rotated segment (e.g. merged static + runtime names). Default is a no-op.
+    fn update_segment_metadata(&mut self, _entries: Vec<(String, String)>) {}
+    /// Write a `SegmentMetadataEvent` into the current segment. Called before
+    /// finalize so that single-segment traces contain runtime→worker mappings.
+    /// Default is a no-op.
+    fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
@@ -35,6 +48,15 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     }
     fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
         (**self).write_encoded_batch(batch)
+    }
+    fn segment_metadata(&self) -> &[(String, String)] {
+        (**self).segment_metadata()
+    }
+    fn update_segment_metadata(&mut self, entries: Vec<(String, String)>) {
+        (**self).update_segment_metadata(entries)
+    }
+    fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
+        (**self).write_current_segment_metadata()
     }
 }
 
@@ -71,8 +93,9 @@ pub struct RotatingWriter {
     next_index: u32,
     /// Set after rotation; cleared by `take_rotated()`.
     did_rotate: bool,
-    /// Optional metadata written at the start of each segment.
-    segment_metadata: Option<Vec<(String, String)>>,
+    /// Metadata written at the start of each segment. Updated by the flush
+    /// thread to include runtime names alongside any user-provided entries.
+    segment_metadata: Vec<(String, String)>,
     /// Events silently dropped because the writer was finished/stopped.
     dropped_events: usize,
     /// Whether any real (non-metadata) events have been written to the current segment.
@@ -98,7 +121,7 @@ impl RotatingWriter {
         max_file_size: u64,
         max_total_size: u64,
     ) -> std::io::Result<Self> {
-        Self::create(base_path, max_file_size, max_total_size, None)
+        Self::create(base_path, max_file_size, max_total_size, Vec::new())
     }
 
     #[builder(builder_type = RotatingWriterBuilder, finish_fn = build)]
@@ -108,14 +131,19 @@ impl RotatingWriter {
         max_total_size: u64,
         segment_metadata: Option<Vec<(String, String)>>,
     ) -> std::io::Result<Self> {
-        Self::create(base_path, max_file_size, max_total_size, segment_metadata)
+        Self::create(
+            base_path,
+            max_file_size,
+            max_total_size,
+            segment_metadata.unwrap_or_default(),
+        )
     }
 
     fn create(
         base_path: impl Into<PathBuf>,
         max_file_size: u64,
         max_total_size: u64,
-        segment_metadata: Option<Vec<(String, String)>>,
+        segment_metadata: Vec<(String, String)>,
     ) -> std::io::Result<Self> {
         let base_path = base_path.into();
         if let Some(parent) = base_path.parent() {
@@ -152,7 +180,7 @@ impl RotatingWriter {
         }
         let file = File::create(&path)?;
         let writer = BufWriter::new(file);
-        let raw = Self::write_header_and_metadata(writer, &None)?;
+        let raw = Self::write_header_and_metadata(writer, &Vec::new())?;
 
         Ok(Self {
             base_path: path.clone(),
@@ -163,7 +191,7 @@ impl RotatingWriter {
             state: WriterState::Active(raw),
             next_index: 1,
             did_rotate: false,
-            segment_metadata: None,
+            segment_metadata: Vec::new(),
             dropped_events: 0,
             has_real_events: false,
         })
@@ -178,10 +206,10 @@ impl RotatingWriter {
     /// convert to a [`RawEncoder`] for the remainder of the file's lifetime.
     fn write_header_and_metadata(
         writer: BufWriter<File>,
-        segment_metadata: &Option<Vec<(String, String)>>,
+        segment_metadata: &[(String, String)],
     ) -> std::io::Result<RawEncoder<BufWriter<File>>> {
         let mut encoder = Encoder::new_to(writer)?;
-        let entries = segment_metadata.clone().unwrap_or_default();
+        let entries = segment_metadata.to_vec();
         let timestamp_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -191,6 +219,27 @@ impl RotatingWriter {
             entries,
         })?;
         Ok(encoder.into_raw_encoder())
+    }
+
+    /// Write a `SegmentMetadataEvent` into the current active segment.
+    /// Used by `write_current_segment_metadata` to flush runtime metadata
+    /// before finalize.
+    fn write_segment_metadata(&mut self) -> std::io::Result<()> {
+        let WriterState::Active(raw) = &mut self.state else {
+            return Ok(());
+        };
+        let entries = self.segment_metadata.clone();
+        let timestamp_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let mut enc = Encoder::new();
+        enc.write(&SegmentMetadataEvent {
+            timestamp_ns,
+            entries,
+        })?;
+        raw.write_raw(&enc.finish())?;
+        Ok(())
     }
 
     fn file_path(base: &Path, index: u32) -> PathBuf {
@@ -286,6 +335,18 @@ impl TraceWriter for RotatingWriter {
 
     fn take_rotated(&mut self) -> bool {
         std::mem::take(&mut self.did_rotate)
+    }
+
+    fn segment_metadata(&self) -> &[(String, String)] {
+        &self.segment_metadata
+    }
+
+    fn update_segment_metadata(&mut self, entries: Vec<(String, String)>) {
+        self.segment_metadata = entries;
+    }
+
+    fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
+        self.write_segment_metadata()
     }
 
     fn finalize(&mut self) -> std::io::Result<()> {
@@ -930,6 +991,71 @@ mod tests {
                     if *entries == vec![("k".to_string(), "v".to_string())])
             });
             assert!(has_metadata, "{}: expected SegmentMetadata", file.display());
+        }
+    }
+
+    #[test]
+    fn test_dynamic_metadata_merged_on_rotation() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let one_event = single_event_file_size();
+        let mut writer = RotatingWriter::builder()
+            .base_path(&base)
+            .max_file_size(one_event)
+            .max_total_size(100_000)
+            .segment_metadata(vec![("service".into(), "myapp".into())])
+            .build()
+            .unwrap();
+
+        // Simulate the flush thread merging static + runtime→worker entries.
+        let mut merged = writer.segment_metadata().to_vec();
+        merged.push(("runtime.main".into(), "0,1,2,3".into()));
+        writer.update_segment_metadata(merged);
+
+        // Write enough events to trigger rotation — rotated segments should
+        // contain both static and dynamic metadata.
+        for _ in 0..4 {
+            writer.write_encoded_batch(&test_batch()).unwrap();
+        }
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let mut files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
+            .collect();
+        files.sort();
+        assert!(files.len() >= 2, "expected at least 2 files from rotation");
+
+        // First segment was constructed before update_dynamic_metadata, so
+        // it only has static metadata. Rotated segments have both.
+        for file in &files[1..] {
+            let all_events = format::decode_events(&std::fs::read(file).unwrap()).unwrap();
+            let meta: Vec<_> = all_events
+                .iter()
+                .filter_map(|e| match e {
+                    TelemetryEvent::SegmentMetadata { entries, .. } => Some(entries.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                meta.len(),
+                1,
+                "{}: expected 1 metadata event",
+                file.display()
+            );
+            assert!(
+                meta[0].contains(&("service".to_string(), "myapp".to_string())),
+                "{}: missing static metadata",
+                file.display()
+            );
+            assert!(
+                meta[0].contains(&("runtime.main".to_string(), "0,1,2,3".to_string())),
+                "{}: missing dynamic runtime worker metadata",
+                file.display()
+            );
         }
     }
 

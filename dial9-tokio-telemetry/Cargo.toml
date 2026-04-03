@@ -16,7 +16,7 @@ rustc-args = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 all-features = true
 
 [dependencies]
-tokio = { version = "1", features = ["rt", "macros", "time", "rt-multi-thread", "sync", "net", "io-util"] }
+tokio = { version = "1.51.0", features = ["rt", "macros", "time", "rt-multi-thread", "sync", "net", "io-util"] }
 tokio-util = "0.7"
 arc-swap = "1"
 crossbeam-queue = "0.3"
