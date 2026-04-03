@@ -77,7 +77,8 @@ fn background_symbolization_produces_symbol_table_entries() {
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "bin") {
+        let name = path.file_name().unwrap().to_string_lossy();
+        if !name.ends_with(".bin") && !name.ends_with(".bin.gz") {
             continue;
         }
 
