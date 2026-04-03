@@ -6,10 +6,7 @@
 /// Identifies where a process is running, used as the `instance_path`
 /// component in S3 object keys.
 ///
-/// # Examples
-/// ```ignore
-/// use dial9_tokio_telemetry::background_task::instance_metadata::InstanceIdentity;
-///
+/// ```text
 /// let id = InstanceIdentity::new("us-east-1/i-0abc123");
 /// assert_eq!(id.as_str(), "us-east-1/i-0abc123");
 /// ```
