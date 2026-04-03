@@ -32,55 +32,48 @@ impl TraceReader {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid trace header")
         })?;
 
-        let mut ref_events = Vec::new();
-        dec.for_each_event(|ev| {
-            if let Some(ev) = format::decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
-                ref_events.push(ev);
-            }
-        })
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-
-        let string_pool = dec.string_pool();
-
         let mut spawn_locations = HashMap::new();
         let mut task_spawn_locs = HashMap::new();
         let mut thread_names = HashMap::new();
         let mut segment_metadata = Vec::new();
+        let mut events = Vec::new();
 
-        // Build spawn_locations from the string pool: every interned string
-        // that was used as a spawn_loc gets an entry.
-        for ev in &ref_events {
-            match ev {
-                TelemetryEventRef::PollStart(e) => {
-                    populate_spawn_loc(&mut spawn_locations, e.spawn_loc, string_pool);
+        // Resolve InternedString fields (spawn_loc, thread_name) inside the
+        // callback where the string pool is still valid for the current batch.
+        // After a mid-stream header the pool resets, so deferred resolution
+        // would use the wrong pool for earlier batches.
+        dec.for_each_event(|ev| {
+            if let Some(r) = format::decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
+                match &r {
+                    TelemetryEventRef::PollStart(e) => {
+                        populate_spawn_loc(&mut spawn_locations, e.spawn_loc, ev.string_pool);
+                    }
+                    TelemetryEventRef::TaskSpawn(e) => {
+                        populate_spawn_loc(&mut spawn_locations, e.spawn_loc, ev.string_pool);
+                        task_spawn_locs.insert(e.task_id, e.spawn_loc);
+                    }
+                    TelemetryEventRef::SegmentMetadata(e) => {
+                        segment_metadata = e
+                            .entries
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect();
+                    }
+                    _ => {}
                 }
-                TelemetryEventRef::TaskSpawn(e) => {
-                    populate_spawn_loc(&mut spawn_locations, e.spawn_loc, string_pool);
-                    task_spawn_locs.insert(e.task_id, e.spawn_loc);
+                let owned = format::to_owned_event(r, ev.string_pool);
+                if let TelemetryEvent::CpuSample {
+                    tid,
+                    thread_name: Some(ref name),
+                    ..
+                } = owned
+                {
+                    thread_names.insert(tid, name.clone());
                 }
-                TelemetryEventRef::SegmentMetadata(e) => {
-                    segment_metadata = e
-                        .entries
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect();
-                }
-                _ => {}
+                events.push(owned);
             }
-        }
-
-        // Thread names come from CpuSample events' thread_name field
-        for ev in &ref_events {
-            if let TelemetryEventRef::CpuSample(e) = ev
-                && let Some(name) = string_pool.get(e.thread_name)
-                && name != "<no thread name>"
-            {
-                thread_names.insert(e.tid, name.to_string());
-            }
-        }
-
-        let events: Vec<TelemetryEvent> =
-            ref_events.into_iter().map(TelemetryEvent::from).collect();
+        })
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         Ok(Self {
             events,
@@ -794,15 +787,58 @@ pub fn detect_sampled_polls(events: &[TelemetryEvent]) -> Vec<SampledPoll> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::events::RawEvent;
     use crate::telemetry::format::WorkerId;
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
-    use crate::telemetry::writer::{RotatingWriter, TraceWriter};
     use dial9_trace_format::InternedString;
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
-    use std::io::Write;
     const UNKNOWN_SPAWN_LOC: InternedString = InternedString::from_raw(0);
+
+    #[test]
+    fn trace_reader_reads_gzip_trace_files() {
+        use crate::telemetry::buffer::ThreadLocalBuffer;
+        use crate::telemetry::events::RawEvent;
+        use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let raw_path = dir.path().join("trace.bin");
+
+        let mut writer = RotatingWriter::single_file(&raw_path).unwrap();
+        let batch = crate::telemetry::collector::Batch::new(
+            ThreadLocalBuffer::encode_single(&RawEvent::WorkerPark {
+                timestamp_nanos: 1_000,
+                worker_id: WorkerId::from(7usize),
+                worker_local_queue_depth: 3,
+                cpu_time_nanos: 11,
+            }),
+            1,
+        );
+        writer.write_encoded_batch(&batch).unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        let raw = std::fs::read(&raw_path).unwrap();
+        let gzip_path = dir.path().join("trace.bin.gz");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&raw).unwrap();
+        let compressed = encoder.finish().unwrap();
+        std::fs::write(&gzip_path, compressed).unwrap();
+
+        let mut reader = TraceReader::new(gzip_path.to_str().unwrap()).unwrap();
+        let events = reader.read_all().unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            TelemetryEvent::WorkerPark {
+                timestamp_nanos: 1_000,
+                worker_id,
+                worker_local_queue_depth: 3,
+                cpu_time_nanos: 11,
+            } if worker_id == WorkerId::from(7usize)
+        ));
+    }
 
     #[test]
     fn test_analyze_empty() {
@@ -856,45 +892,6 @@ mod tests {
         let analysis = analyze_trace(&events);
         let stats = analysis.worker_stats.get(&WorkerId::from(0usize)).unwrap();
         assert_eq!(stats.max_local_queue, 10);
-    }
-
-    #[test]
-    fn trace_reader_reads_gzip_trace_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let raw_path = dir.path().join("trace.bin");
-
-        let mut writer = RotatingWriter::single_file(&raw_path).unwrap();
-        writer
-            .write_event(&RawEvent::WorkerPark {
-                timestamp_nanos: 1_000,
-                worker_id: WorkerId::from(7usize),
-                worker_local_queue_depth: 3,
-                cpu_time_nanos: 11,
-            })
-            .unwrap();
-        writer.flush().unwrap();
-        drop(writer);
-
-        let raw = std::fs::read(&raw_path).unwrap();
-        let gzip_path = dir.path().join("trace.bin.gz");
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-        encoder.write_all(&raw).unwrap();
-        let compressed = encoder.finish().unwrap();
-        std::fs::write(&gzip_path, compressed).unwrap();
-
-        let mut reader = TraceReader::new(gzip_path.to_str().unwrap()).unwrap();
-        let events = reader.read_all().unwrap();
-
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0],
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos: 1_000,
-                worker_id,
-                worker_local_queue_depth: 3,
-                cpu_time_nanos: 11,
-            } if worker_id == WorkerId::from(7usize)
-        ));
     }
 
     #[test]
@@ -1205,6 +1202,7 @@ mod tests {
                 timestamp_nanos: 1_500_000,
                 worker_id: WorkerId::from(0usize),
                 tid: 100,
+                thread_name: None,
                 source: CpuSampleSource::CpuProfile,
                 callchain: vec![],
             },
@@ -1212,6 +1210,7 @@ mod tests {
                 timestamp_nanos: 1_800_000,
                 worker_id: WorkerId::from(0usize),
                 tid: 100,
+                thread_name: None,
                 source: CpuSampleSource::SchedEvent,
                 callchain: vec![],
             },
@@ -1264,6 +1263,7 @@ mod tests {
                 timestamp_nanos: 3_000_000, // after poll ended
                 worker_id: WorkerId::from(0usize),
                 tid: 100,
+                thread_name: None,
                 source: CpuSampleSource::CpuProfile,
                 callchain: vec![],
             },

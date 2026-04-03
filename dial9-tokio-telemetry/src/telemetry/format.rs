@@ -1,5 +1,6 @@
 use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
 use crate::telemetry::task_metadata::TaskId;
+use dial9_trace_format::decoder::StringPool;
 use dial9_trace_format::types::{EventEncoder, FieldType, FieldValueRef};
 use dial9_trace_format::{InternedString, StackFrames, TraceEvent, TraceField};
 use serde::Serialize;
@@ -184,11 +185,24 @@ pub struct SegmentMetadataEvent {
 // ── dial9-trace-format: decode ──────────────────────────────────────────────
 
 /// Decode all events from a `dial9-trace-format` byte slice into `TelemetryEvent`s.
-pub fn decode_events_v2(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
-    Ok(decode_events_ref(data)?
-        .into_iter()
-        .map(TelemetryEvent::from)
-        .collect())
+///
+/// Resolves `InternedString` fields (e.g. `CpuSample.thread_name`) via the
+/// decoder's string pool while it is still valid for each batch.
+pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
+    use dial9_trace_format::decoder::Decoder;
+
+    let mut dec = Decoder::new(data)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
+    let mut events = Vec::new();
+
+    dec.for_each_event(|ev| {
+        if let Some(r) = decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
+            events.push(to_owned_event(r, ev.string_pool));
+        }
+    })
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+    Ok(events)
 }
 
 /// Decode all events from a byte slice into zero-copy [`TelemetryEventRef`]s.
@@ -284,68 +298,77 @@ pub fn decode_ref<'a>(
     })
 }
 
-/// Convert a zero-copy `TelemetryEventRef` into an owned `TelemetryEvent`.
-impl From<TelemetryEventRef<'_>> for TelemetryEvent {
-    fn from(r: TelemetryEventRef<'_>) -> Self {
-        match r {
-            TelemetryEventRef::PollStart(e) => TelemetryEvent::PollStart {
-                timestamp_nanos: e.timestamp_ns,
-                worker_id: e.worker_id,
-                worker_local_queue_depth: e.local_queue as usize,
-                task_id: e.task_id,
-                spawn_loc: e.spawn_loc,
-            },
-            TelemetryEventRef::PollEnd(e) => TelemetryEvent::PollEnd {
-                timestamp_nanos: e.timestamp_ns,
-                worker_id: e.worker_id,
-            },
-            TelemetryEventRef::WorkerPark(e) => TelemetryEvent::WorkerPark {
-                timestamp_nanos: e.timestamp_ns,
-                worker_id: e.worker_id,
-                worker_local_queue_depth: e.local_queue as usize,
-                cpu_time_nanos: e.cpu_time_ns,
-            },
-            TelemetryEventRef::WorkerUnpark(e) => TelemetryEvent::WorkerUnpark {
-                timestamp_nanos: e.timestamp_ns,
-                worker_id: e.worker_id,
-                worker_local_queue_depth: e.local_queue as usize,
-                cpu_time_nanos: e.cpu_time_ns,
-                sched_wait_delta_nanos: e.sched_wait_ns,
-            },
-            TelemetryEventRef::QueueSample(e) => TelemetryEvent::QueueSample {
-                timestamp_nanos: e.timestamp_ns,
-                global_queue_depth: e.global_queue as usize,
-            },
-            TelemetryEventRef::TaskSpawn(e) => TelemetryEvent::TaskSpawn {
-                timestamp_nanos: e.timestamp_ns,
-                task_id: e.task_id,
-                spawn_loc: e.spawn_loc,
-            },
-            TelemetryEventRef::TaskTerminate(e) => TelemetryEvent::TaskTerminate {
-                timestamp_nanos: e.timestamp_ns,
-                task_id: e.task_id,
-            },
-            TelemetryEventRef::CpuSample(e) => TelemetryEvent::CpuSample {
-                timestamp_nanos: e.timestamp_ns,
-                worker_id: e.worker_id,
-                tid: e.tid,
-                source: e.source,
-                callchain: e.callchain.iter().collect(),
-            },
-            TelemetryEventRef::WakeEvent(e) => TelemetryEvent::WakeEvent {
-                timestamp_nanos: e.timestamp_ns,
-                waker_task_id: e.waker_task_id,
-                woken_task_id: e.woken_task_id,
-                target_worker: e.target_worker,
-            },
-            TelemetryEventRef::SegmentMetadata(e) => TelemetryEvent::SegmentMetadata {
-                timestamp_nanos: e.timestamp_ns,
-                entries: e
-                    .entries
-                    .iter()
-                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                    .collect(),
-            },
-        }
+/// Resolve an interned thread name from the string pool, filtering out the
+/// sentinel `"<no thread name>"` placeholder.
+fn resolve_thread_name(pool: &StringPool, interned: InternedString) -> Option<String> {
+    pool.get(interned)
+        .filter(|n| *n != "<no thread name>")
+        .map(|n| n.to_string())
+}
+
+/// Convert a zero-copy `TelemetryEventRef` into an owned `TelemetryEvent`,
+/// resolving any `InternedString` fields (e.g. `thread_name`) via the
+/// string pool that was active when the event was decoded.
+pub(crate) fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> TelemetryEvent {
+    match r {
+        TelemetryEventRef::PollStart(e) => TelemetryEvent::PollStart {
+            timestamp_nanos: e.timestamp_ns,
+            worker_id: e.worker_id,
+            worker_local_queue_depth: e.local_queue as usize,
+            task_id: e.task_id,
+            spawn_loc: e.spawn_loc,
+        },
+        TelemetryEventRef::PollEnd(e) => TelemetryEvent::PollEnd {
+            timestamp_nanos: e.timestamp_ns,
+            worker_id: e.worker_id,
+        },
+        TelemetryEventRef::WorkerPark(e) => TelemetryEvent::WorkerPark {
+            timestamp_nanos: e.timestamp_ns,
+            worker_id: e.worker_id,
+            worker_local_queue_depth: e.local_queue as usize,
+            cpu_time_nanos: e.cpu_time_ns,
+        },
+        TelemetryEventRef::WorkerUnpark(e) => TelemetryEvent::WorkerUnpark {
+            timestamp_nanos: e.timestamp_ns,
+            worker_id: e.worker_id,
+            worker_local_queue_depth: e.local_queue as usize,
+            cpu_time_nanos: e.cpu_time_ns,
+            sched_wait_delta_nanos: e.sched_wait_ns,
+        },
+        TelemetryEventRef::QueueSample(e) => TelemetryEvent::QueueSample {
+            timestamp_nanos: e.timestamp_ns,
+            global_queue_depth: e.global_queue as usize,
+        },
+        TelemetryEventRef::TaskSpawn(e) => TelemetryEvent::TaskSpawn {
+            timestamp_nanos: e.timestamp_ns,
+            task_id: e.task_id,
+            spawn_loc: e.spawn_loc,
+        },
+        TelemetryEventRef::TaskTerminate(e) => TelemetryEvent::TaskTerminate {
+            timestamp_nanos: e.timestamp_ns,
+            task_id: e.task_id,
+        },
+        TelemetryEventRef::CpuSample(e) => TelemetryEvent::CpuSample {
+            timestamp_nanos: e.timestamp_ns,
+            worker_id: e.worker_id,
+            tid: e.tid,
+            thread_name: resolve_thread_name(pool, e.thread_name),
+            source: e.source,
+            callchain: e.callchain.iter().collect(),
+        },
+        TelemetryEventRef::WakeEvent(e) => TelemetryEvent::WakeEvent {
+            timestamp_nanos: e.timestamp_ns,
+            waker_task_id: e.waker_task_id,
+            woken_task_id: e.woken_task_id,
+            target_worker: e.target_worker,
+        },
+        TelemetryEventRef::SegmentMetadata(e) => TelemetryEvent::SegmentMetadata {
+            timestamp_nanos: e.timestamp_ns,
+            entries: e
+                .entries
+                .iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+        },
     }
 }

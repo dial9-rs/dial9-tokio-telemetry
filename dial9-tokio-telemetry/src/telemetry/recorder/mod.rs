@@ -1,9 +1,12 @@
 mod event_writer;
+mod runtime_context;
 mod shared_state;
 
+pub(crate) use runtime_context::{RuntimeContext, current_worker_id};
 pub(crate) use shared_state::SharedState;
 
 use event_writer::EventWriter;
+use runtime_context::{make_poll_end, make_poll_start, make_worker_park, make_worker_unpark};
 
 use crate::metrics::{FlushMetrics, Operation};
 use crate::telemetry::buffer;
@@ -37,7 +40,11 @@ pub(crate) struct FlushStats {
 /// Perform one flush cycle: drain CPU profilers, drain the collector, write
 /// events to disk, and flush the writer. This is the only code path that
 /// touches EventWriter, and it runs exclusively on the flush thread.
-fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStats {
+fn flush_once(
+    event_writer: &mut EventWriter,
+    shared: &SharedState,
+    drain_self: bool,
+) -> FlushStats {
     let events_before = event_writer.events_written();
     let cpu_events_time = Instant::now();
     #[cfg(feature = "cpu-profiling")]
@@ -46,10 +53,12 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     }
     let cpu_time = cpu_events_time.elapsed();
 
-    // Flush the current thread's buffer (the flush thread itself produces
-    // queue-sample events via record_event) so those events reach the
-    // collector before we drain it.
-    buffer::drain_to_collector(&shared.collector);
+    if drain_self {
+        // Periodically flush the flush thread's own TL buffer (queue samples + CPU events).
+        // We don't drain every cycle because each batch becomes its own trace segment;
+        // batching ~1s worth avoids writing tiny segments every 5ms.
+        buffer::drain_to_collector(&shared.collector);
+    }
 
     let dropped = shared.collector.take_dropped_batches();
     if dropped > 0 {
@@ -60,16 +69,16 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     }
 
     while let Some(batch) = shared.collector.next() {
-        for raw in batch {
-            if let Err(e) = event_writer.write_raw_event(raw) {
-                tracing::warn!("failed to write trace event: {e}");
-                shared.enabled.store(false, Ordering::Relaxed);
-                return FlushStats {
-                    event_count: event_writer.events_written() - events_before,
-                    dropped_batches: dropped as u64,
-                    cpu_time,
-                };
-            }
+        if batch.event_count > 0
+            && let Err(e) = event_writer.write_encoded_batch(&batch)
+        {
+            tracing::warn!("failed to transcode batch: {e}");
+            shared.enabled.store(false, Ordering::Relaxed);
+            return FlushStats {
+                event_count: event_writer.events_written() - events_before,
+                dropped_batches: dropped as u64,
+                cpu_time,
+            };
         }
     }
     if let Err(e) = event_writer.flush() {
@@ -82,39 +91,49 @@ fn flush_once(event_writer: &mut EventWriter, shared: &SharedState) -> FlushStat
     }
 }
 
-/// Install telemetry hooks on the runtime builder. Returns the shared state
-/// (for the hot-path callbacks) and the event writer (to be moved into the
-/// flush thread). No shared mutex is created.
-fn install_hooks(
+/// Register telemetry callbacks on a runtime builder.
+/// Closures capture `Arc<RuntimeContext>` (runtime-specific) and `Arc<SharedState>` (recording core).
+///
+/// # Worker ID resolution
+///
+/// `WORKER_ID` TLS is populated lazily on the first `on_thread_unpark` / `on_before_task_poll`
+/// call via [`resolve_worker_id`](runtime_context::resolve_worker_id), not in `on_thread_start`.
+/// This is intentional: `on_thread_start` fires before `RuntimeMetrics` is available, so we
+/// cannot yet call `metrics.worker_thread_id(i)` to determine which worker index we are.
+/// By the time any waker calls `current_worker_id()`, at least one unpark or poll has occurred
+/// and TLS is guaranteed to be populated.
+fn register_hooks(
     builder: &mut tokio::runtime::Builder,
-    writer: Box<dyn TraceWriter>,
+    ctx: &Arc<RuntimeContext>,
+    shared: &Arc<SharedState>,
     task_tracking_enabled: bool,
-    start_time_ns: u64,
-) -> (Arc<SharedState>, EventWriter) {
-    let shared = Arc::new(SharedState::new(start_time_ns));
-
+) {
+    let c1 = ctx.clone();
     let s1 = shared.clone();
+    let c2 = ctx.clone();
     let s2 = shared.clone();
+    let c3 = ctx.clone();
     let s3 = shared.clone();
+    let c4 = ctx.clone();
     let s4 = shared.clone();
 
     builder
         .on_thread_park(move || {
-            let event = s1.make_worker_park();
+            let event = make_worker_park(&c1, &s1);
             s1.record_event(event);
         })
         .on_thread_unpark(move || {
-            let event = s2.make_worker_unpark();
+            let event = make_worker_unpark(&c2, &s2);
             s2.record_event(event);
         })
         .on_before_task_poll(move |meta| {
             let task_id = TaskId::from(meta.id());
             let location = meta.spawned_at();
-            let event = s3.make_poll_start(location, task_id);
+            let event = make_poll_start(&c3, &s3, location, task_id);
             s3.record_event(event);
         })
         .on_after_task_poll(move |_meta| {
-            let event = s4.make_poll_end();
+            let event = make_poll_end(&c4, &s4);
             s4.record_event(event);
         });
 
@@ -147,6 +166,8 @@ fn install_hooks(
             .on_thread_start(move || {
                 // Register as Blocking initially; worker threads will
                 // overwrite this to Worker(i) in resolve_worker_id.
+                // NOTE: `tokio::runtime::worker_index()` will always return `None` at this point
+                // so we can't utilize that here.
                 {
                     let tid = crate::telemetry::events::current_tid();
                     s_start
@@ -173,9 +194,22 @@ fn install_hooks(
                 }
             });
     }
+}
 
+/// Install telemetry hooks on the runtime builder. Returns the shared state
+/// (for the hot-path callbacks), a fresh `RuntimeContext`, and the event writer.
+fn install_hooks(
+    builder: &mut tokio::runtime::Builder,
+    writer: Box<dyn TraceWriter>,
+    task_tracking_enabled: bool,
+    start_time_ns: u64,
+    runtime_name: Option<String>,
+) -> (Arc<SharedState>, Arc<RuntimeContext>, EventWriter) {
+    let shared = Arc::new(SharedState::new(start_time_ns));
+    let ctx = Arc::new(RuntimeContext::new(runtime_name));
+    register_hooks(builder, &ctx, &shared, task_tracking_enabled);
     let event_writer = EventWriter::new(writer);
-    (shared, event_writer)
+    (shared, ctx, event_writer)
 }
 
 /// Cheap, cloneable handle for controlling telemetry from anywhere.
@@ -244,6 +278,11 @@ impl TelemetryGuard {
 
     pub fn disable(&self) {
         self.handle.disable();
+    }
+
+    /// Access the shared state for reuse by additional runtimes.
+    pub(crate) fn shared(&self) -> &Arc<SharedState> {
+        &self.handle.shared
     }
 
     /// Send FinalizeAndStop to the flush thread, join it, then drain the
@@ -338,6 +377,7 @@ pub struct TracedRuntimeBuilder<P = NoTracePath> {
     enabled: bool,
     task_tracking_enabled: bool,
     trace_path: Option<PathBuf>,
+    runtime_name: Option<String>,
     #[cfg(feature = "cpu-profiling")]
     cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
     #[cfg(feature = "cpu-profiling")]
@@ -366,6 +406,13 @@ impl<P> TracedRuntimeBuilder<P> {
 
     pub fn with_task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking_enabled = enabled;
+        self
+    }
+
+    /// Set a human-readable name for this runtime. Used in segment metadata
+    /// to map runtime indices to names for the trace viewer.
+    pub fn with_runtime_name(mut self, name: impl Into<String>) -> Self {
+        self.runtime_name = Some(name.into());
         self
     }
 
@@ -411,11 +458,45 @@ impl<P> TracedRuntimeBuilder<P> {
         self
     }
 
+    /// Attach a new runtime to an existing telemetry session.
+    ///
+    /// This reuses the `SharedState`, flush thread, writer, and CPU profiler
+    /// from the original `TelemetryGuard`. Only the tokio callbacks are
+    /// registered on the new builder. The new runtime's workers get a unique
+    /// runtime index so their `WorkerId`s don't collide with existing runtimes.
+    pub fn build_with_reuse(
+        self,
+        mut builder: tokio::runtime::Builder,
+        guard: &TelemetryGuard,
+    ) -> std::io::Result<tokio::runtime::Runtime> {
+        let shared = guard.shared().clone();
+
+        let ctx = Arc::new(RuntimeContext::new(self.runtime_name));
+        register_hooks(&mut builder, &ctx, &shared, self.task_tracking_enabled);
+
+        let runtime = builder.build()?;
+
+        // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
+        // Using a single OnceLock ensures resolve_worker_id never sees metrics without
+        // a valid base — eliminating the race between two separate set() calls.
+        let metrics = runtime.handle().metrics();
+        let num_workers = metrics.num_workers() as u64;
+        let base = shared
+            .next_worker_id
+            .fetch_add(num_workers, Ordering::Relaxed);
+        ctx.metrics_and_base.set((metrics, base)).ok();
+
+        shared.contexts.lock().unwrap().push(ctx);
+
+        Ok(runtime)
+    }
+
     fn into_state<Q>(self) -> TracedRuntimeBuilder<Q> {
         TracedRuntimeBuilder {
             enabled: self.enabled,
             task_tracking_enabled: self.task_tracking_enabled,
             trace_path: self.trace_path,
+            runtime_name: self.runtime_name,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: self.cpu_profiling_config,
             #[cfg(feature = "cpu-profiling")]
@@ -558,11 +639,12 @@ impl TracedRuntimeBuilder<HasTracePath> {
             .sched_event_config
             .map(crate::telemetry::cpu_profile::SchedProfiler::new);
 
-        let (shared, mut event_writer) = install_hooks(
+        let (shared, ctx, mut event_writer) = install_hooks(
             &mut builder,
             writer,
             self.task_tracking_enabled,
             start_mono_ns,
+            self.runtime_name,
         );
 
         #[cfg(feature = "cpu-profiling")]
@@ -577,10 +659,19 @@ impl TracedRuntimeBuilder<HasTracePath> {
 
         let runtime = builder.build()?;
 
-        // Store runtime metrics so worker-id resolution works.
-        shared
-            .metrics
-            .store(Arc::new(Some(runtime.handle().metrics())));
+        // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
+        // Using a single OnceLock ensures resolve_worker_id never sees metrics without
+        // a valid base — eliminating the race between two separate set() calls.
+        let metrics = runtime.handle().metrics();
+        let num_workers = metrics.num_workers() as u64;
+        let base = shared
+            .next_worker_id
+            .fetch_add(num_workers, Ordering::Relaxed);
+        ctx.metrics_and_base.set((metrics, base)).ok();
+
+        // Register this context so the flush thread can sample its queue
+        // depth and generate runtime→worker metadata entries.
+        shared.contexts.lock().unwrap().push(ctx);
 
         // Channel for TelemetryHandle/Guard → flush thread communication.
         // Bounded(1) so senders don't pile up commands.
@@ -605,8 +696,16 @@ impl TracedRuntimeBuilder<HasTracePath> {
                         let _ = libc::nice(10);
                     }
 
+                    // Drain the flush thread's own TL buffer every ~1s (200 × 5ms)
+                    // rather than every cycle, so queue samples and CPU events
+                    // are batched into reasonably-sized segments.
+                    let mut cycle_count: u64 = 0;
+                    const SELF_DRAIN_INTERVAL: u64 = 200;
                     let sample_interval = Duration::from_millis(10);
                     let mut last_sample = Instant::now();
+                    // Snapshot the user-provided segment metadata so we can
+                    // merge it with runtime→worker entries on each flush cycle.
+                    let static_metadata = event_writer.segment_metadata().to_vec();
 
                     loop {
                         let mut ack_tx = None;
@@ -627,14 +726,29 @@ impl TracedRuntimeBuilder<HasTracePath> {
                         let now = Instant::now();
                         if now.duration_since(last_sample) >= sample_interval {
                             last_sample = now;
-                            let metrics_guard = shared.metrics.load();
-                            if let Some(ref metrics) = **metrics_guard {
-                                shared.record_queue_sample(metrics.global_queue_depth());
+                            let contexts = shared.contexts.lock().unwrap().clone();
+                            let total_global_queue: usize =
+                                contexts.iter().map(|c| c.global_queue_depth()).sum();
+                            if !contexts.is_empty() {
+                                shared.record_queue_sample(total_global_queue);
                             }
                         }
 
+                        // Merge user-provided metadata with runtime→worker mappings
+                        // so the next rotated segment is fully self-describing.
+                        let contexts = shared.contexts.lock().unwrap().clone();
+                        let runtime_entries: Vec<(String, String)> =
+                            contexts.iter().filter_map(|c| c.metadata_entry()).collect();
+                        if !runtime_entries.is_empty() {
+                            let mut merged = static_metadata.clone();
+                            merged.extend(runtime_entries);
+                            event_writer.update_segment_metadata(merged);
+                        }
+
+                        cycle_count += 1;
+                        let drain_self = exit || cycle_count.is_multiple_of(SELF_DRAIN_INTERVAL);
                         let mut flush_timer = Timer::start_now();
-                        let stats = flush_once(&mut event_writer, &shared);
+                        let stats = flush_once(&mut event_writer, &shared, drain_self);
                         flush_timer.stop();
                         if stats.event_count > 0 || stats.dropped_batches > 0 {
                             let _guard = FlushMetrics {
@@ -647,8 +761,15 @@ impl TracedRuntimeBuilder<HasTracePath> {
                             }
                             .append_on_drop(flush_metrics_sink.clone());
                         }
-                        if exit && let Err(e) = event_writer.finalize() {
-                            tracing::warn!("failed to finalize trace segment: {e}");
+                        if exit {
+                            // Write final metadata before sealing so single-segment
+                            // traces contain runtime→worker mappings.
+                            if let Err(e) = event_writer.write_current_segment_metadata() {
+                                tracing::warn!("failed to write final segment metadata: {e}");
+                            }
+                            if let Err(e) = event_writer.finalize() {
+                                tracing::warn!("failed to finalize trace segment: {e}");
+                            }
                         }
                         if let Some(tx) = ack_tx.take() {
                             let _ = tx.send(());
@@ -740,6 +861,7 @@ impl TracedRuntime {
             enabled: true,
             task_tracking_enabled: false,
             trace_path: None,
+            runtime_name: None,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
             #[cfg(feature = "cpu-profiling")]
@@ -794,7 +916,86 @@ impl TracedRuntime {
 mod tests {
     use super::*;
     use crate::telemetry::NullWriter;
+    use crate::telemetry::collector::CentralCollector;
     use std::panic::Location;
+    use std::sync::Arc;
+
+    /// Drain all pending batches from a `CentralCollector` into an `EventWriter`.
+    /// Call `buffer::drain_to_collector` first to flush the thread-local buffer.
+    fn drain_collector_to_writer(collector: &CentralCollector, ew: &mut EventWriter) {
+        while let Some(batch) = collector.next() {
+            if batch.event_count > 0 {
+                ew.write_encoded_batch(&batch).unwrap();
+            }
+        }
+    }
+    #[test]
+    fn current_thread_runtime_resolves_worker_ids() {
+        let data = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let data_clone = data.clone();
+
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+
+        let writer = {
+            struct W(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+            impl crate::telemetry::writer::TraceWriter for W {
+                fn write_encoded_batch(
+                    &mut self,
+                    batch: &crate::telemetry::collector::Batch,
+                ) -> std::io::Result<()> {
+                    self.0
+                        .lock()
+                        .unwrap()
+                        .extend_from_slice(batch.encoded_bytes());
+                    Ok(())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            W(data_clone)
+        };
+
+        let (rt, guard) = TracedRuntime::builder()
+            .build_and_start_with_writer(builder, writer)
+            .unwrap();
+
+        rt.block_on(async {
+            tokio::spawn(async {
+                tokio::task::yield_now().await;
+            })
+            .await
+            .unwrap();
+        });
+
+        drop(rt);
+        drop(guard);
+
+        let raw = data.lock().unwrap();
+        let events = crate::telemetry::format::decode_events(&raw).unwrap();
+        let poll_starts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                crate::telemetry::events::TelemetryEvent::PollStart { worker_id, .. } => {
+                    Some(*worker_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!poll_starts.is_empty(), "expected at least one PollStart");
+        let unknown: Vec<_> = poll_starts
+            .iter()
+            .filter(|id| **id == crate::telemetry::format::WorkerId::UNKNOWN)
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "all PollStart events should have a known worker ID, \
+             but {}/{} were UNKNOWN",
+            unknown.len(),
+            poll_starts.len()
+        );
+    }
 
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
@@ -855,26 +1056,35 @@ mod tests {
             .build()
             .unwrap();
         let mut ew = EventWriter::new(Box::new(writer));
+        let collector = Arc::new(CentralCollector::new());
 
         let locations = [
             location_a, location_b, location_a, location_b, location_a, location_b,
         ];
         for (i, loc) in locations.iter().enumerate() {
             let task_id = crate::telemetry::task_metadata::TaskId::from_u32(i as u32);
-            ew.write_raw_event(RawEvent::TaskSpawn {
-                timestamp_nanos: (i as u64 + 1) * 1000,
-                task_id,
-                location: loc,
-            })
-            .unwrap();
-            ew.write_raw_event(RawEvent::PollStart {
-                timestamp_nanos: (i as u64 + 1) * 1000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id,
-                location: loc,
-            })
-            .unwrap();
+            buffer::record_event(
+                RawEvent::TaskSpawn {
+                    timestamp_nanos: (i as u64 + 1) * 1000,
+                    task_id,
+                    location: loc,
+                },
+                &collector,
+            );
+            buffer::record_event(
+                RawEvent::PollStart {
+                    timestamp_nanos: (i as u64 + 1) * 1000,
+                    worker_id: WorkerId::from(0usize),
+                    worker_local_queue_depth: 0,
+                    task_id,
+                    location: loc,
+                },
+                &collector,
+            );
+            // Drain after each iteration to produce separate small batches
+            // that trigger file rotation (max_file_size is 100 bytes).
+            buffer::drain_to_collector(&collector);
+            drain_collector_to_writer(&collector, &mut ew);
         }
         ew.flush().unwrap();
         ew.finalize().unwrap();
@@ -918,6 +1128,299 @@ mod tests {
         assert_eq!(
             total_events, 6,
             "all PollStart events should be readable across files"
+        );
+    }
+
+    #[test]
+    fn build_with_reuse_attaches_second_runtime() {
+        let builder_a = tokio::runtime::Builder::new_multi_thread();
+        let (runtime_a, guard) = TracedRuntime::builder()
+            .build_and_start_with_writer(builder_a, NullWriter)
+            .unwrap();
+
+        let builder_b = tokio::runtime::Builder::new_multi_thread();
+        let runtime_b = TracedRuntime::builder()
+            .build_with_reuse(builder_b, &guard)
+            .unwrap();
+
+        // Both runtimes should work
+        runtime_a.block_on(async {
+            let r = tokio::spawn(async { 1 }).await.unwrap();
+            assert_eq!(r, 1);
+        });
+        runtime_b.block_on(async {
+            let r = tokio::spawn(async { 2 }).await.unwrap();
+            assert_eq!(r, 2);
+        });
+    }
+
+    #[test]
+    fn build_with_reuse_produces_unique_worker_ids() {
+        use crate::telemetry::format::WorkerId;
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+
+        // Use a capturing writer to collect encoded bytes
+        struct CapturingWriter {
+            data: Arc<Mutex<Vec<u8>>>,
+        }
+        impl crate::telemetry::writer::TraceWriter for CapturingWriter {
+            fn write_encoded_batch(
+                &mut self,
+                batch: &crate::telemetry::collector::Batch,
+            ) -> std::io::Result<()> {
+                self.data
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(batch.encoded_bytes());
+                Ok(())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let data = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = CapturingWriter { data: data.clone() };
+
+        let mut builder_a = tokio::runtime::Builder::new_multi_thread();
+        builder_a.worker_threads(2);
+        let (runtime_a, guard) = TracedRuntime::builder()
+            .with_task_tracking(true)
+            .build_and_start_with_writer(builder_a, writer)
+            .unwrap();
+
+        let mut builder_b = tokio::runtime::Builder::new_multi_thread();
+        builder_b.worker_threads(2);
+        let runtime_b = TracedRuntime::builder()
+            .with_task_tracking(true)
+            .build_with_reuse(builder_b, &guard)
+            .unwrap();
+
+        // Generate poll events on both runtimes. Spawn many concurrent tasks
+        // to ensure work lands on actual worker threads (not just block_on's thread).
+        runtime_a.block_on(async {
+            let mut handles = Vec::new();
+            for _ in 0..50 {
+                handles.push(tokio::spawn(async {
+                    tokio::task::yield_now().await;
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+        });
+        runtime_b.block_on(async {
+            let mut handles = Vec::new();
+            for _ in 0..50 {
+                handles.push(tokio::spawn(async {
+                    tokio::task::yield_now().await;
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+        });
+
+        // Drop runtimes, then guard to flush
+        drop(runtime_a);
+        drop(runtime_b);
+        drop(guard);
+
+        let raw = data.lock().unwrap();
+        let captured = crate::telemetry::format::decode_events(&raw).unwrap();
+        let mut worker_ids: HashSet<u64> = HashSet::new();
+        for event in captured.iter() {
+            match event {
+                crate::telemetry::events::TelemetryEvent::PollStart { worker_id, .. }
+                | crate::telemetry::events::TelemetryEvent::PollEnd { worker_id, .. }
+                | crate::telemetry::events::TelemetryEvent::WorkerPark { worker_id, .. }
+                | crate::telemetry::events::TelemetryEvent::WorkerUnpark { worker_id, .. } => {
+                    if *worker_id != WorkerId::UNKNOWN {
+                        worker_ids.insert(worker_id.as_u64());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Runtime A has 2 workers → IDs 0,1. Runtime B → IDs 2,3.
+        // We should see at least one ID from each runtime's range.
+        let has_runtime_a = worker_ids.iter().any(|&id| id < 2);
+        let has_runtime_b = worker_ids.iter().any(|&id| (2..4).contains(&id));
+        assert!(
+            has_runtime_a && has_runtime_b,
+            "expected worker IDs from both runtimes (0..2 and 2..4), got: {worker_ids:?}"
+        );
+    }
+
+    /// Verify that `build_with_reuse` propagates the second runtime's metadata
+    /// (runtime name → worker ID mapping) into the trace file's segment metadata.
+    #[test]
+    fn build_with_reuse_propagates_second_runtime_metadata() {
+        use crate::telemetry::events::TelemetryEvent;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let trace_path = dir.path().join("trace.bin");
+
+        let writer = crate::telemetry::writer::RotatingWriter::builder()
+            .base_path(&trace_path)
+            .max_file_size(1024 * 1024)
+            .max_total_size(10 * 1024 * 1024)
+            .build()
+            .unwrap();
+
+        let mut builder_a = tokio::runtime::Builder::new_multi_thread();
+        builder_a.worker_threads(2);
+        let (runtime_a, guard) = TracedRuntime::builder()
+            .with_runtime_name("main")
+            .with_trace_path(trace_path.to_str().unwrap())
+            .build_and_start(builder_a, writer)
+            .unwrap();
+
+        let mut builder_b = tokio::runtime::Builder::new_multi_thread();
+        builder_b.worker_threads(2);
+        let runtime_b = TracedRuntime::builder()
+            .with_runtime_name("io")
+            .build_with_reuse(builder_b, &guard)
+            .unwrap();
+
+        // Run work on both runtimes so workers resolve their identities.
+        for rt in [&runtime_a, &runtime_b] {
+            rt.block_on(async {
+                let mut handles = Vec::new();
+                for _ in 0..20 {
+                    handles.push(tokio::spawn(async {
+                        tokio::task::yield_now().await;
+                    }));
+                }
+                for h in handles {
+                    h.await.unwrap();
+                }
+            });
+        }
+
+        // Give the flush thread time to run (it cycles every 5ms and merges
+        // runtime metadata into the writer on each cycle).
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        drop(runtime_a);
+        drop(runtime_b);
+        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(5));
+
+        // Read all sealed trace files and collect SegmentMetadata entries.
+        let mut all_metadata: Vec<Vec<(String, String)>> = Vec::new();
+        let mut files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
+            .collect();
+        files.sort();
+        for file in &files {
+            let data = std::fs::read(file).unwrap();
+            let events = crate::telemetry::format::decode_events(&data).unwrap();
+            for event in &events {
+                if let TelemetryEvent::SegmentMetadata { entries, .. } = event {
+                    all_metadata.push(entries.clone());
+                }
+            }
+        }
+
+        assert!(
+            !all_metadata.is_empty(),
+            "expected at least one SegmentMetadata event in trace files"
+        );
+
+        // At least one segment's metadata should contain both runtime mappings.
+        let has_both = all_metadata.iter().any(|entries| {
+            let has_main = entries.iter().any(|(k, _)| k == "runtime.main");
+            let has_io = entries.iter().any(|(k, _)| k == "runtime.io");
+            has_main && has_io
+        });
+        assert!(
+            has_both,
+            "expected segment metadata to contain both runtime.main and runtime.io, \
+             got: {all_metadata:?}"
+        );
+    }
+
+    /// Wake events from runtime B's workers must carry global worker IDs (≥ num_workers_a),
+    /// not local indices that collide with runtime A's workers.
+    #[test]
+    fn wake_events_use_global_worker_id_in_multi_runtime() {
+        use crate::telemetry::events::TelemetryEvent;
+        use std::sync::{Arc, Mutex};
+
+        struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+        impl crate::telemetry::writer::TraceWriter for CapturingWriter {
+            fn write_encoded_batch(
+                &mut self,
+                batch: &crate::telemetry::collector::Batch,
+            ) -> std::io::Result<()> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(batch.encoded_bytes());
+                Ok(())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let data = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        let mut builder_a = tokio::runtime::Builder::new_multi_thread();
+        builder_a.worker_threads(2);
+        let (runtime_a, guard) = TracedRuntime::builder()
+            .with_task_tracking(true)
+            .build_and_start_with_writer(builder_a, CapturingWriter(data.clone()))
+            .unwrap();
+
+        let mut builder_b = tokio::runtime::Builder::new_multi_thread();
+        builder_b.worker_threads(2);
+        let runtime_b = TracedRuntime::builder()
+            .with_task_tracking(true)
+            .build_with_reuse(builder_b, &guard)
+            .unwrap();
+
+        // Use handle.spawn on runtime B to get Traced waker wrapping → wake events.
+        let handle = guard.handle();
+        runtime_b.block_on(async {
+            let mut handles = Vec::new();
+            for _ in 0..50 {
+                handles.push(handle.spawn(async {
+                    tokio::task::yield_now().await;
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+        });
+
+        drop(runtime_a);
+        drop(runtime_b);
+        drop(guard);
+
+        let raw = data.lock().unwrap();
+        let captured = crate::telemetry::format::decode_events(&raw).unwrap();
+        let wake_workers: Vec<u8> = captured
+            .iter()
+            .filter_map(|e| match e {
+                TelemetryEvent::WakeEvent { target_worker, .. } => Some(*target_worker),
+                _ => None,
+            })
+            .collect();
+        assert!(!wake_workers.is_empty(), "expected at least one WakeEvent");
+
+        // Runtime A has workers 0,1. Runtime B has workers 2,3.
+        // Wakes issued from runtime B's workers must have target_worker >= 2.
+        let has_global_id = wake_workers.iter().any(|&w| w >= 2 && w != 255);
+        assert!(
+            has_global_id,
+            "expected wake events from runtime B to use global worker IDs (>= 2), \
+             but got: {wake_workers:?}"
         );
     }
 
@@ -1010,7 +1513,8 @@ mod tests {
                         callchain: callchain.clone(),
                     };
                     *timestamp += 1;
-                    ew.write_cpu_event(&data);
+                    ew.write_raw_event(RawEvent::CpuSample(Box::new(data)))
+                        .unwrap();
                 }
             }
 

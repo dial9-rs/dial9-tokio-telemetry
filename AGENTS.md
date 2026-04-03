@@ -31,6 +31,10 @@ let _ = ...
 
 - Always run `cargo nextest run` to run tests
 
+## Ownership
+
+- You own all code you are working on. There is no such thing as a "pre-existing failure" or something that is "not your problem." If you see a warning or failure, fix it.
+
 ## Pre-commit checks
 
 - You MUST run `cargo fmt --check` and `cargo clippy --all-targets --all-features` before every commit. Both must be clean.
