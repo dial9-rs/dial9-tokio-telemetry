@@ -326,12 +326,14 @@ impl TraceWriter for RotatingWriter {
             self.dropped_events += batch.event_count as usize;
             return Ok(());
         };
-        // Raw-copy the thread-local batch. Each batch is self-contained
-        // (starts with its own header), so the next batch's header acts as
-        // the reset frame for decoders.
-        raw.write_raw(&batch.encoded_bytes)?;
-        self.has_real_events = true;
-        self.maybe_rotate()?;
+        if batch.event_count > 0 {
+            // Raw-copy the thread-local batch. Each batch is self-contained
+            // (starts with its own header), so the next batch's header acts as
+            // the reset frame for decoders.
+            raw.write_raw(&batch.encoded_bytes)?;
+            self.has_real_events = true;
+            self.maybe_rotate()?;
+        }
         Ok(())
     }
 }
