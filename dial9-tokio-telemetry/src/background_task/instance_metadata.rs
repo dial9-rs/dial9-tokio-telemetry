@@ -52,6 +52,12 @@ mod tests {
     use assert2::check;
 
     #[test]
+    fn new_returns_given_string() {
+        let id = InstanceIdentity::new("us-east-1/i-0abc123");
+        check!(id.as_str() == "us-east-1/i-0abc123");
+    }
+
+    #[test]
     fn from_hostname_returns_non_empty_string() {
         let id = InstanceIdentity::from_hostname();
         check!(!id.as_str().is_empty());
