@@ -1,17 +1,9 @@
 //! Machine identity detection for S3 object key paths.
-//!
-//! Provides `InstanceIdentity` — a newtype around `String` used as the
-//! `instance_path` component in S3 object keys.
 
 /// Identifies where a process is running, used as the `instance_path`
 /// component in S3 object keys.
-///
-/// ```text
-/// let id = InstanceIdentity::new("us-east-1/i-0abc123");
-/// assert_eq!(id.as_str(), "us-east-1/i-0abc123");
-/// ```
 #[derive(Clone)]
-pub struct InstanceIdentity(String);
+pub(crate) struct InstanceIdentity(String);
 
 impl From<String> for InstanceIdentity {
     fn from(s: String) -> Self {
@@ -26,13 +18,8 @@ impl From<&str> for InstanceIdentity {
 }
 
 impl InstanceIdentity {
-    /// Create an identity from an explicit string.
-    pub fn new(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-
     /// Auto-detect identity from the system hostname.
-    pub fn from_hostname() -> Self {
+    pub(crate) fn from_hostname() -> Self {
         let hostname = hostname::get()
             .ok()
             .and_then(|h| h.into_string().ok())
@@ -41,7 +28,7 @@ impl InstanceIdentity {
     }
 
     /// The identity string.
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -50,12 +37,6 @@ impl InstanceIdentity {
 mod tests {
     use super::*;
     use assert2::check;
-
-    #[test]
-    fn new_returns_given_string() {
-        let id = InstanceIdentity::new("us-east-1/i-0abc123");
-        check!(id.as_str() == "us-east-1/i-0abc123");
-    }
 
     #[test]
     fn from_hostname_returns_non_empty_string() {
