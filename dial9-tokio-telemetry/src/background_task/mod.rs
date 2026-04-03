@@ -416,13 +416,17 @@ impl SegmentProcessor for WriteBackProcessor {
             match result {
                 Ok(Ok(())) => {
                     if dest_path != original_path {
-                        // If the original is already gone, the writer evicted
-                        // it while we were processing.  Remove the dest file
-                        // we just wrote so it doesn't leak on disk.
-                        if let Err(e) = std::fs::remove_file(&original_path)
-                            && e.kind() == std::io::ErrorKind::NotFound
-                        {
-                            let _ = std::fs::remove_file(&dest_path);
+                        // Remove the original .bin now that .bin.gz exists.
+                        // If the writer already evicted it, clean up the dest
+                        // file we just wrote so it doesn't leak on disk.
+                        match std::fs::remove_file(&original_path) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                let _ = std::fs::remove_file(&dest_path);
+                            }
+                            Err(e) => {
+                                tracing::warn!("failed to remove original segment {}: {e}", original_path.display());
+                            }
                         }
                     }
                     Ok(data)
@@ -474,13 +478,16 @@ impl WorkerLoop {
 
     pub(crate) async fn run(&mut self) {
         loop {
-            let segements_uploaded = self.process_open_segments().await;
+            let segments_found = self.process_open_segments().await;
             if self.stop.is_cancelled() {
+                // One final scan to pick up segments sealed after our last
+                // directory listing (the flush thread is joined before the
+                // stop signal, so one extra pass is sufficient).
+                self.process_open_segments().await;
                 tracing::debug!(target: "dial9_worker", "Exiting run loop: cancellation received");
                 return;
             }
-            // if we didn't upload anything wait `poll_interval` (cancelling if we get shutdown while waiting)
-            if !segements_uploaded {
+            if !segments_found {
                 tokio::select! {
                     _ = self.stop.cancelled() => {}
                     _ = tokio::time::sleep(self.poll_interval) => {}
@@ -929,6 +936,9 @@ mod tests {
                 let counter = self.0.clone();
                 Box::pin(async move {
                     counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut done = data.segment.path.as_os_str().to_owned();
+                    done.push(".done");
+                    let _ = std::fs::rename(&data.segment.path, done);
                     Ok(data)
                 })
             }
@@ -958,7 +968,7 @@ mod tests {
         );
         worker.run().await;
 
-        // Worker should have drained both segments even though stop was set
+        // Worker should have drained both segments even though stop was set.
         check!(processed.load(Ordering::SeqCst) == 2);
     }
 
@@ -996,6 +1006,9 @@ mod tests {
                         })
                     } else {
                         counter.fetch_add(1, Ordering::SeqCst);
+                        let mut done = data.segment.path.as_os_str().to_owned();
+                        done.push(".done");
+                        let _ = std::fs::rename(&data.segment.path, done);
                         Ok(data)
                     }
                 })
@@ -1027,7 +1040,7 @@ mod tests {
         );
         worker.run().await;
 
-        // Second segment should still be processed despite first failing
+        // Second segment should still be processed despite first failing.
         check!(processed.load(Ordering::SeqCst) == 1);
     }
 
