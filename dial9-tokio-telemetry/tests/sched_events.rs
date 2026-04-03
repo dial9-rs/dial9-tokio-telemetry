@@ -5,8 +5,8 @@ mod common;
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn sched_events_capture_context_switches() {
-    use dial9_tokio_telemetry::telemetry::events::CpuSampleSource;
-    use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
+    use dial9_tokio_telemetry::telemetry::CpuSampleSource;
+    use dial9_tokio_telemetry::telemetry::TelemetryEvent;
     use dial9_tokio_telemetry::telemetry::{SchedEventConfig, TracedRuntime};
     use std::time::Duration;
 

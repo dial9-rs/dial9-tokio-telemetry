@@ -40,11 +40,13 @@ metrique-writer = "0.1"
 metrique = { version = "0.1.20", features = ["local-format"] }
 
 [features]
+analysis = []
 cpu-profiling = ["dep:dial9-perf-self-profile"]
 task-dump = ["tokio/taskdump"]
 worker-s3 = ["dep:aws-sdk-s3-transfer-manager", "dep:aws-sdk-s3", "dep:aws-config", "dep:time"]
 
 [dev-dependencies]
+dial9-tokio-telemetry = { path = ".", features = ["analysis"] }
 assert2 = { workspace = true }
 criterion = "0.5"
 clap = { version = "4", features = ["derive"] }
@@ -62,7 +64,7 @@ async-trait = "0.1.89"
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-dial9-tokio-telemetry = { path = ".", features = ["cpu-profiling", "worker-s3"] }
+dial9-tokio-telemetry = { path = ".", features = ["cpu-profiling", "worker-s3", "analysis"] }
 nix = { version = "0.29", features = ["process"] }
 
 [[bench]]
@@ -96,15 +98,31 @@ required-features = ["cpu-profiling"]
 
 [[example]]
 name = "cpu_profile_workload"
-required-features = ["cpu-profiling"]
+required-features = ["cpu-profiling", "analysis"]
 
 [[example]]
 name = "s3_stress_test"
 required-features = ["worker-s3"]
 
 [[example]]
+name = "analyze_trace"
+required-features = ["analysis"]
+
+[[example]]
+name = "trace_to_jsonl"
+required-features = ["analysis"]
+
+[[example]]
+name = "trace_to_fat_jsonl"
+required-features = ["analysis"]
+
+[[example]]
 name = "kernel_sched_events"
-required-features = ["cpu-profiling"]
+required-features = ["cpu-profiling", "analysis"]
+
+[[example]]
+name = "thread_per_core"
+required-features = ["analysis"]
 
 [[bench]]
 name = "writer_encode"

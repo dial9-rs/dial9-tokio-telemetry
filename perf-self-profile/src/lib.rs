@@ -49,9 +49,9 @@ pub mod tracepoint;
 /// - x86_64: canonical address hole starts at bit 47
 /// - aarch64: TTBR0 (user) vs TTBR1 (kernel) selected by bit 63
 #[cfg(target_arch = "x86_64")]
-pub const USER_ADDR_LIMIT: u64 = 0x0000_8000_0000_0000;
+pub(crate) const USER_ADDR_LIMIT: u64 = 0x0000_8000_0000_0000;
 #[cfg(target_arch = "aarch64")]
-pub const USER_ADDR_LIMIT: u64 = 0x8000_0000_0000_0000;
+pub(crate) const USER_ADDR_LIMIT: u64 = 0x8000_0000_0000_0000;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("perf-self-profile: USER_ADDR_LIMIT not defined for this architecture");
 

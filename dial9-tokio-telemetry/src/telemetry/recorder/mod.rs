@@ -1031,6 +1031,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "analysis")]
     fn test_spawn_locations_resolve_after_rotation() {
         use crate::telemetry::analysis::TraceReader;
         use crate::telemetry::format::WorkerId;
@@ -1105,7 +1106,7 @@ mod tests {
         let mut total_events = 0;
         for file in &files {
             let path = file.to_str().unwrap();
-            let mut reader = TraceReader::new(path).unwrap();
+            let reader = TraceReader::new(path).unwrap();
 
             for (spawn_loc, loc) in &reader.spawn_locations {
                 assert!(
@@ -1122,7 +1123,7 @@ mod tests {
                 });
             }
 
-            let events = reader.read_all().unwrap();
+            let events = &reader.runtime_events;
             total_events += events.len();
         }
         assert_eq!(
@@ -1424,7 +1425,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "cpu-profiling")]
+    #[cfg(all(feature = "cpu-profiling", feature = "analysis"))]
     mod rotation_proptest {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
@@ -1557,7 +1558,7 @@ mod tests {
                 // Verify every PollStart's spawn_loc_id resolves.
                 let spawn_locs = &reader.spawn_locations;
 
-                for ev in &reader.events {
+                for ev in &reader.all_events {
                     match ev {
                         TelemetryEvent::PollStart { spawn_loc, .. } => {
                             assert!(

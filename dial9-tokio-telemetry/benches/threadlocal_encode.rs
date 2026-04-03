@@ -9,10 +9,9 @@
 //!   cargo bench --bench threadlocal_encode
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use dial9_tokio_telemetry::telemetry::format::{
-    PollEndEvent, PollStartEvent, WorkerParkEvent, WorkerUnparkEvent,
+use dial9_tokio_telemetry::telemetry::{
+    PollEndEvent, PollStartEvent, TaskId, WorkerId, WorkerParkEvent, WorkerUnparkEvent,
 };
-use dial9_tokio_telemetry::telemetry::{TaskId, WorkerId};
 use dial9_trace_format::encoder::Encoder;
 
 fn make_batch(worker: usize) -> Vec<(u64, WorkerId, TaskId)> {

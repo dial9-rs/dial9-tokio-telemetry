@@ -1,4 +1,10 @@
-// Streaming decoder
+//! Streaming decoder for reading trace files.
+//!
+//! [`Decoder`] reads the file header, processes schema and string-pool frames,
+//! and yields events as [`DecodedFrame`] (owned) or [`DecodedFrameRef`]
+//! (zero-copy). It also implements [`Iterator`] and provides a
+//! [`for_each_event`](Decoder::for_each_event) callback API for
+//! allocation-free processing.
 
 use crate::codec::{
     self, Frame, FrameRef, HEADER_SIZE, PoolEntry, PoolEntryRef, SchemaInfo, WireTypeId,
@@ -122,6 +128,10 @@ struct SchemaCache {
     has_timestamp: bool,
 }
 
+/// Streaming trace file decoder.
+///
+/// Reads from a byte slice, processing schema, string-pool, and event frames.
+/// Implements [`Iterator`] over [`DecodedFrameRef`] for convenient consumption.
 pub struct Decoder<'a> {
     data: &'a [u8],
     pos: usize,
@@ -182,7 +192,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Consume this decoder and create an [`Encoder`] that appends to the
+    /// Consume this decoder and create an [`Encoder`](crate::encoder::Encoder) that appends to the
     /// decoded trace. The encoder inherits the string pool, schema registry,
     /// and timestamp base so new frames are compatible with the existing data.
     ///

@@ -94,7 +94,7 @@ fn graceful_shutdown_seals_segments() {
 /// real trace events are present.
 #[test]
 fn end_to_end_trace_to_s3_roundtrip() {
-    use dial9_tokio_telemetry::telemetry::analysis::TraceReader;
+    use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
@@ -191,11 +191,8 @@ fn end_to_end_trace_to_s3_roundtrip() {
     });
 
     // Parse the downloaded trace with TraceReader
-    let mut reader = TraceReader::new(downloaded_path.to_str().unwrap()).unwrap();
-    let (_magic, version) = reader.read_header().unwrap();
-    assert!(version > 0, "expected valid format version");
-
-    let events = reader.read_all().unwrap();
+    let reader = TraceReader::new(downloaded_path.to_str().unwrap()).unwrap();
+    let events = &reader.runtime_events;
     assert!(
         !events.is_empty(),
         "expected trace events in downloaded segment, got none"
@@ -214,7 +211,7 @@ fn end_to_end_trace_to_s3_roundtrip() {
 /// and corrects the client, even when the initial client has the wrong region.
 #[test]
 fn region_auto_detection_corrects_wrong_client_region() {
-    use dial9_tokio_telemetry::telemetry::analysis::TraceReader;
+    use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
@@ -306,9 +303,8 @@ fn region_auto_detection_corrects_wrong_client_region() {
         std::fs::write(&downloaded_path, &decompressed).unwrap();
     });
 
-    let mut reader = TraceReader::new(downloaded_path.to_str().unwrap()).unwrap();
-    reader.read_header().unwrap();
-    let events = reader.read_all().unwrap();
+    let reader = TraceReader::new(downloaded_path.to_str().unwrap()).unwrap();
+    let events = &reader.runtime_events;
     assert!(
         !events.is_empty(),
         "expected trace events after region correction"
@@ -330,7 +326,7 @@ fn region_auto_detection_corrects_wrong_client_region() {
 /// the worker would pick up any leftover segments.
 #[test]
 fn stress_test_all_segments_uploaded_and_valid() {
-    use dial9_tokio_telemetry::telemetry::analysis::TraceReader;
+    use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
@@ -472,16 +468,8 @@ fn stress_test_all_segments_uploaded_and_valid() {
         // Parseable trace events.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &decompressed).unwrap();
-        let mut reader = TraceReader::new(tmp.path().to_str().unwrap()).unwrap();
-        let (_magic, version) = reader.read_header().unwrap();
-        assert!(version > 0, "invalid format version in {key}");
-        // Use read_raw_event to count all events including metadata-only
-        // records (TaskSpawn, ThreadNameDef, SegmentMetadata). A small segment
-        // may contain only metadata if it was sealed at a rotation boundary.
-        let mut segment_events = 0usize;
-        while reader.read_raw_event().unwrap().is_some() {
-            segment_events += 1;
-        }
+        let reader = TraceReader::new(tmp.path().to_str().unwrap()).unwrap();
+        let segment_events = reader.all_events.len();
         assert!(segment_events > 0, "expected events in {key}, got none");
         total_events += segment_events;
     }
