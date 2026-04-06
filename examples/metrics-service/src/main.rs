@@ -257,7 +257,6 @@ fn main() -> std::io::Result<()> {
             .with_executor(executor)
             .with_graceful_shutdown(async move { shutdown.cancelled().await })
             .await;
-
     });
 
     // Drop the runtime first so worker threads exit and flush their
