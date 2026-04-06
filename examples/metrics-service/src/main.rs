@@ -1,4 +1,3 @@
-mod axum_traced;
 mod buffer;
 mod ddb;
 mod routes;
@@ -10,7 +9,7 @@ use aws_config::BehaviorVersion;
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryHandle, TracedRuntime};
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
@@ -253,10 +252,11 @@ fn main() -> std::io::Result<()> {
             }
         });
 
-        axum_traced::serve(listener, app.into_make_service(), handle.clone())
+        let executor = TelemetryExecutor(handle);
+        axum::serve(listener, app.into_make_service())
+            .with_executor(executor)
             .with_graceful_shutdown(async move { shutdown.cancelled().await })
-            .await
-            .unwrap();
+            .await;
     });
 
     // Drop the runtime first so worker threads exit and flush their
@@ -266,4 +266,17 @@ fn main() -> std::io::Result<()> {
     tracing::info!("dial9 shutdown: {shutdown:?}");
 
     Ok(())
+}
+
+/// Adapter to allow `TelemetryHandle` to be used as an executor for axum's serve.
+#[derive(Clone)]
+struct TelemetryExecutor(TelemetryHandle);
+
+impl axum::serve::Executor for TelemetryExecutor {
+    fn execute<Fut>(&self, fut: Fut)
+    where
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.0.spawn(fut);
+    }
 }
