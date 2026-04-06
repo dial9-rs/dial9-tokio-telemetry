@@ -42,14 +42,12 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
                 let _ = h.await;
             }
         }
-
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(10))
-            .await
-            .expect("graceful shutdown");
     });
 
     drop(runtime);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(10))
+        .expect("graceful shutdown");
 
     let mut gzip_files = 0;
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {

@@ -8,27 +8,11 @@ use metrique::unit::{Byte, Microsecond, Millisecond};
 use metrique::unit_of_work::metrics;
 
 /// Distinguishes the type of operation a metric entry describes.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[metrics(value(string))]
 pub(crate) enum Operation {
     Flush,
     ProcessSegment,
-}
-
-// https://github.com/awslabs/metrique/issues/250
-impl std::fmt::Debug for Operation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Flush => write!(f, "Flush"),
-            Self::ProcessSegment => write!(f, "ProcessSegment"),
-        }
-    }
-}
-
-impl std::fmt::Debug for OperationValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(<&str>::from(self))
-    }
 }
 
 /// Metrics emitted by the flush thread each cycle.

@@ -59,7 +59,10 @@ impl BackgroundTaskConfig {
 
     /// Directory containing trace segments.
     pub fn trace_dir(&self) -> &Path {
-        self.trace_path.parent().unwrap_or(Path::new("."))
+        match self.trace_path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        }
     }
 
     /// File stem used for segment matching (e.g. "trace" for "trace.0.bin").
@@ -468,7 +471,7 @@ impl WorkerLoop {
                 return false;
             }
         };
-        tracing::debug!(target: "dial9_worker", dir = %self.dir.display(), stem = %self.stem, count = segments.len(), "scanned for sealed segments");
+        tracing::trace!(target: "dial9_worker", dir = %self.dir.display(), stem = %self.stem, count = segments.len(), "scanned for sealed segments");
         let found = !segments.is_empty();
         self.process_segments(&segments).await;
         found
@@ -1000,6 +1003,15 @@ mod tests {
 
         // Second segment should still be processed despite first failing
         check!(processed.load(Ordering::SeqCst) == 1);
+    }
+
+    #[test]
+    fn trace_dir_for_bare_relative_path_defaults_to_current_directory() {
+        let config = BackgroundTaskConfig::builder()
+            .trace_path("trace.bin")
+            .build();
+
+        check!(config.trace_dir() == std::path::Path::new("."));
     }
 }
 

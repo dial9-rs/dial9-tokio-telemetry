@@ -1,25 +1,19 @@
-use dial9_tokio_telemetry::telemetry::events::RawEvent;
+use dial9_tokio_telemetry::telemetry::Batch;
+use dial9_tokio_telemetry::telemetry::TelemetryEvent;
+use dial9_tokio_telemetry::telemetry::format::decode_events;
 use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
 use std::sync::{Arc, Mutex};
 
 /// A [`TraceWriter`] that accumulates all events into a shared `Vec`.
 ///
-/// Construct with [`CapturingWriter::new`] and pass the returned
-/// `Arc<Mutex<Vec<TelemetryEvent>>>` wherever you need to inspect the
-/// captured events after the runtime has been dropped.
-///
-/// ```rust,ignore
-/// let (writer, events) = CapturingWriter::new();
-/// // ... build runtime with writer ...
-/// let captured = events.lock().unwrap();
-/// ```
+/// Encoded batches are decoded back into `RawEvent` variants so that
+/// tests can inspect them uniformly regardless of the encoding path.
 pub struct CapturingWriter {
-    events: Arc<Mutex<Vec<RawEvent>>>,
+    events: Arc<Mutex<Vec<TelemetryEvent>>>,
 }
 
 impl CapturingWriter {
-    /// Create a new writer and return a handle to the shared event buffer.
-    pub fn new() -> (Self, Arc<Mutex<Vec<RawEvent>>>) {
+    pub fn new() -> (Self, Arc<Mutex<Vec<TelemetryEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
@@ -31,8 +25,9 @@ impl CapturingWriter {
 }
 
 impl TraceWriter for CapturingWriter {
-    fn write_event(&mut self, event: &RawEvent) -> std::io::Result<()> {
-        self.events.lock().unwrap().push(event.clone());
+    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
+        let events = decode_events(batch.encoded_bytes()).expect("invalid batch");
+        self.events.lock().unwrap().extend_from_slice(&events);
         Ok(())
     }
 

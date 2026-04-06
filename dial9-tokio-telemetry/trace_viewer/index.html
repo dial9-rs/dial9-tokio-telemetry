@@ -387,6 +387,8 @@
                 <button id="btn-zoom-in">Zoom +</button>
                 <button id="btn-zoom-out">Zoom −</button>
                 <button id="btn-fit">Fit All</button>
+                <button id="btn-time-mode" title="Toggle between relative (offset from trace start) and absolute timestamps">Time: Relative</button>
+                <button id="btn-tz-mode" title="Toggle between UTC and local timezone for absolute timestamps" style="display:none">TZ: UTC</button>
                 <button id="btn-reset">New File</button>
             </div>
             <div id="main-area" tabindex="0" role="application" aria-label="Trace timeline">
@@ -568,6 +570,38 @@
             let minTs = 0,
                 maxTs = 0,
                 durationNs = 0;
+            let useAbsoluteTime = false;
+            let useLocalTz = false;
+
+            function fmtDuration(ns) {
+                const prefix = "+";
+                const v = ns;
+                if (v >= 1e9) return prefix + (v / 1e9).toFixed(2) + "s";
+                if (v >= 1e6) return prefix + (v / 1e6).toFixed(2) + "ms";
+                if (v >= 1e3) return prefix + (v / 1e3).toFixed(1) + "µs";
+                return prefix + v.toFixed(0) + "ns";
+            }
+
+            function fmtWallClock(ns) {
+                const ms = ns / 1e6;
+                const d = new Date(ms);
+                const pad2 = n => String(n).padStart(2, "0");
+                if (useLocalTz) {
+                    return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" +
+                        pad2(d.getSeconds());
+                } else {
+                    return pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes()) + ":" +
+                        pad2(d.getUTCSeconds());
+                }
+            }
+
+            // Format a timestamp (ns) for display. In relative mode, shows
+            // offset from trace start with a "+" prefix. In absolute mode,
+            // shows wall-clock time.
+            function fmtTs(ns) {
+                if (useAbsoluteTime) return fmtWallClock(ns);
+                return fmtDuration(ns - minTs);
+            }
             // View window in nanoseconds
             let viewStart = 0,
                 viewEnd = 0;
@@ -1268,12 +1302,7 @@
                     ctx.moveTo(x, 20);
                     ctx.lineTo(x, 30);
                     ctx.stroke();
-                    const relMs = (t - minTs) / 1e6;
-                    let label;
-                    if (relMs >= 1000) label = (relMs / 1000).toFixed(2) + "s";
-                    else if (relMs >= 1) label = relMs.toFixed(2) + "ms";
-                    else label = (relMs * 1000).toFixed(0) + "µs";
-                    ctx.fillText(label, x, 16);
+                    ctx.fillText(fmtTs(t), x, 16);
                 }
             }
 
@@ -2084,6 +2113,20 @@
                 viewEnd = maxTs;
                 renderAll();
             });
+            document.getElementById("btn-time-mode").addEventListener("click", () => {
+                useAbsoluteTime = !useAbsoluteTime;
+                document.getElementById("btn-time-mode").textContent =
+                    useAbsoluteTime ? "Time: Absolute" : "Time: Relative";
+                document.getElementById("btn-tz-mode").style.display =
+                    useAbsoluteTime ? "" : "none";
+                renderAll();
+            });
+            document.getElementById("btn-tz-mode").addEventListener("click", () => {
+                useLocalTz = !useLocalTz;
+                document.getElementById("btn-tz-mode").textContent =
+                    useLocalTz ? "TZ: Local" : "TZ: UTC";
+                renderAll();
+            });
 
             function zoom(factor, centerFrac = 0.5) {
                 clearToasts();
@@ -2582,9 +2625,8 @@
                     html += `Example polls: `;
                     for (let i = 0; i < examples.length; i++) {
                         const ex = examples[i];
-                        const tMs = ((ex.poll.start - minTs) / 1e6).toFixed(2);
                         const durUs = ((ex.poll.end - ex.poll.start) / 1e3).toFixed(0);
-                        html += `<span class="sched-jump" style="cursor:pointer;text-decoration:underline;margin-right:8px" data-time="${ex.poll.start}" data-end="${ex.poll.end}" data-worker="${ex.worker}">W${ex.worker} @${tMs}ms (${durUs}µs)</span>`;
+                        html += `<span class="sched-jump" style="cursor:pointer;text-decoration:underline;margin-right:8px" data-time="${ex.poll.start}" data-end="${ex.poll.end}" data-worker="${ex.worker}">W${ex.worker} @${fmtTs(ex.poll.start)} (${durUs}µs)</span>`;
                     }
                     if (g.polls.length > 5) html += `<span style="color:#888">… ${g.polls.length - 5} more</span>`;
                     html += `</div>`;
@@ -2783,7 +2825,6 @@
 
                     const w = workerIds[laneIdx];
                     const spans = workerSpans[w];
-                    const relMs = (ns - minTs) / 1e6;
 
                     // Determine worker state at this point in time
                     let state = "🟢 Active";
@@ -2875,7 +2916,7 @@
                     }
 
                     tooltip.innerHTML =
-                        `<span class="label">Worker</span> <span class="value">${w}</span> · <span class="label">Time</span> <span class="value">${relMs.toFixed(3)}ms</span><br>` +
+                        `<span class="label">Worker</span> <span class="value">${w}</span> · <span class="label">Time</span> <span class="value">${fmtTs(ns)}</span><br>` +
                         `<span class="label">State:</span> ${state}${stateDetail}<br>` +
                         schedInfo +
                         pollInfo +
@@ -3344,8 +3385,7 @@
                     // Show first few tasks as clickable links
                     const show = taskList.slice(0, 5);
                     for (const t of show) {
-                        const tMs = ((t.firstPoll - minTs) / 1e6).toFixed(3);
-                        html += `<div style="margin-left:8px"><span class="spawned-task-link" style="color:#6c63ff;cursor:pointer;text-decoration:underline" data-task-id="${t.taskId}">0x${t.taskId.toString(16)}</span> <span style="color:#888">@ ${tMs}ms</span></div>`;
+                        html += `<div style="margin-left:8px"><span class="spawned-task-link" style="color:#6c63ff;cursor:pointer;text-decoration:underline" data-task-id="${t.taskId}">0x${t.taskId.toString(16)}</span> <span style="color:#888">@ ${fmtTs(t.firstPoll)}</span></div>`;
                     }
                     if (taskList.length > 5) html += `<div style="color:#888;margin-left:8px;font-size:0.9em">… ${taskList.length - 5} more</div>`;
                     html += `</div>`;
