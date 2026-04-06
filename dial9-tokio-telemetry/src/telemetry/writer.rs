@@ -1129,10 +1129,10 @@ mod tests {
         let max_total_size = max_file_size * 100;
         let mut writer = RotatingWriter::new(&base, max_file_size, max_total_size).unwrap();
 
-        // Write two events: the first fills segment 0, the second triggers
+        // Write two batches: the first fills segment 0, the second triggers
         // rotation (sealing segment 0 as trace.0.bin) and starts segment 1.
-        writer.write_event(&park_event()).unwrap();
-        writer.write_event(&park_event()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
         // Segment 0 is now sealed as trace.0.bin.
 
         // Simulate the background worker renaming trace.0.bin → trace.0.bin.gz.
@@ -1145,7 +1145,7 @@ mod tests {
         // segment 0 (which has been renamed to .bin.gz on disk).
         writer.max_total_size = max_file_size;
         for _ in 0..3 {
-            writer.write_event(&park_event()).unwrap();
+            writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
 
