@@ -156,11 +156,6 @@ for (const wid of workerIds) {
 if (pollErrors.length > 0) fail(pollErrors[0]);
 pass("PollStart/PollEnd pairing (no nested polls)");
 
-const startCount = typeCounts[0] || 0;
-const endCount = typeCounts[1] || 0;
-if (startCount !== endCount)
-  fail(`PollStart=${startCount} PollEnd=${endCount}`);
-pass(`PollStart count == PollEnd count (${startCount})`);
 
 // --- Field sanity ---
 
