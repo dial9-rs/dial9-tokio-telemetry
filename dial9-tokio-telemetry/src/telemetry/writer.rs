@@ -170,7 +170,9 @@ impl RotatingWriter {
     }
 
     /// Create a writer that writes to a single file with no rotation or eviction.
-    /// The file is created at exactly the given path.
+    /// The segment is written to `{stem}.0.bin.active` while active, then sealed
+    /// to `{stem}.0.bin` on [`finalize`]. The background worker will symbolize
+    /// and gzip it to `{stem}.0.bin.gz`.
     ///
     /// Note: This API does not allow the ability to provide custom segment metadata.
     pub fn single_file(path: impl Into<PathBuf>) -> std::io::Result<Self> {
@@ -178,16 +180,17 @@ impl RotatingWriter {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let file = File::create(&path)?;
+        let active_path = Self::active_path(&path, 0);
+        let file = File::create(&active_path)?;
         let writer = BufWriter::new(file);
         let raw = Self::write_header_and_metadata(writer, &Vec::new())?;
 
         Ok(Self {
-            base_path: path.clone(),
+            base_path: path,
             max_file_size: u64::MAX,
             max_total_size: u64::MAX,
             closed_files: VecDeque::new(),
-            active_path: path,
+            active_path,
             state: WriterState::Active(raw),
             next_index: 1,
             did_rotate: false,
@@ -200,6 +203,11 @@ impl RotatingWriter {
     /// The base path used for trace segment files.
     pub fn base_path(&self) -> &Path {
         &self.base_path
+    }
+
+    /// The path of the currently active (being-written) segment file.
+    pub fn current_active_path(&self) -> &Path {
+        &self.active_path
     }
 
     /// Create an encoder, write the file header and segment metadata, then
@@ -504,7 +512,7 @@ mod tests {
         let mut w = RotatingWriter::single_file(&path).unwrap();
         w.write_encoded_batch(&test_batch()).unwrap();
         w.flush().unwrap();
-        std::fs::metadata(&path).unwrap().len()
+        std::fs::metadata(w.current_active_path()).unwrap().len()
     }
 
     #[test]
@@ -524,7 +532,7 @@ mod tests {
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
-        let metadata = std::fs::metadata(&path).unwrap();
+        let metadata = std::fs::metadata(writer.current_active_path()).unwrap();
         assert!(
             metadata.len() > 0,
             "file should not be empty after writing an event"
@@ -544,7 +552,7 @@ mod tests {
         }
         writer.flush().unwrap();
 
-        let metadata = std::fs::metadata(&path).unwrap();
+        let metadata = std::fs::metadata(writer.current_active_path()).unwrap();
         // Two events should be larger than one event
         assert!(metadata.len() > one_event_size);
     }
@@ -554,9 +562,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test_format_v2.bin");
         let writer = RotatingWriter::single_file(&path).unwrap();
+        let active = writer.current_active_path().to_owned();
         drop(writer);
 
-        let mut file = std::fs::File::open(&path).unwrap();
+        let mut file = std::fs::File::open(&active).unwrap();
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic).unwrap();
         assert_eq!(&magic, b"TRC\0");
@@ -944,10 +953,31 @@ mod tests {
         let mut writer = RotatingWriter::single_file(&path).unwrap();
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
+        writer.finalize().unwrap();
 
-        // single_file writes directly to the given path, no .active suffix
-        assert!(path.exists());
-        assert!(!dir.path().join("test.bin.active").exists());
+        // single_file seals to test.0.bin after finalize, no leftover .active
+        assert!(dir.path().join("test.0.bin").exists());
+        assert!(!dir.path().join("test.0.bin.active").exists());
+    }
+
+    #[test]
+    fn test_single_file_sealed_segment_discoverable_by_worker() {
+        use crate::background_task::sealed::find_sealed_segments;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("trace.bin");
+        let mut writer = RotatingWriter::single_file(&path).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let segments = find_sealed_segments(dir.path(), "trace").unwrap();
+        assert_eq!(
+            segments.len(),
+            1,
+            "worker should find exactly one sealed segment"
+        );
+        assert_eq!(segments[0].path, dir.path().join("trace.0.bin"));
     }
 
     #[test]
@@ -1099,7 +1129,8 @@ mod tests {
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
-        let all_events = format::decode_events(&std::fs::read(&path).unwrap()).unwrap();
+        let all_events =
+            format::decode_events(&std::fs::read(writer.current_active_path()).unwrap()).unwrap();
         let park_count = all_events
             .iter()
             .filter(|e| matches!(e, TelemetryEvent::WorkerPark { .. }))

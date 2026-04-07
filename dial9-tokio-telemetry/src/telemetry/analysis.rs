@@ -816,9 +816,10 @@ mod tests {
         );
         writer.write_encoded_batch(&batch).unwrap();
         writer.flush().unwrap();
+        let active = writer.current_active_path().to_owned();
         drop(writer);
 
-        let raw = std::fs::read(&raw_path).unwrap();
+        let raw = std::fs::read(&active).unwrap();
         let gzip_path = dir.path().join("trace.bin.gz");
         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
         encoder.write_all(&raw).unwrap();

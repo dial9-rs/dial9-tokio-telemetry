@@ -204,10 +204,10 @@ handle.disable();
 
 ```bash
 # per-worker stats, wake→poll delays, idle worker detection
-cargo run --example analyze_trace -- /tmp/my_traces/trace.0.bin
+cargo run --example analyze_trace -- /tmp/my_traces/trace.0.bin.gz
 
 # convert to JSONL for ad-hoc scripting
-cargo run --example trace_to_jsonl -- /tmp/my_traces/trace.0.bin output.jsonl
+cargo run --example trace_to_jsonl -- /tmp/my_traces/trace.0.bin.gz output.jsonl
 ```
 
 There's also an interactive HTML trace viewer — open `trace_viewer/index.html` and drag in a `.bin` file. [Here's a demo.](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)
