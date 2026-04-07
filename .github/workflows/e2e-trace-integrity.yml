@@ -33,7 +33,7 @@ jobs:
           AWS_ACCESS_KEY_ID: local
           AWS_SECRET_ACCESS_KEY: local
           AWS_DEFAULT_REGION: us-east-1
-          AWS_PROFILE: ""
+          AWS_PROFILE: "fake-profile"
         run: scripts/regenerate_demo_trace.sh
       - uses: actions/setup-node@v4
         with:
