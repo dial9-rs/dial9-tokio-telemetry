@@ -1,4 +1,4 @@
-name: Trace Sanity
+name: Trace Integrity
 on:
   pull_request:
     paths:
@@ -15,8 +15,8 @@ permissions:
   contents: read
 
 jobs:
-  trace-sanity:
-    name: Trace Sanity
+  trace-integrity:
+    name: Trace Integrity
     runs-on: ubuntu-latest
     services:
       dynamodb-local:
@@ -38,5 +38,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Sanity-check demo trace
-        run: node dial9-tokio-telemetry/trace_viewer/sanity_test.js
+      - name: Check trace integrity
+        run: node dial9-tokio-telemetry/trace_viewer/test_trace_integrity.js.js
