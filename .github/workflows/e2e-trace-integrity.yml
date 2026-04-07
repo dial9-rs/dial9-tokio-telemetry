@@ -39,4 +39,4 @@ jobs:
         with:
           node-version: 24
       - name: Check trace integrity
-        run: node dial9-tokio-telemetry/trace_viewer/test_trace_integrity.js.js
+        run: node dial9-tokio-telemetry/trace_viewer/test_trace_integrity.js
