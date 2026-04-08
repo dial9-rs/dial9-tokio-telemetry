@@ -452,170 +452,6 @@
     return [...groups.values()].sort((a, b) => b.count - a.count);
   }
 
-  /**
-   * Reconstruct poll/park/active spans from raw events using a state machine.
-   * @param {TraceEvent[]} events - raw trace events
-   * @param {number[]} workerIds - sorted worker IDs
-   * @param {number} maxTs - end-of-trace timestamp for closing open spans
-   * @returns {{
-   *   workerSpans: Object<number, { polls: Array<{start: number, end: number, taskId?: number, spawnLocId?: string|null, spawnLoc?: string|null}>, parks: Array<{start: number, end: number, schedWait: number}>, actives: Array<{start: number, end: number, ratio: number}>, cpuSampleTimes: number[] }>,
-   *   perWorker: Object<number, TraceEvent[]>,
-   *   queueSamples: Array<{t: number, global: number}>,
-   * }}
-   */
-  function buildWorkerSpans(events, workerIds, maxTs) {
-    const workerSpans = {};
-    const openPoll = {},
-      openPark = {},
-      openUnpark = {};
-    const openPollMeta = {};
-    for (const w of workerIds) {
-      workerSpans[w] = {
-        polls: [],
-        parks: [],
-        actives: [],
-        cpuSampleTimes: [],
-      };
-    }
-
-    // Group events by worker and sort per-worker by timestamp
-    const perWorker = {};
-    for (const e of events) {
-      if (
-        e.eventType !== EVENT_TYPES.QueueSample &&
-        e.eventType !== EVENT_TYPES.WakeEvent
-      ) {
-        (perWorker[e.workerId] ??= []).push(e);
-      }
-    }
-    for (const wEvents of Object.values(perWorker)) {
-      wEvents.sort((a, b) => a.timestamp - b.timestamp);
-    }
-
-    for (const [w, wEvents] of Object.entries(perWorker)) {
-      for (const e of wEvents) {
-        if (e.eventType === EVENT_TYPES.PollStart) {
-          openPoll[w] = e.timestamp;
-          openPollMeta[w] = {
-            taskId: e.taskId,
-            spawnLocId: e.spawnLocId,
-            spawnLoc: e.spawnLoc,
-          };
-        } else if (e.eventType === EVENT_TYPES.PollEnd) {
-          if (openPoll[w] != null) {
-            const meta = openPollMeta[w] || {
-              taskId: 0,
-              spawnLocId: 0,
-              spawnLoc: null,
-            };
-            workerSpans[w].polls.push({
-              start: openPoll[w],
-              end: e.timestamp,
-              taskId: meta.taskId,
-              spawnLocId: meta.spawnLocId,
-              spawnLoc: meta.spawnLoc,
-            });
-            openPoll[w] = null;
-          }
-        } else if (e.eventType === EVENT_TYPES.WorkerPark) {
-          openPark[w] = e.timestamp;
-          if (openUnpark[w] != null) {
-            const wallDelta = e.timestamp - openUnpark[w].timestamp;
-            const cpuDelta = e.cpuTime - openUnpark[w].cpuTime;
-            const ratio =
-              wallDelta > 0 ? Math.min(cpuDelta / wallDelta, 1.0) : 1.0;
-            workerSpans[w].actives.push({
-              start: openUnpark[w].timestamp,
-              end: e.timestamp,
-              ratio,
-            });
-            openUnpark[w] = null;
-          }
-        } else if (e.eventType === EVENT_TYPES.WorkerUnpark) {
-          if (openPark[w] != null) {
-            workerSpans[w].parks.push({
-              start: openPark[w],
-              end: e.timestamp,
-              schedWait: e.schedWait,
-            });
-            openPark[w] = null;
-          }
-          openUnpark[w] = { timestamp: e.timestamp, cpuTime: e.cpuTime };
-        }
-      }
-    }
-
-    // Close any open spans at trace end
-    for (const w of workerIds) {
-      if (openPoll[w] != null)
-        workerSpans[w].polls.push({ start: openPoll[w], end: maxTs });
-      if (openPark[w] != null)
-        workerSpans[w].parks.push({ start: openPark[w], end: maxTs });
-    }
-
-    // Global queue samples
-    const queueSamples = events
-      .filter((e) => e.eventType === EVENT_TYPES.QueueSample)
-      .map((e) => ({ t: e.timestamp, global: e.globalQueue }));
-
-    return { workerSpans, perWorker, queueSamples };
-  }
-
-  /**
-   * Attach CPU samples to the poll spans they fall within using binary search.
-   * Mutates workerSpans poll objects (adds .cpuSamples[], .schedSamples[])
-   * and sample objects (sets .spawnLoc).
-   * @param {CpuSample[]} cpuSamples
-   * @param {Object} workerSpans
-   * @returns {{ pollsWithCpuSamples: number, pollsWithSchedSamples: number }}
-   */
-  function attachCpuSamples(cpuSamples, workerSpans) {
-    for (const sample of cpuSamples) {
-      const spans = workerSpans[sample.workerId];
-      if (!spans) {
-        sample.spawnLoc = null;
-        continue;
-      }
-      if (sample.source !== 1) spans.cpuSampleTimes.push(sample.timestamp);
-      const polls = spans.polls;
-      const ts = sample.timestamp;
-      // Binary search for rightmost poll with start <= ts
-      let lo = 0,
-        hi = polls.length - 1,
-        found = false;
-      while (lo <= hi) {
-        const mid = (lo + hi) >> 1;
-        if (polls[mid].start <= ts) {
-          lo = mid + 1;
-        } else {
-          hi = mid - 1;
-        }
-      }
-      // hi is now the index of the last poll with start <= ts
-      if (hi >= 0 && ts <= polls[hi].end) {
-        const poll = polls[hi];
-        if (sample.source === 1) {
-          (poll.schedSamples ??= []).push(sample);
-        } else {
-          (poll.cpuSamples ??= []).push(sample);
-        }
-        sample.spawnLoc = poll.spawnLoc;
-        found = true;
-      }
-      if (!found) sample.spawnLoc = null;
-    }
-
-    let pollsWithCpuSamples = 0;
-    let pollsWithSchedSamples = 0;
-    for (const w of Object.keys(workerSpans)) {
-      for (const p of workerSpans[w].polls) {
-        if (p.cpuSamples) pollsWithCpuSamples++;
-        if (p.schedSamples) pollsWithSchedSamples++;
-      }
-    }
-    return { pollsWithCpuSamples, pollsWithSchedSamples };
-  }
-
   // Export for both browser and Node.js
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
@@ -624,8 +460,6 @@
       formatFrame,
       symbolizeChain,
       deduplicateSamples,
-      buildWorkerSpans,
-      attachCpuSamples,
     };
   } else {
     exports.TraceParser = {
@@ -634,8 +468,6 @@
       formatFrame,
       symbolizeChain,
       deduplicateSamples,
-      buildWorkerSpans,
-      attachCpuSamples,
     };
   }
 })(typeof exports === "undefined" ? this : exports);
