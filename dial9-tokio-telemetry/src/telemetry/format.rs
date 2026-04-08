@@ -1,4 +1,6 @@
-use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
+use crate::telemetry::events::CpuSampleSource;
+#[cfg(any(feature = "analysis", test))]
+use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::TaskId;
 #[cfg(any(feature = "analysis", test))]
 use dial9_trace_format::decoder::StringPool;
