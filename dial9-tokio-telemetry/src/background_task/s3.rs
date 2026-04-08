@@ -66,6 +66,7 @@ where
 /// Override with [`key_fn`](S3ConfigBuilder::key_fn) for a custom layout.
 #[derive(Clone, bon::Builder)]
 #[builder(on(String, into))]
+#[allow(private_bounds)]
 pub struct S3Config {
     bucket: String,
     service_name: String,

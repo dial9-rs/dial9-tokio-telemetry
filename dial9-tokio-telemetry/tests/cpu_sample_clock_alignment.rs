@@ -18,11 +18,9 @@ mod common;
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
     let _ = tracing_subscriber::fmt::try_init();
-    use dial9_tokio_telemetry::telemetry::{
-        CpuSampleSource, TelemetryEvent, clock_monotonic_ns,
-    };
     use dial9_tokio_telemetry::telemetry::WorkerId;
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
+    use dial9_tokio_telemetry::telemetry::{CpuSampleSource, TelemetryEvent, clock_monotonic_ns};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 

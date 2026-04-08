@@ -98,8 +98,7 @@ fn bench_threadlocal_rawcopy(c: &mut Criterion) {
             &batches,
             |b, batches| {
                 b.iter(|| {
-                    let mut output = Vec::new();
-                    dial9_trace_format::codec::encode_header(&mut output).unwrap();
+                    let mut output = Encoder::new().finish();
                     for batch in batches {
                         let mut local = Encoder::new();
                         encode_batch(&mut local, batch);

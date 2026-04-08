@@ -23,8 +23,8 @@ pub use cpu_profile::SchedEventConfig;
 pub use dial9_trace_format::InternedString;
 pub use events::{CpuSampleSource, RawEvent, TelemetryEvent, clock_monotonic_ns};
 pub use format::{
-    PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerParkEvent,
-    WorkerUnparkEvent, WorkerId,
+    PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerId, WorkerParkEvent,
+    WorkerUnparkEvent,
 };
 pub use recorder::{
     HasTracePath, NoTracePath, TelemetryGuard, TelemetryHandle, TracedRuntime, TracedRuntimeBuilder,
