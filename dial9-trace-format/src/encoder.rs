@@ -3,7 +3,7 @@
 use crate::TraceEvent;
 use crate::codec::{self, PoolEntry, WireTypeId};
 use crate::schema::{SchemaEntry, SchemaRegistry};
-use crate::types::{EncodeState, EventEncoder, InternedString};
+use crate::types::{CountingWriter, EncodeState, EventEncoder, InternedString};
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -213,7 +213,10 @@ impl<W: Write> Encoder<W> {
     /// Returns the old writer. Writes a file header to the new writer.
     pub fn reset_to(&mut self, mut new_writer: W) -> io::Result<W> {
         codec::encode_header(&mut new_writer)?;
-        self.reset_registry_and_pools();
+        self.string_pool.clear();
+        self.next_pool_id = 0;
+        self.registry.clear();
+        self.schema_ids.clear();
         // creating a new EncodeState resets the timestamp delta
         let old_state = std::mem::replace(&mut self.state, EncodeState::new(new_writer));
         Ok(old_state.writer.into_inner())
@@ -373,20 +376,49 @@ impl<W: Write> Encoder<W> {
         self.state.writer.flush()
     }
 
-    /// Write raw bytes directly to the underlying writer, bypassing encoder
-    /// state. Byte count is tracked for rotation decisions.
+    /// Convert this encoder into a [`RawEncoder`] that only supports writing
+    /// pre-encoded bytes. The byte count is preserved so rotation decisions
+    /// remain correct.
+    ///
+    /// Use this after writing any structured data (headers, segment metadata)
+    /// to switch to a raw-only mode for appending pre-encoded batches.
+    pub fn into_raw_encoder(self) -> RawEncoder<W> {
+        RawEncoder {
+            writer: self.state.writer,
+        }
+    }
+}
+
+/// A write-only encoder that accepts pre-encoded bytes.
+///
+/// Created by [`Encoder::into_raw_encoder`] after the file header and any
+/// structured metadata have been written. Carries no schema registry, string
+/// pool, or timestamp state — it simply forwards bytes to the underlying
+/// writer while tracking the total byte count.
+pub struct RawEncoder<W> {
+    writer: CountingWriter<W>,
+}
+
+impl<W: Write> RawEncoder<W> {
+    /// Write pre-encoded bytes to the underlying writer.
     pub fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.state.writer.write_all(bytes)
+        self.writer.write_all(bytes)
     }
 
-    /// Reset encoder state (schemas, string pool, timestamp base) without
-    /// touching the underlying writer. Used after writing a raw batch that
-    /// includes its own header.
-    pub fn reset_registry_and_pools(&mut self) {
-        self.string_pool.clear();
-        self.next_pool_id = 0;
-        self.registry.clear();
-        self.schema_ids.clear();
+    /// Total bytes written (including bytes written by the [`Encoder`] before
+    /// conversion).
+    pub fn bytes_written(&self) -> u64 {
+        self.writer.bytes_written()
+    }
+
+    /// Flush the underlying writer.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+
+    /// Consume the raw encoder and return the inner writer.
+    pub fn into_inner(self) -> W {
+        self.writer.into_inner()
     }
 }
 
@@ -949,5 +981,103 @@ mod tests {
             .expect("new trace must contain event");
         assert_eq!(*event.0, Some(2_000));
         assert_eq!(event.1[0], FieldValue::Varint(99));
+    }
+
+    #[test]
+    fn into_raw_encoder_preserves_byte_count() {
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
+        )
+        .unwrap();
+
+        let bytes_before = enc.bytes_written();
+        assert!(bytes_before > 0);
+
+        let raw = enc.into_raw_encoder();
+        assert_eq!(
+            raw.bytes_written(),
+            bytes_before,
+            "byte count must be preserved across conversion"
+        );
+    }
+
+    #[test]
+    fn raw_encoder_write_raw_and_bytes_written() {
+        let enc = Encoder::new();
+        let initial = enc.bytes_written();
+        let mut raw = enc.into_raw_encoder();
+
+        let payload = [0xAA; 100];
+        raw.write_raw(&payload).unwrap();
+
+        assert_eq!(
+            raw.bytes_written(),
+            initial + payload.len() as u64,
+            "bytes_written must include raw payload"
+        );
+    }
+
+    #[test]
+    fn raw_encoder_into_inner_returns_all_data() {
+        use crate::decoder::{DecodedFrame, Decoder};
+
+        // Write a structured event via Encoder, then append a raw batch
+        // via RawEncoder, and verify the combined output decodes correctly.
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        enc.write_event(&schema, &[FieldValue::Varint(1_000), FieldValue::Varint(1)])
+            .unwrap();
+
+        // Build a raw batch with the same schema
+        let raw_batch = {
+            let mut batch_enc = Encoder::new();
+            batch_enc
+                .write_event(&schema, &[FieldValue::Varint(2_000), FieldValue::Varint(2)])
+                .unwrap();
+            batch_enc.finish()
+        };
+
+        let mut raw = enc.into_raw_encoder();
+        raw.write_raw(&raw_batch).unwrap();
+        let combined = raw.into_inner();
+
+        let mut dec = Decoder::new(&combined).unwrap();
+        let events: Vec<_> = dec
+            .decode_all()
+            .into_iter()
+            .filter_map(|f| match f {
+                DecodedFrame::Event {
+                    timestamp_ns,
+                    values,
+                    ..
+                } => Some((timestamp_ns, values)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, Some(1_000));
+        assert_eq!(events[0].1, vec![FieldValue::Varint(1)]);
+        assert_eq!(events[1].0, Some(2_000));
+        assert_eq!(events[1].1, vec![FieldValue::Varint(2)]);
     }
 }

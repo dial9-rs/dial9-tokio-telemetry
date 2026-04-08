@@ -74,6 +74,7 @@
    *   cpuSamples: CpuSample[],
    *   callframeSymbols: Map<string, SymbolFrame|SymbolFrame[]>,
    *   threadNames: Map<number, string>,
+   *   runtimeWorkers: Map<string, number[]>,
    * }} ParsedTrace
    */
 
@@ -110,6 +111,7 @@
     const callframeSymbols = new Map();
     const cpuSamples = [];
     const threadNames = new Map();
+    const runtimeWorkers = new Map(); // runtime name → [workerId, ...]
 
     const capped = () => events.length >= maxEvents;
     // Frames processed regardless of event cap:
@@ -121,6 +123,7 @@
       "TaskTerminateEvent",
       "CpuSampleEvent",
       "SymbolTableEntry",
+      "SegmentMetadataEvent",
     ]);
 
     for (const frame of frames) {
@@ -253,6 +256,20 @@
           }
           break;
         }
+        case "SegmentMetadataEvent": {
+          const entries = v.entries || {};
+          for (const [key, val] of Object.entries(entries)) {
+            if (key.startsWith("runtime.")) {
+              const name = key.slice("runtime.".length);
+              const ids = val
+                .split(",")
+                .map(Number)
+                .filter((n) => !isNaN(n));
+              if (ids.length > 0) runtimeWorkers.set(name, ids);
+            }
+          }
+          break;
+        }
         case "SymbolTableEntry": {
           const addrKey = "0x" + BigInt(v.addr).toString(16);
           const depth = Number(v.inline_depth || 0);
@@ -297,6 +314,7 @@
       callframeSymbols,
       threadNames,
       taskTerminateTimes,
+      runtimeWorkers,
     };
   }
 

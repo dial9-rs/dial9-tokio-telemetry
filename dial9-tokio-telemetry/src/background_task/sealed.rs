@@ -198,8 +198,9 @@ mod tests {
 
     #[test]
     fn test_parse_segment_timestamp() {
-        use crate::telemetry::events::RawEvent;
+        use crate::telemetry::format::WorkerParkEvent;
         use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+        use dial9_trace_format::encoder::Encoder;
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
@@ -207,16 +208,22 @@ mod tests {
 
         let mut writer = RotatingWriter::single_file(&base).unwrap();
 
-        let event = RawEvent::WorkerPark {
-            timestamp_nanos: 1000000000,
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write_infallible(&WorkerParkEvent {
+            timestamp_ns: 1000000000,
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            worker_local_queue_depth: 0,
-            cpu_time_nanos: 0,
-        };
-        writer.write_event(&event).unwrap();
+            local_queue: 0,
+            cpu_time_ns: 0,
+        });
+        writer
+            .write_encoded_batch(&crate::telemetry::collector::Batch {
+                encoded_bytes: enc.into_inner(),
+                event_count: 1,
+            })
+            .unwrap();
         writer.flush().unwrap();
 
-        let data = std::fs::read(&base).unwrap();
+        let data = std::fs::read(writer.current_active_path()).unwrap();
         let timestamp_nanos = parse_segment_timestamp(&data).unwrap();
 
         let now_nanos = std::time::SystemTime::now()
@@ -230,8 +237,9 @@ mod tests {
 
     #[test]
     fn test_creation_epoch_secs_uses_parsed_timestamp() {
-        use crate::telemetry::events::RawEvent;
+        use crate::telemetry::format::WorkerParkEvent;
         use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+        use dial9_trace_format::encoder::Encoder;
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
@@ -239,17 +247,24 @@ mod tests {
 
         let mut writer = RotatingWriter::single_file(&base).unwrap();
 
-        let event = RawEvent::WorkerPark {
-            timestamp_nanos: 1000000000,
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write_infallible(&WorkerParkEvent {
+            timestamp_ns: 1000000000,
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            worker_local_queue_depth: 0,
-            cpu_time_nanos: 0,
-        };
-        writer.write_event(&event).unwrap();
+            local_queue: 0,
+            cpu_time_ns: 0,
+        });
+        writer
+            .write_encoded_batch(&crate::telemetry::collector::Batch {
+                encoded_bytes: enc.into_inner(),
+                event_count: 1,
+            })
+            .unwrap();
         writer.flush().unwrap();
 
-        let data = std::fs::read(&base).unwrap();
-        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &base);
+        let active = writer.current_active_path().to_owned();
+        let data = std::fs::read(&active).unwrap();
+        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &active);
         check!(header_valid);
         let expected_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -280,24 +295,31 @@ mod tests {
 
     #[test]
     fn test_parse_segment_timestamp_no_metadata() {
-        use crate::telemetry::events::RawEvent;
+        use crate::telemetry::format::WorkerParkEvent;
         use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+        use dial9_trace_format::encoder::Encoder;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
 
         // Don't call set_segment_metadata — writer should still write one automatically
         let mut writer = RotatingWriter::single_file(&base).unwrap();
-        let event = RawEvent::WorkerPark {
-            timestamp_nanos: 1_000_000_000,
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write_infallible(&WorkerParkEvent {
+            timestamp_ns: 1_000_000_000,
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            worker_local_queue_depth: 0,
-            cpu_time_nanos: 0,
-        };
-        writer.write_event(&event).unwrap();
+            local_queue: 0,
+            cpu_time_ns: 0,
+        });
+        writer
+            .write_encoded_batch(&crate::telemetry::collector::Batch {
+                encoded_bytes: enc.into_inner(),
+                event_count: 1,
+            })
+            .unwrap();
         writer.flush().unwrap();
 
-        let data = std::fs::read(&base).unwrap();
+        let data = std::fs::read(writer.current_active_path()).unwrap();
         let ts = parse_segment_timestamp(&data).unwrap();
         let now_nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -8,8 +8,13 @@
 //!   cargo bench --bench writer_encode
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use dial9_tokio_telemetry::telemetry::events::RawEvent;
+use dial9_tokio_telemetry::telemetry::Batch;
+use dial9_tokio_telemetry::telemetry::format::{
+    PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerParkEvent,
+    WorkerUnparkEvent,
+};
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TaskId, TraceWriter, WorkerId};
+use dial9_trace_format::encoder::Encoder;
 
 /// Build a realistic batch simulating a worker thread's activity.
 ///
@@ -17,69 +22,71 @@ use dial9_tokio_telemetry::telemetry::{RotatingWriter, TaskId, TraceWriter, Work
 /// We simulate ~170 polls per batch (340 events) plus park/unpark and a few
 /// spawns and wakes, totalling ~350 events. The batch is repeated ~3× to fill
 /// close to 1024 events.
-fn make_batch(worker: usize) -> Vec<RawEvent> {
+fn make_encoded_batch(worker: usize) -> Batch {
     let wid = WorkerId::from(worker);
     let task = TaskId::from_u32(1);
-    let loc = std::panic::Location::caller();
-    let mut events = Vec::with_capacity(1024);
+    let mut enc = Encoder::new();
+    let loc = enc.intern_string_infallible("src/main.rs:42");
 
     for cycle in 0..3u64 {
         let base = cycle * 10_000;
-        events.push(RawEvent::WorkerUnpark {
-            timestamp_nanos: base + 100,
+        enc.write_infallible(&WorkerUnparkEvent {
+            timestamp_ns: base + 100,
             worker_id: wid,
-            worker_local_queue_depth: 5,
-            cpu_time_nanos: 500_000,
-            sched_wait_delta_nanos: 1_000,
+            local_queue: 5,
+            cpu_time_ns: 500_000,
+            sched_wait_ns: 1_000,
         });
 
         for i in 0..170u64 {
-            events.push(RawEvent::PollStart {
-                timestamp_nanos: base + 200 + i * 10,
+            enc.write_infallible(&PollStartEvent {
+                timestamp_ns: base + 200 + i * 10,
                 worker_id: wid,
-                worker_local_queue_depth: 3,
+                local_queue: 3,
                 task_id: task,
-                location: loc,
+                spawn_loc: loc,
             });
-            events.push(RawEvent::PollEnd {
-                timestamp_nanos: base + 205 + i * 10,
+            enc.write_infallible(&PollEndEvent {
+                timestamp_ns: base + 205 + i * 10,
                 worker_id: wid,
             });
         }
 
         for _ in 0..3 {
-            events.push(RawEvent::TaskSpawn {
-                timestamp_nanos: base + 2000,
+            enc.write_infallible(&TaskSpawnEvent {
+                timestamp_ns: base + 2000,
                 task_id: task,
-                location: loc,
+                spawn_loc: loc,
             });
         }
         for _ in 0..5 {
-            events.push(RawEvent::WakeEvent {
-                timestamp_nanos: base + 2500,
+            enc.write_infallible(&WakeEventEvent {
+                timestamp_ns: base + 2500,
                 waker_task_id: task,
                 woken_task_id: task,
                 target_worker: worker as u8,
             });
         }
 
-        events.push(RawEvent::WorkerPark {
-            timestamp_nanos: base + 3000,
+        enc.write_infallible(&WorkerParkEvent {
+            timestamp_ns: base + 3000,
             worker_id: wid,
-            worker_local_queue_depth: 0,
-            cpu_time_nanos: 600_000,
+            local_queue: 0,
+            cpu_time_ns: 600_000,
         });
     }
 
-    events
+    Batch::new(enc.reset_to_infallible(Vec::new()), 1024)
 }
 
 fn bench_writer_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("writer_encode");
 
     for num_batches in [1, 10, 100] {
-        let batches: Vec<_> = (0..num_batches).map(|i| make_batch(i % 8)).collect();
-        let total_events: usize = batches.iter().map(|b| b.len()).sum();
+        let batches: Vec<_> = (0..num_batches)
+            .map(|i| make_encoded_batch(i % 8))
+            .collect();
+        let total_events: usize = num_batches * 1024; // approximate
         group.throughput(criterion::Throughput::Elements(total_events as u64));
 
         group.bench_with_input(
@@ -89,7 +96,7 @@ fn bench_writer_encode(c: &mut Criterion) {
                 let mut writer = RotatingWriter::single_file("/dev/null").unwrap();
                 b.iter(|| {
                     for batch in batches {
-                        writer.write_event_batch(batch).unwrap();
+                        writer.write_encoded_batch(batch).unwrap();
                     }
                     writer.flush().unwrap();
                 });

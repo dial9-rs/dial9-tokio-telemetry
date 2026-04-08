@@ -65,7 +65,12 @@ impl ArcWake for TracedWakerData {
 }
 
 fn record_wake_event(data: &TracedWakerData) {
-    let event = data.shared.create_wake_event(data.woken_task_id);
+    // The worker issuing the wake — not the worker that will execute the woken task
+    // (which is unknowable at wake time). Stored in the event as `target_worker`.
+    let waking_worker = crate::telemetry::recorder::current_worker_id();
+    let event = data
+        .shared
+        .create_wake_event(data.woken_task_id, waking_worker);
     data.shared.record_event(event);
 }
 
@@ -163,7 +168,8 @@ mod tests {
         drop(guard);
 
         // Parse the trace file and collect all WakeEvents.
-        let trace_path_str = trace_path.to_str().unwrap();
+        let sealed = dir.path().join("trace.0.bin");
+        let trace_path_str = sealed.to_str().unwrap();
         let mut reader = TraceReader::new(trace_path_str).unwrap();
         reader.read_header().unwrap();
         let events = reader.read_all().unwrap();

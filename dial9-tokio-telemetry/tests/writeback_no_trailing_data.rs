@@ -42,19 +42,18 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
                 let _ = h.await;
             }
         }
-
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(10))
-            .await
-            .expect("graceful shutdown");
     });
 
     drop(runtime);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(10))
+        .expect("graceful shutdown");
 
     let mut gzip_files = 0;
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().is_none_or(|ext| ext != "bin") {
+        let name = path.file_name().unwrap().to_string_lossy();
+        if !name.ends_with(".bin") && !name.ends_with(".bin.gz") {
             continue;
         }
         let raw = std::fs::read(&path).unwrap();

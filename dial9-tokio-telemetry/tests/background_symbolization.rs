@@ -61,15 +61,13 @@ fn background_symbolization_produces_symbol_table_entries() {
         // Give the flush thread time to write and seal segments,
         // and the worker time to symbolize them.
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-        // Graceful shutdown: seals final segment, worker drains all remaining.
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(10))
-            .await
-            .expect("graceful shutdown");
     });
 
     drop(runtime);
+    // Graceful shutdown: seals final segment, worker drains all remaining.
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(10))
+        .expect("graceful shutdown");
 
     // Read all .bin files in the trace directory. After the worker runs,
     // processed segments are gzip-compressed (GzipWriteBackProcessor).
@@ -79,7 +77,8 @@ fn background_symbolization_produces_symbol_table_entries() {
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "bin") {
+        let name = path.file_name().unwrap().to_string_lossy();
+        if !name.ends_with(".bin") && !name.ends_with(".bin.gz") {
             continue;
         }
 

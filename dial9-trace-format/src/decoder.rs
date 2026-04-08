@@ -61,7 +61,7 @@ pub struct RawEvent<'a, 'f> {
 /// Populated automatically by the [`Decoder`] as it processes `StringPool` frames.
 /// Pass a reference to [`crate::TraceEvent::decode`] so that `InternedString` fields
 /// resolve to `&str` in derived `Ref` types.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct StringPool(pub(crate) HashMap<InternedString, String>);
 
 impl StringPool {
