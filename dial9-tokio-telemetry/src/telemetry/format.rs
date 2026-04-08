@@ -1,5 +1,6 @@
 use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
 use crate::telemetry::task_metadata::TaskId;
+#[cfg(any(feature = "analysis", test))]
 use dial9_trace_format::decoder::StringPool;
 use dial9_trace_format::types::{EventEncoder, FieldType, FieldValueRef};
 use dial9_trace_format::{InternedString, StackFrames, TraceEvent, TraceField};
@@ -209,6 +210,7 @@ pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
 /// Zero-copy enum of all telemetry event types. Each variant wraps the
 /// derive-generated `*EventRef<'a>` that borrows directly from the decode buffer.
 #[derive(Debug, Clone)]
+#[cfg(any(feature = "analysis", test))]
 pub enum TelemetryEventRef<'a> {
     PollStart(PollStartEventRef<'a>),
     PollEnd(PollEndEventRef<'a>),
@@ -222,6 +224,7 @@ pub enum TelemetryEventRef<'a> {
     SegmentMetadata(SegmentMetadataEventRef<'a>),
 }
 
+#[cfg(any(feature = "analysis", test))]
 impl<'a> TelemetryEventRef<'a> {
     /// Returns the timestamp in nanoseconds, if this event type carries one.
     #[allow(dead_code)]
