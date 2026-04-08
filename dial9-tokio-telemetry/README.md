@@ -13,7 +13,11 @@ This crate requires Tokio's unstable APIs for runtime hooks and worker metrics. 
 ```toml
 # .cargo/config.toml
 [build]
-rustflags = ["--cfg", "tokio_unstable"]
+rustflags = [
+  "--cfg", "tokio_unstable",
+  # For profiling, you also need:
+  # "-C", "force-frame-pointers=yes"
+]
 ```
 
 Without this flag, compilation will fail with errors about missing methods on `tokio::runtime::Builder` and `RuntimeMetrics`.
