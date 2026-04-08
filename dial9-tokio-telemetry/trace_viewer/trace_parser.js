@@ -452,6 +452,96 @@
     return [...groups.values()].sort((a, b) => b.count - a.count);
   }
 
+  /**
+   * Reconstruct poll/park/active spans from raw events using a state machine.
+   * @param {TraceEvent[]} events - raw trace events
+   * @param {number[]} workerIds - sorted worker IDs
+   * @param {number} maxTs - end-of-trace timestamp for closing open spans
+   * @returns {{
+   *   workerSpans: Object<number, { polls: Array<{start: number, end: number, taskId?: number, spawnLocId?: string|null, spawnLoc?: string|null}>, parks: Array<{start: number, end: number, schedWait: number}>, actives: Array<{start: number, end: number, ratio: number}>, cpuSampleTimes: number[] }>,
+   *   perWorker: Object<number, TraceEvent[]>,
+   *   queueSamples: Array<{t: number, global: number}>,
+   * }}
+   */
+  function buildWorkerSpans(events, workerIds, maxTs) {
+    const workerSpans = {};
+    const openPoll = {}, openPark = {}, openUnpark = {};
+    const openPollMeta = {};
+    for (const w of workerIds) {
+      workerSpans[w] = { polls: [], parks: [], actives: [], cpuSampleTimes: [] };
+    }
+
+    // Group events by worker and sort per-worker by timestamp
+    const perWorker = {};
+    for (const e of events) {
+      if (e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent) {
+        (perWorker[e.workerId] ??= []).push(e);
+      }
+    }
+    for (const wEvents of Object.values(perWorker)) {
+      wEvents.sort((a, b) => a.timestamp - b.timestamp);
+    }
+
+    for (const [w, wEvents] of Object.entries(perWorker)) {
+      for (const e of wEvents) {
+        if (e.eventType === EVENT_TYPES.PollStart) {
+          openPoll[w] = e.timestamp;
+          openPollMeta[w] = { taskId: e.taskId, spawnLocId: e.spawnLocId, spawnLoc: e.spawnLoc };
+        } else if (e.eventType === EVENT_TYPES.PollEnd) {
+          if (openPoll[w] != null) {
+            const meta = openPollMeta[w] || { taskId: 0, spawnLocId: 0, spawnLoc: null };
+            workerSpans[w].polls.push({
+              start: openPoll[w],
+              end: e.timestamp,
+              taskId: meta.taskId,
+              spawnLocId: meta.spawnLocId,
+              spawnLoc: meta.spawnLoc,
+            });
+            openPoll[w] = null;
+          }
+        } else if (e.eventType === EVENT_TYPES.WorkerPark) {
+          openPark[w] = e.timestamp;
+          if (openUnpark[w] != null) {
+            const wallDelta = e.timestamp - openUnpark[w].timestamp;
+            const cpuDelta = e.cpuTime - openUnpark[w].cpuTime;
+            const ratio = wallDelta > 0 ? Math.min(cpuDelta / wallDelta, 1.0) : 1.0;
+            workerSpans[w].actives.push({
+              start: openUnpark[w].timestamp,
+              end: e.timestamp,
+              ratio,
+            });
+            openUnpark[w] = null;
+          }
+        } else if (e.eventType === EVENT_TYPES.WorkerUnpark) {
+          if (openPark[w] != null) {
+            workerSpans[w].parks.push({
+              start: openPark[w],
+              end: e.timestamp,
+              schedWait: e.schedWait,
+            });
+            openPark[w] = null;
+          }
+          openUnpark[w] = { timestamp: e.timestamp, cpuTime: e.cpuTime };
+        }
+      }
+    }
+
+    // Close any open spans at trace end
+    for (const w of workerIds) {
+      if (openPoll[w] != null)
+        workerSpans[w].polls.push({ start: openPoll[w], end: maxTs });
+      if (openPark[w] != null)
+        workerSpans[w].parks.push({ start: openPark[w], end: maxTs });
+    }
+
+    // Global queue samples
+    const queueSamples = events
+      .filter((e) => e.eventType === EVENT_TYPES.QueueSample)
+      .map((e) => ({ t: e.timestamp, global: e.globalQueue }));
+
+    return { workerSpans, perWorker, queueSamples };
+  }
+
   // Export for both browser and Node.js
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
@@ -460,6 +550,7 @@
       formatFrame,
       symbolizeChain,
       deduplicateSamples,
+      buildWorkerSpans,
     };
   } else {
     exports.TraceParser = {
@@ -468,6 +559,7 @@
       formatFrame,
       symbolizeChain,
       deduplicateSamples,
+      buildWorkerSpans,
     };
   }
 })(typeof exports === "undefined" ? this : exports);

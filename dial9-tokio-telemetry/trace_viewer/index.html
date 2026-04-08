@@ -477,7 +477,7 @@
         <script src="trace_parser.js"></script>
         <script>
             // Use the external parser
-            const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
+            const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples, buildWorkerSpans } = TraceParser;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -746,87 +746,10 @@
                 viewEnd = maxTs;
 
                 // Build spans
-                workerSpans = {};
-                const openPoll = {},
-                    openPark = {},
-                    openUnpark = {}; // track {timestamp, cpuTime} at unpark
-                const openPollMeta = {}; // track {taskId, spawnLocId} at PollStart
-                for (const w of workerIds) {
-                    workerSpans[w] = { polls: [], parks: [], actives: [], cpuSampleTimes: [] };
-                }
-
-                // Group events by worker and sort per-worker by timestamp
-                // (events arrive in flush order, not global timestamp order)
-                const perWorker = {};
-                const globalEvts = []; // QueueSample etc
-                for (const e of evts) {
-                    if (e.eventType === ET.QueueSample || e.eventType === ET.WakeEvent) {
-                        globalEvts.push(e);
-                    } else {
-                        (perWorker[e.workerId] ??= []).push(e);
-                    }
-                }
-                for (const wEvents of Object.values(perWorker)) {
-                    wEvents.sort((a, b) => a.timestamp - b.timestamp);
-                }
-
-                for (const [w, wEvents] of Object.entries(perWorker)) {
-                    for (const e of wEvents) {
-                        if (e.eventType === ET.PollStart) {
-                            openPoll[w] = e.timestamp;
-                            openPollMeta[w] = { taskId: e.taskId, spawnLocId: e.spawnLocId, spawnLoc: e.spawnLoc };
-                        } else if (e.eventType === ET.PollEnd) {
-                            if (openPoll[w] != null) {
-                                const meta = openPollMeta[w] || { taskId: 0, spawnLocId: 0, spawnLoc: null };
-                                workerSpans[w].polls.push({
-                                    start: openPoll[w],
-                                    end: e.timestamp,
-                                    taskId: meta.taskId,
-                                    spawnLocId: meta.spawnLocId,
-                                    spawnLoc: meta.spawnLoc,
-                                });
-                                openPoll[w] = null;
-                            }
-                        } else if (e.eventType === ET.WorkerPark) {
-                            openPark[w] = e.timestamp;
-                            // Close active period
-                            if (openUnpark[w] != null) {
-                                const wallDelta = e.timestamp - openUnpark[w].timestamp;
-                                const cpuDelta = e.cpuTime - openUnpark[w].cpuTime;
-                                const ratio = wallDelta > 0 ? Math.min(cpuDelta / wallDelta, 1.0) : 1.0;
-                                workerSpans[w].actives.push({
-                                    start: openUnpark[w].timestamp,
-                                    end: e.timestamp,
-                                    ratio,
-                                });
-                                openUnpark[w] = null;
-                            }
-                        } else if (e.eventType === ET.WorkerUnpark) {
-                            if (openPark[w] != null) {
-                                workerSpans[w].parks.push({
-                                    start: openPark[w],
-                                    end: e.timestamp,
-                                    schedWait: e.schedWait,
-                                });
-                                openPark[w] = null;
-                            }
-                            openUnpark[w] = { timestamp: e.timestamp, cpuTime: e.cpuTime };
-                        }
-                    }
-                }
-                // Close any open spans at trace end
-                for (const w of workerIds) {
-                    if (openPoll[w] != null)
-                        workerSpans[w].polls.push({
-                            start: openPoll[w],
-                            end: maxTs,
-                        });
-                    if (openPark[w] != null)
-                        workerSpans[w].parks.push({
-                            start: openPark[w],
-                            end: maxTs,
-                        });
-                }
+                const spanResult = buildWorkerSpans(evts, workerIds, maxTs);
+                workerSpans = spanResult.workerSpans;
+                const perWorker = spanResult.perWorker;
+                queueSamples = spanResult.queueSamples;
 
                 // Debug: log active period stats
                 for (const w of workerIds) {
@@ -834,11 +757,6 @@
                     console.log(`Worker ${w}: ${a.length} active periods` +
                         (a.length > 0 ? `, first ratio=${a[0].ratio.toFixed(3)}` : ''));
                 }
-
-                // Global queue samples (from QueueSample events only)
-                queueSamples = evts
-                    .filter((e) => e.eventType === ET.QueueSample)
-                    .map((e) => ({ t: e.timestamp, global: e.globalQueue }));
                 console.log(`Found ${queueSamples.length} global queue samples`);
 
                 // Attach CPU samples to poll spans they fall within
