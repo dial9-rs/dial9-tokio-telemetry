@@ -4,7 +4,7 @@
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
-const { parseTrace } = require("./trace_parser.js");
+const { parseTrace, EVENT_TYPES } = require("./trace_parser.js");
 
 const tracePath = process.argv[2] || path.join(__dirname, "demo-trace.bin");
 
@@ -38,15 +38,6 @@ function fail(msg) {
 function pass(msg) {
   console.log(`✓ ${msg}`);
 }
-
-const EVENT_TYPES = {
-  PollStart: 0,
-  PollEnd: 1,
-  WorkerPark: 2,
-  WorkerUnpark: 3,
-  QueueSample: 4,
-  WakeEvent: 9,
-};
 
 const trace = parseTrace(buffer);
 console.log(`Parsed ${trace.events.length} events (version ${trace.version})`);

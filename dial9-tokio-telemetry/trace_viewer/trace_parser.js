@@ -77,6 +77,15 @@
    * }} ParsedTrace
    */
 
+  const EVENT_TYPES = {
+    PollStart: 0,
+    PollEnd: 1,
+    WorkerPark: 2,
+    WorkerUnpark: 3,
+    QueueSample: 4,
+    WakeEvent: 9,
+  };
+
   /**
    * Parse a dial9-trace-format binary trace buffer.
    * @param {ArrayBuffer} buffer - The binary trace data
@@ -446,6 +455,7 @@
   // Export for both browser and Node.js
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
+      EVENT_TYPES,
       parseTrace,
       formatFrame,
       symbolizeChain,
@@ -453,6 +463,7 @@
     };
   } else {
     exports.TraceParser = {
+      EVENT_TYPES,
       parseTrace,
       formatFrame,
       symbolizeChain,

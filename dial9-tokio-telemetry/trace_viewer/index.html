@@ -477,7 +477,7 @@
         <script src="trace_parser.js"></script>
         <script>
             // Use the external parser
-            const { parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
+            const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -528,14 +528,6 @@
             }
 
             // ── Event type helpers ──
-            const ET = {
-                PollStart: 0,
-                PollEnd: 1,
-                WorkerPark: 2,
-                WorkerUnpark: 3,
-                QueueSample: 4,
-                WakeEvent: 9,
-            };
             const ET_NAMES = [
                 "PollStart",
                 "PollEnd",
