@@ -51,7 +51,8 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     drop(guard);
 
     // --- Read the trace back ---
-    let reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
+    let sealed_path = dir.path().join("trace.0.bin");
+    let reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
     let events = &reader.runtime_events;
     let analysis = analyze_trace(events);
 

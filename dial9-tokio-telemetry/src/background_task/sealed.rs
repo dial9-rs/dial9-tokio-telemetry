@@ -223,7 +223,7 @@ mod tests {
             .unwrap();
         writer.flush().unwrap();
 
-        let data = std::fs::read(&base).unwrap();
+        let data = std::fs::read(writer.current_active_path()).unwrap();
         let timestamp_nanos = parse_segment_timestamp(&data).unwrap();
 
         let now_nanos = std::time::SystemTime::now()
@@ -262,8 +262,9 @@ mod tests {
             .unwrap();
         writer.flush().unwrap();
 
-        let data = std::fs::read(&base).unwrap();
-        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &base);
+        let active = writer.current_active_path().to_owned();
+        let data = std::fs::read(&active).unwrap();
+        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &active);
         check!(header_valid);
         let expected_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -318,7 +319,7 @@ mod tests {
             .unwrap();
         writer.flush().unwrap();
 
-        let data = std::fs::read(&base).unwrap();
+        let data = std::fs::read(writer.current_active_path()).unwrap();
         let ts = parse_segment_timestamp(&data).unwrap();
         let now_nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

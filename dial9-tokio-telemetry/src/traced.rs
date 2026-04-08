@@ -169,7 +169,8 @@ mod tests {
         drop(guard);
 
         // Parse the trace file and collect all WakeEvents.
-        let trace_path_str = trace_path.to_str().unwrap();
+        let sealed = dir.path().join("trace.0.bin");
+        let trace_path_str = sealed.to_str().unwrap();
         let reader = TraceReader::new(trace_path_str).unwrap();
         let events = &reader.runtime_events;
 

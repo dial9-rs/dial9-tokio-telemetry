@@ -100,7 +100,8 @@ fn overhead_bench_validates() {
     drop(guard);
 
     // Read trace
-    let reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
+    let sealed_path = dir.path().join("trace.0.bin");
+    let reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
     let events = &reader.runtime_events;
     let analysis = analyze_trace(events);
 

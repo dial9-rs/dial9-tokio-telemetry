@@ -56,11 +56,12 @@ fn test_js_parser_matches_rust() {
         });
     }
 
-    eprintln!("Generated trace at {}", trace_path.display());
+    let sealed_path = temp_dir.path().join("test_trace.0.bin");
+    eprintln!("Generated trace at {}", sealed_path.display());
 
     // Export to JSONL using Rust parser (in-process to avoid cargo subprocess overhead)
     {
-        let reader = TraceReader::new(trace_path.to_str().unwrap()).unwrap();
+        let reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
         let file = std::fs::File::create(&jsonl_path).unwrap();
         let mut w = BufWriter::new(file);
         for e in &reader.all_events {
@@ -81,7 +82,7 @@ fn test_js_parser_matches_rust() {
     let test_output = Command::new("node")
         .args([
             test_script.to_str().unwrap(),
-            trace_path.to_str().unwrap(),
+            sealed_path.to_str().unwrap(),
             jsonl_path.to_str().unwrap(),
         ])
         .output()
