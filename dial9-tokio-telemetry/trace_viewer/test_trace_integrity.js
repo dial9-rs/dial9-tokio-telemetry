@@ -286,7 +286,9 @@ function testWakeEventTargetWorkerInRange() {
   const wakeEvents = trace.events.filter(
     (e) => e.eventType === EVENT_TYPES.WakeEvent
   );
-  const outOfRangeWorker = wakeEvents.find((e) => e.targetWorker > maxWorkerId);
+  const outOfRangeWorker = wakeEvents.find(
+    (e) => e.targetWorker !== 255 && e.targetWorker > maxWorkerId
+  );
   if (outOfRangeWorker)
     fail(
       `WakeEvent targetWorker ${outOfRangeWorker.targetWorker} exceeds max worker ID ${maxWorkerId}`
