@@ -477,7 +477,7 @@
         <script src="trace_parser.js"></script>
         <script>
             // Use the external parser
-            const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples, buildWorkerSpans } = TraceParser;
+            const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples, buildWorkerSpans, attachCpuSamples } = TraceParser;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -760,42 +760,9 @@
                 console.log(`Found ${queueSamples.length} global queue samples`);
 
                 // Attach CPU samples to poll spans they fall within
-                // Use binary search: polls are sorted by start time per worker
                 if (trace.cpuSamples.length > 0) {
-                    for (const sample of trace.cpuSamples) {
-                        const spans = workerSpans[sample.workerId];
-                        if (!spans) { sample.spawnLoc = null; continue; }
-                        if (sample.source !== 1) spans.cpuSampleTimes.push(sample.timestamp);
-                        const polls = spans.polls;
-                        const ts = sample.timestamp;
-                        // Binary search for rightmost poll with start <= ts
-                        let lo = 0, hi = polls.length - 1, found = false;
-                        while (lo <= hi) {
-                            const mid = (lo + hi) >> 1;
-                            if (polls[mid].start <= ts) { lo = mid + 1; } else { hi = mid - 1; }
-                        }
-                        // hi is now the index of the last poll with start <= ts
-                        if (hi >= 0 && ts <= polls[hi].end) {
-                            const poll = polls[hi];
-                            if (sample.source === 1) {
-                                (poll.schedSamples ??= []).push(sample);
-                            } else {
-                                (poll.cpuSamples ??= []).push(sample);
-                            }
-                            sample.spawnLoc = poll.spawnLoc;
-                            found = true;
-                        }
-                        if (!found) sample.spawnLoc = null;
-                    }
-                    let pollsWithSamples = 0;
-                    let pollsWithSched = 0;
-                    for (const w of workerIds) {
-                        for (const p of workerSpans[w].polls) {
-                            if (p.cpuSamples) pollsWithSamples++;
-                            if (p.schedSamples) pollsWithSched++;
-                        }
-                    }
-                    console.log(`CPU samples: ${trace.cpuSamples.length}, polls with cpu samples: ${pollsWithSamples}, polls with sched events: ${pollsWithSched}`);
+                    const { pollsWithCpuSamples, pollsWithSchedSamples } = attachCpuSamples(trace.cpuSamples, workerSpans);
+                    console.log(`CPU samples: ${trace.cpuSamples.length}, polls with cpu samples: ${pollsWithCpuSamples}, polls with sched events: ${pollsWithSchedSamples}`);
                 }
 
                 // Per-worker local queue samples (from events that have local_queue)
