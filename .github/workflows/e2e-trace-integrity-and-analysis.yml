@@ -1,4 +1,4 @@
-name: Trace Integrity
+name: Trace Integrity & Analysis
 on:
   pull_request:
     paths:
@@ -15,8 +15,8 @@ permissions:
   contents: read
 
 jobs:
-  trace-integrity:
-    name: Trace Integrity
+  trace-integrity-and-analysis:
+    name: Trace Integrity & Analysis
     runs-on: ubuntu-latest
     services:
       dynamodb-local:
@@ -40,3 +40,5 @@ jobs:
           node-version: 24
       - name: Check trace integrity
         run: node dial9-tokio-telemetry/trace_viewer/test_trace_integrity.js
+      - name: Check trace analysis
+        run: node dial9-tokio-telemetry/trace_viewer/test_trace_analysis.js
