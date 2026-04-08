@@ -3,7 +3,7 @@
 /// Identifies where a process is running, used as the `instance_path`
 /// component in S3 object keys.
 #[derive(Clone)]
-pub(crate) struct InstanceIdentity(String);
+pub struct InstanceIdentity(String);
 
 impl From<String> for InstanceIdentity {
     fn from(s: String) -> Self {
@@ -19,7 +19,7 @@ impl From<&str> for InstanceIdentity {
 
 impl InstanceIdentity {
     /// Auto-detect identity from the system hostname.
-    pub(crate) fn from_hostname() -> Self {
+    pub fn from_hostname() -> Self {
         let hostname = hostname::get()
             .ok()
             .and_then(|h| h.into_string().ok())
@@ -28,7 +28,7 @@ impl InstanceIdentity {
     }
 
     /// The identity string.
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
