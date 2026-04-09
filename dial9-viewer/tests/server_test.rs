@@ -331,3 +331,73 @@ async fn trace_handles_uncompressed_data() {
     let body = resp.bytes().await.unwrap();
     check!(body.as_ref() == data);
 }
+
+/// Full end-to-end smoke test: simulates the browser flow.
+/// 1. Upload gzipped trace segments to fake S3
+/// 2. Search for them via /api/search
+/// 3. Pick keys from the search results
+/// 4. Fetch concatenated trace via /api/trace
+/// 5. Verify the concatenated output matches the original data
+#[tokio::test]
+async fn e2e_search_then_view() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    // Simulate two trace segments from the same time bucket
+    let seg1 = b"SEGMENT_ONE_BINARY_DATA_HERE";
+    let seg2 = b"SEGMENT_TWO_BINARY_DATA_HERE";
+
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/1910/checkout-api/us-east-1/host1/1000-0.bin.gz",
+        &gzip_bytes(seg1),
+    )
+    .await;
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/1910/checkout-api/us-east-1/host1/1000-1.bin.gz",
+        &gzip_bytes(seg2),
+    )
+    .await;
+
+    // Step 1: Search — like the browser would
+    let search_resp: Vec<ObjectInfo> = client
+        .get(format!(
+            "{base}/api/search?q=2026-04-09/1910/checkout-api/&bucket=traces-bucket"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    check!(search_resp.len() == 2);
+
+    // Step 2: Build the trace URL from search results — like the browser's viewSelected()
+    let keys: Vec<&str> = search_resp.iter().map(|o| o.key.as_str()).collect();
+    let keys_param = keys.join(",");
+
+    let trace_resp = client
+        .get(format!(
+            "{base}/api/trace?keys={}&bucket=traces-bucket",
+            urlencoding::encode(&keys_param)
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    check!(trace_resp.status().as_u16() == 200);
+    let body = trace_resp.bytes().await.unwrap();
+
+    // The concatenated output should be seg1 + seg2 (order depends on S3 listing)
+    check!(body.len() == seg1.len() + seg2.len());
+    // Both segments should be present
+    let body_slice = body.as_ref();
+    let has_seg1 = body_slice.windows(seg1.len()).any(|w| w == seg1.as_slice());
+    let has_seg2 = body_slice.windows(seg2.len()).any(|w| w == seg2.as_slice());
+    check!(has_seg1);
+    check!(has_seg2);
+}
