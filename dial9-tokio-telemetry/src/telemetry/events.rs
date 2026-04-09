@@ -301,6 +301,7 @@ pub(crate) enum RawEvent {
         target_worker: u8,
     },
     /// A CPU stack trace sample from perf_event, attributed to a worker thread.
+    #[cfg_attr(not(feature = "cpu-profiling"), allow(dead_code))]
     CpuSample(Box<CpuSampleData>),
 }
 

@@ -8,7 +8,11 @@ fn do_sleep() {
 }
 
 fn main() {
-    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 1);
+    }
+
     let sampler = Arc::new(Mutex::new(
         PerfSampler::new_per_thread(SamplerConfig {
             frequency_hz: 1,

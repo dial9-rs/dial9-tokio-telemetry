@@ -1,5 +1,6 @@
 //! Integration test: sched event capture via per-thread perf profiling.
 
+#[cfg(feature = "cpu-profiling")]
 mod common;
 
 #[cfg(feature = "cpu-profiling")]

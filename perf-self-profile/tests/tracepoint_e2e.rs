@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use dial9_perf_self_profile::tracepoint::TracepointDef;
 use dial9_perf_self_profile::{PerfSampler, SamplerConfig};
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};

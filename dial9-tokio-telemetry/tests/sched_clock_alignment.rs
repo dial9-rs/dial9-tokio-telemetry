@@ -7,6 +7,7 @@
 //! CLOCK_MONOTONIC_RAW instead of CLOCK_MONOTONIC, timestamps would drift
 //! and events would fall outside the expected windows.
 
+#[cfg(feature = "cpu-profiling")]
 mod common;
 
 #[cfg(feature = "cpu-profiling")]

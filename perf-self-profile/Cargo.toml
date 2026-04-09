@@ -12,9 +12,11 @@ targets = ["x86_64-unknown-linux-gnu"]
 all-features = true
 
 [dependencies]
+dial9-trace-format = { workspace = true }
+tracing = "0.1.44"
+
+[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 blazesym = "0.2"
-dial9-trace-format = { workspace = true }
 perf-event-data = "0.1.8"
 perf-event-open-sys2 = "5.0.6"
-tracing = "0.1.44"

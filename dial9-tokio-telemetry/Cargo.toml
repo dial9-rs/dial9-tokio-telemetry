@@ -97,6 +97,10 @@ name = "debug_timing"
 required-features = ["task-dump"]
 
 [[example]]
+name = "blocking_pool_tracking"
+required-features = ["cpu-profiling"]
+
+[[example]]
 name = "blocking_sleep"
 required-features = ["cpu-profiling"]
 

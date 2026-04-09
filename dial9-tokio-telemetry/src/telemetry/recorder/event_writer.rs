@@ -37,7 +37,7 @@ impl EventWriter {
     }
 
     /// Encode a RawEvent into a batch and write it through the writer.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "cpu-profiling"))]
     pub(crate) fn write_raw_event(
         &mut self,
         raw: crate::telemetry::events::RawEvent,

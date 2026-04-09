@@ -12,6 +12,7 @@
 //! by finding the `PollStart` event whose time interval (PollStart →
 //! corresponding PollEnd) contains the burn window.
 
+#[cfg(feature = "cpu-profiling")]
 mod common;
 
 #[cfg(feature = "cpu-profiling")]

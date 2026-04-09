@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
 use std::collections::HashSet;
 use std::sync::Arc;
