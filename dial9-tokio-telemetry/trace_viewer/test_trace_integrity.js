@@ -3,9 +3,9 @@
 
 const fs = require("fs");
 const path = require("path");
-const zlib = require("zlib");
 const { parseTrace, EVENT_TYPES } = require("./trace_parser.js");
 
+async function main() {
 const tracePath = process.argv[2] || path.join(__dirname, "demo-trace.bin");
 
 if (!fs.existsSync(tracePath)) {
@@ -21,15 +21,6 @@ if (stat.size === 0) {
   process.exit(1);
 }
 
-let rawBuf = fs.readFileSync(tracePath);
-if (rawBuf[0] === 0x1f && rawBuf[1] === 0x8b) {
-  rawBuf = zlib.gunzipSync(rawBuf);
-}
-const buffer = rawBuf.buffer.slice(
-  rawBuf.byteOffset,
-  rawBuf.byteOffset + rawBuf.byteLength
-);
-
 function fail(msg) {
   console.log(`✗ ${msg}`);
   process.exit(1);
@@ -39,7 +30,7 @@ function pass(msg) {
   console.log(`✓ ${msg}`);
 }
 
-const trace = parseTrace(buffer);
+const trace = await parseTrace(fs.readFileSync(tracePath));
 console.log(`Parsed ${trace.events.length} events (version ${trace.version})`);
 
 function testHasEvents() {
@@ -343,3 +334,6 @@ testWakeEventTargetWorkerInRange();
 testAllPollStartsHaveTaskId();
 
 console.log("\n✓ All checks passed!");
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });

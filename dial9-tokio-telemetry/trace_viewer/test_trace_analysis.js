@@ -3,7 +3,6 @@
 
 const fs = require("fs");
 const path = require("path");
-const zlib = require("zlib");
 const { EVENT_TYPES, parseTrace } = require("./trace_parser.js");
 const {
   buildWorkerSpans,
@@ -18,21 +17,13 @@ const {
   buildFgData,
 } = require("./trace_analysis.js");
 
+async function main() {
 const tracePath = process.argv[2] || path.join(__dirname, "demo-trace.bin");
 
 if (!fs.existsSync(tracePath)) {
   console.error(`Trace file not found: ${tracePath}`);
   process.exit(1);
 }
-
-let rawBuf = fs.readFileSync(tracePath);
-if (rawBuf[0] === 0x1f && rawBuf[1] === 0x8b) {
-  rawBuf = zlib.gunzipSync(rawBuf);
-}
-const buffer = rawBuf.buffer.slice(
-  rawBuf.byteOffset,
-  rawBuf.byteOffset + rawBuf.byteLength
-);
 
 function fail(msg) {
   console.log(`✗ ${msg}`);
@@ -43,7 +34,7 @@ function pass(msg) {
   console.log(`✓ ${msg}`);
 }
 
-const trace = parseTrace(buffer);
+const trace = await parseTrace(fs.readFileSync(tracePath));
 const evts = trace.events;
 
 const wSet = new Set();
@@ -423,3 +414,6 @@ testBuildFgData();
 testBuildFgDataEmpty();
 
 console.log("\n✓ All analysis checks passed!");
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });
