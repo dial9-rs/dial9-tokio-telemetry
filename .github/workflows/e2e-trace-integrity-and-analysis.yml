@@ -1,15 +1,6 @@
 name: Trace Integrity & Analysis
 on:
   pull_request:
-    paths:
-      - "dial9-trace-format/**"
-      - "dial9-trace-format-derive/**"
-      - "dial9-tokio-telemetry/trace_viewer/**"
-      - "dial9-tokio-telemetry/src/telemetry/events.rs"
-      - "dial9-tokio-telemetry/src/telemetry/format.rs"
-      - "examples/metrics-service/**"
-      - "scripts/regenerate_demo_trace.sh"
-      - ".github/workflows/e2e-trace-viewer.yml"
 
 permissions:
   contents: read
@@ -27,18 +18,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Regenerate demo trace
-        env:
-          AWS_ENDPOINT_URL: http://localhost:8000
-          AWS_ACCESS_KEY_ID: local
-          AWS_SECRET_ACCESS_KEY: local
-          AWS_DEFAULT_REGION: us-east-1
-          AWS_PROFILE: "fake-profile"
-        run: scripts/regenerate_demo_trace.sh
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Check trace integrity
-        run: node dial9-tokio-telemetry/trace_viewer/test_trace_integrity.js
-      - name: Check trace analysis
-        run: node dial9-tokio-telemetry/trace_viewer/test_trace_analysis.js
+      - name: E2E trace tests
+        run: scripts/e2e-trace-tests.sh

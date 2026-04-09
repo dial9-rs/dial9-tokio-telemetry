@@ -65,8 +65,6 @@ for (const e of evts) {
 
 // ── buildWorkerSpans ──
 
-console.log("\nbuildWorkerSpans:");
-
 const { workerSpans, perWorker, queueSamples } = buildWorkerSpans(
   evts,
   workerIds,
@@ -118,15 +116,7 @@ function testQueueSamplesExist() {
   pass(`${queueSamples.length} queue samples`);
 }
 
-testPollsHaveValidRange();
-testNoOverlappingPolls();
-testActiveRatiosInRange();
-testParksHaveValidRange();
-testQueueSamplesExist();
-
 // ── attachCpuSamples ──
-
-console.log("\nattachCpuSamples:");
 
 const cpuResult = attachCpuSamples(trace.cpuSamples, workerSpans);
 
@@ -162,12 +152,7 @@ function testCpuResultCounts() {
   );
 }
 
-testAttachedSamplesWithinPollBounds();
-testCpuResultCounts();
-
 // ── extractLocalQueueSamples ──
-
-console.log("\nextractLocalQueueSamples:");
 
 const { workerQueueSamples, maxLocalQueue } = extractLocalQueueSamples(
   perWorker,
@@ -188,12 +173,7 @@ function testMaxLocalQueue() {
   pass(`maxLocalQueue = ${maxLocalQueue}`);
 }
 
-testLocalQueueNonNegative();
-testMaxLocalQueue();
-
 // ── buildActiveTaskTimeline ──
-
-console.log("\nbuildActiveTaskTimeline:");
 
 const { activeTaskSamples, taskFirstPoll } = buildActiveTaskTimeline(
   trace.taskSpawnTimes,
@@ -215,12 +195,7 @@ function testCountNonNegative() {
   pass("Task counts non-negative");
 }
 
-testTimelineSorted();
-testCountNonNegative();
-
 // ── indexWakeEvents ──
-
-console.log("\nindexWakeEvents:");
 
 const { wakesByTask, wakesByWorker } = indexWakeEvents(evts);
 
@@ -256,13 +231,7 @@ function testWakeCountsConsistent() {
   pass(`${taskTotal} wake events indexed consistently`);
 }
 
-testWakesByTaskSorted();
-testWakesByWorkerSorted();
-testWakeCountsConsistent();
-
 // ── computeSchedulingDelays ──
-
-console.log("\ncomputeSchedulingDelays:");
 
 const schedDelays = computeSchedulingDelays(
   workerSpans,
@@ -300,14 +269,7 @@ function testDelaysSorted() {
   pass("schedDelays sorted by wakeTime");
 }
 
-testDelaysPositive();
-testDelaysBounded();
-testWakeBeforePoll();
-testDelaysSorted();
-
 // ── filterPointsOfInterest ──
-
-console.log("\nfilterPointsOfInterest:");
 
 function testLongPollFilter() {
   const pois = filterPointsOfInterest(
@@ -372,14 +334,7 @@ function testSortByWorst() {
   pass("sortByWorst produces descending order");
 }
 
-testLongPollFilter();
-testCpuSampledFilter();
-testWakeDelayFilter();
-testSortByWorst();
-
 // ── buildFlamegraphTree / flattenFlamegraph ──
-
-console.log("\nflamegraph:");
 
 function testFlamegraphTree() {
   const cpuSamples = trace.cpuSamples.filter((s) => s.source !== 1);
@@ -423,6 +378,45 @@ function testBuildFgDataEmpty() {
   pass("buildFgData returns null for empty samples");
 }
 
+// ── Run all tests ──
+
+console.log("\nbuildWorkerSpans:");
+testPollsHaveValidRange();
+testNoOverlappingPolls();
+testActiveRatiosInRange();
+testParksHaveValidRange();
+testQueueSamplesExist();
+
+console.log("\nattachCpuSamples:");
+testAttachedSamplesWithinPollBounds();
+testCpuResultCounts();
+
+console.log("\nextractLocalQueueSamples:");
+testLocalQueueNonNegative();
+testMaxLocalQueue();
+
+console.log("\nbuildActiveTaskTimeline:");
+testTimelineSorted();
+testCountNonNegative();
+
+console.log("\nindexWakeEvents:");
+testWakesByTaskSorted();
+testWakesByWorkerSorted();
+testWakeCountsConsistent();
+
+console.log("\ncomputeSchedulingDelays:");
+testDelaysPositive();
+testDelaysBounded();
+testWakeBeforePoll();
+testDelaysSorted();
+
+console.log("\nfilterPointsOfInterest:");
+testLongPollFilter();
+testCpuSampledFilter();
+testWakeDelayFilter();
+testSortByWorst();
+
+console.log("\nflamegraph:");
 testFlamegraphTree();
 testFlattenFlamegraph();
 testBuildFgData();
