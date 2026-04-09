@@ -37,7 +37,7 @@ aws-config = { version = "1", optional = true, default-features = false }
 flate2 = { version = "1" }
 time = { version = "0.3", features = ["formatting", "macros"], optional = true }
 metrique-writer = "0.1"
-metrique = { version = "0.1.20", features = ["local-format"] }
+metrique = { version = "0.1.23", features = ["local-format"] }
 
 [features]
 analysis = []
