@@ -17,7 +17,3 @@ pub(crate) mod metrics;
 /// Core telemetry types, recording, and trace I/O.
 pub mod telemetry;
 pub(crate) mod traced;
-
-#[cfg(feature = "task-dump")]
-/// Long-poll detection and async task dump collection.
-pub mod task_dump;
