@@ -32,17 +32,18 @@
     if (b.length < 2 || b[0] !== 0x1f || b[1] !== 0x8b) {
       return buf;
     }
-    if (typeof require !== "undefined") {
-      const zlib = require("zlib");
-      const decompressed = zlib.gunzipSync(Buffer.from(b));
-      return decompressed.buffer.slice(
-        decompressed.byteOffset,
-        decompressed.byteOffset + decompressed.byteLength
-      );
+    if (typeof DecompressionStream !== "undefined") {
+      return await new Response(
+        new Blob([b]).stream().pipeThrough(new DecompressionStream("gzip"))
+      ).arrayBuffer();
     }
-    return await new Response(
-      new Blob([b]).stream().pipeThrough(new DecompressionStream("gzip"))
-    ).arrayBuffer();
+    // Fallback for older Node.js without DecompressionStream
+    const zlib = require("zlib");
+    const decompressed = zlib.gunzipSync(Buffer.from(b));
+    return decompressed.buffer.slice(
+      decompressed.byteOffset,
+      decompressed.byteOffset + decompressed.byteLength
+    );
   }
 
   /**
