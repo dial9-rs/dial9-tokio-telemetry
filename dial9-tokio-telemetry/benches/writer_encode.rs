@@ -15,6 +15,7 @@ use dial9_tokio_telemetry::telemetry::format::{
 };
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TaskId, TraceWriter, WorkerId};
 use dial9_trace_format::encoder::Encoder;
+use tempfile::TempDir;
 
 /// Build a realistic batch simulating a worker thread's activity.
 ///
@@ -93,7 +94,8 @@ fn bench_writer_encode(c: &mut Criterion) {
             BenchmarkId::new("batches", num_batches),
             &batches,
             |b, batches| {
-                let mut writer = RotatingWriter::single_file("/dev/null").unwrap();
+                let tmp = TempDir::new().unwrap();
+                let mut writer = RotatingWriter::single_file(tmp.path().join("trace")).unwrap();
                 b.iter(|| {
                     for batch in batches {
                         writer.write_encoded_batch(batch).unwrap();
