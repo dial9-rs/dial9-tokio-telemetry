@@ -132,7 +132,7 @@ impl SchedProfiler {
         self.sampler.stop_tracking_current_thread()
     }
 
-    pub fn drain(&mut self, mut f: impl FnMut(RawCpuSample)) {
+    pub(crate) fn drain(&mut self, mut f: impl FnMut(RawCpuSample)) {
         self.sampler.for_each_sample(|sample| {
             f(RawCpuSample {
                 tid: sample.tid,

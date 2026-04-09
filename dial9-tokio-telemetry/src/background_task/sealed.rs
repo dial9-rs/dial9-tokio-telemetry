@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 /// A sealed trace segment ready for processing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SealedSegment {
+pub(crate) struct SealedSegment {
     pub(crate) path: PathBuf,
     pub(crate) index: u32,
 }
@@ -110,7 +110,7 @@ impl std::fmt::Display for ParseTimestampError {
 /// Matches files named `{stem}.{index}.bin` where `stem` matches the
 /// given base path's file stem. Ignores `.active` files and any files
 /// that don't match the expected naming pattern.
-pub fn find_sealed_segments(dir: &Path, stem: &str) -> std::io::Result<Vec<SealedSegment>> {
+pub(crate) fn find_sealed_segments(dir: &Path, stem: &str) -> std::io::Result<Vec<SealedSegment>> {
     let mut segments = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;

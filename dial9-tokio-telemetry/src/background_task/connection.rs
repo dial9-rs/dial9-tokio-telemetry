@@ -12,7 +12,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Circuit breaker for S3 upload attempts.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub enum CircuitBreaker {
+pub(crate) enum CircuitBreaker {
     /// S3 is reachable. Normal upload + delete.
     #[default]
     Closed,
@@ -25,12 +25,12 @@ pub enum CircuitBreaker {
 
 impl CircuitBreaker {
     /// Create a new closed (healthy) circuit breaker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::Closed
     }
 
     /// Whether uploads should be attempted right now.
-    pub fn should_attempt(&self) -> bool {
+    pub(crate) fn should_attempt(&self) -> bool {
         match self {
             Self::Closed => true,
             Self::Open { next_retry, .. } => Instant::now() >= *next_retry,
@@ -38,12 +38,12 @@ impl CircuitBreaker {
     }
 
     /// Record a successful upload. Closes the circuit.
-    pub fn on_success(&mut self) {
+    pub(crate) fn on_success(&mut self) {
         *self = Self::Closed;
     }
 
     /// Record a failed upload. Opens the circuit with exponential backoff.
-    pub fn on_failure(&mut self) {
+    pub(crate) fn on_failure(&mut self) {
         let backoff = match self {
             Self::Closed => INITIAL_BACKOFF,
             Self::Open { backoff, .. } => (*backoff * 2).min(MAX_BACKOFF),

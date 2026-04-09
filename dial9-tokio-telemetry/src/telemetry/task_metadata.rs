@@ -8,14 +8,17 @@ use std::hash::{Hash, Hasher};
 pub struct TaskId(pub(crate) u64);
 
 impl TaskId {
+    /// Create a `TaskId` from a raw `u32` value.
     pub fn from_u32(id: u32) -> Self {
         TaskId(id as u64)
     }
 
+    /// Convert to the underlying `u64` value.
     pub fn to_u64(self) -> u64 {
         self.0
     }
 
+    /// Returns the raw task ID.
     pub fn id(&self) -> u64 {
         self.0
     }

@@ -29,16 +29,20 @@ impl Default for TrackerConfig {
 /// A timestamped trace entry.
 pub type TraceEntry = (SystemTime, Arc<Trace>);
 
+/// Status of a monitored long-poll sentinel.
 #[derive(Debug, Clone)]
 pub enum SentinelStatus {
     /// Task is pending with a history of traces.
     /// Each entry contains the timestamp when the trace was captured and the trace itself.
     /// The SmallVec is optimized for the common case of a small number of traces.
     Pending(SmallVec<[TraceEntry; 4]>),
+    /// Task completed normally.
     Completed,
+    /// Task was cancelled (e.g. via `JoinHandle::abort`).
     Cancelled,
 }
 
+/// Shared sentinel for tracking a single long-running task.
 pub type Sentinel = Arc<ArcSwap<SentinelStatus>>;
 
 #[derive(Hash, Eq, PartialEq)]
@@ -57,10 +61,13 @@ pub struct SendCount(pub usize);
 /// Information about a detected long-running task.
 #[derive(Debug, Clone)]
 pub struct LongPollEvent {
+    /// Current status of the sentinel (always `Pending` when emitted).
     pub status: SentinelStatus,
+    /// How many times this sentinel has been reported.
     pub send_count: SendCount,
 }
 
+/// Tracks pending tasks and emits [`LongPollEvent`]s when they exceed the detection threshold.
 pub struct LongPollTracker {
     buckets: Vec<Vec<Sentinel>>,
     current_bucket: usize,
@@ -69,12 +76,28 @@ pub struct LongPollTracker {
     sentinel_rx: mpsc::UnboundedReceiver<Sentinel>,
 }
 
+impl std::fmt::Debug for LongPollTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LongPollTracker").finish_non_exhaustive()
+    }
+}
+
+/// Handle returned by [`LongPollTracker::new`] for receiving events and registering sentinels.
 pub struct TrackerHandle {
+    /// Receiver for long-poll detection events.
     pub rx: mpsc::UnboundedReceiver<LongPollEvent>,
+    /// Sender for registering new sentinels to track.
     pub sentinel_tx: mpsc::UnboundedSender<Sentinel>,
 }
 
+impl std::fmt::Debug for TrackerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrackerHandle").finish_non_exhaustive()
+    }
+}
+
 impl LongPollTracker {
+    /// Create a new tracker and its associated handle.
     pub fn new() -> (Self, TrackerHandle) {
         let (tx, rx) = mpsc::unbounded_channel();
         let (sentinel_tx, sentinel_rx) = mpsc::unbounded_channel();
@@ -89,6 +112,7 @@ impl LongPollTracker {
         (tracker, handle)
     }
 
+    /// Register a sentinel for long-poll tracking.
     pub fn add_sentinel(&mut self, sentinel: Sentinel) {
         self.buckets[0].push(sentinel);
     }
@@ -147,6 +171,7 @@ impl LongPollTracker {
         true
     }
 
+    /// Spawn the tracker as a background tokio task.
     pub fn spawn(mut self) {
         tokio::spawn(async move {
             loop {
@@ -160,6 +185,7 @@ impl LongPollTracker {
 }
 
 pin_project! {
+    /// Future wrapper that detects long-running polls and reports them via sentinels.
     pub struct DetectLongWait<F> {
         #[pin]
         inner: F,
