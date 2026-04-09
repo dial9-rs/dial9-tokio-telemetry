@@ -55,7 +55,7 @@ impl S3Backend {
         }
     }
 
-    #[cfg(test)]
+    /// Create from an existing S3 client (useful for testing with s3s).
     pub fn from_client(client: aws_sdk_s3::Client) -> Self {
         Self { client }
     }
