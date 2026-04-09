@@ -50,7 +50,6 @@ If you modify the trace format (event structure, encoding, parser, etc.), you MU
 Or manually:
 
 ```bash
-cd dial9-tokio-telemetry
 rm -f dial9-viewer/ui/demo-trace.bin
 cargo build --release -p metrics-service
 AWS_PROFILE=your-profile cargo run --release -p metrics-service --bin metrics-service -- --trace-path sched-trace.bin --demo

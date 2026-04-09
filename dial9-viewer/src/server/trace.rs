@@ -9,6 +9,7 @@ use std::io::Read;
 use crate::server::AppState;
 
 const MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024; // 50 MB
+const MAX_KEYS: usize = 100;
 
 #[derive(Deserialize)]
 pub struct TraceParams {
@@ -29,6 +30,12 @@ pub async fn get_trace(
     let keys: Vec<&str> = params.keys.split(',').filter(|k| !k.is_empty()).collect();
     if keys.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "keys is required".to_string()));
+    }
+    if keys.len() > MAX_KEYS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("too many keys (max {MAX_KEYS})"),
+        ));
     }
 
     let mut combined = Vec::new();
@@ -64,10 +71,29 @@ fn maybe_gunzip(data: &[u8]) -> Vec<u8> {
     if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
         let mut decoder = GzDecoder::new(data);
         let mut decompressed = Vec::new();
-        if decoder.read_to_end(&mut decompressed).is_ok() {
-            return decompressed;
+        let mut buf = [0u8; 8192];
+        loop {
+            match decoder.read(&mut buf) {
+                Ok(0) => return decompressed,
+                Ok(n) => {
+                    decompressed.extend_from_slice(&buf[..n]);
+                    if decompressed.len() > MAX_RESPONSE_BYTES {
+                        tracing::warn!(
+                            size = decompressed.len(),
+                            "decompressed data exceeds limit, truncating"
+                        );
+                        return decompressed;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "gzip header detected but decompression failed, returning raw bytes"
+                    );
+                    return data.to_vec();
+                }
+            }
         }
-        tracing::warn!("gzip header detected but decompression failed, returning raw bytes");
     }
     data.to_vec()
 }

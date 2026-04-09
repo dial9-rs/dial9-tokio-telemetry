@@ -48,12 +48,17 @@
             position: sticky; top: 0; background: #1a1a2e;
             text-align: left; padding: 8px 6px; color: #888;
             border-bottom: 1px solid #333; font-weight: 600;
+            cursor: pointer; user-select: none;
         }
+        thead th:hover { color: #bbb; }
+        thead th .sort-arrow { font-size: 0.7em; margin-left: 3px; }
         tbody tr { border-bottom: 1px solid #222; }
         tbody tr:hover { background: #222244; }
-        tbody td { padding: 6px; }
-        td.key { word-break: break-all; }
-        td.size, td.date { white-space: nowrap; color: #aaa; }
+        tbody td { padding: 6px; white-space: nowrap; }
+        td.key { word-break: break-all; white-space: normal; }
+        td.size, td.date { color: #aaa; }
+        td.service { color: #7ec8e3; }
+        td.host { color: #aaa; font-size: 0.8em; }
         td input[type="checkbox"] { accent-color: #6c63ff; }
         .status {
             padding: 40px; text-align: center; color: #666; font-size: 0.9em;
@@ -95,9 +100,12 @@
             <thead>
                 <tr>
                     <th style="width:30px"><input type="checkbox" id="select-all" /></th>
-                    <th>Key</th>
-                    <th style="width:80px">Size</th>
-                    <th style="width:160px">Last Modified</th>
+                    <th data-sort="service" onclick="sortBy('service')">Service<span class="sort-arrow"></span></th>
+                    <th data-sort="host" onclick="sortBy('host')">Host<span class="sort-arrow"></span></th>
+                    <th data-sort="traceStart" onclick="sortBy('traceStart')">Trace Start<span class="sort-arrow"></span></th>
+                    <th data-sort="segIndex" onclick="sortBy('segIndex')">Seg #<span class="sort-arrow"></span></th>
+                    <th data-sort="size" onclick="sortBy('size')">Size<span class="sort-arrow"></span></th>
+                    <th data-sort="last_modified" onclick="sortBy('last_modified')">Uploaded<span class="sort-arrow"></span></th>
                 </tr>
             </thead>
             <tbody id="results-body"></tbody>
@@ -127,14 +135,16 @@
     const selectionCount = document.getElementById('selection-count');
     const selectAllCb = document.getElementById('select-all');
 
-    // Pre-fill bucket from URL params
+    // Pre-fill from URL params first, then fetch server defaults
     const params = new URLSearchParams(window.location.search);
     if (params.get('bucket')) bucketInput.value = params.get('bucket');
     if (params.get('prefix')) searchInput.value = params.get('prefix');
 
-    // Detect if backend is available
-    let backendAvailable = true;
-    fetch('/api/search?bucket=_probe').catch(() => { backendAvailable = false; });
+    // Fetch server-configured defaults for any fields not set via URL
+    fetch('/api/config').then(r => r.json()).then(config => {
+        if (!bucketInput.value && config.default_bucket) bucketInput.value = config.default_bucket;
+        if (!searchInput.value && config.default_prefix) searchInput.value = config.default_prefix;
+    }).catch(e => console.warn('Failed to load config:', e));
 
     searchInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') doSearch();
@@ -147,7 +157,7 @@
     function esc(s) {
         const d = document.createElement('div');
         d.textContent = s;
-        return d.innerHTML;
+        return d.innerHTML.replace(/"/g, '&quot;');
     }
 
     function formatSize(bytes) {
@@ -190,7 +200,40 @@
         }
     }
 
+    function parseKey(key) {
+        // Expected: {YYYY-MM-DD}/{HHMM}/{service}/{host}/{epoch}-{index}.bin.gz
+        const parts = key.split('/');
+        if (parts.length >= 5) {
+            const file = parts[parts.length - 1];
+            // Parse epoch-index from filename like "1775138540-65.bin.gz"
+            const match = file.match(/^(\d+)-(\d+)\.bin/);
+            let traceStart = '', segIndex = '';
+            if (match) {
+                const epoch = parseInt(match[1], 10);
+                traceStart = formatDate(new Date(epoch * 1000).toISOString());
+                segIndex = match[2];
+            }
+            return {
+                service: parts[parts.length - 3],
+                host: parts[parts.length - 2],
+                traceStart,
+                segIndex,
+            };
+        }
+        return { service: '', host: key, traceStart: '', segIndex: '' };
+    }
+
+    let currentObjects = [];
+    let currentSort = { col: null, asc: true };
+
+    function sortBy(col) {
+        if (currentSort.col === col) currentSort.asc = !currentSort.asc;
+        else { currentSort.col = col; currentSort.asc = true; }
+        renderResults(currentObjects);
+    }
+
     function renderResults(objects) {
+        currentObjects = objects;
         resultsBody.innerHTML = '';
         if (objects.length === 0) {
             statusMsg.textContent = 'No results found.';
@@ -200,16 +243,44 @@
             return;
         }
 
+        // Parse all rows
+        let rows = objects.map(obj => ({ ...obj, parsed: parseKey(obj.key) }));
+
+        // Sort
+        if (currentSort.col) {
+            const col = currentSort.col;
+            const dir = currentSort.asc ? 1 : -1;
+            rows.sort((a, b) => {
+                let va, vb;
+                if (col === 'size') { va = a.size; vb = b.size; }
+                else if (col === 'segIndex') { va = parseInt(a.parsed.segIndex)||0; vb = parseInt(b.parsed.segIndex)||0; }
+                else if (col === 'last_modified') { va = a.last_modified || ''; vb = b.last_modified || ''; }
+                else { va = a.parsed[col] || ''; vb = b.parsed[col] || ''; }
+                return va < vb ? -dir : va > vb ? dir : 0;
+            });
+        }
+
+        // Update sort arrows
+        document.querySelectorAll('thead th .sort-arrow').forEach(el => el.textContent = '');
+        if (currentSort.col) {
+            const th = document.querySelector(`th[data-sort="${currentSort.col}"] .sort-arrow`);
+            if (th) th.textContent = currentSort.asc ? ' ▲' : ' ▼';
+        }
+
         statusMsg.style.display = 'none';
         resultsTable.style.display = '';
 
-        for (const obj of objects) {
+        for (const row of rows) {
+            const p = row.parsed;
             const tr = document.createElement('tr');
             tr.innerHTML = `
-                <td><input type="checkbox" class="row-cb" data-key="${esc(obj.key)}" /></td>
-                <td class="key">${esc(obj.key)}</td>
-                <td class="size">${formatSize(obj.size)}</td>
-                <td class="date">${formatDate(obj.last_modified)}</td>
+                <td><input type="checkbox" class="row-cb" data-key="${esc(row.key)}" /></td>
+                <td class="service">${esc(p.service)}</td>
+                <td class="host">${esc(p.host)}</td>
+                <td>${esc(p.traceStart)}</td>
+                <td>${esc(p.segIndex)}</td>
+                <td class="size">${formatSize(row.size)}</td>
+                <td class="date">${formatDate(row.last_modified)}</td>
             `;
             tr.querySelector('.row-cb').addEventListener('change', updateSelectionCount);
             resultsBody.appendChild(tr);

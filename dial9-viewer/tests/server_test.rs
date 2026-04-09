@@ -61,11 +61,7 @@ async fn start_server(state: AppState) -> String {
 
 #[tokio::test]
 async fn serves_static_files() {
-    let state = AppState {
-        backend: Arc::new(FakeBackend),
-        default_bucket: None,
-        default_prefix: None,
-    };
+    let state = AppState::new(Arc::new(FakeBackend), None, None);
     let base = start_server(state).await;
     let client = reqwest::Client::new();
 
@@ -90,11 +86,7 @@ async fn serves_static_files() {
 
 #[tokio::test]
 async fn search_requires_bucket() {
-    let state = AppState {
-        backend: Arc::new(FakeBackend),
-        default_bucket: None,
-        default_prefix: None,
-    };
+    let state = AppState::new(Arc::new(FakeBackend), None, None);
     let base = start_server(state).await;
     let client = reqwest::Client::new();
 
@@ -108,11 +100,7 @@ async fn search_requires_bucket() {
 
 #[tokio::test]
 async fn search_uses_default_bucket() {
-    let state = AppState {
-        backend: Arc::new(FakeBackend),
-        default_bucket: Some("my-bucket".into()),
-        default_prefix: None,
-    };
+    let state = AppState::new(Arc::new(FakeBackend), Some("my-bucket".into()), None);
     let base = start_server(state).await;
     let client = reqwest::Client::new();
 
@@ -128,11 +116,7 @@ async fn search_uses_default_bucket() {
 
 #[tokio::test]
 async fn trace_requires_keys() {
-    let state = AppState {
-        backend: Arc::new(FakeBackend),
-        default_bucket: Some("test-bucket".into()),
-        default_prefix: None,
-    };
+    let state = AppState::new(Arc::new(FakeBackend), Some("test-bucket".into()), None);
     let base = start_server(state).await;
     let client = reqwest::Client::new();
 
@@ -142,6 +126,46 @@ async fn trace_requires_keys() {
         .await
         .unwrap();
     check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn config_returns_defaults() {
+    let state = AppState::new(
+        Arc::new(FakeBackend),
+        Some("my-bucket".into()),
+        Some("my-prefix".into()),
+    );
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp: serde_json::Value = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp["default_bucket"] == "my-bucket");
+    check!(resp["default_prefix"] == "my-prefix");
+}
+
+#[tokio::test]
+async fn config_returns_nulls_when_no_defaults() {
+    let state = AppState::new(Arc::new(FakeBackend), None, None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp: serde_json::Value = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp["default_bucket"].is_null());
+    check!(resp["default_prefix"].is_null());
 }
 
 // --- s3s integration tests ---
@@ -182,11 +206,7 @@ async fn setup_s3_test(
     // but they share the same filesystem root)
     let backend = S3Backend::from_client(fake_s3_client(s3_root.path()));
 
-    let state = AppState {
-        backend: Arc::new(backend),
-        default_bucket,
-        default_prefix,
-    };
+    let state = AppState::new(Arc::new(backend), default_bucket, default_prefix);
     let base = start_server(state).await;
     (upload_client, base, s3_root)
 }

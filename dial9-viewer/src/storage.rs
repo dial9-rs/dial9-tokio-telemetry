@@ -70,6 +70,7 @@ impl StorageBackend for S3Backend {
         let bucket = bucket.to_string();
         let prefix = prefix.to_string();
         Box::pin(async move {
+            const MAX_RESULTS: usize = 1000;
             let mut objects = Vec::new();
             let mut continuation: Option<String> = None;
 
@@ -98,6 +99,11 @@ impl StorageBackend for S3Backend {
                     }
                 }
 
+                if objects.len() >= MAX_RESULTS {
+                    objects.truncate(MAX_RESULTS);
+                    break;
+                }
+
                 if resp.is_truncated() == Some(true) {
                     continuation = resp.next_continuation_token().map(|s| s.to_string());
                 } else {
@@ -117,6 +123,8 @@ impl StorageBackend for S3Backend {
         let bucket = bucket.to_string();
         let key = key.to_string();
         Box::pin(async move {
+            use aws_sdk_s3::operation::get_object::GetObjectError;
+
             let resp = self
                 .client
                 .get_object()
@@ -124,13 +132,11 @@ impl StorageBackend for S3Backend {
                 .key(&key)
                 .send()
                 .await
-                .map_err(|e| {
-                    let msg = e.to_string();
-                    if msg.contains("NoSuchKey") {
+                .map_err(|e| match e.into_service_error() {
+                    GetObjectError::NoSuchKey(_) => {
                         StorageError::NotFound(format!("{bucket}/{key}"))
-                    } else {
-                        StorageError::Other(msg)
                     }
+                    other => StorageError::Other(other.to_string()),
                 })?;
 
             let bytes = resp

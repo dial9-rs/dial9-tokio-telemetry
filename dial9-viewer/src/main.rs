@@ -50,11 +50,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let backend = dial9_viewer::storage::S3Backend::from_env().await;
-    let app_state = dial9_viewer::server::AppState {
-        backend: std::sync::Arc::new(backend),
-        default_bucket: cli.bucket.clone(),
-        default_prefix: cli.prefix.clone(),
-    };
+    let app_state = dial9_viewer::server::AppState::new(
+        std::sync::Arc::new(backend),
+        cli.bucket.clone(),
+        cli.prefix.clone(),
+    );
 
     let app = dial9_viewer::server::router(app_state, &ui_dir);
 

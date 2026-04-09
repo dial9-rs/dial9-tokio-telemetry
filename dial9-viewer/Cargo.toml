@@ -4,12 +4,19 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
 description = "CLI trace viewer and S3 browser for dial9-tokio-telemetry"
+
+[features]
+dev-server = ["dep:s3s", "dep:s3s-fs", "dep:s3s-aws", "dep:tempfile"]
 
 [[bin]]
 name = "dial9-viewer"
 path = "src/main.rs"
+
+[[bin]]
+name = "dev-server"
+path = "src/bin/dev_server.rs"
+required-features = ["dev-server"]
 
 [dependencies]
 axum = "0.8"
@@ -18,16 +25,19 @@ flate2 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }
 anyhow = "1"
+s3s = { version = "0.13.0", optional = true }
+s3s-fs = { version = "0.13.0", optional = true }
+s3s-aws = { version = "0.13.0", optional = true }
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 s3s = "0.13.0"
 s3s-fs = "0.13.0"

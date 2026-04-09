@@ -730,7 +730,8 @@
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const arrayBuffer = await response.arrayBuffer();
                     loadAbortController = null;
-                    trace = parseTrace(await maybeGunzip(arrayBuffer));
+                    const gunzipped = await maybeGunzip(arrayBuffer);
+                    trace = parseTrace(gunzipped);
                     processTrace();
                     showViewer(url.split('/').pop() || 'trace.bin');
                 } catch (err) {
