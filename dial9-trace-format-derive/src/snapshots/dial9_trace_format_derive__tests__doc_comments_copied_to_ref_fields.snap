@@ -1,0 +1,54 @@
+---
+source: dial9-trace-format-derive/src/lib.rs
+assertion_line: 218
+expression: "expand_to_string(quote!\n{\n    #[doc = r\" Root documentation\"] struct DocEvent\n    {\n        #[traceevent(timestamp)] #[doc = r\" Event timestamp in nanoseconds.\"]\n        timestamp_ns: u64, #[doc = r\" The worker thread ID.\"] worker_id: u64,\n        #[doc = r\" Number of items in the local queue.\"] local_queue: u8,\n    }\n})"
+---
+/// Root documentation
+#[derive(Debug, Clone)]
+struct DocEventRef<'a> {
+    /// Event timestamp in nanoseconds.
+    pub timestamp_ns: u64,
+    /// The worker thread ID.
+    pub worker_id: <u64 as ::dial9_trace_format::TraceField>::Ref<'a>,
+    /// Number of items in the local queue.
+    pub local_queue: <u8 as ::dial9_trace_format::TraceField>::Ref<'a>,
+}
+impl ::dial9_trace_format::TraceEvent for DocEvent {
+    type Ref<'a> = DocEventRef<'a>;
+    fn event_name() -> &'static str {
+        "DocEvent"
+    }
+    fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
+        vec![
+            ::dial9_trace_format::schema::FieldDef { name : "worker_id".to_string(),
+            field_type : < u64 as ::dial9_trace_format::TraceField > ::field_type(), },
+            ::dial9_trace_format::schema::FieldDef { name : "local_queue".to_string(),
+            field_type : < u8 as ::dial9_trace_format::TraceField > ::field_type(), }
+        ]
+    }
+    fn timestamp(&self) -> u64 {
+        self.timestamp_ns
+    }
+    fn encode_fields<W: ::std::io::Write>(
+        &self,
+        enc: &mut ::dial9_trace_format::EventEncoder<'_, W>,
+    ) -> ::std::io::Result<()> {
+        <u64 as ::dial9_trace_format::TraceField>::encode(&self.worker_id, enc)?;
+        <u8 as ::dial9_trace_format::TraceField>::encode(&self.local_queue, enc)?;
+        Ok(())
+    }
+    fn decode<'a>(
+        timestamp_ns: Option<u64>,
+        fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
+    ) -> Option<Self::Ref<'a>> {
+        Some(DocEventRef {
+            timestamp_ns: timestamp_ns?,
+            worker_id: <u64 as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(0usize)?,
+            )?,
+            local_queue: <u8 as ::dial9_trace_format::TraceField>::decode_ref(
+                fields.get(1usize)?,
+            )?,
+        })
+    }
+}
