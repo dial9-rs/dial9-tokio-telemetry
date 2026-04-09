@@ -310,8 +310,8 @@
         if (keys.length === 0) return;
 
         const bucket = bucketInput.value.trim();
-        const keysParam = keys.join(',');
-        const traceUrl = `/api/trace?bucket=${encodeURIComponent(bucket)}&keys=${encodeURIComponent(keysParam)}`;
+        const keysParams = keys.map(k => `keys=${encodeURIComponent(k)}`).join('&');
+        const traceUrl = `/api/trace?bucket=${encodeURIComponent(bucket)}&${keysParams}`;
         window.open(`index.html?trace=${encodeURIComponent(traceUrl)}`, '_blank');
     }
     </script>

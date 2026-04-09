@@ -305,7 +305,9 @@ async fn trace_fetches_and_concatenates() {
     put_object(&s3, "test-bucket", "seg2.bin.gz", &gzip_bytes(trace2)).await;
 
     let resp = client
-        .get(format!("{base}/api/trace?keys=seg1.bin.gz,seg2.bin.gz"))
+        .get(format!(
+            "{base}/api/trace?keys=seg1.bin.gz&keys=seg2.bin.gz"
+        ))
         .send()
         .await
         .unwrap();
@@ -398,12 +400,15 @@ async fn e2e_search_then_view() {
 
     // Step 2: Build the trace URL from search results — like the browser's viewSelected()
     let keys: Vec<&str> = search_resp.iter().map(|o| o.key.as_str()).collect();
-    let keys_param = keys.join(",");
+    let keys_param: String = keys
+        .iter()
+        .map(|k| format!("keys={}", urlencoding::encode(k)))
+        .collect::<Vec<_>>()
+        .join("&");
 
     let trace_resp = client
         .get(format!(
-            "{base}/api/trace?keys={}&bucket=traces-bucket",
-            urlencoding::encode(&keys_param)
+            "{base}/api/trace?{keys_param}&bucket=traces-bucket",
         ))
         .send()
         .await

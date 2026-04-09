@@ -84,10 +84,10 @@ impl StorageBackend for S3Backend {
                     req = req.continuation_token(token);
                 }
 
-                let resp = req
-                    .send()
-                    .await
-                    .map_err(|e| StorageError::Other(e.to_string()))?;
+                let resp = req.send().await.map_err(|e| {
+                    use aws_sdk_s3::error::DisplayErrorContext;
+                    StorageError::Other(format!("{}", DisplayErrorContext(&e)))
+                })?;
 
                 for obj in resp.contents() {
                     if let Some(key) = obj.key() {
@@ -123,8 +123,6 @@ impl StorageBackend for S3Backend {
         let bucket = bucket.to_string();
         let key = key.to_string();
         Box::pin(async move {
-            use aws_sdk_s3::operation::get_object::GetObjectError;
-
             let resp = self
                 .client
                 .get_object()
@@ -132,11 +130,16 @@ impl StorageBackend for S3Backend {
                 .key(&key)
                 .send()
                 .await
-                .map_err(|e| match e.into_service_error() {
-                    GetObjectError::NoSuchKey(_) => {
-                        StorageError::NotFound(format!("{bucket}/{key}"))
+                .map_err(|e| {
+                    use aws_sdk_s3::error::DisplayErrorContext;
+                    use aws_sdk_s3::operation::get_object::GetObjectError;
+
+                    match e.into_service_error() {
+                        GetObjectError::NoSuchKey(_) => {
+                            StorageError::NotFound(format!("{bucket}/{key}"))
+                        }
+                        other => StorageError::Other(format!("{}", DisplayErrorContext(&other))),
                     }
-                    other => StorageError::Other(other.to_string()),
                 })?;
 
             let bytes = resp

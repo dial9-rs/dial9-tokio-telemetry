@@ -34,7 +34,7 @@ Open `http://localhost:3000` to browse traces. Enter a search prefix (e.g. `2026
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/search?q=<prefix>&bucket=<bucket>` | List S3 objects matching the prefix |
-| `GET /api/trace?keys=<k1,k2,...>&bucket=<bucket>` | Fetch, gunzip, and concatenate trace segments |
+| `GET /api/trace?keys=<k1>&keys=<k2>&bucket=<bucket>` | Fetch, gunzip, and concatenate trace segments |
 
 The trace endpoint returns raw binary data (`application/octet-stream`) suitable for loading directly in the trace viewer via `?trace=` URL parameter. Maximum response size is 50 MB.
 

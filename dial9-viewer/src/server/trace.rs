@@ -1,8 +1,10 @@
 use axum::body::Body;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum_extra::extract::Query;
 use flate2::read::GzDecoder;
+use futures::future::join_all;
 use serde::Deserialize;
 use std::io::Read;
 
@@ -13,8 +15,9 @@ const MAX_KEYS: usize = 100;
 
 #[derive(Deserialize)]
 pub struct TraceParams {
-    /// Comma-separated S3 keys
-    pub keys: String,
+    /// S3 keys (repeated query param: ?keys=a&keys=b)
+    #[serde(default)]
+    pub keys: Vec<String>,
     pub bucket: Option<String>,
 }
 
@@ -27,7 +30,12 @@ pub async fn get_trace(
         .or(state.default_bucket.clone())
         .ok_or((StatusCode::BAD_REQUEST, "bucket is required".to_string()))?;
 
-    let keys: Vec<&str> = params.keys.split(',').filter(|k| !k.is_empty()).collect();
+    let keys: Vec<&str> = params
+        .keys
+        .iter()
+        .map(|k| k.as_str())
+        .filter(|k| !k.is_empty())
+        .collect();
     if keys.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "keys is required".to_string()));
     }
@@ -38,15 +46,14 @@ pub async fn get_trace(
         ));
     }
 
+    let fetches = keys
+        .iter()
+        .map(|key| state.backend.get_object(&bucket, key));
+    let results = join_all(fetches).await;
+
     let mut combined = Vec::new();
-
-    for key in &keys {
-        let data = state
-            .backend
-            .get_object(&bucket, key)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
+    for result in results {
+        let data = result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let raw = maybe_gunzip(&data);
 
         if combined.len() + raw.len() > MAX_RESPONSE_BYTES {

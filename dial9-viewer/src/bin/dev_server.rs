@@ -85,10 +85,14 @@ async fn main() -> anyhow::Result<()> {
     let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
     let app = dial9_viewer::server::router(state, &ui_dir);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    tracing::info!("dial9-viewer dev server listening on http://localhost:3000");
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3000);
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+    tracing::info!("dial9-viewer dev server listening on http://localhost:{port}");
     tracing::info!("bucket={bucket}, prefix=traces");
-    tracing::info!("try: http://localhost:3000/browser.html");
+    tracing::info!("try: http://localhost:{port}/browser.html");
     tracing::info!("search for: 2026-04-09/");
 
     axum::serve(listener, app)
