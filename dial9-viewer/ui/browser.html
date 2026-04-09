@@ -4,9 +4,245 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>dial9 Trace Browser</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+            background: #1a1a2e; color: #e0e0e0;
+            display: flex; flex-direction: column; height: 100vh;
+        }
+        header {
+            padding: 12px 20px; background: #16213e;
+            border-bottom: 1px solid #333; flex-shrink: 0;
+        }
+        header h1 { font-size: 1.1em; color: #6c63ff; display: inline; }
+        header span { font-size: 0.8em; color: #666; margin-left: 8px; }
+        .controls {
+            padding: 12px 20px; background: #16213e;
+            border-bottom: 1px solid #333; flex-shrink: 0;
+            display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+        }
+        .controls label { font-size: 0.8em; color: #888; }
+        .controls input[type="text"] {
+            background: #2a2a4a; border: 1px solid #444; color: #e0e0e0;
+            padding: 6px 10px; border-radius: 4px; font-size: 0.9em;
+            font-family: inherit;
+        }
+        #bucket-input { width: 180px; }
+        #search-input { flex: 1; min-width: 200px; }
+        button {
+            background: #2a2a4a; border: 1px solid #444; color: #ccc;
+            padding: 6px 14px; border-radius: 4px; cursor: pointer;
+            font-size: 0.85em; font-family: inherit;
+        }
+        button:hover { background: #3a3a5a; }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+        button.primary { background: #6c63ff; border-color: #6c63ff; color: #fff; }
+        button.primary:hover { background: #5a52e0; }
+        button.primary:disabled { background: #4a4a6a; border-color: #4a4a6a; }
+        .results-area {
+            flex: 1; overflow-y: auto; padding: 0 20px;
+        }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+        thead th {
+            position: sticky; top: 0; background: #1a1a2e;
+            text-align: left; padding: 8px 6px; color: #888;
+            border-bottom: 1px solid #333; font-weight: 600;
+        }
+        tbody tr { border-bottom: 1px solid #222; }
+        tbody tr:hover { background: #222244; }
+        tbody td { padding: 6px; }
+        td.key { word-break: break-all; }
+        td.size, td.date { white-space: nowrap; color: #aaa; }
+        td input[type="checkbox"] { accent-color: #6c63ff; }
+        .status {
+            padding: 40px; text-align: center; color: #666; font-size: 0.9em;
+        }
+        .status.error { color: #ff6b6b; }
+        .actions {
+            padding: 8px 20px; background: #16213e;
+            border-top: 1px solid #333; flex-shrink: 0;
+            display: flex; gap: 8px; align-items: center;
+        }
+        .actions .count { font-size: 0.8em; color: #888; margin-left: auto; }
+        footer {
+            padding: 6px 20px; font-size: 0.75em; color: #444;
+            border-top: 1px solid #222; flex-shrink: 0;
+        }
+        footer a { color: #6c63ff; text-decoration: none; }
+    </style>
 </head>
 <body>
-    <h1>dial9 Trace Browser</h1>
-    <p>Placeholder — will be replaced in Task 5.</p>
+    <header>
+        <h1>dial9 Trace Browser</h1>
+        <span>search &amp; view traces from S3</span>
+    </header>
+
+    <div class="controls">
+        <label for="bucket-input">Bucket:</label>
+        <input type="text" id="bucket-input" placeholder="my-trace-bucket" />
+        <label for="search-input">Search:</label>
+        <input type="text" id="search-input"
+               placeholder="prefix, e.g. 2026-04-09/1910/checkout-api" />
+        <button id="search-btn" onclick="doSearch()">Search</button>
+    </div>
+
+    <div class="results-area" id="results-area">
+        <div class="status" id="status-msg">
+            Enter a bucket and search prefix, then click Search.
+        </div>
+        <table id="results-table" style="display:none">
+            <thead>
+                <tr>
+                    <th style="width:30px"><input type="checkbox" id="select-all" /></th>
+                    <th>Key</th>
+                    <th style="width:80px">Size</th>
+                    <th style="width:160px">Last Modified</th>
+                </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+        </table>
+    </div>
+
+    <div class="actions">
+        <button onclick="selectAll(true)">Select All</button>
+        <button onclick="selectAll(false)">Deselect All</button>
+        <button class="primary" id="view-btn" onclick="viewSelected()" disabled>
+            View Selected in Trace Viewer
+        </button>
+        <span class="count" id="selection-count"></span>
+    </div>
+
+    <footer>
+        <a href="index.html">Open Trace Viewer</a> (drag &amp; drop)
+    </footer>
+
+    <script>
+    const bucketInput = document.getElementById('bucket-input');
+    const searchInput = document.getElementById('search-input');
+    const statusMsg = document.getElementById('status-msg');
+    const resultsTable = document.getElementById('results-table');
+    const resultsBody = document.getElementById('results-body');
+    const viewBtn = document.getElementById('view-btn');
+    const selectionCount = document.getElementById('selection-count');
+    const selectAllCb = document.getElementById('select-all');
+
+    // Pre-fill bucket from URL params
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('bucket')) bucketInput.value = params.get('bucket');
+    if (params.get('prefix')) searchInput.value = params.get('prefix');
+
+    // Detect if backend is available
+    let backendAvailable = true;
+    fetch('/api/search?bucket=_probe').catch(() => { backendAvailable = false; });
+
+    searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doSearch();
+    });
+
+    selectAllCb.addEventListener('change', () => {
+        selectAll(selectAllCb.checked);
+    });
+
+    function esc(s) {
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function formatDate(dateStr) {
+        if (!dateStr) return '';
+        try {
+            const d = new Date(dateStr);
+            return d.toISOString().replace('T', ' ').slice(0, 19);
+        } catch { return dateStr; }
+    }
+
+    async function doSearch() {
+        const bucket = bucketInput.value.trim();
+        if (!bucket) { alert('Bucket is required'); return; }
+
+        const q = searchInput.value.trim();
+        const url = `/api/search?bucket=${encodeURIComponent(bucket)}&q=${encodeURIComponent(q)}`;
+
+        statusMsg.textContent = 'Searching…';
+        statusMsg.className = 'status';
+        statusMsg.style.display = '';
+        resultsTable.style.display = 'none';
+
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(`HTTP ${resp.status}: ${text}`);
+            }
+            const objects = await resp.json();
+            renderResults(objects);
+        } catch (err) {
+            statusMsg.textContent = 'Error: ' + err.message;
+            statusMsg.className = 'status error';
+        }
+    }
+
+    function renderResults(objects) {
+        resultsBody.innerHTML = '';
+        if (objects.length === 0) {
+            statusMsg.textContent = 'No results found.';
+            statusMsg.style.display = '';
+            resultsTable.style.display = 'none';
+            updateSelectionCount();
+            return;
+        }
+
+        statusMsg.style.display = 'none';
+        resultsTable.style.display = '';
+
+        for (const obj of objects) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><input type="checkbox" class="row-cb" data-key="${esc(obj.key)}" /></td>
+                <td class="key">${esc(obj.key)}</td>
+                <td class="size">${formatSize(obj.size)}</td>
+                <td class="date">${formatDate(obj.last_modified)}</td>
+            `;
+            tr.querySelector('.row-cb').addEventListener('change', updateSelectionCount);
+            resultsBody.appendChild(tr);
+        }
+        updateSelectionCount();
+    }
+
+    function getSelectedKeys() {
+        return Array.from(document.querySelectorAll('.row-cb:checked'))
+            .map(cb => cb.dataset.key);
+    }
+
+    function updateSelectionCount() {
+        const keys = getSelectedKeys();
+        selectionCount.textContent = keys.length ? `${keys.length} selected` : '';
+        viewBtn.disabled = keys.length === 0;
+    }
+
+    function selectAll(checked) {
+        document.querySelectorAll('.row-cb').forEach(cb => { cb.checked = checked; });
+        selectAllCb.checked = checked;
+        updateSelectionCount();
+    }
+
+    function viewSelected() {
+        const keys = getSelectedKeys();
+        if (keys.length === 0) return;
+
+        const bucket = bucketInput.value.trim();
+        const keysParam = keys.join(',');
+        const traceUrl = `/api/trace?bucket=${encodeURIComponent(bucket)}&keys=${encodeURIComponent(keysParam)}`;
+        window.open(`index.html?trace=${encodeURIComponent(traceUrl)}`, '_blank');
+    }
+    </script>
 </body>
 </html>
