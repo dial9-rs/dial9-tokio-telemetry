@@ -7,6 +7,11 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
     let vis = &input.vis;
     let name_str = name.to_string();
     let ref_name = format_ident!("{}Ref", name);
+    let struct_doc_attrs: Vec<_> = input
+        .attrs
+        .iter()
+        .filter(|a| a.path().is_ident("doc"))
+        .collect();
 
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
@@ -18,12 +23,19 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
 
     // Find the field marked with #[traceevent(timestamp)]
     let mut timestamp_field_name = None;
+    let mut timestamp_doc_attrs = Vec::new();
     for field in fields.iter() {
         for attr in &field.attrs {
             if attr.path().is_ident("traceevent") {
                 let _ = attr.parse_nested_meta(|meta| {
                     if meta.path.is_ident("timestamp") {
                         timestamp_field_name = Some(field.ident.as_ref().unwrap().clone());
+                        timestamp_doc_attrs = field
+                            .attrs
+                            .iter()
+                            .filter(|a| a.path().is_ident("doc"))
+                            .cloned()
+                            .collect();
                     }
                     Ok(())
                 });
@@ -57,7 +69,13 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
             <#ty as ::dial9_trace_format::TraceField>::encode(&self.#field_name, enc)?;
         });
 
+        let doc_attrs: Vec<_> = field
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("doc"))
+            .collect();
         ref_fields.push(quote! {
+            #(#doc_attrs)*
             pub #field_name: <#ty as ::dial9_trace_format::TraceField>::Ref<'a>
         });
         let idx = decode_idx;
@@ -79,7 +97,8 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
 
     // For the Ref struct, include the timestamp field if present — populated from the decode parameter
     let ref_timestamp_field = if let Some(ref ts_field) = timestamp_field_name {
-        quote! { pub #ts_field: u64, }
+        let ts_docs = &timestamp_doc_attrs;
+        quote! { #(#ts_docs)* pub #ts_field: u64, }
     } else {
         quote! {}
     };
@@ -103,6 +122,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
     };
 
     quote! {
+        #(#struct_doc_attrs)*
         #[derive(Debug, Clone)]
         #vis struct #ref_name<'a> {
             #ref_timestamp_field
@@ -193,6 +213,22 @@ mod tests {
                 j_interned: InternedString,
                 k_frames: StackFrames,
                 l_map: Vec<(String, String)>,
+            }
+        }));
+    }
+
+    #[test]
+    fn doc_comments_copied_to_ref_fields() {
+        assert_snapshot!(expand_to_string(quote! {
+            /// Root documentation
+            struct DocEvent {
+                #[traceevent(timestamp)]
+                /// Event timestamp in nanoseconds.
+                timestamp_ns: u64,
+                /// The worker thread ID.
+                worker_id: u64,
+                /// Number of items in the local queue.
+                local_queue: u8,
             }
         }));
     }
