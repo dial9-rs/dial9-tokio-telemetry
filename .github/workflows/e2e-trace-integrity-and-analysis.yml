@@ -1,0 +1,25 @@
+name: Trace Integrity & Analysis
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  trace-integrity-and-analysis:
+    name: Trace Integrity & Analysis
+    runs-on: ubuntu-latest
+    services:
+      dynamodb-local:
+        image: amazon/dynamodb-local
+        ports:
+          - 8000:8000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: E2E trace tests
+        run: scripts/e2e-trace-tests.sh

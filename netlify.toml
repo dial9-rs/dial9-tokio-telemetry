@@ -2,3 +2,5 @@
   base = "dial9-tokio-telemetry/trace_viewer"
   publish = "."
   command = "rm decode.js && cp ../../dial9-trace-format/js/decode.js decode.js"
+  # always run a deploy preview no matter what
+  ignore = "exit 1"

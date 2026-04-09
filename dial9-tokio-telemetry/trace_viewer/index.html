@@ -477,9 +477,10 @@
 
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
+        <script src="trace_analysis.js"></script>
         <script>
-            // Use the external parser
-            const { parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
+            const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
+            const { buildWorkerSpans, attachCpuSamples, extractLocalQueueSamples, buildActiveTaskTimeline, indexWakeEvents, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -530,14 +531,6 @@
             }
 
             // ── Event type helpers ──
-            const ET = {
-                PollStart: 0,
-                PollEnd: 1,
-                WorkerPark: 2,
-                WorkerUnpark: 3,
-                QueueSample: 4,
-                WakeEvent: 9,
-            };
             const ET_NAMES = [
                 "PollStart",
                 "PollEnd",
@@ -788,87 +781,10 @@
                 viewEnd = maxTs;
 
                 // Build spans
-                workerSpans = {};
-                const openPoll = {},
-                    openPark = {},
-                    openUnpark = {}; // track {timestamp, cpuTime} at unpark
-                const openPollMeta = {}; // track {taskId, spawnLocId} at PollStart
-                for (const w of workerIds) {
-                    workerSpans[w] = { polls: [], parks: [], actives: [], cpuSampleTimes: [] };
-                }
-
-                // Group events by worker and sort per-worker by timestamp
-                // (events arrive in flush order, not global timestamp order)
-                const perWorker = {};
-                const globalEvts = []; // QueueSample etc
-                for (const e of evts) {
-                    if (e.eventType === ET.QueueSample || e.eventType === ET.WakeEvent) {
-                        globalEvts.push(e);
-                    } else {
-                        (perWorker[e.workerId] ??= []).push(e);
-                    }
-                }
-                for (const wEvents of Object.values(perWorker)) {
-                    wEvents.sort((a, b) => a.timestamp - b.timestamp);
-                }
-
-                for (const [w, wEvents] of Object.entries(perWorker)) {
-                    for (const e of wEvents) {
-                        if (e.eventType === ET.PollStart) {
-                            openPoll[w] = e.timestamp;
-                            openPollMeta[w] = { taskId: e.taskId, spawnLocId: e.spawnLocId, spawnLoc: e.spawnLoc };
-                        } else if (e.eventType === ET.PollEnd) {
-                            if (openPoll[w] != null) {
-                                const meta = openPollMeta[w] || { taskId: 0, spawnLocId: 0, spawnLoc: null };
-                                workerSpans[w].polls.push({
-                                    start: openPoll[w],
-                                    end: e.timestamp,
-                                    taskId: meta.taskId,
-                                    spawnLocId: meta.spawnLocId,
-                                    spawnLoc: meta.spawnLoc,
-                                });
-                                openPoll[w] = null;
-                            }
-                        } else if (e.eventType === ET.WorkerPark) {
-                            openPark[w] = e.timestamp;
-                            // Close active period
-                            if (openUnpark[w] != null) {
-                                const wallDelta = e.timestamp - openUnpark[w].timestamp;
-                                const cpuDelta = e.cpuTime - openUnpark[w].cpuTime;
-                                const ratio = wallDelta > 0 ? Math.min(cpuDelta / wallDelta, 1.0) : 1.0;
-                                workerSpans[w].actives.push({
-                                    start: openUnpark[w].timestamp,
-                                    end: e.timestamp,
-                                    ratio,
-                                });
-                                openUnpark[w] = null;
-                            }
-                        } else if (e.eventType === ET.WorkerUnpark) {
-                            if (openPark[w] != null) {
-                                workerSpans[w].parks.push({
-                                    start: openPark[w],
-                                    end: e.timestamp,
-                                    schedWait: e.schedWait,
-                                });
-                                openPark[w] = null;
-                            }
-                            openUnpark[w] = { timestamp: e.timestamp, cpuTime: e.cpuTime };
-                        }
-                    }
-                }
-                // Close any open spans at trace end
-                for (const w of workerIds) {
-                    if (openPoll[w] != null)
-                        workerSpans[w].polls.push({
-                            start: openPoll[w],
-                            end: maxTs,
-                        });
-                    if (openPark[w] != null)
-                        workerSpans[w].parks.push({
-                            start: openPark[w],
-                            end: maxTs,
-                        });
-                }
+                const spanResult = buildWorkerSpans(evts, workerIds, maxTs);
+                workerSpans = spanResult.workerSpans;
+                const perWorker = spanResult.perWorker;
+                queueSamples = spanResult.queueSamples;
 
                 // Debug: log active period stats
                 for (const w of workerIds) {
@@ -876,179 +792,29 @@
                     console.log(`Worker ${w}: ${a.length} active periods` +
                         (a.length > 0 ? `, first ratio=${a[0].ratio.toFixed(3)}` : ''));
                 }
-
-                // Global queue samples (from QueueSample events only)
-                queueSamples = evts
-                    .filter((e) => e.eventType === ET.QueueSample)
-                    .map((e) => ({ t: e.timestamp, global: e.globalQueue }));
                 console.log(`Found ${queueSamples.length} global queue samples`);
 
                 // Attach CPU samples to poll spans they fall within
-                // Use binary search: polls are sorted by start time per worker
                 if (trace.cpuSamples.length > 0) {
-                    for (const sample of trace.cpuSamples) {
-                        const spans = workerSpans[sample.workerId];
-                        if (!spans) { sample.spawnLoc = null; continue; }
-                        if (sample.source !== 1) spans.cpuSampleTimes.push(sample.timestamp);
-                        const polls = spans.polls;
-                        const ts = sample.timestamp;
-                        // Binary search for rightmost poll with start <= ts
-                        let lo = 0, hi = polls.length - 1, found = false;
-                        while (lo <= hi) {
-                            const mid = (lo + hi) >> 1;
-                            if (polls[mid].start <= ts) { lo = mid + 1; } else { hi = mid - 1; }
-                        }
-                        // hi is now the index of the last poll with start <= ts
-                        if (hi >= 0 && ts <= polls[hi].end) {
-                            const poll = polls[hi];
-                            if (sample.source === 1) {
-                                (poll.schedSamples ??= []).push(sample);
-                            } else {
-                                (poll.cpuSamples ??= []).push(sample);
-                            }
-                            sample.spawnLoc = poll.spawnLoc;
-                            found = true;
-                        }
-                        if (!found) sample.spawnLoc = null;
-                    }
-                    let pollsWithSamples = 0;
-                    let pollsWithSched = 0;
-                    for (const w of workerIds) {
-                        for (const p of workerSpans[w].polls) {
-                            if (p.cpuSamples) pollsWithSamples++;
-                            if (p.schedSamples) pollsWithSched++;
-                        }
-                    }
-                    console.log(`CPU samples: ${trace.cpuSamples.length}, polls with cpu samples: ${pollsWithSamples}, polls with sched events: ${pollsWithSched}`);
+                    const { pollsWithCpuSamples, pollsWithSchedSamples } = attachCpuSamples(trace.cpuSamples, workerSpans);
+                    console.log(`CPU samples: ${trace.cpuSamples.length}, polls with cpu samples: ${pollsWithCpuSamples}, polls with sched events: ${pollsWithSchedSamples}`);
                 }
 
-                // Per-worker local queue samples (from events that have local_queue)
-                workerQueueSamples = {};
-                maxLocalQueue = 1;
-                for (const w of workerIds) {
-                    workerQueueSamples[w] = [];
-                }
-                for (const [w, wEvents] of Object.entries(perWorker)) {
-                    for (const e of wEvents) {
-                        if (e.eventType === ET.PollStart || e.eventType === ET.WorkerPark || e.eventType === ET.WorkerUnpark) {
-                            workerQueueSamples[w] ??= [];
-                            workerQueueSamples[w].push({
-                                t: e.timestamp,
-                                local: e.localQueue,
-                            });
-                            if (e.localQueue > maxLocalQueue)
-                                maxLocalQueue = e.localQueue;
-                        }
-                    }
-                }
+                // Per-worker local queue samples
+                const lqResult = extractLocalQueueSamples(perWorker, workerIds);
+                workerQueueSamples = lqResult.workerQueueSamples;
+                maxLocalQueue = lqResult.maxLocalQueue;
 
                 // Build active task count timeline from TaskSpawn/TaskTerminate
-                activeTaskSamples = [];
-                taskFirstPoll = new Map();
-                if (trace.taskSpawnTimes && trace.taskSpawnTimes.size > 0) {
-                    const taskEvents = []; // [{t, delta: +1 or -1}]
-                    // Use real spawn timestamps
-                    for (const [taskId, t] of trace.taskSpawnTimes) {
-                        taskFirstPoll.set(taskId, t);
-                        taskEvents.push({ t, delta: 1 });
-                    }
-                    // Use real terminate timestamps
-                    for (const [, t] of trace.taskTerminateTimes) {
-                        taskEvents.push({ t, delta: -1 });
-                    }
-                    taskEvents.sort((a, b) => a.t - b.t);
-                    let count = 0;
-                    for (const te of taskEvents) {
-                        count += te.delta;
-                        activeTaskSamples.push({ t: te.t, count: Math.max(0, count) });
-                    }
-                }
+                const atResult = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
+                activeTaskSamples = atResult.activeTaskSamples;
+                taskFirstPoll = atResult.taskFirstPoll;
 
-                // Index wake events by woken task ID
-                wakesByTask = {};
-                for (const e of evts) {
-                    if (e.eventType === ET.WakeEvent) {
-                        (wakesByTask[e.wokenTaskId] ??= []).push({
-                            timestamp: e.timestamp,
-                            wakerTaskId: e.wakerTaskId,
-                            targetWorker: e.targetWorker,
-                        });
-                    }
-                }
-                for (const arr of Object.values(wakesByTask)) {
-                    arr.sort((a, b) => a.timestamp - b.timestamp);
-                }
+                const wakeResult = indexWakeEvents(evts);
+                wakesByTask = wakeResult.wakesByTask;
+                wakesByWorker = wakeResult.wakesByWorker;
 
-                // Index wake events by target worker
-                wakesByWorker = {};
-                for (const e of evts) {
-                    if (e.eventType === ET.WakeEvent) {
-                        (wakesByWorker[e.targetWorker] ??= []).push({
-                            timestamp: e.timestamp,
-                            wakerTaskId: e.wakerTaskId,
-                            wokenTaskId: e.wokenTaskId,
-                        });
-                    }
-                }
-                for (const arr of Object.values(wakesByWorker)) {
-                    arr.sort((a, b) => a.timestamp - b.timestamp);
-                }
-
-                // Compute scheduling delays: for each poll, find the most recent wake before it
-                // Build task → sorted polls index for mid-poll wake adjustment
-                const pollsByTask = {};
-                for (const w of workerIds) {
-                    for (const s of workerSpans[w].polls) {
-                        if (s.taskId) (pollsByTask[s.taskId] ??= []).push(s);
-                    }
-                }
-                for (const arr of Object.values(pollsByTask)) {
-                    arr.sort((a, b) => a.start - b.start);
-                }
-
-                schedDelays = [];
-                for (const w of workerIds) {
-                    for (const s of workerSpans[w].polls) {
-                        if (!s.taskId) continue;
-                        const wakes = wakesByTask[s.taskId];
-                        if (!wakes || !wakes.length) continue;
-                        // Binary search for last wake <= s.start
-                        let lo = 0, hi = wakes.length - 1, best = -1;
-                        while (lo <= hi) {
-                            const mid = (lo + hi) >> 1;
-                            if (wakes[mid].timestamp <= s.start) { best = mid; lo = mid + 1; }
-                            else hi = mid - 1;
-                        }
-                        if (best >= 0) {
-                            const wake = wakes[best];
-                            // If wake arrived during an earlier poll of this task, effective wait starts at that poll's end
-                            let effectiveWake = wake.timestamp;
-                            const taskPolls = pollsByTask[s.taskId];
-                            if (taskPolls) {
-                                for (const p of taskPolls) {
-                                    if (p.start >= s.start) break; // only earlier polls
-                                    if (wake.timestamp >= p.start && wake.timestamp <= p.end) {
-                                        effectiveWake = p.end;
-                                        break;
-                                    }
-                                }
-                            }
-                            const delay = s.start - effectiveWake;
-                            if (delay > 0 && delay < 1e9) { // sanity: < 1s
-                                schedDelays.push({
-                                    wakeTime: effectiveWake,
-                                    pollTime: s.start,
-                                    delay,
-                                    taskId: s.taskId,
-                                    wakerTaskId: wake.wakerTaskId,
-                                    worker: w,
-                                    poll: s,
-                                });
-                            }
-                        }
-                    }
-                }
-                schedDelays.sort((a, b) => a.wakeTime - b.wakeTime);
+                schedDelays = computeSchedulingDelays(workerSpans, workerIds, wakesByTask);
                 console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);
             }
 
@@ -1079,81 +845,8 @@
 
             function updatePointsOfInterest() {
                 const filterType = document.getElementById("poi-filter").value;
-                pointsOfInterest = [];
-                
-                for (const w of workerIds) {
-                    const spans = workerSpans[w];
-                    
-                    if (filterType === "sched") {
-                        // Find parks with scheduling delays > 100µs
-                        for (const s of spans.parks) {
-                            if (trace.hasSchedWait && s.schedWait > 100) {
-                                const schedWaitNs = s.schedWait * 1000;
-                                const wakeupShouldBe = s.end - schedWaitNs;
-                                pointsOfInterest.push({
-                                    time: wakeupShouldBe,
-                                    worker: w,
-                                    type: "sched",
-                                    value: s.schedWait,
-                                    span: s
-                                });
-                            }
-                        }
-                    } else if (filterType === "long-poll") {
-                        // Polls longer than 1ms
-                        for (const s of spans.polls) {
-                            const durMs = (s.end - s.start) / 1e6;
-                            if (durMs > 1) {
-                                pointsOfInterest.push({
-                                    time: s.start,
-                                    worker: w,
-                                    type: "long-poll",
-                                    value: durMs,
-                                    span: s
-                                });
-                            }
-                        }
-                    } else if (filterType === "cpu-sampled") {
-                        for (const s of spans.polls) {
-                            const cpuCount = s.cpuSamples ? s.cpuSamples.length : 0;
-                            const schedCount = s.schedSamples ? s.schedSamples.length : 0;
-                            if (cpuCount + schedCount > 0) {
-                                pointsOfInterest.push({
-                                    time: s.start,
-                                    worker: w,
-                                    type: "cpu-sampled",
-                                    value: cpuCount + schedCount,
-                                    span: s
-                                });
-                            }
-                        }
-                    }
-                }
-
-                if (filterType === "wake-delay") {
-                    // Wake→Poll scheduling delays > 100µs
-                    for (const sd of schedDelays) {
-                        const delayUs = sd.delay / 1000;
-                        if (delayUs > 100) {
-                            pointsOfInterest.push({
-                                time: sd.wakeTime,
-                                worker: sd.worker,
-                                type: "wake-delay",
-                                value: delayUs,
-                                span: sd.poll,
-                                schedDelay: sd,
-                            });
-                        }
-                    }
-                }
-                
-                // Sort by time or by worst value
                 const sortByWorst = document.getElementById("sort-by-worst").checked;
-                if (sortByWorst) {
-                    pointsOfInterest.sort((a, b) => b.value - a.value);
-                } else {
-                    pointsOfInterest.sort((a, b) => a.time - b.time);
-                }
+                pointsOfInterest = filterPointsOfInterest(filterType, workerSpans, workerIds, schedDelays, trace.hasSchedWait, { sortByWorst });
                 currentPoiIndex = -1;
                 updatePoiCounter();
             }
@@ -3023,57 +2716,7 @@
             // Raw samples for current flamegraph (for re-filtering)
             let fgAllSamples = [];
 
-            function buildFlamegraphTree(samples) {
-                const root = { name: "(all)", children: new Map(), count: 0, self: 0 };
-                for (const s of samples) {
-                    const chain = s.callchain.slice().reverse();
-                    let node = root;
-                    node.count++;
-                    for (const addr of chain) {
-                        const entry = trace.callframeSymbols.get(addr);
-                        const key = entry ? entry.symbol : (addr || '??');
-                        const name = formatFrame(addr, trace.callframeSymbols).text;
-                        if (!node.children.has(key)) {
-                            node.children.set(key, { name, children: new Map(), count: 0, self: 0 });
-                        }
-                        node = node.children.get(key);
-                        node.count++;
-                    }
-                    node.self++;
-                }
-                return root;
-            }
-
-            function flattenFlamegraph(root, total) {
-                const nodes = [];
-                let maxD = 0;
-                function walk(node, depth, xStart) {
-                    const w = node.count / total;
-                    if (w < 0.001) return;
-                    nodes.push({ name: node.name, depth, x: xStart, w, count: node.count, self: node.self });
-                    if (depth > maxD) maxD = depth;
-                    const kids = [...node.children.values()].sort((a, b) => b.count - a.count);
-                    let cx = xStart;
-                    for (const child of kids) {
-                        walk(child, depth + 1, cx);
-                        cx += child.count / total;
-                    }
-                }
-                const kids = [...root.children.values()].sort((a, b) => b.count - a.count);
-                let cx = 0;
-                for (const child of kids) {
-                    walk(child, 0, cx);
-                    cx += child.count / total;
-                }
-                return { nodes, maxDepth: maxD };
-            }
-
-            function buildFgData(samples) {
-                if (!samples.length) return null;
-                const tree = buildFlamegraphTree(samples);
-                const result = flattenFlamegraph(tree, samples.length);
-                return { nodes: result.nodes, maxDepth: result.maxDepth, totalSamples: samples.length };
-            }
+            // buildFlamegraphTree, flattenFlamegraph, buildFgData imported from TraceParser
 
             // Selection picker: shown after shift+drag when both flamegraph and sched data exist
             function showSelectionPicker(selStart, selEnd) {
@@ -3156,8 +2799,8 @@
                 const workerSamples = samples.filter(s => s.workerId !== 255);
                 const offworkerSamples = samples.filter(s => s.workerId === 255);
 
-                fgWorkerData = buildFgData(workerSamples);
-                fgOffworkerData = buildFgData(offworkerSamples);
+                fgWorkerData = buildFgData(workerSamples, trace.callframeSymbols);
+                fgOffworkerData = buildFgData(offworkerSamples, trace.callframeSymbols);
 
                 document.getElementById("fg-worker-label").textContent =
                     `Worker threads — ${workerSamples.length} samples`;
