@@ -4,6 +4,7 @@ members = [
     "dial9-tokio-telemetry",
     "dial9-trace-format",
     "dial9-trace-format-derive",
+    "dial9-viewer",
     "perf-self-profile",
     "examples/metrics-service",
 ]
