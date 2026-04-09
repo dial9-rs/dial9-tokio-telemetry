@@ -26,6 +26,25 @@
     return 0;
   }
 
+  /** Decompress gzip data if detected, otherwise return as-is. */
+  async function maybeGunzip(buf) {
+    const b = buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf;
+    if (b.length < 2 || b[0] !== 0x1f || b[1] !== 0x8b) {
+      return buf;
+    }
+    if (typeof require !== "undefined") {
+      const zlib = require("zlib");
+      const decompressed = zlib.gunzipSync(Buffer.from(b));
+      return decompressed.buffer.slice(
+        decompressed.byteOffset,
+        decompressed.byteOffset + decompressed.byteLength
+      );
+    }
+    return await new Response(
+      new Blob([b]).stream().pipeThrough(new DecompressionStream("gzip"))
+    ).arrayBuffer();
+  }
+
   /**
    * @typedef {{
    *   eventType: number,
@@ -89,12 +108,14 @@
 
   /**
    * Parse a dial9-trace-format binary trace buffer.
-   * @param {ArrayBuffer} buffer - The binary trace data
+   * Automatically decompresses gzip input.
+   * @param {ArrayBuffer|Uint8Array} buffer - The binary trace data (may be gzipped)
    * @param {Object} [options] - Optional parsing options
    * @param {number} [options.maxEvents] - Maximum number of events to parse (default: 2,000,000)
-   * @returns {ParsedTrace}
+   * @returns {Promise<ParsedTrace>}
    */
-  function parseTrace(buffer, options) {
+  async function parseTrace(buffer, options) {
+    buffer = await maybeGunzip(buffer);
     const maxEvents = (options && options.maxEvents) || MAX_EVENTS;
     const TD = getTraceDecoder();
     const dec = new TD(
