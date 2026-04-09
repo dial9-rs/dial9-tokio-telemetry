@@ -40,7 +40,7 @@ fn test_js_parser_matches_rust() {
         #[cfg(feature = "cpu-profiling")]
         {
             tb = tb.with_cpu_profiling(
-                dial9_tokio_telemetry::telemetry::CpuProfilingConfig::default(),
+                dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig::default(),
             );
         }
         let (runtime, _guard) = tb.build_and_start(builder, writer).unwrap();

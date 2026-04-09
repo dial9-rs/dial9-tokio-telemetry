@@ -9,7 +9,7 @@ use std::time::Duration;
 use aws_config::BehaviorVersion;
 use clap::Parser;
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
+use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;

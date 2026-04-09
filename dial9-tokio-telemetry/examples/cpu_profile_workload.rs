@@ -10,7 +10,7 @@
 //!   echo 2 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
 use dial9_tokio_telemetry::telemetry::{
-    CpuProfilingConfig, RotatingWriter, TelemetryEvent, TracedRuntime,
+    RotatingWriter, TelemetryEvent, TracedRuntime, cpu_profile::CpuProfilingConfig,
 };
 use std::time::Duration;
 

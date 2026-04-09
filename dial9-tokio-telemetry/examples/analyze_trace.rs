@@ -2,6 +2,7 @@ use dial9_tokio_telemetry::analysis_unstable::{
     TraceReader, analyze_trace, compute_wake_to_poll_delays, detect_idle_workers, print_analysis,
 };
 use dial9_tokio_telemetry::telemetry::{TaskId, TelemetryEvent, UNKNOWN_TASK_ID};
+use dial9_trace_format::InternedString;
 use std::collections::HashMap;
 use std::env;
 
@@ -46,8 +47,7 @@ fn main() {
     }
 
     // Build task_id → spawn_loc from PollStart events (more complete than TaskSpawn alone)
-    let mut task_locs: HashMap<TaskId, dial9_tokio_telemetry::telemetry::InternedString> =
-        HashMap::new();
+    let mut task_locs: HashMap<TaskId, InternedString> = HashMap::new();
     for e in events {
         if let TelemetryEvent::PollStart {
             task_id, spawn_loc, ..

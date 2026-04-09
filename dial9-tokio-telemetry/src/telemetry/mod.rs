@@ -9,19 +9,14 @@ pub(crate) mod buffer;
 pub(crate) mod collector;
 pub use collector::Batch;
 #[cfg(feature = "cpu-profiling")]
-pub(crate) mod cpu_profile;
+pub mod cpu_profile;
 pub(crate) mod events;
 pub(crate) mod format;
 pub(crate) mod recorder;
 pub(crate) mod task_metadata;
 pub(crate) mod writer;
 
-#[cfg(feature = "cpu-profiling")]
-pub use cpu_profile::CpuProfilingConfig;
-#[cfg(feature = "cpu-profiling")]
-pub use cpu_profile::SchedEventConfig;
-pub use dial9_trace_format::InternedString;
-pub use events::{CpuSampleSource, RawEvent, TelemetryEvent, clock_monotonic_ns};
+pub use events::{CpuSampleSource, TelemetryEvent, clock_monotonic_ns};
 pub use format::{
     PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerId, WorkerParkEvent,
     WorkerUnparkEvent,

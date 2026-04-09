@@ -7,7 +7,8 @@ mod common;
 fn sched_events_capture_context_switches() {
     use dial9_tokio_telemetry::telemetry::CpuSampleSource;
     use dial9_tokio_telemetry::telemetry::TelemetryEvent;
-    use dial9_tokio_telemetry::telemetry::{SchedEventConfig, TracedRuntime};
+    use dial9_tokio_telemetry::telemetry::TracedRuntime;
+    use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
     use std::time::Duration;
 
     let (writer, events) = common::CapturingWriter::new();

@@ -3,12 +3,12 @@
 //! This module is feature-gated behind `analysis` and re-exports every public
 //! type and function from the internal `telemetry::analysis` implementation.
 //!
-//! The API surface here is still evolving — hence the `_unstable` suffix.
+//! The API surface here is still evolving.
 //! Expect breaking changes between minor versions.
 //!
 //! # Quick start
 //!
-//! ```rust,ignore
+//! ```no_run
 //! use dial9_tokio_telemetry::analysis_unstable::{TraceReader, analyze_trace, print_analysis};
 //!
 //! let reader = TraceReader::new("trace.0.bin")?;

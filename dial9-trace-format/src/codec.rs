@@ -70,6 +70,7 @@ pub(crate) enum Frame {
 }
 
 /// Zero-copy pool entry borrowing from the input buffer.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PoolEntryRef<'a> {
     /// Pool ID assigned by the encoder.
