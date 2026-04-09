@@ -18,11 +18,10 @@ mod common;
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
     let _ = tracing_subscriber::fmt::try_init();
-    use dial9_tokio_telemetry::telemetry::events::{
-        CpuSampleSource, TelemetryEvent, clock_monotonic_ns,
-    };
-    use dial9_tokio_telemetry::telemetry::format::WorkerId;
-    use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
+    use dial9_tokio_telemetry::telemetry::TracedRuntime;
+    use dial9_tokio_telemetry::telemetry::WorkerId;
+    use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
+    use dial9_tokio_telemetry::telemetry::{CpuSampleSource, TelemetryEvent, clock_monotonic_ns};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -261,9 +260,10 @@ fn burn_cpu(duration: std::time::Duration) {
 #[test]
 fn thread_name_attribution_for_external_and_blocking_threads() {
     let _ = tracing_subscriber::fmt::try_init();
-    use dial9_tokio_telemetry::telemetry::events::TelemetryEvent;
-    use dial9_tokio_telemetry::telemetry::format::WorkerId;
-    use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, TracedRuntime};
+    use dial9_tokio_telemetry::telemetry::TelemetryEvent;
+    use dial9_tokio_telemetry::telemetry::TracedRuntime;
+    use dial9_tokio_telemetry::telemetry::WorkerId;
+    use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
     use std::time::Duration;
 
     let (writer, events) = common::CapturingWriter::new();

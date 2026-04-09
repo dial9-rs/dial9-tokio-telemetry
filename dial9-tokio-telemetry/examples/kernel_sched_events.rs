@@ -42,8 +42,9 @@
 //!   ...
 //!   start_thread
 
+use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 use dial9_tokio_telemetry::telemetry::{
-    CpuSampleSource, RotatingWriter, SchedEventConfig, TelemetryEvent, TraceReader, TracedRuntime,
+    CpuSampleSource, RotatingWriter, TelemetryEvent, TracedRuntime, cpu_profile::SchedEventConfig,
 };
 use std::time::Duration;
 
@@ -84,14 +85,13 @@ fn main() {
 
     // Read back and print callchains
     eprintln!("\n=== Reading trace from {trace_path} ===");
-    let mut reader = TraceReader::new(&trace_path).unwrap();
-    reader.read_header().unwrap();
-    let events = reader.read_all().unwrap();
+    let reader = TraceReader::new(&trace_path).unwrap();
+    let events = &reader.runtime_events;
 
     let mut printed = 0;
     let mut total_samples = 0;
 
-    for event in &events {
+    for event in events {
         if let TelemetryEvent::CpuSample {
             worker_id,
             source,

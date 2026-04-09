@@ -1,4 +1,8 @@
-// High-level encoder API
+//! High-level encoder for writing trace files.
+//!
+//! [`Encoder`] writes the file header, registers schemas, interns strings, and
+//! encodes events with delta-compressed timestamps. It is the primary entry
+//! point for producing trace data.
 
 use crate::TraceEvent;
 use crate::codec::{self, PoolEntry, WireTypeId};
@@ -112,6 +116,13 @@ enum SchemaKey {
     RustType(TypeId),
 }
 
+/// Trace file encoder.
+///
+/// Writes the binary file header, registers event schemas, interns strings
+/// into a pool, and encodes events with delta-compressed timestamps.
+///
+/// The default type parameter (`Vec<u8>`) buffers everything in memory;
+/// use [`Encoder::new_to`] to write to an arbitrary [`Write`] sink.
 pub struct Encoder<W: Write = Vec<u8>> {
     state: EncodeState<W>,
     registry: SchemaRegistry,

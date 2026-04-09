@@ -1,6 +1,7 @@
 mod validation;
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TraceReader, TracedRuntime, analyze_trace};
+use dial9_tokio_telemetry::analysis_unstable::{TraceReader, analyze_trace};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -100,15 +101,14 @@ fn overhead_bench_validates() {
 
     // Read trace
     let sealed_path = dir.path().join("trace.0.bin");
-    let mut reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
-    reader.read_header().unwrap();
-    let events = reader.read_all().unwrap();
-    let analysis = analyze_trace(&events);
+    let reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
+    let events = &reader.runtime_events;
+    let analysis = analyze_trace(events);
 
     let (metrics, total_requests) = tokio_metrics;
 
     eprintln!("Total requests processed: {}", total_requests);
     eprintln!("Total tasks spawned: {}", metrics.spawned_tasks_count());
 
-    validation::validate_trace_matches_metrics(&analysis, &events, &metrics);
+    validation::validate_trace_matches_metrics(&analysis, events, &metrics);
 }

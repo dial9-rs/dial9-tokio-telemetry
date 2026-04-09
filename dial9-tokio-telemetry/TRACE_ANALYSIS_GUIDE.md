@@ -4,13 +4,13 @@
 
 ```bash
 # 1. Get basic statistics
-cargo run --example analyze_trace -- trace.0.bin
+cargo run --example analyze_trace --features analysis -- trace.0.bin
 
 # 2. Convert to JSONL for custom analysis
-cargo run --example trace_to_jsonl -- trace.0.bin trace.jsonl
+cargo run --example trace_to_jsonl --features analysis -- trace.0.bin trace.jsonl
 
 # 3. View CPU profile
-cargo run --example cpu_flamegraph -- trace.0.bin > flamegraph.txt
+cargo run --example cpu_flamegraph --features analysis -- trace.0.bin > flamegraph.txt
 ```
 
 ## Understanding the Output
@@ -146,14 +146,14 @@ Use CPU samples to see what code was running during blocking:
 
 ```bash
 # Get spawn location mapping
-cargo run --example analyze_trace -- trace.0.bin 2>&1 | grep "=== Spawn Locations"
+cargo run --example analyze_trace --features analysis -- trace.0.bin 2>&1 | grep "=== Spawn Locations"
 ```
 
 ### Aggregate CPU by Function
 
 ```bash
 # Get flamegraph-style output
-cargo run --example cpu_flamegraph -- trace.0.bin | \
+cargo run --example cpu_flamegraph --features analysis -- trace.0.bin | \
   grep "metrics_service\|aws_" | \
   head -20
 ```
@@ -188,7 +188,7 @@ with open('trace.jsonl') as f:
 
 ```bash
 # 1. Get overview
-cargo run --example analyze_trace -- trace.0.bin
+cargo run --example analyze_trace --features analysis -- trace.0.bin
 
 # 2. See high wake→poll delays? Check local queues
 #    Write script to correlate delays with queue depths

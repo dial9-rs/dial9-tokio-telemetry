@@ -16,9 +16,7 @@
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/thread_per_core/trace.0.bin
 
-use dial9_tokio_telemetry::telemetry::{
-    RotatingWriter, TelemetryEvent, TracedRuntime, WorkerId, format,
-};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryEvent, TracedRuntime, WorkerId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -122,7 +120,7 @@ fn main() -> std::io::Result<()> {
 
     for file in &files {
         let data = std::fs::read(file)?;
-        let events = format::decode_events(&data)?;
+        let events = dial9_tokio_telemetry::analysis_unstable::decode_events(&data)?;
         for event in &events {
             match event {
                 TelemetryEvent::SegmentMetadata { entries, .. } => {

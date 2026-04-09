@@ -1,5 +1,5 @@
 #[cfg(feature = "worker-s3")]
-pub mod connection;
+pub(crate) mod connection;
 pub mod instance_metadata;
 pub(crate) mod pipeline_metrics;
 #[cfg(feature = "worker-s3")]
@@ -777,7 +777,7 @@ mod tests {
         let mut deps = NotFoundTestDeps::new();
         deps.upload_segment(&missing).await;
 
-        check!(deps.circuit_breaker.is_closed());
+        check!(deps.circuit_breaker == connection::CircuitBreaker::Closed);
     }
 
     // --- Review finding #1: compressed_size metric is non-zero after pipeline ---

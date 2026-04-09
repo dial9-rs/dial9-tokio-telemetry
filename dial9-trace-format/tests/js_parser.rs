@@ -1,6 +1,5 @@
 //! Integration test: encode a trace in Rust, decode it with the JS reader, compare results.
 
-use dial9_trace_format::codec::{self, WireTypeId};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
@@ -91,42 +90,45 @@ fn js_decodes_all_field_types() {
 
     let mut data = enc.finish();
 
-    // Append symbol table as untimestamped schema-based events via low-level codec.
-    let sym_tid = WireTypeId(100);
-    codec::encode_schema(
-        sym_tid,
-        &dial9_trace_format::schema::SchemaEntry {
-            name: "SymbolTableEntry".into(),
-            has_timestamp: false,
-            fields: vec![
-                FieldDef {
-                    name: "base_addr".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "size".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "symbol_name".into(),
-                    field_type: FieldType::PooledString,
-                },
+    // Append symbol table via a second encoder (simulating offline symbolization).
+    // Decode the first trace, then create an appending encoder.
+    {
+        let mut decoder = dial9_trace_format::decoder::Decoder::new(&data).unwrap();
+        while decoder.next_frame_ref().ok().flatten().is_some() {}
+        let mut output = Vec::new();
+        let mut ext = decoder.into_encoder(&mut output);
+        let sym_schema = ext
+            .register_schema(
+                "SymbolTableEntry",
+                vec![
+                    FieldDef {
+                        name: "base_addr".into(),
+                        field_type: FieldType::Varint,
+                    },
+                    FieldDef {
+                        name: "size".into(),
+                        field_type: FieldType::Varint,
+                    },
+                    FieldDef {
+                        name: "symbol_name".into(),
+                        field_type: FieldType::PooledString,
+                    },
+                ],
+            )
+            .unwrap();
+        ext.write_event(
+            &sym_schema,
+            &[
+                FieldValue::Varint(0), // timestamp
+                FieldValue::Varint(0x1000),
+                FieldValue::Varint(256),
+                FieldValue::PooledString(pool_id),
             ],
-        },
-        &mut data,
-    )
-    .unwrap();
-    codec::encode_event(
-        sym_tid,
-        None,
-        &[
-            FieldValue::Varint(0x1000),
-            FieldValue::Varint(256),
-            FieldValue::PooledString(pool_id),
-        ],
-        &mut data,
-    )
-    .unwrap();
+        )
+        .unwrap();
+        drop(ext);
+        data.extend_from_slice(&output);
+    }
 
     let json = js_decode(&data);
 

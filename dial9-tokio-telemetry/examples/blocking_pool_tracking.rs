@@ -7,7 +7,8 @@
 //! Usage:
 //!   cargo run --release --features cpu-profiling --example blocking_pool_tracking
 
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::time::Duration;
 
 fn burn_cpu(duration: Duration) {

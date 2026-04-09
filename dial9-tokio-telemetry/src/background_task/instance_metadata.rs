@@ -1,18 +1,7 @@
 //! Machine identity detection for S3 object key paths.
-//!
-//! Provides `InstanceIdentity` — a newtype around `String` used as the
-//! `instance_path` component in S3 object keys.
 
 /// Identifies where a process is running, used as the `instance_path`
 /// component in S3 object keys.
-///
-/// # Examples
-/// ```
-/// use dial9_tokio_telemetry::background_task::instance_metadata::InstanceIdentity;
-///
-/// let id = InstanceIdentity::new("us-east-1/i-0abc123");
-/// assert_eq!(id.as_str(), "us-east-1/i-0abc123");
-/// ```
 #[derive(Clone)]
 pub struct InstanceIdentity(String);
 
@@ -29,11 +18,6 @@ impl From<&str> for InstanceIdentity {
 }
 
 impl InstanceIdentity {
-    /// Create an identity from an explicit string.
-    pub fn new(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-
     /// Auto-detect identity from the system hostname.
     pub fn from_hostname() -> Self {
         let hostname = hostname::get()

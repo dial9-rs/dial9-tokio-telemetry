@@ -10,7 +10,7 @@
 //!   echo 2 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
 use dial9_tokio_telemetry::telemetry::{
-    CpuProfilingConfig, RotatingWriter, TelemetryEvent, TracedRuntime,
+    RotatingWriter, TelemetryEvent, TracedRuntime, cpu_profile::CpuProfilingConfig,
 };
 use std::time::Duration;
 
@@ -79,17 +79,14 @@ fn main() {
     // Read back and report. TraceReader auto-detects gzip and parses
     // SymbolTableEntry events into callframe_symbols.
     eprintln!("\n=== Reading trace from {segment_path} ===");
-    let mut reader = dial9_tokio_telemetry::telemetry::TraceReader::new(segment_path).unwrap();
-    let (magic, version) = reader.read_header().unwrap();
-    eprintln!("Format: {magic} v{version}");
-
-    let events = reader.read_all().unwrap();
+    let reader = dial9_tokio_telemetry::analysis_unstable::TraceReader::new(segment_path).unwrap();
+    let events = &reader.runtime_events;
     let mut cpu_samples = 0;
     let mut polls = 0;
     let mut samples_by_worker: std::collections::HashMap<u64, usize> =
         std::collections::HashMap::new();
 
-    for event in &events {
+    for event in events {
         match event {
             TelemetryEvent::CpuSample {
                 worker_id,

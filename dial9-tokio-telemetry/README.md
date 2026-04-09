@@ -126,7 +126,7 @@ Both of these events are tied to the precise instant and thread that they happen
 # #[cfg(feature = "cpu-profiling")]
 # fn main() -> std::io::Result<()> {
 # use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
+use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
 
 # let writer = RotatingWriter::new("/tmp/t.bin", 1024, 4096)?;
 # let builder = tokio::runtime::Builder::new_multi_thread();
@@ -208,10 +208,10 @@ handle.disable();
 
 ```bash
 # per-worker stats, wake→poll delays, idle worker detection
-cargo run --example analyze_trace -- /tmp/my_traces/trace.0.bin.gz
+cargo run --example analyze_trace --features analysis -- /tmp/my_traces/trace.0.bin.gz
 
 # convert to JSONL for ad-hoc scripting
-cargo run --example trace_to_jsonl -- /tmp/my_traces/trace.0.bin.gz output.jsonl
+cargo run --example trace_to_jsonl --features analysis -- /tmp/my_traces/trace.0.bin.gz output.jsonl
 ```
 
 There's also an interactive HTML trace viewer — open `trace_viewer/index.html` and drag in a `.bin` file. [Here's a demo.](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)

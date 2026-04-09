@@ -9,10 +9,9 @@
 //!   cargo bench --bench threadlocal_encode
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use dial9_tokio_telemetry::telemetry::format::{
-    PollEndEvent, PollStartEvent, WorkerParkEvent, WorkerUnparkEvent,
+use dial9_tokio_telemetry::telemetry::{
+    PollEndEvent, PollStartEvent, TaskId, WorkerId, WorkerParkEvent, WorkerUnparkEvent,
 };
-use dial9_tokio_telemetry::telemetry::{TaskId, WorkerId};
 use dial9_trace_format::encoder::Encoder;
 
 fn make_batch(worker: usize) -> Vec<(u64, WorkerId, TaskId)> {
@@ -99,8 +98,7 @@ fn bench_threadlocal_rawcopy(c: &mut Criterion) {
             &batches,
             |b, batches| {
                 b.iter(|| {
-                    let mut output = Vec::new();
-                    dial9_trace_format::codec::encode_header(&mut output).unwrap();
+                    let mut output = Encoder::new().finish();
                     for batch in batches {
                         let mut local = Encoder::new();
                         encode_batch(&mut local, batch);

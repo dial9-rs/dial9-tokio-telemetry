@@ -1,4 +1,9 @@
-// Frame encoding/decoding (header, schema, event, string pool, symbol table)
+//! Wire-format encoding and decoding for trace frames.
+//!
+//! This module contains the low-level frame codec. Most users should use
+//! [`Encoder`](crate::encoder::Encoder) and [`Decoder`](crate::decoder::Decoder)
+//! instead. The types [`WireTypeId`], [`PoolEntry`], and [`PoolEntryRef`] are
+//! re-exported here because they appear in the decoder's public API.
 
 use crate::schema::{FieldDef, SchemaEntry};
 use crate::types::{FieldType, FieldValue, FieldValueRef};
@@ -12,41 +17,44 @@ use std::io::{self, Write};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WireTypeId(pub u16);
 
-pub const MAGIC: [u8; 4] = [0x54, 0x52, 0x43, 0x00]; // TRC\0
-pub const VERSION: u8 = 1;
-pub const HEADER_SIZE: usize = 5;
+pub(crate) const MAGIC: [u8; 4] = [0x54, 0x52, 0x43, 0x00]; // TRC\0
+pub(crate) const VERSION: u8 = 1;
+pub(crate) const HEADER_SIZE: usize = 5;
 
-pub const TAG_SCHEMA: u8 = 0x01;
-pub const TAG_EVENT: u8 = 0x02;
-pub const TAG_STRING_POOL: u8 = 0x03;
+pub(crate) const TAG_SCHEMA: u8 = 0x01;
+pub(crate) const TAG_EVENT: u8 = 0x02;
+pub(crate) const TAG_STRING_POOL: u8 = 0x03;
 // Tags 0x04 and 0x06 are reserved (formerly SymbolTable and ProcMaps, now schema-based events).
-pub const TAG_TIMESTAMP_RESET: u8 = 0x05;
+pub(crate) const TAG_TIMESTAMP_RESET: u8 = 0x05;
 
 /// Maximum nanosecond delta that fits in a u24 (3 bytes).
-pub const MAX_TIMESTAMP_DELTA_NS: u64 = 0xFF_FFFF; // 16,777,215
+pub(crate) const MAX_TIMESTAMP_DELTA_NS: u64 = 0xFF_FFFF; // 16,777,215
 
 /// Encode a u32 value as 3-byte little-endian (u24). Caller must ensure `value <= 0xFF_FFFF`.
 #[inline]
-pub fn encode_u24_le(value: u32, w: &mut impl Write) -> io::Result<()> {
+pub(crate) fn encode_u24_le(value: u32, w: &mut impl Write) -> io::Result<()> {
     debug_assert!(value <= MAX_TIMESTAMP_DELTA_NS as u32);
     w.write_all(&[value as u8, (value >> 8) as u8, (value >> 16) as u8])
 }
 
 /// Decode a 3-byte little-endian u24 from `data`. Returns `None` if fewer than 3 bytes.
 #[inline]
-pub fn decode_u24_le(data: &[u8]) -> Option<u32> {
+pub(crate) fn decode_u24_le(data: &[u8]) -> Option<u32> {
     let b = data.get(..3)?;
     Some(b[0] as u32 | (b[1] as u32) << 8 | (b[2] as u32) << 16)
 }
 
+/// An owned string pool entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PoolEntry {
+    /// Pool ID assigned by the encoder.
     pub pool_id: u32,
+    /// Raw string data.
     pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Frame {
+pub(crate) enum Frame {
     Schema {
         type_id: WireTypeId,
         entry: SchemaEntry,
@@ -62,15 +70,18 @@ pub enum Frame {
 }
 
 /// Zero-copy pool entry borrowing from the input buffer.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PoolEntryRef<'a> {
+    /// Pool ID assigned by the encoder.
     pub pool_id: u32,
+    /// Raw string data borrowed from the decode buffer.
     pub data: &'a [u8],
 }
 
 /// Zero-copy frame that borrows from the input buffer.
 #[derive(Debug, Clone, PartialEq)]
-pub enum FrameRef<'a> {
+pub(crate) enum FrameRef<'a> {
     Schema {
         type_id: WireTypeId,
         entry: SchemaEntry,
@@ -85,19 +96,19 @@ pub enum FrameRef<'a> {
 }
 
 /// Schema info needed by the decoder: field types + has_timestamp flag.
-pub struct SchemaInfo<'a> {
+pub(crate) struct SchemaInfo<'a> {
     pub field_types: &'a [FieldType],
     pub has_timestamp: bool,
 }
 
 // --- Encoding ---
 
-pub fn encode_header(w: &mut impl Write) -> io::Result<()> {
+pub(crate) fn encode_header(w: &mut impl Write) -> io::Result<()> {
     w.write_all(&MAGIC)?;
     w.write_all(&[VERSION])
 }
 
-pub fn encode_schema(
+pub(crate) fn encode_schema(
     type_id: WireTypeId,
     entry: &SchemaEntry,
     w: &mut impl Write,
@@ -120,7 +131,8 @@ pub fn encode_schema(
 
 /// Encode an event frame. If `timestamp_delta_ns` is Some, writes a u24 LE delta
 /// after the type_id (for schemas with `has_timestamp = true`).
-pub fn encode_event(
+#[cfg(test)]
+pub(crate) fn encode_event(
     type_id: WireTypeId,
     timestamp_delta_ns: Option<u32>,
     values: &[FieldValue],
@@ -137,7 +149,7 @@ pub fn encode_event(
     Ok(())
 }
 
-pub fn encode_string_pool(entries: &[PoolEntry], w: &mut impl Write) -> io::Result<()> {
+pub(crate) fn encode_string_pool(entries: &[PoolEntry], w: &mut impl Write) -> io::Result<()> {
     w.write_all(&[TAG_STRING_POOL])?;
     w.write_all(&(entries.len() as u32).to_le_bytes())?;
     for e in entries {
@@ -150,7 +162,7 @@ pub fn encode_string_pool(entries: &[PoolEntry], w: &mut impl Write) -> io::Resu
 
 // --- Decoding ---
 
-pub fn decode_header(data: &[u8]) -> Option<u8> {
+pub(crate) fn decode_header(data: &[u8]) -> Option<u8> {
     if data.get(..4)? != MAGIC {
         return None;
     }
@@ -159,7 +171,7 @@ pub fn decode_header(data: &[u8]) -> Option<u8> {
 }
 
 /// Decode a single frame starting at `data`. Returns (Frame, bytes_consumed).
-pub fn decode_frame<'s>(
+pub(crate) fn decode_frame<'s>(
     data: &[u8],
     schema_lookup: impl Fn(WireTypeId) -> Option<SchemaInfo<'s>>,
     timestamp_base_ns: u64,
@@ -271,7 +283,7 @@ fn decode_string_pool_frame(data: &[u8]) -> Option<(Frame, usize)> {
 // --- Zero-copy decoding ---
 
 /// Decode a single frame without allocating owned data for field values.
-pub fn decode_frame_ref<'a, 's>(
+pub(crate) fn decode_frame_ref<'a, 's>(
     data: &'a [u8],
     schema_lookup: impl Fn(WireTypeId) -> Option<SchemaInfo<'s>>,
     timestamp_base_ns: u64,
@@ -546,5 +558,29 @@ mod tests {
     #[test]
     fn unknown_tag_returns_none() {
         assert!(decode_frame(&[0xFF], |_| None, 0).is_none());
+    }
+
+    #[test]
+    fn truncated_event_frame() {
+        let types = vec![FieldType::Varint];
+        let data = [TAG_EVENT, 0x01];
+        let result = decode_frame(
+            &data,
+            |_| {
+                Some(SchemaInfo {
+                    field_types: &types,
+                    has_timestamp: false,
+                })
+            },
+            0,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn truncated_schema_frame() {
+        let data = [TAG_SCHEMA, 0x00, 0x00];
+        let result = decode_frame(&data, |_: WireTypeId| None, 0);
+        assert!(result.is_none());
     }
 }

@@ -6,7 +6,8 @@
 //! growth in production.
 #![cfg(feature = "cpu-profiling")]
 
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::time::Duration;
 
 /// Produce enough trace data to trigger multiple rotations and evictions,

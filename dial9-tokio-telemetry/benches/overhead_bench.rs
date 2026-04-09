@@ -14,7 +14,7 @@
 //! Duration defaults to 30 seconds. A 3-second warmup precedes measurement.
 
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
+use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
     NullWriter, RotatingWriter, TelemetryGuard, TelemetryHandle, TracedRuntime,
 };

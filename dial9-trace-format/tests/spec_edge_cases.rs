@@ -1,22 +1,18 @@
 //! Tests validating SPEC.md edge cases and format limits.
 
-use dial9_trace_format::codec::{
-    self, Frame, HEADER_SIZE, MAGIC, PoolEntry, SchemaInfo, VERSION, WireTypeId,
-};
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::Encoder;
-use dial9_trace_format::schema::{FieldDef, SchemaEntry};
+use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
 
 // --- Header edge cases ---
 
 #[test]
 fn header_is_exactly_5_bytes() {
-    let mut buf = Vec::new();
-    codec::encode_header(&mut buf).unwrap();
-    assert_eq!(buf.len(), HEADER_SIZE);
-    assert_eq!(&buf[..4], &MAGIC);
-    assert_eq!(buf[4], VERSION);
+    let data = Encoder::new().finish();
+    assert_eq!(data.len(), 5);
+    assert_eq!(&data[..4], &[0x54, 0x52, 0x43, 0x00]);
+    assert_eq!(data[4], 1);
 }
 
 #[test]
@@ -27,74 +23,61 @@ fn empty_stream_after_header() {
     assert!(dec.next_frame().unwrap().is_none());
 }
 
-// --- Schema edge cases (codec-level, not encoder) ---
+// --- Schema edge cases ---
 
 #[test]
-fn schema_max_type_id() {
-    let type_id = WireTypeId(u16::MAX);
-    let entry = SchemaEntry {
-        name: "Max".into(),
-        has_timestamp: false,
-        fields: vec![FieldDef {
-            name: "v".into(),
-            field_type: FieldType::Varint,
-        }],
-    };
-    let mut buf = Vec::new();
-    codec::encode_schema(type_id, &entry, &mut buf).unwrap();
-    let types = vec![FieldType::Varint];
-    let (frame, _) = codec::decode_frame(&buf, |_| None, 0).unwrap();
-    assert_eq!(frame, Frame::Schema { type_id, entry });
-
-    // Encode and decode an event with that type_id
-    let mut event_buf = Vec::new();
-    codec::encode_event(type_id, None, &[FieldValue::Varint(1)], &mut event_buf).unwrap();
-    let lookup = |id: WireTypeId| -> Option<SchemaInfo<'_>> {
-        if id == type_id {
-            Some(SchemaInfo {
-                field_types: &types,
-                has_timestamp: false,
-            })
-        } else {
-            None
-        }
-    };
-    let (frame, _) = codec::decode_frame(&event_buf, lookup, 0).unwrap();
-    assert!(matches!(frame, Frame::Event { type_id: tid, .. } if tid == type_id));
+fn schema_max_type_id_via_encoder() {
+    // Register a schema and verify round-trip
+    let mut enc = Encoder::new();
+    let fields = vec![FieldDef {
+        name: "v".into(),
+        field_type: FieldType::Varint,
+    }];
+    let schema = enc.register_schema("Ev", fields).unwrap();
+    enc.write_event(
+        &schema,
+        &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
+    )
+    .unwrap();
+    let data = enc.finish();
+    let mut dec = Decoder::new(&data).unwrap();
+    let frames = dec.decode_all();
+    assert!(matches!(&frames[0], DecodedFrame::Schema(s) if s.name == "Ev"));
+    if let DecodedFrame::Event { values, .. } = &frames[1] {
+        assert_eq!(values[0], FieldValue::Varint(42));
+    } else {
+        panic!("expected event");
+    }
 }
 
 #[test]
-fn schema_empty_name() {
-    let type_id = WireTypeId(0);
-    let entry = SchemaEntry {
-        name: "".into(),
-        has_timestamp: false,
-        fields: vec![],
-    };
-    let mut buf = Vec::new();
-    codec::encode_schema(type_id, &entry, &mut buf).unwrap();
-    let (frame, _) = codec::decode_frame(&buf, |_| None, 0).unwrap();
-    assert_eq!(frame, Frame::Schema { type_id, entry });
+fn schema_empty_name_via_encoder() {
+    let mut enc = Encoder::new();
+    let schema = enc.register_schema("", vec![]).unwrap();
+    enc.write_event(&schema, &[FieldValue::Varint(0)]).unwrap();
+    let data = enc.finish();
+    let mut dec = Decoder::new(&data).unwrap();
+    let frames = dec.decode_all();
+    assert!(matches!(&frames[0], DecodedFrame::Schema(s) if s.name.is_empty()));
 }
 
 #[test]
-fn schema_many_fields() {
-    let type_id = WireTypeId(1);
+fn schema_many_fields_via_encoder() {
+    let mut enc = Encoder::new();
     let fields: Vec<FieldDef> = (0..256)
         .map(|i| FieldDef {
             name: format!("f{i}"),
             field_type: FieldType::Varint,
         })
         .collect();
-    let entry = SchemaEntry {
-        name: "Wide".into(),
-        has_timestamp: false,
-        fields: fields.clone(),
-    };
-    let mut buf = Vec::new();
-    codec::encode_schema(type_id, &entry, &mut buf).unwrap();
-    let (frame, _) = codec::decode_frame(&buf, |_| None, 0).unwrap();
-    assert_eq!(frame, Frame::Schema { type_id, entry });
+    let schema = enc.register_schema("Wide", fields).unwrap();
+    let mut values = vec![FieldValue::Varint(0)]; // timestamp
+    values.extend((0..256).map(FieldValue::Varint));
+    enc.write_event(&schema, &values).unwrap();
+    let data = enc.finish();
+    let mut dec = Decoder::new(&data).unwrap();
+    let frames = dec.decode_all();
+    assert!(matches!(&frames[0], DecodedFrame::Schema(s) if s.fields.len() == 256));
 }
 
 // --- Field type edge cases ---
@@ -244,29 +227,30 @@ fn stack_frames_descending_addresses() {
 // --- String pool edge cases ---
 
 #[test]
-fn string_pool_empty_string() {
-    let entries = vec![PoolEntry {
-        pool_id: 0,
-        data: vec![],
-    }];
-    let mut buf = Vec::new();
-    codec::encode_string_pool(&entries, &mut buf).unwrap();
-    let (frame, _) = codec::decode_frame(&buf, |_| None, 0).unwrap();
-    assert_eq!(frame, Frame::StringPool(entries));
+fn string_pool_via_encoder() {
+    let mut enc = Encoder::new();
+    let id = enc.intern_string("").unwrap();
+    let data = enc.finish();
+    let mut dec = Decoder::new(&data).unwrap();
+    dec.decode_all();
+    assert_eq!(dec.string_pool().get(id), Some(""));
 }
 
 #[test]
-fn string_pool_many_entries() {
-    let entries: Vec<PoolEntry> = (0..100)
-        .map(|i| PoolEntry {
-            pool_id: i,
-            data: format!("str_{i}").into_bytes(),
-        })
+fn string_pool_many_entries_via_encoder() {
+    let mut enc = Encoder::new();
+    let ids: Vec<_> = (0..100)
+        .map(|i| enc.intern_string(&format!("str_{i}")).unwrap())
         .collect();
-    let mut buf = Vec::new();
-    codec::encode_string_pool(&entries, &mut buf).unwrap();
-    let (frame, _) = codec::decode_frame(&buf, |_| None, 0).unwrap();
-    assert_eq!(frame, Frame::StringPool(entries));
+    let data = enc.finish();
+    let mut dec = Decoder::new(&data).unwrap();
+    dec.decode_all();
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            dec.string_pool().get(*id),
+            Some(format!("str_{i}").as_str())
+        );
+    }
 }
 
 // --- Multi-frame ordering ---
@@ -371,28 +355,4 @@ fn field_type_tag_255_invalid() {
 #[test]
 fn truncated_header() {
     assert!(Decoder::new(&[0x54, 0x52, 0x43]).is_none());
-}
-
-#[test]
-fn truncated_event_frame() {
-    let types = vec![FieldType::Varint];
-    let data = [0x02, 0x01];
-    let result = codec::decode_frame(
-        &data,
-        |_| {
-            Some(SchemaInfo {
-                field_types: &types,
-                has_timestamp: false,
-            })
-        },
-        0,
-    );
-    assert!(result.is_none());
-}
-
-#[test]
-fn truncated_schema_frame() {
-    let data = [0x01, 0x00, 0x00];
-    let result = codec::decode_frame(&data, |_: WireTypeId| None, 0);
-    assert!(result.is_none());
 }

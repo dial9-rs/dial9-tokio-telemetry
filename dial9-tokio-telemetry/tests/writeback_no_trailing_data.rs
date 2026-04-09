@@ -4,7 +4,8 @@
 //! rewritten the segment, appending trailing garbage.
 #![cfg(feature = "cpu-profiling")]
 
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use flate2::read::GzDecoder;
 use std::io::Read;
 

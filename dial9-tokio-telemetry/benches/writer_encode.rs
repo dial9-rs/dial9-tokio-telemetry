@@ -8,12 +8,10 @@
 //!   cargo bench --bench writer_encode
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use dial9_tokio_telemetry::telemetry::Batch;
-use dial9_tokio_telemetry::telemetry::format::{
-    PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerParkEvent,
-    WorkerUnparkEvent,
+use dial9_tokio_telemetry::telemetry::{
+    Batch, PollEndEvent, PollStartEvent, RotatingWriter, TaskId, TaskSpawnEvent, TraceWriter,
+    WakeEventEvent, WorkerId, WorkerParkEvent, WorkerUnparkEvent,
 };
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TaskId, TraceWriter, WorkerId};
 use dial9_trace_format::encoder::Encoder;
 use tempfile::TempDir;
 

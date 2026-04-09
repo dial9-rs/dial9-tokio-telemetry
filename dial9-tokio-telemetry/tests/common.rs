@@ -1,12 +1,10 @@
-use dial9_tokio_telemetry::telemetry::Batch;
-use dial9_tokio_telemetry::telemetry::TelemetryEvent;
-use dial9_tokio_telemetry::telemetry::format::decode_events;
-use dial9_tokio_telemetry::telemetry::writer::TraceWriter;
+use dial9_tokio_telemetry::analysis_unstable::decode_events;
+use dial9_tokio_telemetry::telemetry::{Batch, TelemetryEvent, TraceWriter};
 use std::sync::{Arc, Mutex};
 
 /// A [`TraceWriter`] that accumulates all events into a shared `Vec`.
 ///
-/// Encoded batches are decoded back into `RawEvent` variants so that
+/// Encoded batches are decoded back into `TelemetryEvent` variants so that
 /// tests can inspect them uniformly regardless of the encoding path.
 pub struct CapturingWriter {
     events: Arc<Mutex<Vec<TelemetryEvent>>>,

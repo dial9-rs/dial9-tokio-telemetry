@@ -1,5 +1,8 @@
-use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
+use crate::telemetry::events::CpuSampleSource;
+#[cfg(any(feature = "analysis", test))]
+use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::TaskId;
+#[cfg(any(feature = "analysis", test))]
 use dial9_trace_format::decoder::StringPool;
 use dial9_trace_format::types::{EventEncoder, FieldType, FieldValueRef};
 use dial9_trace_format::{InternedString, StackFrames, TraceEvent, TraceField};
@@ -188,6 +191,7 @@ pub struct SegmentMetadataEvent {
 ///
 /// Resolves `InternedString` fields (e.g. `CpuSample.thread_name`) via the
 /// decoder's string pool while it is still valid for each batch.
+#[cfg(any(feature = "analysis", test))]
 pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
     use dial9_trace_format::decoder::Decoder;
 
@@ -205,27 +209,10 @@ pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
     Ok(events)
 }
 
-/// Decode all events from a byte slice into zero-copy [`TelemetryEventRef`]s.
-pub fn decode_events_ref(data: &[u8]) -> io::Result<Vec<TelemetryEventRef<'_>>> {
-    use dial9_trace_format::decoder::Decoder;
-
-    let mut dec = Decoder::new(data)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
-    let mut events = Vec::new();
-
-    dec.for_each_event(|ev| {
-        if let Some(ev) = decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
-            events.push(ev);
-        }
-    })
-    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
-    Ok(events)
-}
-
 /// Zero-copy enum of all telemetry event types. Each variant wraps the
 /// derive-generated `*EventRef<'a>` that borrows directly from the decode buffer.
 #[derive(Debug, Clone)]
+#[cfg(any(feature = "analysis", test))]
 pub enum TelemetryEventRef<'a> {
     PollStart(PollStartEventRef<'a>),
     PollEnd(PollEndEventRef<'a>),
@@ -239,8 +226,10 @@ pub enum TelemetryEventRef<'a> {
     SegmentMetadata(SegmentMetadataEventRef<'a>),
 }
 
+#[cfg(any(feature = "analysis", test))]
 impl<'a> TelemetryEventRef<'a> {
     /// Returns the timestamp in nanoseconds, if this event type carries one.
+    #[allow(dead_code)]
     pub fn timestamp_ns(&self) -> Option<u64> {
         match self {
             Self::PollStart(e) => Some(e.timestamp_ns),
@@ -257,9 +246,10 @@ impl<'a> TelemetryEventRef<'a> {
     }
 }
 
+#[cfg(any(feature = "analysis", test))]
 /// Decode a single event from its schema name and zero-copy field values.
 /// Returns `None` for unknown event names.
-pub fn decode_ref<'a>(
+pub(crate) fn decode_ref<'a>(
     name: &str,
     timestamp_ns: Option<u64>,
     fields: &[FieldValueRef<'a>],
@@ -300,6 +290,7 @@ pub fn decode_ref<'a>(
 
 /// Resolve an interned thread name from the string pool, filtering out the
 /// sentinel `"<no thread name>"` placeholder.
+#[cfg(any(feature = "analysis", test))]
 fn resolve_thread_name(pool: &StringPool, interned: InternedString) -> Option<String> {
     pool.get(interned)
         .filter(|n| *n != "<no thread name>")
@@ -309,6 +300,7 @@ fn resolve_thread_name(pool: &StringPool, interned: InternedString) -> Option<St
 /// Convert a zero-copy `TelemetryEventRef` into an owned `TelemetryEvent`,
 /// resolving any `InternedString` fields (e.g. `thread_name`) via the
 /// string pool that was active when the event was decoded.
+#[cfg(any(feature = "analysis", test))]
 pub(crate) fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> TelemetryEvent {
     match r {
         TelemetryEventRef::PollStart(e) => TelemetryEvent::PollStart {

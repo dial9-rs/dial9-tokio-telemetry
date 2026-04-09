@@ -93,7 +93,7 @@ fn test_rawcopy_round_trip_single_batch() {
 
     // Simulate raw-copy: just concatenate onto an output stream
     let mut output = Vec::new();
-    dial9_trace_format::codec::encode_header(&mut output).unwrap();
+    output.extend_from_slice(&Encoder::new().finish());
     output.extend_from_slice(&bytes1);
 
     let mut dec = Decoder::new(&output).unwrap();
@@ -127,7 +127,7 @@ fn test_rawcopy_string_pool_per_batch() {
 
     // Concatenate both batches (each has its own header)
     let mut output = Vec::new();
-    dial9_trace_format::codec::encode_header(&mut output).unwrap();
+    output.extend_from_slice(&Encoder::new().finish());
     output.extend_from_slice(&bytes1);
     output.extend_from_slice(&bytes2);
 
@@ -158,7 +158,7 @@ fn test_rawcopy_timestamp_preserved() {
     let bytes2 = enc2.reset_to_infallible(Vec::new());
 
     let mut output = Vec::new();
-    dial9_trace_format::codec::encode_header(&mut output).unwrap();
+    output.extend_from_slice(&Encoder::new().finish());
     output.extend_from_slice(&bytes1);
     output.extend_from_slice(&bytes2);
 
@@ -209,7 +209,7 @@ fn test_rawcopy_empty_batch() {
     let bytes1 = enc1.reset_to_infallible(Vec::new());
 
     let mut output = Vec::new();
-    dial9_trace_format::codec::encode_header(&mut output).unwrap();
+    output.extend_from_slice(&Encoder::new().finish());
     output.extend_from_slice(&bytes1);
 
     let mut dec = Decoder::new(&output).unwrap();

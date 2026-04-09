@@ -12,10 +12,9 @@ mod common;
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn sched_event_timestamps_align_with_wall_clock() {
-    use dial9_tokio_telemetry::telemetry::events::{
-        CpuSampleSource, TelemetryEvent, clock_monotonic_ns,
-    };
-    use dial9_tokio_telemetry::telemetry::{SchedEventConfig, TracedRuntime};
+    use dial9_tokio_telemetry::telemetry::TracedRuntime;
+    use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
+    use dial9_tokio_telemetry::telemetry::{CpuSampleSource, TelemetryEvent, clock_monotonic_ns};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 

@@ -102,7 +102,6 @@ impl<F: Future> Future for Traced<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::analysis::TraceReader;
     use crate::telemetry::buffer;
     use crate::telemetry::events::TelemetryEvent;
     use crate::telemetry::recorder::TracedRuntime;
@@ -117,7 +116,9 @@ mod tests {
     /// This is an integration test: events are written to a real file via
     /// `RotatingWriter` and then read back with `TraceReader`.
     #[test]
+    #[cfg(feature = "analysis")]
     fn traced_emits_wake_events() {
+        use crate::telemetry::analysis::TraceReader;
         let dir = TempDir::new().unwrap();
         let trace_path = dir.path().join("trace.bin");
 
@@ -170,9 +171,8 @@ mod tests {
         // Parse the trace file and collect all WakeEvents.
         let sealed = dir.path().join("trace.0.bin");
         let trace_path_str = sealed.to_str().unwrap();
-        let mut reader = TraceReader::new(trace_path_str).unwrap();
-        reader.read_header().unwrap();
-        let events = reader.read_all().unwrap();
+        let reader = TraceReader::new(trace_path_str).unwrap();
+        let events = &reader.runtime_events;
 
         let wake_task_ids: Vec<TaskId> = events
             .iter()
