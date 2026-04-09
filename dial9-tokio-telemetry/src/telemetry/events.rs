@@ -6,7 +6,7 @@ use std::sync::Arc;
 /// Role of a thread known to the telemetry system.
 #[cfg(feature = "cpu-profiling")]
 #[derive(Debug, Clone, Copy)]
-pub enum ThreadRole {
+pub(crate) enum ThreadRole {
     /// A tokio worker thread with the given index.
     Worker(usize),
     /// A thread in tokio's blocking pool.
@@ -23,6 +23,7 @@ pub enum CpuSampleSource {
 }
 
 impl CpuSampleSource {
+    /// Decode from a raw `u8` wire value.
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::SchedEvent,
@@ -32,14 +33,14 @@ impl CpuSampleSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ThreadName(Arc<str>);
+pub(crate) struct ThreadName(Arc<str>);
 
 impl ThreadName {
-    pub fn new(name: String) -> Self {
+    pub(crate) fn new(name: String) -> Self {
         Self(name.into())
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         self.0.as_ref()
     }
 }
@@ -56,38 +57,55 @@ impl ThreadName {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "event")]
 pub enum TelemetryEvent {
+    /// A task poll began on a worker thread.
     PollStart {
+        /// Wall-clock timestamp in nanoseconds (monotonic).
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
+        /// Worker thread that is polling.
         #[serde(rename = "worker")]
         worker_id: WorkerId,
+        /// Depth of this worker's local task queue at poll start.
         #[serde(rename = "local_q")]
         worker_local_queue_depth: usize,
+        /// Task being polled.
         task_id: TaskId,
+        /// Interned spawn location of the task.
         spawn_loc: InternedString,
     },
+    /// A task poll completed on a worker thread.
     PollEnd {
+        /// Wall-clock timestamp in nanoseconds (monotonic).
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
+        /// Worker thread that finished polling.
         #[serde(rename = "worker")]
         worker_id: WorkerId,
     },
+    /// A worker thread parked (went idle).
     WorkerPark {
+        /// Wall-clock timestamp in nanoseconds (monotonic).
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
+        /// Worker thread that parked.
         #[serde(rename = "worker")]
         worker_id: WorkerId,
+        /// Depth of this worker's local task queue at park time.
         #[serde(rename = "local_q")]
         worker_local_queue_depth: usize,
         /// Thread CPU time (nanos) from CLOCK_THREAD_CPUTIME_ID.
         #[serde(rename = "cpu_ns")]
         cpu_time_nanos: u64,
     },
+    /// A worker thread unparked (resumed).
     WorkerUnpark {
+        /// Wall-clock timestamp in nanoseconds (monotonic).
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
+        /// Worker thread that unparked.
         #[serde(rename = "worker")]
         worker_id: WorkerId,
+        /// Depth of this worker's local task queue at unpark time.
         #[serde(rename = "local_q")]
         worker_local_queue_depth: usize,
         /// Thread CPU time (nanos) from CLOCK_THREAD_CPUTIME_ID.
@@ -97,27 +115,39 @@ pub enum TelemetryEvent {
         #[serde(rename = "sched_wait_ns")]
         sched_wait_delta_nanos: u64,
     },
+    /// Periodic sample of the global task queue depth.
     QueueSample {
+        /// Wall-clock timestamp in nanoseconds (monotonic).
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
+        /// Number of tasks in the global (injection) queue.
         #[serde(rename = "global_q")]
         global_queue_depth: usize,
     },
+    /// A new task was spawned.
     TaskSpawn {
+        /// Wall-clock timestamp in nanoseconds (monotonic).
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
+        /// Unique identifier for the spawned task.
         task_id: TaskId,
+        /// Interned spawn location of the task.
         spawn_loc: InternedString,
     },
+    /// A task terminated (completed or was cancelled).
     TaskTerminate {
+        /// Wall-clock timestamp in nanoseconds (monotonic).
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
+        /// Task that terminated.
         task_id: TaskId,
     },
     /// A CPU stack trace sample from perf_event, attributed to a worker thread.
     CpuSample {
+        /// Wall-clock timestamp in nanoseconds (monotonic).
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
+        /// Worker thread that was sampled.
         #[serde(rename = "worker")]
         worker_id: WorkerId,
         /// OS thread ID that was sampled.
@@ -132,18 +162,30 @@ pub enum TelemetryEvent {
     /// Maps an OS thread ID to its name (from `/proc/self/task/<tid>/comm`).
     /// Emitted before the first CpuSample referencing this tid in each file.
     /// Allows grouping non-worker CPU samples by thread name.
-    ThreadNameDef { tid: u32, name: String },
+    ThreadNameDef {
+        /// OS thread ID.
+        tid: u32,
+        /// Human-readable thread name.
+        name: String,
+    },
+    /// One task woke another task.
     WakeEvent {
+        /// Wall-clock timestamp in nanoseconds (monotonic).
         #[serde(rename = "timestamp_ns")]
         timestamp_nanos: u64,
+        /// Task that issued the wake.
         waker_task_id: TaskId,
+        /// Task that was woken.
         woken_task_id: TaskId,
+        /// Worker thread index that issued the wake (255 = unknown).
         target_worker: u8,
     },
     /// Key-value metadata written at the start of each segment.
     /// Makes trace files self-describing (host, region, service, boot_id, etc.).
     SegmentMetadata {
+        /// Wall-clock timestamp in nanoseconds (monotonic).
         timestamp_nanos: u64,
+        /// Key-value metadata pairs.
         entries: Vec<(String, String)>,
     },
 }
@@ -214,7 +256,7 @@ impl TelemetryEvent {
 /// Carries rich data (including `&'static Location`) with no locking.
 /// Converted to wire format by the flush thread.
 #[derive(Debug, Clone)]
-pub enum RawEvent {
+pub(crate) enum RawEvent {
     PollStart {
         timestamp_nanos: u64,
         worker_id: WorkerId,
@@ -265,7 +307,7 @@ pub enum RawEvent {
 /// Data for a CPU stack trace sample. Boxed inside [`RawEvent`] to keep the
 /// enum small for the common hot-path variants.
 #[derive(Debug, Clone)]
-pub struct CpuSampleData {
+pub(crate) struct CpuSampleData {
     pub timestamp_nanos: u64,
     pub worker_id: WorkerId,
     pub tid: u32,
@@ -276,12 +318,12 @@ pub struct CpuSampleData {
 
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.
 #[cfg(target_os = "linux")]
-pub fn current_tid() -> u32 {
+pub(crate) fn current_tid() -> u32 {
     unsafe { libc::syscall(libc::SYS_gettid) as u32 }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn current_tid() -> u32 {
+pub(crate) fn current_tid() -> u32 {
     // No gettid on non-Linux; use a thread-local counter as a unique ID.
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(1);
@@ -292,7 +334,7 @@ pub fn current_tid() -> u32 {
 /// Read the calling thread's CPU time via `CLOCK_THREAD_CPUTIME_ID`.
 /// This is a vDSO call on Linux (~20-40ns), no actual syscall.
 #[cfg(target_os = "linux")]
-pub fn thread_cpu_time_nanos() -> u64 {
+pub(crate) fn thread_cpu_time_nanos() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -306,7 +348,7 @@ pub fn thread_cpu_time_nanos() -> u64 {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn thread_cpu_time_nanos() -> u64 {
+pub(crate) fn thread_cpu_time_nanos() -> u64 {
     0
 }
 
@@ -336,7 +378,7 @@ pub fn clock_monotonic_ns() -> u64 {
 /// Per-thread scheduler stats from `/proc/<pid>/task/<tid>/schedstat`.
 /// Fields: run_time_ns wait_time_ns timeslices
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SchedStat {
+pub(crate) struct SchedStat {
     pub wait_time_ns: u64,
 }
 
@@ -345,7 +387,7 @@ impl SchedStat {
     /// Read schedstat for the current thread using a cached per-thread file descriptor.
     /// Opening `/proc/self/task/<tid>/schedstat` is done once per thread; subsequent reads
     /// use `pread(fd, buf, 0)` which is ~2-3x cheaper than open+read+close.
-    pub fn read_current() -> std::io::Result<Self> {
+    pub(crate) fn read_current() -> std::io::Result<Self> {
         use std::os::unix::io::RawFd;
 
         thread_local! {
@@ -406,7 +448,7 @@ impl SchedStat {
 
 #[cfg(not(target_os = "linux"))]
 impl SchedStat {
-    pub fn read_current() -> std::io::Result<Self> {
+    pub(crate) fn read_current() -> std::io::Result<Self> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "schedstat not available on this platform",

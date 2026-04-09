@@ -7,7 +7,9 @@ use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
+/// Trait for writing encoded telemetry batches to a destination.
 pub trait TraceWriter: Send {
+    /// Flush buffered data to the underlying storage.
     fn flush(&mut self) -> std::io::Result<()>;
     /// Returns true if the writer rotated to a new file since the last call to this method.
     fn take_rotated(&mut self) -> bool {
@@ -62,6 +64,7 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
 
 /// A writer that discards all events. Useful for benchmarking hook overhead
 /// without I/O costs.
+#[derive(Debug)]
 pub struct NullWriter;
 
 impl TraceWriter for NullWriter {
@@ -103,6 +106,16 @@ pub struct RotatingWriter {
     has_real_events: bool,
 }
 
+impl std::fmt::Debug for RotatingWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotatingWriter")
+            .field("base_path", &self.base_path)
+            .field("max_file_size", &self.max_file_size)
+            .field("max_total_size", &self.max_total_size)
+            .finish_non_exhaustive()
+    }
+}
+
 // the write side is obviously marge larger than the `Finished` size so clippy warns on this
 // but we don't want to force going through a pointer every time we want to write.
 #[allow(clippy::large_enum_variant)]
@@ -124,6 +137,7 @@ impl RotatingWriter {
         Self::create(base_path, max_file_size, max_total_size, Vec::new())
     }
 
+    /// Create a `RotatingWriterBuilder` for advanced configuration.
     #[builder(builder_type = RotatingWriterBuilder, finish_fn = build)]
     pub fn builder(
         base_path: impl Into<PathBuf>,
@@ -171,7 +185,7 @@ impl RotatingWriter {
 
     /// Create a writer that writes to a single file with no rotation or eviction.
     /// The segment is written to `{stem}.0.bin.active` while active, then sealed
-    /// to `{stem}.0.bin` on [`finalize`]. The background worker will symbolize
+    /// to `{stem}.0.bin` on `finalize`. The background worker will symbolize
     /// and gzip it to `{stem}.0.bin.gz`.
     ///
     /// Note: This API does not allow the ability to provide custom segment metadata.

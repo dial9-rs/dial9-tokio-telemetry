@@ -1,7 +1,7 @@
 # Agent Guidelines
 
 - You MUST use Red/Green TDD.
-- BEFORE COMMITING: `cargo nextest run --stress-duration 20`. The package has no flaky tests. If you find a flaky test, you created it.
+- BEFORE COMMITING: `cargo nextest run --stress-duration 20s`. The package has no flaky tests. If you find a flaky test, you created it.
 
 ## API Design
 

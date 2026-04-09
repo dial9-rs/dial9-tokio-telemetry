@@ -180,6 +180,7 @@ pin_project! {
 }
 
 impl<F> DetectLongWait<F> {
+    /// Create a new `DetectLongWait` with default configuration.
     pub fn new(inner: F, tx: mpsc::UnboundedSender<Sentinel>) -> Self {
         Self {
             inner,
@@ -189,6 +190,7 @@ impl<F> DetectLongWait<F> {
         }
     }
 
+    /// Create a new `DetectLongWait` with custom configuration.
     pub fn with_config(
         inner: F,
         tx: mpsc::UnboundedSender<Sentinel>,

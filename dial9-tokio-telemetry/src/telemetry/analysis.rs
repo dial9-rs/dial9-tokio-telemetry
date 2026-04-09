@@ -11,6 +11,7 @@ use std::io::{Read as _, Result};
 /// Decodes the entire file eagerly and populates lookup tables for spawn
 /// locations (from the string pool), task→spawn-location mappings, callframe
 /// symbols, thread names, and segment metadata.
+#[derive(Debug)]
 pub struct TraceReader {
     /// All decoded events (including metadata like TaskSpawn).
     pub all_events: Vec<TelemetryEvent>,
@@ -27,6 +28,7 @@ pub struct TraceReader {
 }
 
 impl TraceReader {
+    /// Read and decode a trace file at the given path.
     pub fn new(path: &str) -> Result<Self> {
         let data = read_trace_file(path)?;
         let mut dec = Decoder::new(&data).ok_or_else(|| {
@@ -137,29 +139,46 @@ fn populate_spawn_loc(
     }
 }
 
+/// Aggregated statistics for a single Tokio worker thread.
 #[derive(Debug, Default)]
 pub struct WorkerStats {
+    /// Number of task polls executed by this worker.
     pub poll_count: usize,
+    /// Number of times this worker parked (went idle).
     pub park_count: usize,
+    /// Number of times this worker was unparked (resumed).
     pub unpark_count: usize,
+    /// Cumulative time spent polling tasks, in nanoseconds.
     pub total_poll_time_ns: u64,
+    /// Maximum observed local queue depth for this worker.
     pub max_local_queue: usize,
+    /// Maximum OS scheduling wait observed during any single unpark, in nanoseconds.
     pub max_sched_wait_ns: u64,
+    /// Cumulative OS scheduling wait across all unparks, in nanoseconds.
     pub total_sched_wait_ns: u64,
 }
 
+/// Aggregated poll statistics for a single spawn location.
 #[derive(Debug, Default)]
 pub struct SpawnLocationStats {
+    /// Number of polls from tasks spawned at this location.
     pub poll_count: usize,
+    /// Cumulative poll time for tasks from this location, in nanoseconds.
     pub total_poll_time_ns: u64,
 }
 
+/// Summary of a decoded trace: event counts, timing, and per-worker statistics.
 #[derive(Debug)]
 pub struct TraceAnalysis {
+    /// Total number of events in the trace.
     pub total_events: usize,
+    /// Wall-clock duration of the trace in nanoseconds.
     pub duration_ns: u64,
+    /// Per-worker aggregated statistics.
     pub worker_stats: HashMap<WorkerId, WorkerStats>,
+    /// Maximum observed global queue depth across all samples.
     pub max_global_queue: usize,
+    /// Average global queue depth across all samples.
     pub avg_global_queue: f64,
     /// Per-spawn-location statistics (only populated when task tracking is enabled).
     pub spawn_location_stats: HashMap<InternedString, SpawnLocationStats>,
@@ -191,6 +210,7 @@ fn lookup_global_queue_depth(timeline: &[(u64, usize)], timestamp: u64) -> usize
     }
 }
 
+/// Analyze a slice of telemetry events and produce a [`TraceAnalysis`] summary.
 pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
     let mut worker_stats: HashMap<WorkerId, WorkerStats> = HashMap::new();
     let mut poll_starts: HashMap<WorkerId, u64> = HashMap::new();
@@ -343,8 +363,11 @@ pub fn compute_wake_to_poll_delays(events: &[TelemetryEvent]) -> Vec<u64> {
 /// An active period between WorkerUnpark and WorkerPark, with scheduling ratio.
 #[derive(Debug)]
 pub struct ActivePeriod {
+    /// Worker thread that was active during this period.
     pub worker_id: WorkerId,
+    /// Timestamp when the worker was unparked (nanos).
     pub start_ns: u64,
+    /// Timestamp when the worker parked again (nanos).
     pub end_ns: u64,
     /// CPU time consumed during this active period (nanos).
     pub cpu_delta_ns: u64,
@@ -397,6 +420,7 @@ pub fn compute_active_periods(events: &[TelemetryEvent]) -> Vec<ActivePeriod> {
     periods
 }
 
+/// Print a human-readable summary of a [`TraceAnalysis`] to stdout.
 pub fn print_analysis(analysis: &TraceAnalysis, spawn_locations: &HashMap<InternedString, String>) {
     println!("\n=== Trace Analysis ===");
     println!("Total events: {}", analysis.total_events);
@@ -495,11 +519,17 @@ pub fn detect_idle_workers(events: &[TelemetryEvent]) -> Vec<(WorkerId, u64, usi
 /// A poll that exceeded the given duration threshold.
 #[derive(Debug)]
 pub struct LongPoll {
+    /// Worker that executed the poll.
     pub worker_id: WorkerId,
+    /// Poll start timestamp (nanos).
     pub start_ns: u64,
+    /// Poll end timestamp (nanos).
     pub end_ns: u64,
+    /// Duration of the poll in nanoseconds.
     pub duration_ns: u64,
+    /// Task that was being polled.
     pub task_id: TaskId,
+    /// Spawn location of the task.
     pub spawn_loc: InternedString,
 }
 
@@ -549,9 +579,13 @@ pub fn detect_long_polls(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<Lo
 /// A park period where the OS scheduler delayed the worker thread.
 #[derive(Debug)]
 pub struct SchedDelay {
+    /// Worker that experienced the scheduling delay.
     pub worker_id: WorkerId,
+    /// Timestamp when the worker parked (nanos).
     pub park_ns: u64,
+    /// Timestamp when the worker was unparked (nanos).
     pub unpark_ns: u64,
+    /// OS scheduling wait during this park period (nanos).
     pub sched_wait_ns: u64,
 }
 
@@ -598,10 +632,15 @@ pub fn detect_sched_delays(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<
 /// A wake-to-poll scheduling delay that exceeded a threshold.
 #[derive(Debug)]
 pub struct WakeDelay {
+    /// Worker that polled the task after the wake.
     pub worker_id: WorkerId,
+    /// Timestamp of the wake event (nanos).
     pub wake_ns: u64,
+    /// Timestamp of the subsequent poll start (nanos).
     pub poll_ns: u64,
+    /// Delay between wake and poll in nanoseconds.
     pub delay_ns: u64,
+    /// Task that experienced the scheduling delay.
     pub task_id: TaskId,
 }
 
@@ -662,12 +701,19 @@ pub fn detect_wake_delays(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<W
 /// A poll that had CPU or scheduler samples collected during its execution.
 #[derive(Debug)]
 pub struct SampledPoll {
+    /// Worker that executed the poll.
     pub worker_id: WorkerId,
+    /// Poll start timestamp (nanos).
     pub start_ns: u64,
+    /// Poll end timestamp (nanos).
     pub end_ns: u64,
+    /// Task that was being polled.
     pub task_id: TaskId,
+    /// Spawn location of the task.
     pub spawn_loc: InternedString,
+    /// Number of CPU profile samples collected during this poll.
     pub cpu_sample_count: usize,
+    /// Number of scheduler event samples collected during this poll.
     pub sched_sample_count: usize,
 }
 
