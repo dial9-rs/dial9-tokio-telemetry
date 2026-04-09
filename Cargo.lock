@@ -1454,6 +1454,7 @@ dependencies = [
  "hostname",
  "libc",
  "metrique",
+ "metrique-timesource",
  "metrique-writer",
  "nix",
  "pin-project-lite",
@@ -2717,6 +2718,9 @@ name = "metrique-timesource"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d607939211e4eaaa8cd35394fa5e57faffb7390d0ac513b39992edcaf3cc526c"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "metrique-writer"
