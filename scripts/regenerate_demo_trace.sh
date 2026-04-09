@@ -22,7 +22,7 @@ REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 TRACE_PATH="$REPO_ROOT/sched-trace.bin"
-DEMO_DEST="$REPO_ROOT/dial9-tokio-telemetry/trace_viewer/demo-trace.bin"
+DEMO_DEST="$REPO_ROOT/dial9-viewer/ui/demo-trace.bin"
 # RotatingWriter turns "sched-trace.bin" into "sched-trace.0.bin.gz", etc.
 TRACE_GZ_GLOB="$REPO_ROOT/sched-trace.*.bin.gz"
 
@@ -53,5 +53,5 @@ echo ""
 echo "✓ Demo trace regenerated successfully!"
 echo ""
 echo "To commit:"
-echo "  git add dial9-tokio-telemetry/trace_viewer/demo-trace.bin"
+echo "  git add dial9-viewer/ui/demo-trace.bin"
 echo "  git commit -m 'Regenerate demo trace'"

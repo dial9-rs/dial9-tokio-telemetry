@@ -680,9 +680,9 @@ fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| {
         // Try relative paths from likely CWDs
         for p in &[
-            "../../dial9-tokio-telemetry/trace_viewer/demo-trace.bin",
-            "../dial9-tokio-telemetry/trace_viewer/demo-trace.bin",
-            "dial9-tokio-telemetry/trace_viewer/demo-trace.bin",
+            "../../dial9-viewer/ui/demo-trace.bin",
+            "../dial9-viewer/ui/demo-trace.bin",
+            "dial9-viewer/ui/demo-trace.bin",
         ] {
             if std::path::Path::new(p).exists() {
                 return p.to_string();

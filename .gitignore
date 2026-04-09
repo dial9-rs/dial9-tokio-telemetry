@@ -1,6 +1,6 @@
 # ignore trace files in the root directory (produced by examples etc.)
 *.bin
 # except the demo trace
-!dial9-tokio-telemetry/trace_viewer/demo-trace.bin
+!dial9-viewer/ui/demo-trace.bin
 target/
 .claude/

@@ -51,11 +51,11 @@ Or manually:
 
 ```bash
 cd dial9-tokio-telemetry
-rm -f trace_viewer/demo-trace.bin
+rm -f dial9-viewer/ui/demo-trace.bin
 cargo build --release -p metrics-service
 AWS_PROFILE=your-profile cargo run --release -p metrics-service --bin metrics-service -- --trace-path sched-trace.bin --demo
-cp sched-trace.*.bin trace_viewer/demo-trace.bin
-git add trace_viewer/demo-trace.bin
+cp sched-trace.*.bin dial9-viewer/ui/demo-trace.bin
+git add dial9-viewer/ui/demo-trace.bin
 git commit -m "Regenerate demo trace after format changes"
 ```
 

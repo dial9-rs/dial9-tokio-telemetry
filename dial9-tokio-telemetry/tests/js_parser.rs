@@ -73,10 +73,13 @@ fn test_js_parser_matches_rust() {
 
     eprintln!("Exported JSONL to {}", jsonl_path.display());
 
-    // Run JS parser test (use CARGO_MANIFEST_DIR to find trace_viewer)
+    // Run JS parser test (use CARGO_MANIFEST_DIR to find ui directory)
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let test_script = std::path::Path::new(&manifest_dir)
-        .join("trace_viewer")
+        .parent()
+        .unwrap()
+        .join("dial9-viewer")
+        .join("ui")
         .join("test_parser.js");
 
     let test_output = Command::new("node")
@@ -159,7 +162,10 @@ if (!sym || sym.symbol !== "my_function") {{
 console.log("OK: " + result.events.length + " events, symbol resolved");
 "#,
         viewer = std::path::Path::new(&manifest_dir)
-            .join("trace_viewer")
+            .parent()
+            .unwrap()
+            .join("dial9-viewer")
+            .join("ui")
             .display(),
         trace = trace_path.display(),
     );
