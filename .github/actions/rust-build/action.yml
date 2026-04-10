@@ -27,12 +27,13 @@ runs:
           run: |
               sudo sysctl kernel.perf_event_paranoid=1
               sudo sysctl kernel.kptr_restrict=0
-        - name: Raise locked-memory limit for perf ring buffers
-          if: runner.os == 'Linux'
-          shell: bash
-          run: sudo prlimit --pid $$ --memlock=unlimited:unlimited
         - name: Run tests
           shell: bash
           env:
               RUSTFLAGS: "--cfg tokio_unstable"
-          run: cargo test
+          run: |
+              if [ "$RUNNER_OS" = "Linux" ]; then
+                  # Raise locked-memory limit for large perf ring buffers
+                  sudo prlimit --pid $$ --memlock=unlimited:unlimited
+              fi
+              cargo test
