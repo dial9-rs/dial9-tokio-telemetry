@@ -12,10 +12,10 @@
 //! by finding the `PollStart` event whose time interval (PollStart →
 //! corresponding PollEnd) contains the burn window.
 
-#[cfg(feature = "cpu-profiling")]
+#![cfg(feature = "cpu-profiling")]
+
 mod common;
 
-#[cfg(feature = "cpu-profiling")]
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -236,7 +236,6 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     }
 }
 
-#[cfg(feature = "cpu-profiling")]
 fn burn_cpu(duration: std::time::Duration) {
     let start = std::time::Instant::now();
     let mut x: u64 = 1;
@@ -257,7 +256,6 @@ fn burn_cpu(duration: std::time::Duration) {
 /// `/proc/self/task/<tid>/comm` while the threads are still alive. The final
 /// `ThreadNameDef` emission happens later at write time, after the threads
 /// have exited — proving the eager cache is necessary.
-#[cfg(feature = "cpu-profiling")]
 #[test]
 fn thread_name_attribution_for_external_and_blocking_threads() {
     let _ = tracing_subscriber::fmt::try_init();
