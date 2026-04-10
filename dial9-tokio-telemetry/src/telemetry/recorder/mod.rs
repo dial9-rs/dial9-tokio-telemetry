@@ -736,9 +736,9 @@ impl TracedRuntimeBuilder<HasTracePath> {
                     // are batched into reasonably-sized segments.
                     let mut cycle_count: u64 = 0;
                     const SELF_DRAIN_INTERVAL: u64 = 200;
-                    /// Drain all thread-local buffers every ~30s (6000 × 5ms).
-                    /// This ensures idle/silent threads don't hold events across
-                    /// trace file rotations.
+                    // Drain all thread-local buffers every ~30s (6000 × 5ms).
+                    // This ensures idle/silent threads don't hold events across
+                    // trace file rotations.
                     const TL_DRAIN_INTERVAL: u64 = 6000;
                     let sample_interval = Duration::from_millis(10);
                     let mut last_sample = Instant::now();
