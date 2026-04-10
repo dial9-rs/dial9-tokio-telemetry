@@ -5,13 +5,12 @@ permissions:
 
 jobs:
   build:
-    name: Build
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.os }}, ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        toolchain:
-          - stable
-          - nightly
+        os: [ubuntu-latest, macos-latest]
+        toolchain: [stable, nightly]
     env:
       RUST_BACKTRACE: 1
     steps:
