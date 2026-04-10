@@ -221,21 +221,31 @@ pub struct TelemetryHandle {
     control_tx: std::sync::mpsc::SyncSender<ControlCommand>,
 }
 
+impl std::fmt::Debug for TelemetryHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelemetryHandle").finish_non_exhaustive()
+    }
+}
+
 impl TelemetryHandle {
+    /// Enable telemetry recording.
     pub fn enable(&self) {
         self.shared.enabled.store(true, Ordering::Relaxed);
     }
 
+    /// Disable telemetry recording.
     pub fn disable(&self) {
         self.shared.enabled.store(false, Ordering::Relaxed);
     }
 
+    /// Get a [`TracedHandle`](crate::traced::TracedHandle) for wrapping futures with wake tracking.
     pub fn traced_handle(&self) -> crate::traced::TracedHandle {
         crate::traced::TracedHandle {
             shared: self.shared.clone(),
         }
     }
 
+    /// Spawn a future wrapped with wake-event tracking.
     #[track_caller]
     pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
     where
@@ -263,19 +273,29 @@ pub struct TelemetryGuard {
     worker: Option<WorkerHandle>,
 }
 
+impl std::fmt::Debug for TelemetryGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelemetryGuard").finish_non_exhaustive()
+    }
+}
+
 impl TelemetryGuard {
+    /// Get a cloneable handle for controlling telemetry.
     pub fn handle(&self) -> TelemetryHandle {
         self.handle.clone()
     }
 
+    /// Monotonic start time of the telemetry session in nanoseconds.
     pub fn start_time(&self) -> u64 {
         self.handle.shared.start_time_ns
     }
 
+    /// Enable telemetry recording.
     pub fn enable(&self) {
         self.handle.enable();
     }
 
+    /// Disable telemetry recording.
     pub fn disable(&self) {
         self.handle.disable();
     }
@@ -369,10 +389,13 @@ impl Drop for TelemetryGuard {
 }
 
 /// Marker: no trace path has been set yet.
+#[derive(Debug)]
 pub struct NoTracePath;
 /// Marker: a trace path has been set.
+#[derive(Debug)]
 pub struct HasTracePath;
 
+/// Builder for configuring a traced Tokio runtime.
 pub struct TracedRuntimeBuilder<P = NoTracePath> {
     enabled: bool,
     task_tracking_enabled: bool,
@@ -391,6 +414,13 @@ pub struct TracedRuntimeBuilder<P = NoTracePath> {
     _marker: std::marker::PhantomData<P>,
 }
 
+impl<P> std::fmt::Debug for TracedRuntimeBuilder<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TracedRuntimeBuilder")
+            .finish_non_exhaustive()
+    }
+}
+
 // Methods available on both NoTracePath and HasTracePath.
 impl<P> TracedRuntimeBuilder<P> {
     /// Set to `false` to build a plain runtime with no telemetry
@@ -404,6 +434,7 @@ impl<P> TracedRuntimeBuilder<P> {
         self
     }
 
+    /// Enable or disable task spawn/terminate tracking.
     pub fn with_task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking_enabled = enabled;
         self
@@ -416,6 +447,7 @@ impl<P> TracedRuntimeBuilder<P> {
         self
     }
 
+    /// Enable CPU profiling with the given configuration (Linux only).
     #[cfg(feature = "cpu-profiling")]
     pub fn with_cpu_profiling(
         mut self,
@@ -425,6 +457,7 @@ impl<P> TracedRuntimeBuilder<P> {
         self
     }
 
+    /// Enable per-worker scheduler event capture (Linux only).
     #[cfg(feature = "cpu-profiling")]
     pub fn with_sched_events(
         mut self,
@@ -448,11 +481,13 @@ impl<P> TracedRuntimeBuilder<P> {
         self
     }
 
+    /// Set how often the background worker polls for sealed segments.
     pub fn with_worker_poll_interval(mut self, interval: Duration) -> Self {
         self.worker_poll_interval = Some(interval);
         self
     }
 
+    /// Set a metrics sink for the background worker.
     pub fn with_worker_metrics_sink(mut self, sink: metrique_writer::BoxEntrySink) -> Self {
         self.worker_metrics_sink = Some(sink);
         self
@@ -853,9 +888,11 @@ impl TracedRuntimeBuilder<HasTracePath> {
 }
 
 /// Entry point for setting up a traced Tokio runtime.
+#[derive(Debug)]
 pub struct TracedRuntime;
 
 impl TracedRuntime {
+    /// Create a new [`TracedRuntimeBuilder`].
     pub fn builder() -> TracedRuntimeBuilder<NoTracePath> {
         TracedRuntimeBuilder {
             enabled: true,

@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// 5ms so in practice the queue rarely has more than a handful of entries.
 const DEFAULT_CAPACITY: usize = 1024;
 
+/// A batch of encoded trace events ready for writing.
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct Batch {
     pub(crate) encoded_bytes: Vec<u8>,
@@ -46,29 +48,29 @@ impl Default for CentralCollector {
 }
 
 impl CentralCollector {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_capacity(DEFAULT_CAPACITY)
     }
 
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             queue: ArrayQueue::new(capacity),
             dropped_batches: AtomicUsize::new(0),
         }
     }
 
-    pub fn accept_flush(&self, batch: Batch) {
+    pub(crate) fn accept_flush(&self, batch: Batch) {
         if let Some(_evicted) = self.queue.force_push(batch) {
             self.dropped_batches.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    pub fn next(&self) -> Option<Batch> {
+    pub(crate) fn next(&self) -> Option<Batch> {
         self.queue.pop()
     }
 
     /// Returns the number of batches dropped since the last call.
-    pub fn take_dropped_batches(&self) -> usize {
+    pub(crate) fn take_dropped_batches(&self) -> usize {
         self.dropped_batches.swap(0, Ordering::Relaxed)
     }
 }

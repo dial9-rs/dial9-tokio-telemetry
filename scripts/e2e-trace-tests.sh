@@ -36,9 +36,9 @@ echo "--- Regenerating demo trace ---"
 scripts/regenerate_demo_trace.sh
 
 echo "--- Checking trace integrity ---"
-node dial9-tokio-telemetry/trace_viewer/test_trace_integrity.js
+node dial9-viewer/ui/test_trace_integrity.js
 
 echo "--- Checking trace analysis ---"
-node dial9-tokio-telemetry/trace_viewer/test_trace_analysis.js
+node dial9-viewer/ui/test_trace_analysis.js
 
 echo "All E2E trace checks passed."

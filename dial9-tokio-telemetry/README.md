@@ -214,7 +214,7 @@ cargo run --example analyze_trace --features analysis -- /tmp/my_traces/trace.0.
 cargo run --example trace_to_jsonl --features analysis -- /tmp/my_traces/trace.0.bin.gz output.jsonl
 ```
 
-There's also an interactive HTML trace viewer — open `trace_viewer/index.html` and drag in a `.bin` file. [Here's a demo.](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)
+There's also an interactive HTML trace viewer — open `../dial9-viewer/ui/index.html` and drag in a `.bin` file. [Here's a demo.](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)
 
 See [TRACE_ANALYSIS_GUIDE.md](/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) for a walkthrough of diagnosing scheduling delays and CPU hotspots from trace data.
 

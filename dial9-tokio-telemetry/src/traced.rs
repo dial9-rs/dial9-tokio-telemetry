@@ -17,6 +17,12 @@ pub struct TracedHandle {
     pub(crate) shared: Arc<SharedState>,
 }
 
+impl std::fmt::Debug for TracedHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TracedHandle").finish_non_exhaustive()
+    }
+}
+
 pin_project! {
     /// Future wrapper that captures wake events (and later, task dumps).
     pub struct Traced<F> {
@@ -29,7 +35,7 @@ pin_project! {
 }
 
 impl<F> Traced<F> {
-    pub fn new(inner: F, handle: TracedHandle, task_id: TaskId) -> Self {
+    pub(crate) fn new(inner: F, handle: TracedHandle, task_id: TaskId) -> Self {
         let waker_data = Arc::new(TracedWakerData {
             inner: AtomicWaker::new(),
             woken_task_id: task_id,

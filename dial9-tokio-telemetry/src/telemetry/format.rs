@@ -22,6 +22,7 @@ impl WorkerId {
     /// Sentinel for events from tokio's blocking thread pool.
     pub const BLOCKING: WorkerId = WorkerId(254);
 
+    /// Returns the raw `u64` value.
     pub fn as_u64(self) -> u64 {
         self.0
     }
@@ -100,66 +101,90 @@ impl TraceField for WorkerId {
 
 // ── dial9-trace-format: derive structs ──────────────────────────────────────
 
-#[derive(TraceEvent)]
+/// Wire-format event for a task poll start.
+#[derive(Debug, TraceEvent)]
 pub struct PollStartEvent {
+    /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
+    /// Worker thread index.
     pub worker_id: WorkerId,
+    /// Local queue depth (capped to u8).
     pub local_queue: u8,
+    /// Task being polled.
     pub task_id: TaskId,
+    /// Interned spawn location.
     pub spawn_loc: InternedString,
 }
 
-#[derive(TraceEvent)]
+/// Wire-format event for a task poll end.
+#[derive(Debug, TraceEvent)]
 pub struct PollEndEvent {
+    /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
+    /// Worker thread index.
     pub worker_id: WorkerId,
 }
 
-#[derive(TraceEvent)]
+/// Wire-format event for a worker park.
+#[derive(Debug, TraceEvent)]
 pub struct WorkerParkEvent {
+    /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
+    /// Worker thread index.
     pub worker_id: WorkerId,
+    /// Local queue depth (capped to u8).
     pub local_queue: u8,
+    /// Thread CPU time in nanoseconds.
     pub cpu_time_ns: u64,
 }
 
-#[derive(TraceEvent)]
+/// Wire-format event for a worker unpark.
+#[derive(Debug, TraceEvent)]
 pub struct WorkerUnparkEvent {
+    /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
+    /// Worker thread index.
     pub worker_id: WorkerId,
+    /// Local queue depth (capped to u8).
     pub local_queue: u8,
+    /// Thread CPU time in nanoseconds.
     pub cpu_time_ns: u64,
+    /// Scheduling wait delta in nanoseconds.
     pub sched_wait_ns: u64,
 }
 
 #[derive(TraceEvent)]
-pub struct QueueSampleEvent {
+pub(crate) struct QueueSampleEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     pub global_queue: u8,
 }
 
-#[derive(TraceEvent)]
+/// Wire-format event for a task spawn.
+#[derive(Debug, TraceEvent)]
 pub struct TaskSpawnEvent {
+    /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
+    /// Spawned task identifier.
     pub task_id: TaskId,
+    /// Interned spawn location.
     pub spawn_loc: InternedString,
 }
 
 #[derive(TraceEvent)]
-pub struct TaskTerminateEvent {
+pub(crate) struct TaskTerminateEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     pub task_id: TaskId,
 }
 
 #[derive(TraceEvent)]
-pub struct CpuSampleEvent {
+pub(crate) struct CpuSampleEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     pub worker_id: WorkerId,
@@ -169,17 +194,22 @@ pub struct CpuSampleEvent {
     pub callchain: StackFrames,
 }
 
-#[derive(TraceEvent)]
+/// Wire-format event for a wake notification.
+#[derive(Debug, TraceEvent)]
 pub struct WakeEventEvent {
+    /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
+    /// Task that issued the wake.
     pub waker_task_id: TaskId,
+    /// Task that was woken.
     pub woken_task_id: TaskId,
+    /// Worker index that issued the wake (255 = unknown).
     pub target_worker: u8,
 }
 
 #[derive(TraceEvent)]
-pub struct SegmentMetadataEvent {
+pub(crate) struct SegmentMetadataEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     pub entries: Vec<(String, String)>,
@@ -213,7 +243,7 @@ pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
 /// derive-generated `*EventRef<'a>` that borrows directly from the decode buffer.
 #[derive(Debug, Clone)]
 #[cfg(any(feature = "analysis", test))]
-pub enum TelemetryEventRef<'a> {
+pub(crate) enum TelemetryEventRef<'a> {
     PollStart(PollStartEventRef<'a>),
     PollEnd(PollEndEventRef<'a>),
     WorkerPark(WorkerParkEventRef<'a>),
@@ -230,7 +260,7 @@ pub enum TelemetryEventRef<'a> {
 impl<'a> TelemetryEventRef<'a> {
     /// Returns the timestamp in nanoseconds, if this event type carries one.
     #[allow(dead_code)]
-    pub fn timestamp_ns(&self) -> Option<u64> {
+    pub(crate) fn timestamp_ns(&self) -> Option<u64> {
         match self {
             Self::PollStart(e) => Some(e.timestamp_ns),
             Self::PollEnd(e) => Some(e.timestamp_ns),

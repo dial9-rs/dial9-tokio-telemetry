@@ -2,7 +2,7 @@
 
 /// Identifies where a process is running, used as the `instance_path`
 /// component in S3 object keys.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InstanceIdentity(String);
 
 impl From<String> for InstanceIdentity {

@@ -1,5 +1,5 @@
 [build]
-  base = "dial9-tokio-telemetry/trace_viewer"
+  base = "dial9-viewer/ui"
   publish = "."
   command = "rm decode.js && cp ../../dial9-trace-format/js/decode.js decode.js"
   # always run a deploy preview no matter what

@@ -402,5 +402,5 @@ examples/
 design/
 └── tokio-telemetry-system.md # This document
 
-trace_viewer.html             # Interactive HTML viewer (standalone, no build required)
+trace_viewer/                  # Interactive HTML viewer (see dial9-viewer crate)
 ```

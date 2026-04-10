@@ -51,6 +51,15 @@ pub struct BackgroundTaskConfig {
     metrics_sink: BoxEntrySink,
 }
 
+impl std::fmt::Debug for BackgroundTaskConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackgroundTaskConfig")
+            .field("trace_path", &self.trace_path)
+            .field("poll_interval", &self.poll_interval)
+            .finish_non_exhaustive()
+    }
+}
+
 impl BackgroundTaskConfig {
     /// How often the worker checks for sealed segments.
     pub fn poll_interval(&self) -> Duration {

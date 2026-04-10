@@ -34,6 +34,7 @@ pub struct SegmentInfo {
 /// Implement this to control the S3 key layout. The default key layout is
 /// `{prefix}/{date}/{HHMM}/{service}/{instance}/{epoch}-{index}.bin.gz`.
 pub trait S3KeyFn: Send + Sync {
+    /// Generate the S3 object key for the given segment.
     fn object_key(&self, segment: &SegmentInfo) -> String;
 }
 
@@ -86,6 +87,17 @@ pub struct S3Config {
     /// Custom S3 key function. When set, overrides the default key layout.
     #[builder(with = |key_fn: impl S3KeyFn + 'static| Arc::new(key_fn) as Arc<dyn S3KeyFn>)]
     key_fn: Option<Arc<dyn S3KeyFn>>,
+}
+
+impl std::fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Config")
+            .field("bucket", &self.bucket)
+            .field("service_name", &self.service_name)
+            .field("prefix", &self.prefix)
+            .field("region", &self.region)
+            .finish_non_exhaustive()
+    }
 }
 
 impl S3Config {
@@ -188,7 +200,14 @@ pub struct S3Uploader {
     config: S3Config,
 }
 
+impl std::fmt::Debug for S3Uploader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Uploader").finish_non_exhaustive()
+    }
+}
+
 impl S3Uploader {
+    /// Create a new uploader with the given transfer manager client and config.
     pub fn new(client: Client, config: S3Config) -> Self {
         Self { client, config }
     }

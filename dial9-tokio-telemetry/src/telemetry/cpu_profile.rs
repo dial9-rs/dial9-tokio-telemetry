@@ -67,7 +67,7 @@ pub(crate) struct CpuProfiler {
 }
 
 impl CpuProfiler {
-    pub fn start(config: CpuProfilingConfig) -> io::Result<Self> {
+    pub(crate) fn start(config: CpuProfilingConfig) -> io::Result<Self> {
         let sampler = PerfSampler::start(SamplerConfig {
             frequency_hz: config.frequency_hz,
             event_source: config.event_source,
@@ -84,7 +84,7 @@ impl CpuProfiler {
     ///
     /// Filters out child-process samples (perf `inherit` leaks them).
     /// Eagerly caches thread names for non-worker tids.
-    pub fn drain(&mut self, mut f: impl FnMut(RawCpuSample, Option<&ThreadName>)) {
+    pub(crate) fn drain(&mut self, mut f: impl FnMut(RawCpuSample, Option<&ThreadName>)) {
         let pid = self.pid;
         self.sampler.for_each_sample(|sample| {
             if sample.pid != pid {
@@ -115,7 +115,7 @@ pub(crate) struct SchedProfiler {
 }
 
 impl SchedProfiler {
-    pub fn new(config: SchedEventConfig) -> io::Result<Self> {
+    pub(crate) fn new(config: SchedEventConfig) -> io::Result<Self> {
         let sampler = PerfSampler::new_per_thread(SamplerConfig {
             frequency_hz: 1,
             event_source: EventSource::SwContextSwitches,
@@ -124,15 +124,15 @@ impl SchedProfiler {
         Ok(Self { sampler })
     }
 
-    pub fn track_current_thread(&mut self) -> io::Result<()> {
+    pub(crate) fn track_current_thread(&mut self) -> io::Result<()> {
         self.sampler.track_current_thread()
     }
 
-    pub fn stop_tracking_current_thread(&mut self) {
+    pub(crate) fn stop_tracking_current_thread(&mut self) {
         self.sampler.stop_tracking_current_thread()
     }
 
-    pub fn drain(&mut self, mut f: impl FnMut(RawCpuSample)) {
+    pub(crate) fn drain(&mut self, mut f: impl FnMut(RawCpuSample)) {
         self.sampler.for_each_sample(|sample| {
             f(RawCpuSample {
                 tid: sample.tid,
