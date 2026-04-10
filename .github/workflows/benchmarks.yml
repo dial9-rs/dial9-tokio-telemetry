@@ -114,10 +114,12 @@ jobs:
             --adapter rust_criterion \
             --threshold-measure latency \
             --threshold-test percentage \
+            --threshold-lower-boundary _ \
             --threshold-upper-boundary 0.25 \
             --threshold-measure throughput \
             --threshold-test percentage \
             --threshold-lower-boundary 0.25 \
+            --threshold-upper-boundary _ \
             --error-on-alert \
             --github-actions '${{ secrets.GITHUB_TOKEN }}' \
             "cargo bench --package dial9-tokio-telemetry --bench writer_encode"
@@ -133,10 +135,12 @@ jobs:
             --adapter rust_criterion \
             --threshold-measure latency \
             --threshold-test percentage \
+            --threshold-lower-boundary _ \
             --threshold-upper-boundary 0.25 \
             --threshold-measure throughput \
             --threshold-test percentage \
             --threshold-lower-boundary 0.25 \
+            --threshold-upper-boundary _ \
             --error-on-alert \
             --github-actions '${{ secrets.GITHUB_TOKEN }}' \
             "cargo bench --package dial9-trace-format --bench codec"
@@ -152,10 +156,12 @@ jobs:
             --adapter json \
             --threshold-measure latency \
             --threshold-test percentage \
+            --threshold-lower-boundary _ \
             --threshold-upper-boundary 0.25 \
             --threshold-measure throughput \
             --threshold-test percentage \
             --threshold-lower-boundary 0.25 \
+            --threshold-upper-boundary _ \
             --error-on-alert \
             --github-actions '${{ secrets.GITHUB_TOKEN }}' \
             "cargo bench --bench overhead_bench -- --bmf 10"
@@ -171,10 +177,12 @@ jobs:
             --adapter json \
             --threshold-measure latency \
             --threshold-test percentage \
+            --threshold-lower-boundary _ \
             --threshold-upper-boundary 0.25 \
             --threshold-measure throughput \
             --threshold-test percentage \
             --threshold-lower-boundary 0.25 \
+            --threshold-upper-boundary _ \
             --error-on-alert \
             --github-actions '${{ secrets.GITHUB_TOKEN }}' \
             "cargo bench --bench e2e_workload -- --bmf 10"
