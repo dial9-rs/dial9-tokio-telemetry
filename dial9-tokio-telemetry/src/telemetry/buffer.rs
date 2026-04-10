@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::panic::Location;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Tracks the last drain epoch at which a particular thread-local buffer
 /// was flushed. The flush thread reads this (relaxed) to skip buffers
@@ -273,11 +274,25 @@ pub(crate) fn record_event(
     drain_epoch: &AtomicU64,
 ) -> Option<TlBufferHandle> {
     BUFFER.with(|arc| {
-        let mut buf = arc.lock().unwrap_or_else(|e| e.into_inner());
+        // Poisoning requires a panic while the lock is held. Since the only code
+        // under the lock is the encoder (which should never panic), this should be
+        // unreachable. If it does happen, the encoder's internal buffer may be
+        // corrupt, so drop the event rather than writing into garbage state.
+        // The mutex stays poisoned, so this thread silently stops recording.
+        let mut buf = match arc.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+                    tracing::error!("dial9: thread-local buffer mutex poisoned in record_event; dropping events for this thread");
+                });
+                return None;
+            }
+        };
         let first_call = buf.set_collector(collector);
         buf.record_event(&event);
-        if buf.should_flush() {
-            buf.flush_epoch.store(drain_epoch.load(Ordering::Relaxed));
+        let current_epoch = drain_epoch.load(Ordering::Relaxed);
+        if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
+            buf.flush_epoch.store(current_epoch);
             collector.accept_flush(buf.flush());
         }
         if first_call {
@@ -295,7 +310,15 @@ pub(crate) fn record_event(
 /// Used at shutdown and before flush cycles to avoid losing events.
 pub(crate) fn drain_to_collector(collector: &CentralCollector) {
     BUFFER.with(|buf| {
-        let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buf = match buf.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+                    tracing::error!("dial9: thread-local buffer mutex poisoned in drain_to_collector; skipping drain");
+                });
+                return;
+            }
+        };
         if buf.event_count > 0 {
             collector.accept_flush(buf.flush());
         }

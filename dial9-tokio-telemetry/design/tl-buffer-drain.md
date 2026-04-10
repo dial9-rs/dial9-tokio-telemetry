@@ -11,21 +11,60 @@ events flowing) never flush at all until thread exit.
 
 Each `ThreadLocalBuffer` is wrapped in `Arc<Mutex<…>>`. On first use, a
 `TlBufferHandle { Weak<Mutex<TLB>>, FlushEpoch }` is registered in
-`SharedState`. Every ~30 s the flush thread calls `drain_all_tl_buffers()`:
+`SharedState`. The flush thread uses a two-tick protocol, split across
+consecutive iterations of the 5 ms flush loop:
 
-1. Bumps a global `drain_epoch` counter.
+**Tick N−1 (`bump_drain_epoch`):** Increments the global `drain_epoch`
+counter. This signals busy worker threads to self-flush on their next
+`record_event` call.
+
+**Tick N (`drain_all_tl_buffers`):** After a ~5 ms grace period:
+
+1. Reads the current `drain_epoch`.
 2. Iterates all registered handles.
 3. Reads each handle's `FlushEpoch` (relaxed). If it matches the current
-   epoch, the owning thread self-flushed recently — **skip** (zero
-   contention with busy workers).
+   epoch, the owning thread self-flushed during the grace period — **skip**
+   (zero contention with busy workers).
 4. Otherwise, upgrades the `Weak`, locks the buffer, and flushes pending
    events into the `CentralCollector`.
 5. Prunes dead `Weak` handles via `retain`.
 
+On shutdown (`exit = true`), both steps happen in the same tick since there
+is no next tick for the grace period.
+
+### Epoch-aware self-flush
+
+In `record_event`, after encoding an event, the worker thread checks whether
+the global `drain_epoch` has advanced past its local `FlushEpoch`. If so, it
+flushes immediately and stamps the current epoch — even if the 1 MB batch
+threshold has not been reached. This means busy threads self-flush
+opportunistically on the next event after the epoch bump (tick N−1),
+typically within microseconds. By the time the intrusive drain fires (tick
+N, ~5 ms later), most busy threads have already self-flushed and their
+`FlushEpoch` matches the current epoch — so the flush thread skips them
+entirely. The intrusive drain path only needs to lock truly idle/silent
+threads that haven't recorded any events since the epoch bump.
+
+### Mutex poisoning
+
+Poisoning requires a panic while the lock is held. The only code that runs
+under the lock is the encoder and the `accept_flush` handoff, neither of
+which should panic. If a panic did occur, the encoder's internal `Vec<u8>`
+could be in a partially-written state, so recovering via `into_inner()` and
+continuing to write would produce corrupt data.
+
+Instead, all three lock sites (`record_event`, `drain_to_collector`,
+`drain_all_tl_buffers`) treat a poisoned mutex as unrecoverable: they log a
+rate-limited `tracing::error!` (at most once per 60 s per call site) and
+bail out. Because the mutex stays poisoned, the affected thread silently
+stops recording for the rest of its lifetime — clean degradation rather than
+corrupt output or cascading panics.
+
 ### Performance characteristics
 
-- **Busy workers**: never locked by the flush thread. The `FlushEpoch` check
-  is a single relaxed atomic load — no cache-line contention.
+- **Busy workers**: self-flush on epoch advance; never locked by the flush
+  thread. The `FlushEpoch` check is a single relaxed atomic load — no
+  cache-line contention.
 - **Idle workers**: locked briefly (~µs) every 30 s. The mutex is almost
   always uncontended because the owning thread is idle.
 - **Silent workers**: same as idle — the flush thread locks and drains them.

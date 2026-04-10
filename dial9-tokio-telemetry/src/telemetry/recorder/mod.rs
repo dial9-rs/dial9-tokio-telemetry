@@ -788,6 +788,14 @@ impl TracedRuntimeBuilder<HasTracePath> {
                         let drain_self = exit || cycle_count.is_multiple_of(SELF_DRAIN_INTERVAL);
                         // Periodically drain all thread-local buffers so idle/silent
                         // threads don't hold events across trace file rotations.
+                        // We bump the epoch one tick early (~5 ms grace period) so
+                        // busy threads self-flush on their next record_event,
+                        // and the intrusive drain only locks truly idle buffers.
+                        // On exit we bump + drain in the same tick since there is
+                        // no next tick for the grace period.
+                        if exit || cycle_count.is_multiple_of(TL_DRAIN_INTERVAL.saturating_sub(1)) {
+                            shared.bump_drain_epoch();
+                        }
                         if exit || cycle_count.is_multiple_of(TL_DRAIN_INTERVAL) {
                             shared.drain_all_tl_buffers();
                         }

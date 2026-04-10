@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use super::RuntimeContext;
 
@@ -103,8 +104,13 @@ impl SharedState {
     /// Buffers whose `FlushEpoch` matches the current epoch are skipped
     /// (the owning thread flushed recently, so locking would just add
     /// contention). Dead `Weak` handles are pruned.
+    ///
+    /// [`bump_drain_epoch`] is called one flush-loop tick
+    /// before calling this method. That gives busy worker threads a ~5 ms
+    /// grace period to self-flush on their next `record_event`, so the
+    /// intrusive drain only needs to lock truly idle/silent buffers.
     pub(crate) fn drain_all_tl_buffers(&self) {
-        let epoch = self.drain_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        let epoch = self.drain_epoch.load(Ordering::Relaxed);
 
         let handles: Vec<TlBufferHandle> = {
             let guard = self.tl_buffers.lock().unwrap();
@@ -123,18 +129,39 @@ impl SharedState {
                 continue;
             }
             if let Some(arc) = handle.buffer.upgrade() {
-                let mut buf = arc.lock().unwrap_or_else(|e| e.into_inner());
+                let mut buf = match arc.lock() {
+                    Ok(guard) => guard,
+                    // Buffer is poisoned (encoder panic); skip rather than
+                    // flushing potentially corrupt data.
+                    Err(_) => {
+                        crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+                            tracing::error!(
+                                "dial9: thread-local buffer mutex poisoned in drain_all_tl_buffers; skipping flush"
+                            );
+                        });
+                        continue;
+                    }
+                };
                 if buf.has_pending_events() {
                     self.collector.accept_flush(buf.flush());
                 }
             }
         }
 
-        // Prune dead handles.
+        // Prune dead handles (Weak refs to threads that have exited).
         self.tl_buffers
             .lock()
             .unwrap()
             .retain(|h| h.buffer.strong_count() > 0);
+    }
+
+    /// Advance the global drain epoch so that busy worker threads
+    /// self-flush on their next `record_event` call. Call this one
+    /// flush-loop tick (~5 ms) before [`drain_all_tl_buffers`] to give
+    /// workers a grace period, minimising contention on the intrusive
+    /// drain path.
+    pub(crate) fn bump_drain_epoch(&self) {
+        self.drain_epoch.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -183,7 +210,8 @@ mod tests {
         ss.record_event(poll_end_event());
         // Nothing in the collector yet (buffer not full).
         assert!(ss.collector.next().is_none());
-        // Drain should flush the idle buffer.
+        // Bump epoch so the idle buffer (epoch 0) is stale, then drain.
+        ss.bump_drain_epoch();
         ss.drain_all_tl_buffers();
         let batch = ss.collector.next().expect("expected a batch after drain");
         assert!(batch.event_count > 0);
@@ -199,7 +227,8 @@ mod tests {
             ss2.record_event(poll_end_event());
         });
         handle.join().unwrap();
-        // Drain from the main thread.
+        // Bump epoch so the buffer is stale, then drain from the main thread.
+        ss.bump_drain_epoch();
         ss.drain_all_tl_buffers();
         let batch = ss.collector.next().expect("expected a batch after drain");
         assert_eq!(batch.event_count, 2);
@@ -209,10 +238,11 @@ mod tests {
     fn drain_skips_busy_buffer() {
         let ss = enabled_shared_state();
         ss.record_event(poll_end_event());
-        // Simulate a self-flush by stamping the current epoch + 1.
+        // Bump epoch to 1 (simulates the tick before the drain).
+        ss.bump_drain_epoch();
+        // Simulate a self-flush by stamping the current epoch.
         {
             let handles = ss.tl_buffers.lock().unwrap();
-            // drain_all_tl_buffers will bump epoch to 1, so stamp 1 to look busy.
             handles[0].flush_epoch.store(1);
         }
         ss.drain_all_tl_buffers();
