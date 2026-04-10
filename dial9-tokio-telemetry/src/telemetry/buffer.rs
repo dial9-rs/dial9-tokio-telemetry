@@ -3,16 +3,18 @@
 //! The TL buffer is created lazily the first time an event is sent. Events are encoded directly
 //! into a thread-local `Encoder<Vec<u8>>` and flushed to the central collector when the encoded
 //! batch reaches the configured batch size (default 1 MB).
+//!
+//! Each buffer is wrapped in `Arc<Mutex<…>>` so the flush thread can intrusively
+//! drain idle/silent threads via [`TlBufferHandle`]s registered in `SharedState`.
 use crate::telemetry::collector::CentralCollector;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::format::*;
 use dial9_trace_format::InternedString;
 use dial9_trace_format::encoder::Encoder;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::Location;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Tracks the last drain epoch at which a particular thread-local buffer
 /// was flushed. The flush thread reads this (relaxed) to skip buffers
@@ -46,6 +48,9 @@ pub(crate) struct ThreadLocalBuffer {
     /// Bounded by the number of `#[track_caller]` call sites in the program,
     /// which is fixed at compile time, so this does not grow unboundedly.
     location_cache: HashMap<&'static Location<'static>, String>,
+    /// Last drain epoch at which this buffer was flushed. Shared with the
+    /// flush thread via `TlBufferHandle` so it can skip busy workers.
+    pub(crate) flush_epoch: FlushEpoch,
 }
 
 impl Default for ThreadLocalBuffer {
@@ -68,15 +73,19 @@ impl ThreadLocalBuffer {
             batch_size,
             collector: None,
             location_cache: HashMap::new(),
+            flush_epoch: FlushEpoch::new(),
         }
     }
 
     /// Ensure the collector reference is set. Called on every record_event;
     /// only the first call per thread actually stores the Arc.
-    fn set_collector(&mut self, collector: &Arc<CentralCollector>) {
+    /// Returns `true` on the first call (when the collector was not yet set).
+    fn set_collector(&mut self, collector: &Arc<CentralCollector>) -> bool {
         if self.collector.is_none() {
             self.collector = Some(Arc::clone(collector));
+            return true;
         }
+        false
     }
 
     fn encode_event(&mut self, event: &RawEvent) {
@@ -208,7 +217,7 @@ impl ThreadLocalBuffer {
         self.encoder.bytes_written() as usize >= self.batch_size
     }
 
-    fn flush(&mut self) -> crate::telemetry::collector::Batch {
+    pub(crate) fn flush(&mut self) -> crate::telemetry::collector::Batch {
         let event_count = self.event_count as u64;
         let encoded_bytes = self
             .encoder
@@ -218,6 +227,10 @@ impl ThreadLocalBuffer {
             encoded_bytes,
             event_count,
         }
+    }
+
+    pub(crate) fn has_pending_events(&self) -> bool {
+        self.event_count > 0
     }
 }
 
@@ -237,19 +250,26 @@ impl Drop for ThreadLocalBuffer {
 }
 
 thread_local! {
-    static BUFFER: RefCell<ThreadLocalBuffer> = RefCell::new(ThreadLocalBuffer::new());
+    static BUFFER: Arc<Mutex<ThreadLocalBuffer>> = Arc::new(Mutex::new(ThreadLocalBuffer::new()));
 }
 
 /// Record an event into the current thread's buffer. If the buffer is full,
-/// automatically flush the batch to `collector`.
+/// automatically flush the batch to `collector` and stamp the current
+/// `drain_epoch` on the buffer's `FlushEpoch`.
 ///
-/// This sets the collector on the buffer so that at some point in the future when the ThreadLocalBuffer itself is dropped, we know where to send events
-pub(crate) fn record_event(event: RawEvent, collector: &Arc<CentralCollector>) {
+/// This sets the collector on the buffer so that at some point in the future
+/// when the ThreadLocalBuffer itself is dropped, we know where to send events.
+pub(crate) fn record_event(
+    event: RawEvent,
+    collector: &Arc<CentralCollector>,
+    drain_epoch: &AtomicU64,
+) {
     BUFFER.with(|buf| {
-        let mut buf = buf.borrow_mut();
+        let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
         buf.set_collector(collector);
         buf.record_event(&event);
         if buf.should_flush() {
+            buf.flush_epoch.store(drain_epoch.load(Ordering::Relaxed));
             collector.accept_flush(buf.flush());
         }
     });
@@ -259,7 +279,7 @@ pub(crate) fn record_event(event: RawEvent, collector: &Arc<CentralCollector>) {
 /// Used at shutdown and before flush cycles to avoid losing events.
 pub(crate) fn drain_to_collector(collector: &CentralCollector) {
     BUFFER.with(|buf| {
-        let mut buf = buf.borrow_mut();
+        let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
         if buf.event_count > 0 {
             collector.accept_flush(buf.flush());
         }
@@ -335,5 +355,39 @@ mod tests {
         });
         handle.join().unwrap();
         assert_eq!(epoch.load(), 7);
+    }
+
+    #[test]
+    fn test_flush_epoch_stamped_on_self_flush() {
+        let collector = Arc::new(CentralCollector::new());
+        let drain_epoch = AtomicU64::new(5);
+        // Use a tiny batch size so a single event triggers self-flush.
+        // We can't use record_event (thread-local) easily, so test the
+        // logic directly: flush + stamp.
+        let mut buffer = ThreadLocalBuffer::with_batch_size(1);
+        buffer.set_collector(&collector);
+        buffer.record_event(&poll_end_event());
+        assert!(buffer.should_flush());
+        buffer
+            .flush_epoch
+            .store(drain_epoch.load(Ordering::Relaxed));
+        collector.accept_flush(buffer.flush());
+        assert_eq!(buffer.flush_epoch.load(), 5);
+    }
+
+    #[test]
+    fn test_mutex_accessible_from_another_thread() {
+        let buf = Arc::new(Mutex::new(ThreadLocalBuffer::new()));
+        let buf_clone = Arc::clone(&buf);
+        // Write an event from a different thread.
+        let handle = std::thread::spawn(move || {
+            let mut guard = buf_clone.lock().unwrap();
+            guard.record_event(&poll_end_event());
+            assert_eq!(guard.event_count, 1);
+        });
+        handle.join().unwrap();
+        // Main thread can also access it.
+        let guard = buf.lock().unwrap();
+        assert_eq!(guard.event_count, 1);
     }
 }

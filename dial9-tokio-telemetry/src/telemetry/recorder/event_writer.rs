@@ -88,7 +88,11 @@ impl EventWriter {
                     callchain: raw.callchain,
                     thread_name: thread_name.cloned(),
                 };
-                record_event(RawEvent::CpuSample(Box::new(data)), &shared.collector);
+                record_event(
+                    RawEvent::CpuSample(Box::new(data)),
+                    &shared.collector,
+                    &shared.drain_epoch,
+                );
             });
             self.cpu_profiler = Some(profiler);
         }
@@ -109,7 +113,11 @@ impl EventWriter {
                         // sampler is running on worker threads so no thread name
                         thread_name: None,
                     };
-                    record_event(RawEvent::CpuSample(Box::new(data)), &shared.collector);
+                    record_event(
+                        RawEvent::CpuSample(Box::new(data)),
+                        &shared.collector,
+                        &shared.drain_epoch,
+                    );
                 });
             }
         }

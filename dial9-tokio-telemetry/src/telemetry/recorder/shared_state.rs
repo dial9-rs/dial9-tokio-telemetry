@@ -88,6 +88,6 @@ impl SharedState {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
-        buffer::record_event(event, &self.collector);
+        buffer::record_event(event, &self.collector, &self.drain_epoch);
     }
 }

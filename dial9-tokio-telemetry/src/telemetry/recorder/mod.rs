@@ -956,6 +956,7 @@ mod tests {
     use crate::telemetry::collector::CentralCollector;
     use std::panic::Location;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
 
     /// Drain all pending batches from a `CentralCollector` into an `EventWriter`.
     /// Call `buffer::drain_to_collector` first to flush the thread-local buffer.
@@ -1095,6 +1096,7 @@ mod tests {
             .unwrap();
         let mut ew = EventWriter::new(Box::new(writer));
         let collector = Arc::new(CentralCollector::new());
+        let drain_epoch = AtomicU64::new(0);
 
         let locations = [
             location_a, location_b, location_a, location_b, location_a, location_b,
@@ -1108,6 +1110,7 @@ mod tests {
                     location: loc,
                 },
                 &collector,
+                &drain_epoch,
             );
             buffer::record_event(
                 RawEvent::PollStart {
@@ -1118,6 +1121,7 @@ mod tests {
                     location: loc,
                 },
                 &collector,
+                &drain_epoch,
             );
             // Drain after each iteration to produce separate small batches
             // that trigger file rotation (max_file_size is 100 bytes).
