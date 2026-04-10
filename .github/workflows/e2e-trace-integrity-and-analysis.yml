@@ -21,5 +21,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Enable perf_event_open and kallsyms for tests
+        shell: bash
+        run: |
+          sudo sysctl kernel.perf_event_paranoid=1
+          sudo sysctl kernel.kptr_restrict=0
       - name: E2E trace tests
         run: scripts/e2e-trace-tests.sh
