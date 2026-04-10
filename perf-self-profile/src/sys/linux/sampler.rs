@@ -362,16 +362,6 @@ impl PerfSampler {
         samples
     }
 
-    /// Get the raw file descriptors (one per CPU, for use with epoll/poll if needed).
-    pub fn fds(&self) -> Vec<i32> {
-        self.events.iter().map(|ev| ev.fd).collect()
-    }
-
-    /// Returns the number of per-CPU ring buffers that have pending data.
-    pub fn active_rings(&self) -> usize {
-        self.events.iter().filter(|ev| ev.ring.has_data()).count()
-    }
-
     /// Disable sampling on all CPUs (but keep ring buffers readable).
     pub fn disable(&self) {
         for ev in &self.events {

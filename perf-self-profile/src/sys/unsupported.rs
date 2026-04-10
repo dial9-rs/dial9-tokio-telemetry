@@ -22,10 +22,6 @@ impl PerfSampler {
         unsupported()
     }
 
-    pub fn start_for_pid(_pid: i32, _config: SamplerConfig) -> io::Result<Self> {
-        unsupported()
-    }
-
     pub fn new_per_thread(_config: SamplerConfig) -> io::Result<Self> {
         unsupported()
     }
@@ -36,10 +32,6 @@ impl PerfSampler {
 
     pub fn stop_tracking_current_thread(&mut self) {}
 
-    pub fn has_pending(&self) -> bool {
-        false
-    }
-
     pub fn for_each_sample<F>(&mut self, _f: F)
     where
         F: FnMut(&Sample),
@@ -48,14 +40,6 @@ impl PerfSampler {
 
     pub fn drain_samples(&mut self) -> Vec<Sample> {
         Vec::new()
-    }
-
-    pub fn fds(&self) -> Vec<i32> {
-        Vec::new()
-    }
-
-    pub fn active_rings(&self) -> usize {
-        0
     }
 
     pub fn disable(&self) {}
