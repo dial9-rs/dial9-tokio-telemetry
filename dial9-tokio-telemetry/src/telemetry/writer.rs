@@ -201,7 +201,10 @@ impl RotatingWriter {
             max_file_size,
             max_total_size,
             rotation_period,
-            next_rotation_time: Self::next_boundary(time_source().system_time().as_std(), rotation_period),
+            next_rotation_time: Self::next_boundary(
+                time_source().system_time().as_std(),
+                rotation_period,
+            ),
             closed_files: VecDeque::new(),
             active_path: first_path,
             state: WriterState::Active(raw),
@@ -235,7 +238,10 @@ impl RotatingWriter {
             max_file_size: u64::MAX,
             max_total_size: u64::MAX,
             rotation_period: Duration::MAX,
-            next_rotation_time: Self::next_boundary(time_source().system_time().as_std(), Duration::MAX),
+            next_rotation_time: Self::next_boundary(
+                time_source().system_time().as_std(),
+                Duration::MAX,
+            ),
             closed_files: VecDeque::new(),
             active_path,
             state: WriterState::Active(raw),
@@ -265,7 +271,8 @@ impl RotatingWriter {
     ) -> std::io::Result<RawEncoder<BufWriter<File>>> {
         let mut encoder = Encoder::new_to(writer)?;
         let entries = segment_metadata.to_vec();
-        let timestamp_ns = time_source().system_time()
+        let timestamp_ns = time_source()
+            .system_time()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
@@ -284,7 +291,8 @@ impl RotatingWriter {
             return Ok(());
         };
         let entries = self.segment_metadata.clone();
-        let timestamp_ns = time_source().system_time()
+        let timestamp_ns = time_source()
+            .system_time()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
@@ -354,7 +362,8 @@ impl RotatingWriter {
         self.active_path = new_path;
         self.did_rotate = true;
         self.has_real_events = false;
-        self.next_rotation_time = Self::next_boundary(time_source().system_time().as_std(), self.rotation_period);
+        self.next_rotation_time =
+            Self::next_boundary(time_source().system_time().as_std(), self.rotation_period);
 
         tracing::info!(
             segment_index = self.next_index - 1,
@@ -431,7 +440,8 @@ impl RotatingWriter {
             return Ok(());
         };
         let size_trigger = raw.bytes_written() > self.max_file_size;
-        let time_trigger = self.has_real_events && time_source().system_time() >= self.next_rotation_time;
+        let time_trigger =
+            self.has_real_events && time_source().system_time() >= self.next_rotation_time;
         if size_trigger || time_trigger {
             self.rotate()?;
         }
