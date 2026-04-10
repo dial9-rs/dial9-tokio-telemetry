@@ -21,9 +21,11 @@
   /** Parse a string/bigint/number to a JS number */
   function num(v) {
     if (typeof v === "number") return v;
-    if (typeof v === "string") return Number(v);
     if (typeof v === "bigint") return Number(v);
-    return 0;
+    if (typeof v === "string" && v !== "")
+      if (!isNaN(Number(v))) return Number(v);
+
+    throw new Error(`Invalid number: ${v}`);
   }
 
   /** Decompress gzip data if detected, otherwise return as-is. */
