@@ -32,6 +32,7 @@ fn main() -> std::io::Result<()> {
         .base_path("/tmp/my_traces/trace.bin")
         .max_file_size(1024 * 1024)      // rotate after 1 MiB per file
         .max_total_size(5 * 1024 * 1024) // keep at most 5 MiB on disk
+        // .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
         .build()?;
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -48,6 +49,8 @@ fn main() -> std::io::Result<()> {
 ```
 
 Events are 6–16 bytes on the wire, and a typical request generates ~20–35 bytes of trace data (a few poll events plus park/unpark). At 10k requests/sec that's well under 1 MB/s — `RotatingWriter` caps total disk usage so you can leave it running indefinitely. Typical CPU overhead is under 5%.
+
+Segments rotate on size *or* time, whichever comes first. Time boundaries are wall-clock-aligned (e.g. a 60 s period rotates at the top of each minute), which produces clean S3 key paths when using the `worker-s3` feature.
 
 ## Can I use this in prod?
 dial9-tokio-telemetry is designed for always-on production use, but it's still early software. Measure overhead and validate behavior in your environment before deploying to production.
@@ -202,7 +205,7 @@ handle.disable();
 
 ### Writers
 
-`RotatingWriter` rotates files and evicts old ones to stay within a total size budget. For quick experiments, `RotatingWriter::single_file(path)` writes a single file with no rotation.
+`RotatingWriter` rotates files based on size and time, and evicts old ones to stay within a total size budget. By default, segments rotate every 60 seconds (wall-clock-aligned) or when they exceed `max_file_size`, whichever comes first. For quick experiments, `RotatingWriter::single_file(path)` writes a single file with no rotation.
 
 ### Analyzing traces
 

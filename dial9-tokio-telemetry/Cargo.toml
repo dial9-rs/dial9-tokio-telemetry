@@ -38,6 +38,7 @@ flate2 = { version = "1" }
 time = { version = "0.3", features = ["formatting", "macros"], optional = true }
 metrique-writer = "0.1"
 metrique = { version = "0.1.23", features = ["local-format"] }
+metrique-timesource = "0.1"
 
 [features]
 analysis = []
@@ -50,7 +51,9 @@ assert2 = { workspace = true }
 criterion = "0.5"
 clap = { version = "4", features = ["derive"] }
 hdrhistogram = "7"
+metrique-timesource = { version = "0.1", features = ["custom-timesource", "tokio"] }
 metrique-writer = { version = "0.1", features = ["test-util"] }
+tokio = { version = "1.51.0", features = ["test-util"] }
 proptest = "1"
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
