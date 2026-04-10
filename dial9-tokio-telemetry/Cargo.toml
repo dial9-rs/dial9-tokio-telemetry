@@ -76,6 +76,10 @@ required-features = ["task-dump"]
 name = "overhead_bench"
 harness = false
 
+[[bench]]
+name = "e2e_workload"
+harness = false
+
 [[example]]
 name = "long_sleep"
 required-features = ["task-dump"]

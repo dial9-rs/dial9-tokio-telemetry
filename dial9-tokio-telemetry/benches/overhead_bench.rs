@@ -4,7 +4,8 @@
 //! plain runtime so it doesn't pollute the trace or compete for workers.
 //!
 //! Usage:
-//!   cargo bench --bench overhead_bench -- <mode> [duration_secs]
+//!   cargo bench --bench overhead_bench -- <mode> [duration_secs] [--json]
+//!   cargo bench --bench overhead_bench -- --bmf [duration_secs]
 //!
 //! Modes:
 //!   baseline  – plain tokio runtime, no hooks
@@ -12,6 +13,9 @@
 //!   noop      – hooks installed, NullWriter (measures pure hook overhead)
 //!
 //! Duration defaults to 30 seconds. A 3-second warmup precedes measurement.
+//! --bmf runs all three modes and outputs Bencher Metric Format JSON.
+
+mod bmf;
 
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
@@ -92,6 +96,90 @@ async fn run_client(
     hist
 }
 
+// ── Benchmark runner ────────────────────────────────────────────────────────
+
+struct BenchResult {
+    hist: Histogram<u64>, // latency values in nanoseconds
+    wall: Duration,
+}
+
+fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(4).enable_all();
+
+    let (server_rt, guard): (tokio::runtime::Runtime, Option<TelemetryGuard>) = match mode {
+        "telemetry" => {
+            let writer = RotatingWriter::single_file("/tmp/overhead_bench_trace.bin").unwrap();
+            let mut tb = TracedRuntime::builder().with_task_tracking(true);
+            #[cfg(target_os = "linux")]
+            {
+                tb = tb.with_cpu_profiling(CpuProfilingConfig::default());
+            }
+            let (rt, g) = tb.build_and_start(builder, writer).unwrap();
+            (rt, Some(g))
+        }
+        "noop" => {
+            let (rt, g) = TracedRuntime::builder()
+                .build_and_start(builder, NullWriter)
+                .unwrap();
+            (rt, Some(g))
+        }
+        "baseline" => (builder.build().unwrap(), None),
+        other => {
+            eprintln!("unknown mode: {other} (expected: baseline, telemetry, noop)");
+            std::process::exit(1);
+        }
+    };
+
+    let port = server_rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = guard.as_ref().map(|g| g.handle());
+        tokio::spawn(echo_server(listener, handle));
+        port
+    });
+
+    let client_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let warmup_flag = Arc::new(AtomicBool::new(true));
+    let running_flag = Arc::new(AtomicBool::new(true));
+
+    let (hist, wall) = client_rt.block_on(async {
+        let mut handles = Vec::with_capacity(NUM_CLIENTS);
+        for _ in 0..NUM_CLIENTS {
+            handles.push(tokio::spawn(run_client(
+                port,
+                running_flag.clone(),
+                warmup_flag.clone(),
+            )));
+        }
+
+        tokio::time::sleep(Duration::from_secs(WARMUP_SECS)).await;
+        eprintln!("[{mode}] warmup done, measuring {duration_secs}s...");
+        warmup_flag.store(false, Ordering::Relaxed);
+        let t = Instant::now();
+
+        tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+        running_flag.store(false, Ordering::Relaxed);
+        let wall = t.elapsed();
+
+        let mut merged = Histogram::<u64>::new_with_bounds(1_000, 60_000_000_000, 3).unwrap();
+        for h in handles {
+            merged.add(&h.await.unwrap()).unwrap();
+        }
+        (merged, wall)
+    });
+
+    drop(client_rt);
+    drop(server_rt);
+
+    BenchResult { hist, wall }
+}
+
 // ── Stats ────────────────────────────────────────────────────────────────────
 
 fn print_stats(hist: &Histogram<u64>, wall: Duration, json: bool) {
@@ -145,21 +233,48 @@ fn print_stats(hist: &Histogram<u64>, wall: Duration, json: bool) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let json = args.iter().any(|a| a == "--json");
+    let is_bmf = args.iter().any(|a| a == "--bmf");
 
-    // Filter out --json to get positional args
     let positional: Vec<&str> = args
         .iter()
         .skip(1)
-        .filter(|a| *a != "--json")
+        .filter(|a| !a.starts_with("--"))
         .map(|s| s.as_str())
         .collect();
 
-    let mode = positional.first().copied().unwrap_or("baseline");
-    let duration_secs: u64 = positional
-        .get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_DURATION_SECS);
+    let duration_secs: u64 = if is_bmf {
+        positional.first()
+    } else {
+        positional.get(1)
+    }
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(DEFAULT_DURATION_SECS);
 
+    if is_bmf {
+        let mut report = bmf::Report::new();
+        for mode in ["baseline", "telemetry", "noop"] {
+            let r = run_bench(mode, duration_secs);
+            let rps = r.hist.len() as f64 / r.wall.as_secs_f64();
+            let p = format!("overhead::{mode}");
+            report.insert(format!("{p}::throughput_rps"), bmf::Metric::throughput(rps));
+            report.insert(
+                format!("{p}::mean_lat_ns"),
+                bmf::Metric::latency(r.hist.mean()),
+            );
+            report.insert(
+                format!("{p}::p99_lat_ns"),
+                bmf::Metric::latency(r.hist.value_at_percentile(99.0) as f64),
+            );
+            report.insert(
+                format!("{p}::p99_9_lat_ns"),
+                bmf::Metric::latency(r.hist.value_at_percentile(99.9) as f64),
+            );
+        }
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        return;
+    }
+
+    let mode = positional.first().copied().unwrap_or("baseline");
     if !json {
         println!("mode: {mode}");
         println!(
@@ -167,94 +282,10 @@ fn main() {
         );
     }
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
-    let (server_rt, _guard): (tokio::runtime::Runtime, Option<TelemetryGuard>) = match mode {
-        "telemetry" => {
-            let writer = RotatingWriter::single_file("/tmp/overhead_bench_trace.bin").unwrap();
-            let mut tb = TracedRuntime::builder().with_task_tracking(true);
-            #[cfg(target_os = "linux")]
-            {
-                tb = tb.with_cpu_profiling(CpuProfilingConfig::default());
-            }
-            let (rt, g) = tb.build_and_start(builder, writer).unwrap();
-            (rt, Some(g))
-        }
-        "noop" => {
-            let (rt, g) = TracedRuntime::builder()
-                .build_and_start(builder, NullWriter)
-                .unwrap();
-            (rt, Some(g))
-        }
-        "baseline" => (builder.build().unwrap(), None),
-        other => {
-            eprintln!("unknown mode: {other} (expected: baseline, telemetry, noop)");
-            std::process::exit(1);
-        }
-    };
-
-    // Start server and get its port
-    let port = server_rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = _guard.as_ref().map(|g| g.handle());
-        tokio::spawn(echo_server(listener, handle));
-        port
-    });
-
-    // ── Build a separate plain runtime for the load generator ──
-    let client_rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .unwrap();
-
-    // Shared flags to coordinate warmup and measurement phases
-    let warmup_flag = Arc::new(AtomicBool::new(true));
-    let running_flag = Arc::new(AtomicBool::new(true));
-
-    let wall = Instant::now();
-
-    let (merged_hist, measure_elapsed) = client_rt.block_on(async {
-        // Spawn all clients
-        let mut handles = Vec::with_capacity(NUM_CLIENTS);
-        for _ in 0..NUM_CLIENTS {
-            let running = running_flag.clone();
-            let warmup = warmup_flag.clone();
-            handles.push(tokio::spawn(run_client(port, running, warmup)));
-        }
-
-        // Let warmup run
-        tokio::time::sleep(Duration::from_secs(WARMUP_SECS)).await;
-        if !json {
-            println!("warmup complete, starting measurement...");
-        }
-        warmup_flag.store(false, Ordering::Relaxed);
-        let measure_start = Instant::now();
-
-        // Let measurement run for the requested duration
-        tokio::time::sleep(Duration::from_secs(duration_secs)).await;
-        running_flag.store(false, Ordering::Relaxed);
-        let measure_elapsed = measure_start.elapsed();
-
-        // Collect and merge per-client histograms
-        let mut merged = Histogram::<u64>::new_with_bounds(1_000, 60_000_000_000, 3).unwrap();
-        for h in handles {
-            let client_hist = h.await.unwrap();
-            merged.add(&client_hist).unwrap();
-        }
-        (merged, measure_elapsed)
-    });
-
-    drop(client_rt);
-    drop(server_rt);
+    let r = run_bench(mode, duration_secs);
 
     if !json {
         println!("\n── results ({mode}) ──");
     }
-    print_stats(&merged_hist, measure_elapsed, json);
-    if !json {
-        println!("  total wall (incl. warmup): {:.2?}", wall.elapsed());
-    }
+    print_stats(&r.hist, r.wall, json);
 }
