@@ -287,7 +287,10 @@ function testWakeEventTargetWorkerInRange() {
     (e) => e.eventType === EVENT_TYPES.WakeEvent
   );
   const outOfRangeWorker = wakeEvents.find(
-    (e) => e.targetWorker !== 255 && e.targetWorker > maxWorkerId
+    (e) =>
+      e.targetWorker !== 255 && // UNKNOWN
+      e.targetWorker !== 254 && // BLOCKING
+      e.targetWorker > maxWorkerId
   );
   if (outOfRangeWorker)
     fail(
