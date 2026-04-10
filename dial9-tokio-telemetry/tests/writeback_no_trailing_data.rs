@@ -2,7 +2,7 @@
 //! no trailing data. Previously, TelemetryRecorder::Drop flushed queued events
 //! through a stale file descriptor after the worker had already compressed and
 //! rewritten the segment, appending trailing garbage.
-#![cfg(feature = "cpu-profiling")]
+#![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};

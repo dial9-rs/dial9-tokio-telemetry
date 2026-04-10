@@ -22,6 +22,7 @@ runs:
               fi
               cargo build --all-targets --all-features
         - name: Enable perf_event_open and kallsyms for tests
+          if: runner.os == 'Linux'
           shell: bash
           run: |
               sudo sysctl kernel.perf_event_paranoid=1
@@ -31,6 +32,8 @@ runs:
           env:
               RUSTFLAGS: "--cfg tokio_unstable"
           run: |
-              # Raise locked-memory limit for large perf ring buffers
-              sudo prlimit --pid $$ --memlock=unlimited:unlimited
+              if [ "$RUNNER_OS" = "Linux" ]; then
+                  # Raise locked-memory limit for large perf ring buffers
+                  sudo prlimit --pid $$ --memlock=unlimited:unlimited
+              fi
               cargo test --all-features

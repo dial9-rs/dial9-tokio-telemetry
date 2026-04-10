@@ -4,7 +4,7 @@
 //! the original `.bin`.  When the writer evicts old segments, it must also
 //! clean up the renamed `.bin.gz` variants.  A leak here means unbounded disk
 //! growth in production.
-#![cfg(feature = "cpu-profiling")]
+#![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
