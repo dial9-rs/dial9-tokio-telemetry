@@ -26,10 +26,26 @@ permissions:
 jobs:
   # Runs on every push to main to build the statistical baseline.
   benchmark_main:
-    name: Benchmark (main baseline)
+    name: Benchmark — ${{ matrix.bench.name }} (main baseline)
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        bench:
+          - name: writer_encode
+            adapter: rust_criterion
+            command: cargo bench --package dial9-tokio-telemetry --bench writer_encode
+          - name: codec
+            adapter: rust_criterion
+            command: cargo bench --package dial9-trace-format --bench codec
+          - name: overhead_bench
+            adapter: json
+            command: cargo bench --bench overhead_bench -- --bmf 10
+          - name: e2e_workload
+            adapter: json
+            command: cargo bench --bench e2e_workload -- --bmf 10
     env:
       RUST_BACKTRACE: 1
       BENCHER_PROJECT: ${{ secrets.BENCHER_PROJECT }}
@@ -45,49 +61,38 @@ jobs:
 
       - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
 
-      - name: Benchmark — writer_encode
+      - name: Run benchmark
         run: |
           bencher run \
             --token '${{ secrets.BENCHER_API_TOKEN }}' \
             --branch '${{ github.ref_name }}' \
             --testbed ubuntu-latest \
-            --adapter rust_criterion \
-            "cargo bench --package dial9-tokio-telemetry --bench writer_encode"
-
-      - name: Benchmark — codec
-        run: |
-          bencher run \
-            --token '${{ secrets.BENCHER_API_TOKEN }}' \
-            --branch '${{ github.ref_name }}' \
-            --testbed ubuntu-latest \
-            --adapter rust_criterion \
-            "cargo bench --package dial9-trace-format --bench codec"
-
-      - name: Benchmark — overhead_bench
-        run: |
-          bencher run \
-            --token '${{ secrets.BENCHER_API_TOKEN }}' \
-            --branch '${{ github.ref_name }}' \
-            --testbed ubuntu-latest \
-            --adapter json \
-            "cargo bench --bench overhead_bench -- --bmf 10"
-
-      - name: Benchmark — e2e_workload
-        run: |
-          bencher run \
-            --token '${{ secrets.BENCHER_API_TOKEN }}' \
-            --branch '${{ github.ref_name }}' \
-            --testbed ubuntu-latest \
-            --adapter json \
-            "cargo bench --bench e2e_workload -- --bmf 10"
+            --adapter '${{ matrix.bench.adapter }}' \
+            "${{ matrix.bench.command }}"
 
   # Runs on same-repo PRs. Fork PRs are skipped — they have no access to
   # BENCHER_API_TOKEN, so the job would fail rather than silently skip.
   benchmark_pr:
-    name: Benchmark (PR regression check)
+    name: Benchmark — ${{ matrix.bench.name }} (PR regression check)
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        bench:
+          - name: writer_encode
+            adapter: rust_criterion
+            command: cargo bench --package dial9-tokio-telemetry --bench writer_encode
+          - name: codec
+            adapter: rust_criterion
+            command: cargo bench --package dial9-trace-format --bench codec
+          - name: overhead_bench
+            adapter: json
+            command: cargo bench --bench overhead_bench -- --bmf 10
+          - name: e2e_workload
+            adapter: json
+            command: cargo bench --bench e2e_workload -- --bmf 10
     env:
       RUST_BACKTRACE: 1
       BENCHER_PROJECT: ${{ secrets.BENCHER_PROJECT }}
@@ -103,7 +108,7 @@ jobs:
 
       - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
 
-      - name: Benchmark — writer_encode
+      - name: Run benchmark
         run: |
           bencher run \
             --token '${{ secrets.BENCHER_API_TOKEN }}' \
@@ -111,7 +116,7 @@ jobs:
             --start-point main \
             --start-point-reset \
             --testbed ubuntu-latest \
-            --adapter rust_criterion \
+            --adapter '${{ matrix.bench.adapter }}' \
             --threshold-measure latency \
             --threshold-test percentage \
             --threshold-lower-boundary _ \
@@ -122,67 +127,4 @@ jobs:
             --threshold-upper-boundary _ \
             --error-on-alert \
             --github-actions '${{ secrets.GITHUB_TOKEN }}' \
-            "cargo bench --package dial9-tokio-telemetry --bench writer_encode"
-
-      - name: Benchmark — codec
-        run: |
-          bencher run \
-            --token '${{ secrets.BENCHER_API_TOKEN }}' \
-            --branch '${{ github.head_ref }}' \
-            --start-point main \
-            --start-point-reset \
-            --testbed ubuntu-latest \
-            --adapter rust_criterion \
-            --threshold-measure latency \
-            --threshold-test percentage \
-            --threshold-lower-boundary _ \
-            --threshold-upper-boundary 0.25 \
-            --threshold-measure throughput \
-            --threshold-test percentage \
-            --threshold-lower-boundary 0.25 \
-            --threshold-upper-boundary _ \
-            --error-on-alert \
-            --github-actions '${{ secrets.GITHUB_TOKEN }}' \
-            "cargo bench --package dial9-trace-format --bench codec"
-
-      - name: Benchmark — overhead_bench
-        run: |
-          bencher run \
-            --token '${{ secrets.BENCHER_API_TOKEN }}' \
-            --branch '${{ github.head_ref }}' \
-            --start-point main \
-            --start-point-reset \
-            --testbed ubuntu-latest \
-            --adapter json \
-            --threshold-measure latency \
-            --threshold-test percentage \
-            --threshold-lower-boundary _ \
-            --threshold-upper-boundary 0.25 \
-            --threshold-measure throughput \
-            --threshold-test percentage \
-            --threshold-lower-boundary 0.25 \
-            --threshold-upper-boundary _ \
-            --error-on-alert \
-            --github-actions '${{ secrets.GITHUB_TOKEN }}' \
-            "cargo bench --bench overhead_bench -- --bmf 10"
-
-      - name: Benchmark — e2e_workload
-        run: |
-          bencher run \
-            --token '${{ secrets.BENCHER_API_TOKEN }}' \
-            --branch '${{ github.head_ref }}' \
-            --start-point main \
-            --start-point-reset \
-            --testbed ubuntu-latest \
-            --adapter json \
-            --threshold-measure latency \
-            --threshold-test percentage \
-            --threshold-lower-boundary _ \
-            --threshold-upper-boundary 0.25 \
-            --threshold-measure throughput \
-            --threshold-test percentage \
-            --threshold-lower-boundary 0.25 \
-            --threshold-upper-boundary _ \
-            --error-on-alert \
-            --github-actions '${{ secrets.GITHUB_TOKEN }}' \
-            "cargo bench --bench e2e_workload -- --bmf 10"
+            "${{ matrix.bench.command }}"
