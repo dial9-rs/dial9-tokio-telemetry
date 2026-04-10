@@ -249,6 +249,13 @@ impl Drop for ThreadLocalBuffer {
     }
 }
 
+/// A handle to a thread-local buffer, held by `SharedState` so the flush
+/// thread can intrusively drain idle/silent buffers.
+pub(crate) struct TlBufferHandle {
+    pub(crate) buffer: std::sync::Weak<Mutex<ThreadLocalBuffer>>,
+    pub(crate) flush_epoch: FlushEpoch,
+}
+
 thread_local! {
     static BUFFER: Arc<Mutex<ThreadLocalBuffer>> = Arc::new(Mutex::new(ThreadLocalBuffer::new()));
 }
@@ -257,22 +264,31 @@ thread_local! {
 /// automatically flush the batch to `collector` and stamp the current
 /// `drain_epoch` on the buffer's `FlushEpoch`.
 ///
-/// This sets the collector on the buffer so that at some point in the future
-/// when the ThreadLocalBuffer itself is dropped, we know where to send events.
+/// On the first call per thread (when the collector is set), returns a
+/// [`TlBufferHandle`] that the caller should register in `SharedState`
+/// so the flush thread can drain this buffer.
 pub(crate) fn record_event(
     event: RawEvent,
     collector: &Arc<CentralCollector>,
     drain_epoch: &AtomicU64,
-) {
-    BUFFER.with(|buf| {
-        let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
-        buf.set_collector(collector);
+) -> Option<TlBufferHandle> {
+    BUFFER.with(|arc| {
+        let mut buf = arc.lock().unwrap_or_else(|e| e.into_inner());
+        let first_call = buf.set_collector(collector);
         buf.record_event(&event);
         if buf.should_flush() {
             buf.flush_epoch.store(drain_epoch.load(Ordering::Relaxed));
             collector.accept_flush(buf.flush());
         }
-    });
+        if first_call {
+            Some(TlBufferHandle {
+                buffer: Arc::downgrade(arc),
+                flush_epoch: buf.flush_epoch.clone(),
+            })
+        } else {
+            None
+        }
+    })
 }
 
 /// Drain the current thread's buffer into `collector`, even if not full.

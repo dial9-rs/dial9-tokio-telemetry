@@ -1,4 +1,5 @@
 use crate::telemetry::buffer;
+use crate::telemetry::buffer::TlBufferHandle;
 use crate::telemetry::collector::CentralCollector;
 use crate::telemetry::events::RawEvent;
 #[cfg(feature = "cpu-profiling")]
@@ -33,6 +34,9 @@ pub(crate) struct SharedState {
     /// buffers stamp this value on each self-flush so the flush thread can
     /// skip busy workers when draining.
     pub(crate) drain_epoch: AtomicU64,
+    /// Weak handles to all registered thread-local buffers. The flush thread
+    /// uses these to intrusively drain idle/silent buffers.
+    tl_buffers: Mutex<Vec<TlBufferHandle>>,
     /// All registered `RuntimeContext`s. The flush thread clones this vec each
     /// cycle for queue sampling and metadata generation. `build_with_reuse`
     /// pushes new contexts here so the flush thread picks them up.
@@ -53,6 +57,7 @@ impl SharedState {
             start_time_ns,
             next_worker_id: AtomicU64::new(0),
             drain_epoch: AtomicU64::new(0),
+            tl_buffers: Mutex::new(Vec::new()),
             contexts: Mutex::new(Vec::new()),
             #[cfg(feature = "cpu-profiling")]
             thread_roles: Mutex::new(HashMap::new()),
@@ -88,6 +93,146 @@ impl SharedState {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
-        buffer::record_event(event, &self.collector, &self.drain_epoch);
+        if let Some(handle) = buffer::record_event(event, &self.collector, &self.drain_epoch) {
+            self.tl_buffers.lock().unwrap().push(handle);
+        }
+    }
+
+    /// Bump the drain epoch and flush all idle/silent thread-local buffers.
+    ///
+    /// Buffers whose `FlushEpoch` matches the current epoch are skipped
+    /// (the owning thread flushed recently, so locking would just add
+    /// contention). Dead `Weak` handles are pruned.
+    pub(crate) fn drain_all_tl_buffers(&self) {
+        let epoch = self.drain_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+
+        let handles: Vec<TlBufferHandle> = {
+            let guard = self.tl_buffers.lock().unwrap();
+            guard
+                .iter()
+                .map(|h| TlBufferHandle {
+                    buffer: h.buffer.clone(),
+                    flush_epoch: h.flush_epoch.clone(),
+                })
+                .collect()
+        };
+
+        for handle in &handles {
+            // Skip buffers that self-flushed during the current epoch.
+            if handle.flush_epoch.load() >= epoch {
+                continue;
+            }
+            if let Some(arc) = handle.buffer.upgrade() {
+                let mut buf = arc.lock().unwrap_or_else(|e| e.into_inner());
+                if buf.has_pending_events() {
+                    self.collector.accept_flush(buf.flush());
+                }
+            }
+        }
+
+        // Prune dead handles.
+        self.tl_buffers
+            .lock()
+            .unwrap()
+            .retain(|h| h.buffer.strong_count() > 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::telemetry::format::WorkerId;
+
+    fn poll_end_event() -> RawEvent {
+        RawEvent::PollEnd {
+            timestamp_nanos: 1000,
+            worker_id: WorkerId::from(0usize),
+        }
+    }
+
+    /// Helper: create a SharedState with recording enabled.
+    fn enabled_shared_state() -> SharedState {
+        let ss = SharedState::new(0);
+        ss.enabled.store(true, Ordering::Relaxed);
+        ss
+    }
+
+    #[test]
+    fn record_event_registers_tl_buffer_handle() {
+        let ss = enabled_shared_state();
+        // First event on this thread should register a handle.
+        ss.record_event(poll_end_event());
+        let handles = ss.tl_buffers.lock().unwrap();
+        assert_eq!(handles.len(), 1);
+        assert!(handles[0].buffer.upgrade().is_some());
+    }
+
+    #[test]
+    fn second_record_event_does_not_re_register() {
+        let ss = enabled_shared_state();
+        ss.record_event(poll_end_event());
+        ss.record_event(poll_end_event());
+        let handles = ss.tl_buffers.lock().unwrap();
+        assert_eq!(handles.len(), 1);
+    }
+
+    #[test]
+    fn drain_all_tl_buffers_flushes_idle_buffer() {
+        let ss = enabled_shared_state();
+        // Write an event (won't self-flush — buffer is 1MB).
+        ss.record_event(poll_end_event());
+        // Nothing in the collector yet (buffer not full).
+        assert!(ss.collector.next().is_none());
+        // Drain should flush the idle buffer.
+        ss.drain_all_tl_buffers();
+        let batch = ss.collector.next().expect("expected a batch after drain");
+        assert!(batch.event_count > 0);
+    }
+
+    #[test]
+    fn drain_all_tl_buffers_from_another_thread() {
+        let ss = Arc::new(enabled_shared_state());
+        let ss2 = ss.clone();
+        // Write events from a spawned thread.
+        let handle = std::thread::spawn(move || {
+            ss2.record_event(poll_end_event());
+            ss2.record_event(poll_end_event());
+        });
+        handle.join().unwrap();
+        // Drain from the main thread.
+        ss.drain_all_tl_buffers();
+        let batch = ss.collector.next().expect("expected a batch after drain");
+        assert_eq!(batch.event_count, 2);
+    }
+
+    #[test]
+    fn drain_skips_busy_buffer() {
+        let ss = enabled_shared_state();
+        ss.record_event(poll_end_event());
+        // Simulate a self-flush by stamping the current epoch + 1.
+        {
+            let handles = ss.tl_buffers.lock().unwrap();
+            // drain_all_tl_buffers will bump epoch to 1, so stamp 1 to look busy.
+            handles[0].flush_epoch.store(1);
+        }
+        ss.drain_all_tl_buffers();
+        // Buffer should NOT have been flushed — collector is empty.
+        assert!(ss.collector.next().is_none());
+    }
+
+    #[test]
+    fn drain_prunes_dead_handles() {
+        let ss = Arc::new(enabled_shared_state());
+        let ss2 = ss.clone();
+        let handle = std::thread::spawn(move || {
+            ss2.record_event(poll_end_event());
+        });
+        handle.join().unwrap();
+        // Thread exited — its Arc<Mutex<TLB>> was dropped, Weak is dead.
+        // But the TLB's Drop impl flushed remaining events, so the handle
+        // is dead. Drain should prune it.
+        ss.drain_all_tl_buffers();
+        let handles = ss.tl_buffers.lock().unwrap();
+        assert_eq!(handles.len(), 0, "dead handle should have been pruned");
     }
 }
