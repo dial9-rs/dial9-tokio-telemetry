@@ -29,10 +29,11 @@ jobs:
           RUSTFLAGS: "--cfg tokio_unstable"
 
   build:
-    name: Build (${{ matrix.toolchain }})
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.os }}, ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, macos-latest]
         toolchain: [stable, nightly]
     env:
       RUST_BACKTRACE: 1
