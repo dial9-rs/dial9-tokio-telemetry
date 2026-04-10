@@ -736,6 +736,10 @@ impl TracedRuntimeBuilder<HasTracePath> {
                     // are batched into reasonably-sized segments.
                     let mut cycle_count: u64 = 0;
                     const SELF_DRAIN_INTERVAL: u64 = 200;
+                    /// Drain all thread-local buffers every ~30s (6000 × 5ms).
+                    /// This ensures idle/silent threads don't hold events across
+                    /// trace file rotations.
+                    const TL_DRAIN_INTERVAL: u64 = 6000;
                     let sample_interval = Duration::from_millis(10);
                     let mut last_sample = Instant::now();
                     // Snapshot the user-provided segment metadata so we can
@@ -782,6 +786,11 @@ impl TracedRuntimeBuilder<HasTracePath> {
 
                         cycle_count += 1;
                         let drain_self = exit || cycle_count.is_multiple_of(SELF_DRAIN_INTERVAL);
+                        // Periodically drain all thread-local buffers so idle/silent
+                        // threads don't hold events across trace file rotations.
+                        if exit || cycle_count.is_multiple_of(TL_DRAIN_INTERVAL) {
+                            shared.drain_all_tl_buffers();
+                        }
                         let mut flush_timer = Timer::start_now();
                         let stats = flush_once(&mut event_writer, &shared, drain_self);
                         flush_timer.stop();
