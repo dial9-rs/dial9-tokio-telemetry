@@ -1,6 +1,8 @@
 //! Shared types for the sampler: event source, configuration, and sample data.
 
 /// Which event source to sample on.
+// TODO: these variants are currently Linux-specific (perf_event_open constants),
+// consider cfg-gating individual variants when adding other platform backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventSource {
     /// `PERF_COUNT_HW_CPU_CYCLES` — hardware CPU cycle counter.
