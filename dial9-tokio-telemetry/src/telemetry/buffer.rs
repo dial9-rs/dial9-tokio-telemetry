@@ -12,6 +12,27 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::Location;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Tracks the last drain epoch at which a particular thread-local buffer
+/// was flushed. The flush thread reads this (relaxed) to skip buffers
+/// that have self-flushed recently, avoiding contention with busy workers.
+#[derive(Clone)]
+pub(crate) struct FlushEpoch(Arc<AtomicU64>);
+
+impl FlushEpoch {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(0)))
+    }
+
+    pub(crate) fn store(&self, epoch: u64) {
+        self.0.store(epoch, Ordering::Relaxed);
+    }
+
+    pub(crate) fn load(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 
 /// Default maximum encoded batch size before flushing (~1MB).
 const DEFAULT_BATCH_SIZE: usize = 1023 * 1024;
@@ -295,5 +316,24 @@ mod tests {
         let batch = buffer.flush();
         assert!(!batch.encoded_bytes.is_empty());
         assert_eq!(buffer.event_count, 0);
+    }
+
+    #[test]
+    fn test_flush_epoch_store_load() {
+        let epoch = FlushEpoch::new();
+        assert_eq!(epoch.load(), 0);
+        epoch.store(42);
+        assert_eq!(epoch.load(), 42);
+    }
+
+    #[test]
+    fn test_flush_epoch_shared_across_threads() {
+        let epoch = FlushEpoch::new();
+        let epoch_clone = epoch.clone();
+        let handle = std::thread::spawn(move || {
+            epoch_clone.store(7);
+        });
+        handle.join().unwrap();
+        assert_eq!(epoch.load(), 7);
     }
 }

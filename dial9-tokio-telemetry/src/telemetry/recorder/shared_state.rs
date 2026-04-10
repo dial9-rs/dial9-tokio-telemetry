@@ -29,6 +29,10 @@ pub(crate) struct SharedState {
     /// Global worker ID counter. Each runtime reserves a contiguous block
     /// via `fetch_add(num_workers)` so worker IDs don't collide.
     pub(crate) next_worker_id: AtomicU64,
+    /// Epoch counter bumped by the flush thread every ~30s. Thread-local
+    /// buffers stamp this value on each self-flush so the flush thread can
+    /// skip busy workers when draining.
+    pub(crate) drain_epoch: AtomicU64,
     /// All registered `RuntimeContext`s. The flush thread clones this vec each
     /// cycle for queue sampling and metadata generation. `build_with_reuse`
     /// pushes new contexts here so the flush thread picks them up.
@@ -48,6 +52,7 @@ impl SharedState {
             collector: Arc::new(CentralCollector::new()),
             start_time_ns,
             next_worker_id: AtomicU64::new(0),
+            drain_epoch: AtomicU64::new(0),
             contexts: Mutex::new(Vec::new()),
             #[cfg(feature = "cpu-profiling")]
             thread_roles: Mutex::new(HashMap::new()),
