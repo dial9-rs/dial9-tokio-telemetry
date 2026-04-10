@@ -143,23 +143,24 @@ fn test_js_parser_resolves_symbols_past_event_cap() {
         r#"
 const {{ parseTrace }} = require("{viewer}/trace_parser.js");
 const fs = require("fs");
-const buf = fs.readFileSync("{trace}");
-const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-const result = parseTrace(ab, {{ maxEvents: 5 }});
-if (result.events.length > 5) {{
-    console.error("expected at most 5 events, got " + result.events.length);
-    process.exit(1);
+async function main() {{
+    const result = await parseTrace(fs.readFileSync("{trace}"), {{ maxEvents: 5 }});
+    if (result.events.length > 5) {{
+        console.error("expected at most 5 events, got " + result.events.length);
+        process.exit(1);
+    }}
+    if (!result.truncated) {{
+        console.error("expected truncated=true");
+        process.exit(1);
+    }}
+    const sym = result.callframeSymbols.get("0x1234");
+    if (!sym || sym.symbol !== "my_function") {{
+        console.error("symbol not resolved: " + JSON.stringify(sym));
+        process.exit(1);
+    }}
+    console.log("OK: " + result.events.length + " events, symbol resolved");
 }}
-if (!result.truncated) {{
-    console.error("expected truncated=true");
-    process.exit(1);
-}}
-const sym = result.callframeSymbols.get("0x1234");
-if (!sym || sym.symbol !== "my_function") {{
-    console.error("symbol not resolved: " + JSON.stringify(sym));
-    process.exit(1);
-}}
-console.log("OK: " + result.events.length + " events, symbol resolved");
+main().catch((e) => {{ console.error(e); process.exit(1); }});
 "#,
         viewer = std::path::Path::new(&manifest_dir)
             .parent()

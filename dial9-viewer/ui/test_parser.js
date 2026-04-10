@@ -4,7 +4,7 @@
 const fs = require("fs");
 const { parseTrace } = require("./trace_parser.js");
 
-function main() {
+async function main() {
     const args = process.argv.slice(2);
     if (args.length < 2) {
         console.error("Usage: node test_parser.js <trace.bin> <expected.jsonl>");
@@ -15,9 +15,7 @@ function main() {
 
     // Parse binary trace with JS parser
     console.log(`Parsing ${tracePath}...`);
-    const rawBuf = fs.readFileSync(tracePath);
-    const buffer = rawBuf.buffer.slice(rawBuf.byteOffset, rawBuf.byteOffset + rawBuf.byteLength);
-    const trace = parseTrace(buffer);
+    const trace = await parseTrace(fs.readFileSync(tracePath));
 
     console.log(`Parsed ${trace.events.length} events (version ${trace.version})`);
     console.log(`  - ${trace.spawnLocations.size} spawn locations`);
@@ -124,4 +122,4 @@ function main() {
     console.log("\n✓ All checks passed!");
 }
 
-main();
+main().catch((e) => { console.error(e); process.exit(1); });

@@ -663,19 +663,11 @@
                     resetDropZone();
                 });
 
-            async function maybeGunzip(buf) {
-                const b = new Uint8Array(buf);
-                if (b[0] === 0x1f && b[1] === 0x8b) {
-                    return await new Response(new Blob([b]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
-                }
-                return buf;
-            }
-
             function loadFile(file) {
                 const reader = new FileReader();
                 reader.onload = async (e) => {
                     try {
-                        trace = parseTrace(await maybeGunzip(e.target.result));
+                        trace = await parseTrace(e.target.result);
                         processTrace();
                         showViewer(file.name);
                     } catch (err) {
@@ -730,8 +722,7 @@
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const arrayBuffer = await response.arrayBuffer();
                     loadAbortController = null;
-                    const gunzipped = await maybeGunzip(arrayBuffer);
-                    trace = parseTrace(gunzipped);
+                    trace = await parseTrace(arrayBuffer);
                     processTrace();
                     showViewer(url.split('/').pop() || 'trace.bin');
                 } catch (err) {
