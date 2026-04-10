@@ -43,16 +43,7 @@ jobs:
           sudo sysctl kernel.perf_event_paranoid=1
           sudo sysctl kernel.kptr_restrict=0
 
-      - uses: bencherdev/bencher@main
-
-      - name: Benchmark — poll_overhead
-        run: |
-          bencher run \
-            --token '${{ secrets.BENCHER_API_TOKEN }}' \
-            --branch '${{ github.ref_name }}' \
-            --testbed ubuntu-latest \
-            --adapter rust_criterion \
-            "cargo bench --package dial9-tokio-telemetry --bench poll_overhead --features task-dump"
+      - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
 
       - name: Benchmark — writer_encode
         run: |
@@ -110,26 +101,7 @@ jobs:
           sudo sysctl kernel.perf_event_paranoid=1
           sudo sysctl kernel.kptr_restrict=0
 
-      - uses: bencherdev/bencher@main
-
-      - name: Benchmark — poll_overhead
-        run: |
-          bencher run \
-            --token '${{ secrets.BENCHER_API_TOKEN }}' \
-            --branch '${{ github.head_ref }}' \
-            --start-point main \
-            --start-point-reset \
-            --testbed ubuntu-latest \
-            --adapter rust_criterion \
-            --threshold-measure latency \
-            --threshold-test percentage \
-            --threshold-upper-boundary 0.25 \
-            --threshold-measure throughput \
-            --threshold-test percentage \
-            --threshold-lower-boundary 0.25 \
-            --error-on-alert \
-            --github-actions '${{ secrets.GITHUB_TOKEN }}' \
-            "cargo bench --package dial9-tokio-telemetry --bench poll_overhead --features task-dump"
+      - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
 
       - name: Benchmark — writer_encode
         run: |
@@ -142,10 +114,12 @@ jobs:
             --adapter rust_criterion \
             --threshold-measure latency \
             --threshold-test percentage \
+            --threshold-lower-boundary _ \
             --threshold-upper-boundary 0.25 \
             --threshold-measure throughput \
             --threshold-test percentage \
             --threshold-lower-boundary 0.25 \
+            --threshold-upper-boundary _ \
             --error-on-alert \
             --github-actions '${{ secrets.GITHUB_TOKEN }}' \
             "cargo bench --package dial9-tokio-telemetry --bench writer_encode"
@@ -161,10 +135,12 @@ jobs:
             --adapter rust_criterion \
             --threshold-measure latency \
             --threshold-test percentage \
+            --threshold-lower-boundary _ \
             --threshold-upper-boundary 0.25 \
             --threshold-measure throughput \
             --threshold-test percentage \
             --threshold-lower-boundary 0.25 \
+            --threshold-upper-boundary _ \
             --error-on-alert \
             --github-actions '${{ secrets.GITHUB_TOKEN }}' \
             "cargo bench --package dial9-trace-format --bench codec"
@@ -180,10 +156,12 @@ jobs:
             --adapter json \
             --threshold-measure latency \
             --threshold-test percentage \
+            --threshold-lower-boundary _ \
             --threshold-upper-boundary 0.25 \
             --threshold-measure throughput \
             --threshold-test percentage \
             --threshold-lower-boundary 0.25 \
+            --threshold-upper-boundary _ \
             --error-on-alert \
             --github-actions '${{ secrets.GITHUB_TOKEN }}' \
             "cargo bench --bench overhead_bench -- --bmf 10"
@@ -199,10 +177,12 @@ jobs:
             --adapter json \
             --threshold-measure latency \
             --threshold-test percentage \
+            --threshold-lower-boundary _ \
             --threshold-upper-boundary 0.25 \
             --threshold-measure throughput \
             --threshold-test percentage \
             --threshold-lower-boundary 0.25 \
+            --threshold-upper-boundary _ \
             --error-on-alert \
             --github-actions '${{ secrets.GITHUB_TOKEN }}' \
             "cargo bench --bench e2e_workload -- --bmf 10"
