@@ -221,7 +221,6 @@ See [TRACE_ANALYSIS_GUIDE.md](/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) fo
 ## Features
 
 - **`cpu-profiling`** — Linux only. Enables `perf_event_open`-based CPU sampling and scheduler event capture via `dial9-perf-self-profile`.
-- **`task-dump`** — Enables Tokio's `taskdump` feature for async stack traces. Required for the `long_sleep`, `completing_task`, `cancelled_task`, and `debug_timing` examples.
 - **`worker-s3`** — Enables S3 upload support. Adds `aws-sdk-s3`, `aws-sdk-s3-transfer-manager`, `aws-config`, and `flate2`.
 
 ## S3 upload

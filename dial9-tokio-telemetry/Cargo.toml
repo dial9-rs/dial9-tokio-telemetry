@@ -42,7 +42,6 @@ metrique = { version = "0.1.23", features = ["local-format"] }
 [features]
 analysis = []
 cpu-profiling = ["dep:dial9-perf-self-profile"]
-task-dump = ["tokio/taskdump"]
 worker-s3 = ["dep:aws-sdk-s3-transfer-manager", "dep:aws-sdk-s3", "dep:aws-config", "dep:time"]
 
 [dev-dependencies]
@@ -68,33 +67,12 @@ dial9-tokio-telemetry = { path = ".", features = ["cpu-profiling", "worker-s3", 
 nix = { version = "0.29", features = ["process"] }
 
 [[bench]]
-name = "poll_overhead"
-harness = false
-required-features = ["task-dump"]
-
-[[bench]]
 name = "overhead_bench"
 harness = false
 
 [[bench]]
 name = "e2e_workload"
 harness = false
-
-[[example]]
-name = "long_sleep"
-required-features = ["task-dump"]
-
-[[example]]
-name = "completing_task"
-required-features = ["task-dump"]
-
-[[example]]
-name = "cancelled_task"
-required-features = ["task-dump"]
-
-[[example]]
-name = "debug_timing"
-required-features = ["task-dump"]
 
 [[example]]
 name = "blocking_pool_tracking"

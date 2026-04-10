@@ -4,7 +4,7 @@
 mod bmf;
 
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
+use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

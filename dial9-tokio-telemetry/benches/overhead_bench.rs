@@ -169,7 +169,7 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
 
         let mut merged = Histogram::<u64>::new_with_bounds(1_000, 60_000_000_000, 3).unwrap();
         for h in handles {
-            merged.add(&h.await.unwrap()).unwrap();
+            merged.add(h.await.unwrap()).unwrap();
         }
         (merged, wall)
     });
