@@ -274,6 +274,7 @@ async function main() {
       trace.hasSchedWait,
       {}
     );
+    if (pois.length === 0) fail("No long-poll points of interest found");
     for (const p of pois) {
       if (p.type !== "long-poll") fail(`Wrong type: ${p.type}`);
       if (p.value <= 1) fail(`long-poll value ${p.value} <= 1ms`);
@@ -290,6 +291,7 @@ async function main() {
       trace.hasSchedWait,
       {}
     );
+    if (pois.length === 0) fail("No cpu-sampled points of interest found");
     for (const p of pois) {
       if (p.type !== "cpu-sampled") fail(`Wrong type: ${p.type}`);
       if (p.value <= 0) fail(`cpu-sampled value ${p.value} <= 0`);
@@ -306,6 +308,7 @@ async function main() {
       trace.hasSchedWait,
       {}
     );
+    if (pois.length === 0) fail("No wake-delay points of interest found");
     for (const p of pois) {
       if (p.type !== "wake-delay") fail(`Wrong type: ${p.type}`);
       if (p.value <= 100) fail(`wake-delay value ${p.value} <= 100µs`);
@@ -332,8 +335,7 @@ async function main() {
 
   function testFlamegraphTree() {
     const cpuSamples = trace.cpuSamples.filter((s) => s.source !== 1);
-    if (cpuSamples.length === 0)
-      return pass("No CPU samples to test flamegraph");
+    if (cpuSamples.length === 0) fail("No CPU samples found");
 
     const root = buildFlamegraphTree(cpuSamples, trace.callframeSymbols);
     if (root.count !== cpuSamples.length)
@@ -343,7 +345,7 @@ async function main() {
 
   function testFlattenFlamegraph() {
     const cpuSamples = trace.cpuSamples.filter((s) => s.source !== 1);
-    if (cpuSamples.length === 0) return pass("No CPU samples to test flatten");
+    if (cpuSamples.length === 0) fail("No CPU samples found");
 
     const root = buildFlamegraphTree(cpuSamples, trace.callframeSymbols);
     const { nodes, maxDepth } = flattenFlamegraph(root, cpuSamples.length);
@@ -357,8 +359,7 @@ async function main() {
 
   function testBuildFgData() {
     const cpuSamples = trace.cpuSamples.filter((s) => s.source !== 1);
-    if (cpuSamples.length === 0)
-      return pass("No CPU samples to test buildFgData");
+    if (cpuSamples.length === 0) fail("No CPU samples found");
 
     const data = buildFgData(cpuSamples, trace.callframeSymbols);
     if (!data) fail("buildFgData returned null for non-empty samples");
