@@ -3,7 +3,7 @@
 //! Verifies that when cpu-profiling is configured with a trace path,
 //! the background worker symbolizes sealed segments and writes them
 //! back to disk with gzip compression.
-#![cfg(feature = "cpu-profiling")]
+#![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};

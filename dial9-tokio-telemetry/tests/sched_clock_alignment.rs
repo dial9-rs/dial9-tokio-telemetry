@@ -7,10 +7,10 @@
 //! CLOCK_MONOTONIC_RAW instead of CLOCK_MONOTONIC, timestamps would drift
 //! and events would fall outside the expected windows.
 
-#[cfg(feature = "cpu-profiling")]
+#![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
+
 mod common;
 
-#[cfg(feature = "cpu-profiling")]
 #[test]
 fn sched_event_timestamps_align_with_wall_clock() {
     use dial9_tokio_telemetry::telemetry::TracedRuntime;

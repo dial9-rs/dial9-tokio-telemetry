@@ -1,9 +1,9 @@
 //! Integration test: sched event capture via per-thread perf profiling.
 
-#[cfg(feature = "cpu-profiling")]
+#![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
+
 mod common;
 
-#[cfg(feature = "cpu-profiling")]
 #[test]
 fn sched_events_capture_context_switches() {
     use dial9_tokio_telemetry::telemetry::CpuSampleSource;
