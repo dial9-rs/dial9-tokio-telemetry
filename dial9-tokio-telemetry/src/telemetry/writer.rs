@@ -368,7 +368,7 @@ impl RotatingWriter {
         self.next_rotation_time =
             Self::next_boundary(time_source().system_time().as_std(), self.rotation_period);
 
-        tracing::info!(
+        tracing::debug!(
             segment_index = self.next_index - 1,
             "rotated to new trace segment"
         );
