@@ -145,6 +145,8 @@ impl SharedState {
                 if buf.has_pending_events() {
                     self.collector.accept_flush(buf.flush());
                 }
+                // Stamp so we skip this buffer next cycle if it stays idle.
+                handle.flush_epoch.store(epoch);
             }
         }
 
