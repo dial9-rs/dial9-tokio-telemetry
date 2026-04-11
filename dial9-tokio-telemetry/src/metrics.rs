@@ -13,6 +13,7 @@ use metrique::unit_of_work::metrics;
 pub(crate) enum Operation {
     Flush,
     ProcessSegment,
+    TlDrain,
 }
 
 /// Metrics emitted by the flush thread each cycle.
@@ -34,6 +35,49 @@ pub(crate) struct FlushMetrics {
 
     /// The last flush during shutdown
     pub last_flush: bool,
+}
+
+/// Per-cycle counters produced by the intrusive thread-local buffer
+/// drain. Also used as a `#[metrics(subfield)]` so callers can flatten
+/// these fields into their top-level metrics without duplication.
+#[metrics(subfield)]
+#[derive(Debug, Default)]
+pub(crate) struct TlDrainStats {
+    /// Buffers that we locked cross-thread and had pending events.
+    pub buffers_flushed: u64,
+    /// Buffers that we locked cross-thread (superset of `buffers_flushed`;
+    /// the difference is buffers that were already empty when locked).
+    pub buffers_locked: u64,
+    /// Handles skipped because the owning thread self-flushed during the
+    /// epoch grace period. High ratio means busy workers are self-flushing
+    /// efficiently and the intrusive path is staying out of their way.
+    pub buffers_skipped_busy: u64,
+    /// Total events drained from idle/silent buffers this cycle.
+    pub events_flushed: u64,
+    /// Dead `Weak` handles pruned this cycle (threads that have exited).
+    pub dead_pruned: u64,
+}
+
+/// Metrics emitted every time the flush thread runs the intrusive
+/// thread-local buffer drain (~every 30s, plus on shutdown).
+///
+/// `events_flushed > 0` means idle/silent threads were holding events
+/// that would otherwise have crossed a trace file rotation.
+/// `buffers_locked` vs `buffers_flushed` shows how many locks were
+/// taken for buffers that turned out to be empty (e.g., a thread that
+/// self-flushed after the epoch bump but before we upgraded the
+/// `Weak`).
+#[metrics(rename_all = "PascalCase")]
+#[derive(Debug)]
+pub(crate) struct TlDrainMetrics {
+    pub operation: Operation,
+    /// Wall-clock time spent in `drain_all_tl_buffers`.
+    #[metrics(unit = Microsecond)]
+    pub duration: Timer,
+    #[metrics(flatten)]
+    pub stats: TlDrainStats,
+    /// True when this drain ran as part of shutdown finalization.
+    pub last_drain: bool,
 }
 
 /// Metrics emitted per sealed segment processed by the background worker.

@@ -8,7 +8,7 @@ pub(crate) use shared_state::SharedState;
 use event_writer::EventWriter;
 use runtime_context::{make_poll_end, make_poll_start, make_worker_park, make_worker_unpark};
 
-use crate::metrics::{FlushMetrics, Operation};
+use crate::metrics::{FlushMetrics, Operation, TlDrainMetrics};
 use crate::telemetry::buffer;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::task_metadata::TaskId;
@@ -793,13 +793,20 @@ impl TracedRuntimeBuilder<HasTracePath> {
                         // and the intrusive drain only locks truly idle buffers.
                         // On exit we bump + drain in the same tick since there is
                         // no next tick for the grace period.
-                       if exit || (cycle_count + 1).is_multiple_of(TL_DRAIN_INTERVAL) {
-                            shared.bump_drain_epoch();
-                        }
+                        if exit || (cycle_count + 1).is_multiple_of(TL_DRAIN_INTERVAL) {
                             shared.bump_drain_epoch();
                         }
                         if exit || cycle_count.is_multiple_of(TL_DRAIN_INTERVAL) {
-                            shared.drain_all_tl_buffers();
+                            let mut tl_drain_timer = Timer::start_now();
+                            let stats = shared.drain_all_tl_buffers();
+                            tl_drain_timer.stop();
+                            let _guard = TlDrainMetrics {
+                                operation: Operation::TlDrain,
+                                duration: tl_drain_timer,
+                                stats,
+                                last_drain: exit,
+                            }
+                            .append_on_drop(flush_metrics_sink.clone());
                         }
                         let mut flush_timer = Timer::start_now();
                         let stats = flush_once(&mut event_writer, &shared, drain_self);
