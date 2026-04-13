@@ -738,6 +738,7 @@ impl TelemetryCore {
         writer: impl TraceWriter + 'static,
         /// Path for trace output. Enables the background worker when
         /// cpu-profiling or S3 is configured.
+        #[builder(into)]
         trace_path: Option<PathBuf>,
         /// Enable task spawn/terminate tracking.
         #[builder(default)]
