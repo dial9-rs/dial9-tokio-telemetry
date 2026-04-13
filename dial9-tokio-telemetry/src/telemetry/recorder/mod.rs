@@ -952,22 +952,32 @@ fn run_flush_loop(
     flush_metrics_sink: &metrique_writer::BoxEntrySink,
     mut event_writer: EventWriter,
 ) {
+    // Drain the flush thread's own TL buffer every ~1s (200 × 5ms)
+    // rather than every cycle, so queue samples and CPU events
+    // are batched into reasonably-sized segments.
     let mut cycle_count: u64 = 0;
     const SELF_DRAIN_INTERVAL: u64 = 200;
+    // Drain all thread-local buffers every ~30s (6000 × 5ms).
+    // This ensures idle/silent threads don't hold events across
+    // trace file rotations.
     const TL_DRAIN_INTERVAL: u64 = 6000;
     let sample_interval = Duration::from_millis(10);
     let mut last_sample = Instant::now();
+    // Snapshot the user-provided segment metadata so we can
+    // merge it with runtime→worker entries on each flush cycle.
     let static_metadata = event_writer.segment_metadata().to_vec();
 
     loop {
         let mut ack_tx = None;
         let mut exit = false;
+        // Wait for control commands up to 5ms.
         match control_rx.recv_timeout(Duration::from_millis(5)) {
             Ok(ControlCommand::FinalizeAndStop(ack)) => {
                 ack_tx = Some(ack);
                 exit = true;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // All senders dropped — do a best-effort finalize.
                 exit = true;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -983,6 +993,8 @@ fn run_flush_loop(
             }
         }
 
+        // Merge user-provided metadata with runtime→worker mappings
+        // so the next rotated segment is fully self-describing.
         let contexts = shared.contexts.lock().unwrap().clone();
         let runtime_entries: Vec<(String, String)> =
             contexts.iter().filter_map(|c| c.metadata_entry()).collect();
@@ -994,6 +1006,13 @@ fn run_flush_loop(
 
         cycle_count += 1;
         let drain_self = exit || cycle_count.is_multiple_of(SELF_DRAIN_INTERVAL);
+        // Periodically drain all thread-local buffers so idle/silent
+        // threads don't hold events across trace file rotations.
+        // We bump the epoch one tick early (~5 ms grace period) so
+        // busy threads self-flush on their next record_event,
+        // and the intrusive drain only locks truly idle buffers.
+        // On exit we bump + drain in the same tick since there is
+        // no next tick for the grace period.
         if exit || (cycle_count + 1).is_multiple_of(TL_DRAIN_INTERVAL) {
             shared.bump_drain_epoch();
         }
@@ -1024,6 +1043,8 @@ fn run_flush_loop(
             .append_on_drop(flush_metrics_sink.clone());
         }
         if exit {
+            // Write final metadata before sealing so single-segment
+            // traces contain runtime→worker mappings.
             if let Err(e) = event_writer.write_current_segment_metadata() {
                 tracing::warn!("failed to write final segment metadata: {e}");
             }
