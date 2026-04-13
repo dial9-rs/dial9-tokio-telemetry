@@ -538,7 +538,7 @@ impl<P> TracedRuntimeBuilder<P> {
     /// runtime index so their `WorkerId`s don't collide with existing runtimes.
     ///
     /// Consider using [`TelemetryGuard::trace_runtime`] instead for new code.
-    pub fn build_with_reuse(
+    pub fn build_and_attach_to_telemetry(
         self,
         builder: tokio::runtime::Builder,
         guard: &TelemetryGuard,
@@ -731,9 +731,9 @@ pub struct TelemetryCore;
 #[bon::bon]
 impl TelemetryCore {
     /// Build a telemetry session. Recording starts disabled; call
-    /// [`TelemetryGuard::enable`] or use [`build_and_start`](Self::build_and_start).
-    #[builder(finish_fn = build)]
-    pub fn builder(
+    /// [`TelemetryGuard::enable`] to begin recording.
+    #[builder]
+    pub fn new(
         /// The trace writer (e.g. [`RotatingWriter`], [`NullWriter`]).
         writer: impl TraceWriter + 'static,
         /// Path for trace output. Enables the background worker when
@@ -1252,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn build_with_reuse_attaches_second_runtime() {
+    fn build_and_attach_to_telemetry_attaches_second_runtime() {
         let builder_a = tokio::runtime::Builder::new_multi_thread();
         let (runtime_a, guard) = TracedRuntime::builder()
             .build_and_start_with_writer(builder_a, NullWriter)
@@ -1260,7 +1260,7 @@ mod tests {
 
         let builder_b = tokio::runtime::Builder::new_multi_thread();
         let runtime_b = TracedRuntime::builder()
-            .build_with_reuse(builder_b, &guard)
+            .build_and_attach_to_telemetry(builder_b, &guard)
             .unwrap();
 
         // Both runtimes should work
@@ -1275,7 +1275,7 @@ mod tests {
     }
 
     #[test]
-    fn build_with_reuse_produces_unique_worker_ids() {
+    fn build_and_attach_to_telemetry_produces_unique_worker_ids() {
         use crate::telemetry::format::WorkerId;
         use std::collections::HashSet;
         use std::sync::{Arc, Mutex};
@@ -1314,7 +1314,7 @@ mod tests {
         builder_b.worker_threads(2);
         let runtime_b = TracedRuntime::builder()
             .with_task_tracking(true)
-            .build_with_reuse(builder_b, &guard)
+            .build_and_attach_to_telemetry(builder_b, &guard)
             .unwrap();
 
         // Generate poll events on both runtimes. Spawn many concurrent tasks
@@ -1374,10 +1374,10 @@ mod tests {
         );
     }
 
-    /// Verify that `build_with_reuse` propagates the second runtime's metadata
+    /// Verify that `build_and_attach_to_telemetry` propagates the second runtime's metadata
     /// (runtime name → worker ID mapping) into the trace file's segment metadata.
     #[test]
-    fn build_with_reuse_propagates_second_runtime_metadata() {
+    fn build_and_attach_to_telemetry_propagates_second_runtime_metadata() {
         use crate::telemetry::events::TelemetryEvent;
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -1402,7 +1402,7 @@ mod tests {
         builder_b.worker_threads(2);
         let runtime_b = TracedRuntime::builder()
             .with_runtime_name("io")
-            .build_with_reuse(builder_b, &guard)
+            .build_and_attach_to_telemetry(builder_b, &guard)
             .unwrap();
 
         // Run work on both runtimes so workers resolve their identities.
@@ -1502,7 +1502,7 @@ mod tests {
         builder_b.worker_threads(2);
         let runtime_b = TracedRuntime::builder()
             .with_task_tracking(true)
-            .build_with_reuse(builder_b, &guard)
+            .build_and_attach_to_telemetry(builder_b, &guard)
             .unwrap();
 
         // Use handle.spawn on runtime B to get Traced waker wrapping → wake events.
