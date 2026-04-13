@@ -66,7 +66,7 @@ async fn serves_static_files() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("{base}/browser.html"))
+        .get(format!("{base}/index.html"))
         .send()
         .await
         .unwrap();
@@ -75,7 +75,7 @@ async fn serves_static_files() {
     check!(body.contains("dial9"));
 
     let resp = client
-        .get(format!("{base}/index.html"))
+        .get(format!("{base}/viewer.html"))
         .send()
         .await
         .unwrap();

@@ -60,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", cli.port)).await?;
     tracing::info!(port = cli.port, ui_dir = %ui_dir.display(), "dial9-viewer listening");
+    println!("\n  → http://localhost:{}\n", cli.port);
     if let Some(bucket) = &cli.bucket {
         tracing::info!(%bucket, "default bucket");
     }

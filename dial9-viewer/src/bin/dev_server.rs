@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("dial9-viewer dev server listening on http://localhost:{port}");
     tracing::info!("bucket={bucket}, prefix=traces");
-    tracing::info!("try: http://localhost:{port}/browser.html");
+    tracing::info!("try: http://localhost:{port}/");
     tracing::info!("search for: 2026-04-09/");
 
     axum::serve(listener, app)

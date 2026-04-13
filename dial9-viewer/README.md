@@ -63,7 +63,7 @@ cargo run -p dial9-viewer -- --bucket my-bucket
 ./dial9-viewer/serve.py
 ```
 
-The existing `dial9-tokio-telemetry/serve.py` still works for iterating on the trace viewer (`index.html`) without the S3 browser.
+The existing `dial9-tokio-telemetry/serve.py` still works for iterating on the trace viewer (`viewer.html`) without the S3 browser.
 
 ## Testing
 
