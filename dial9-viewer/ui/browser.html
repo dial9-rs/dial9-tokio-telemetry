@@ -14,22 +14,22 @@
         header {
             padding: 12px 20px; background: #16213e;
             border-bottom: 1px solid #333; flex-shrink: 0;
+            display: flex; align-items: center; gap: 12px;
         }
-        header h1 { font-size: 1.1em; color: #6c63ff; display: inline; }
-        header span { font-size: 0.8em; color: #666; margin-left: 8px; }
+        header h1 { font-size: 1.1em; color: #6c63ff; }
+        header span { font-size: 0.8em; color: #666; }
+        header .spacer { flex: 1; }
         .controls {
             padding: 12px 20px; background: #16213e;
             border-bottom: 1px solid #333; flex-shrink: 0;
             display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
         }
         .controls label { font-size: 0.8em; color: #888; }
-        .controls input[type="text"] {
+        .controls input[type="text"], .controls input[type="datetime-local"] {
             background: #2a2a4a; border: 1px solid #444; color: #e0e0e0;
-            padding: 6px 10px; border-radius: 4px; font-size: 0.9em;
+            padding: 6px 10px; border-radius: 4px; font-size: 0.85em;
             font-family: inherit;
         }
-        #bucket-input { width: 180px; }
-        #search-input { flex: 1; min-width: 200px; }
         button {
             background: #2a2a4a; border: 1px solid #444; color: #ccc;
             padding: 6px 14px; border-radius: 4px; cursor: pointer;
@@ -40,9 +40,49 @@
         button.primary { background: #6c63ff; border-color: #6c63ff; color: #fff; }
         button.primary:hover { background: #5a52e0; }
         button.primary:disabled { background: #4a4a6a; border-color: #4a4a6a; }
-        .results-area {
-            flex: 1; overflow-y: auto; padding: 0 20px;
+        button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
+        .quick-btns { display: flex; gap: 4px; }
+        .quick-btns button.selected { background: #6c63ff; border-color: #6c63ff; color: #fff; }
+        .main-area { flex: 1; overflow-y: auto; padding: 0; display: flex; flex-direction: column; }
+        .status { padding: 40px; text-align: center; color: #666; font-size: 0.9em; }
+        .status.error { color: #ff6b6b; }
+
+        /* Tab bar */
+        .tab-bar {
+            display: flex; gap: 0; border-bottom: 1px solid #333;
+            padding: 0 20px; background: #16213e; flex-shrink: 0;
         }
+        .tab-bar button {
+            border: none; border-bottom: 2px solid transparent;
+            border-radius: 0; padding: 8px 16px; font-size: 0.85em;
+            background: transparent; color: #888;
+        }
+        .tab-bar button:hover { color: #ccc; background: transparent; }
+        .tab-bar button.active { color: #6c63ff; border-bottom-color: #6c63ff; background: transparent; }
+
+        /* Host picker */
+        .host-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 12px; padding: 20px;
+        }
+        .host-card {
+            background: #222244; border: 1px solid #333; border-radius: 6px;
+            padding: 14px; cursor: pointer; transition: border-color 0.15s;
+        }
+        .host-card:hover { border-color: #6c63ff; }
+        .host-card.selected { border-color: #6c63ff; background: #2a2a5a; }
+        .host-card .svc { color: #7ec8e3; font-size: 0.85em; margin-bottom: 2px; }
+        .host-card .hostname { font-size: 1em; font-weight: 600; }
+        .host-card .meta { font-size: 0.8em; color: #888; margin-top: 6px; }
+
+        /* Segment list */
+        .segment-panel { padding: 12px 20px; flex: 1; overflow-y: auto; }
+        .segment-panel .back-link {
+            font-size: 0.85em; color: #6c63ff; cursor: pointer;
+            margin-bottom: 10px; display: inline-block;
+        }
+        .segment-panel .back-link:hover { text-decoration: underline; }
+        .segment-panel h3 { font-size: 0.95em; margin-bottom: 8px; }
         table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
         thead th {
             position: sticky; top: 0; background: #1a1a2e;
@@ -55,19 +95,15 @@
         tbody tr { border-bottom: 1px solid #222; }
         tbody tr:hover { background: #222244; }
         tbody td { padding: 6px; white-space: nowrap; }
-        td.key { word-break: break-all; white-space: normal; }
         td.size, td.date { color: #aaa; }
         td.service { color: #7ec8e3; }
         td.host { color: #aaa; font-size: 0.8em; }
         td input[type="checkbox"] { accent-color: #6c63ff; }
-        .status {
-            padding: 40px; text-align: center; color: #666; font-size: 0.9em;
-        }
-        .status.error { color: #ff6b6b; }
+
         .actions {
             padding: 8px 20px; background: #16213e;
             border-top: 1px solid #333; flex-shrink: 0;
-            display: flex; gap: 8px; align-items: center;
+            display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
         }
         .actions .count { font-size: 0.8em; color: #888; margin-left: auto; }
         footer {
@@ -81,40 +117,73 @@
     <header>
         <h1>dial9 Trace Browser</h1>
         <span>search &amp; view traces from S3</span>
+        <span class="spacer"></span>
+        <button id="tz-btn" title="Toggle between UTC and local timezone">TZ: UTC</button>
     </header>
 
     <div class="controls">
-        <label for="bucket-input">Bucket:</label>
-        <input type="text" id="bucket-input" placeholder="my-trace-bucket" />
-        <label for="search-input">Search:</label>
-        <input type="text" id="search-input"
-               placeholder="prefix, e.g. 2026-04-09/1910/checkout-api" />
-        <button id="search-btn" onclick="doSearch()">Search</button>
-    </div>
-
-    <div class="results-area" id="results-area">
-        <div class="status" id="status-msg">
-            Enter a bucket and search prefix, then click Search.
+        <label>Bucket:</label>
+        <input type="text" id="bucket-input" placeholder="my-trace-bucket" style="width:180px" />
+        <span style="color:#444">|</span>
+        <div class="quick-btns">
+            <button onclick="setQuickRange(1)">Last 1hr</button>
+            <button onclick="setQuickRange(3)">Last 3hr</button>
+            <button onclick="setQuickRange(24)">Last 24hr</button>
         </div>
-        <table id="results-table" style="display:none">
-            <thead>
-                <tr>
-                    <th style="width:30px"><input type="checkbox" id="select-all" /></th>
-                    <th data-sort="service" onclick="sortBy('service')">Service<span class="sort-arrow"></span></th>
-                    <th data-sort="host" onclick="sortBy('host')">Host<span class="sort-arrow"></span></th>
-                    <th data-sort="traceStart" onclick="sortBy('traceStart')">Trace Start<span class="sort-arrow"></span></th>
-                    <th data-sort="segIndex" onclick="sortBy('segIndex')">Seg #<span class="sort-arrow"></span></th>
-                    <th data-sort="size" onclick="sortBy('size')">Size<span class="sort-arrow"></span></th>
-                    <th data-sort="last_modified" onclick="sortBy('last_modified')">Uploaded<span class="sort-arrow"></span></th>
-                </tr>
-            </thead>
-            <tbody id="results-body"></tbody>
-        </table>
+        <label>From:</label>
+        <input type="datetime-local" id="range-from" step="60" />
+        <label>To:</label>
+        <input type="datetime-local" id="range-to" step="60" />
+        <button class="primary" id="search-btn" onclick="doTimeRangeSearch()">Search</button>
     </div>
 
-    <div class="actions">
-        <button onclick="selectAll(true)">Select All</button>
-        <button onclick="selectAll(false)">Deselect All</button>
+    <div class="tab-bar">
+        <button class="active" onclick="switchTab('browse')" id="tab-browse">Browse</button>
+        <button onclick="switchTab('raw')" id="tab-raw">Raw Search</button>
+    </div>
+
+    <div class="main-area" id="main-area">
+        <!-- Browse mode: status / host grid / segment list -->
+        <div id="browse-view">
+            <div class="status" id="browse-status">
+                Select a time range and click Search to find traces.
+            </div>
+            <div class="host-grid" id="host-grid" style="display:none"></div>
+            <div class="segment-panel" id="segment-panel" style="display:none"></div>
+        </div>
+
+        <!-- Raw search mode (hidden by default) -->
+        <div id="raw-view" style="display:none">
+            <div style="padding:12px 20px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <label style="font-size:0.8em;color:#888">Prefix:</label>
+                <input type="text" id="raw-search-input"
+                       placeholder="e.g. 2026-04-09/1910/checkout-api"
+                       style="flex:1;min-width:200px;background:#2a2a4a;border:1px solid #444;color:#e0e0e0;padding:6px 10px;border-radius:4px;font-size:0.85em;font-family:inherit" />
+                <button onclick="doRawSearch()">Search</button>
+            </div>
+            <div class="status" id="raw-status">Enter a prefix and search.</div>
+            <div style="padding:0 20px;flex:1;overflow-y:auto">
+                <table id="raw-table" style="display:none">
+                    <thead>
+                        <tr>
+                            <th style="width:30px"><input type="checkbox" id="raw-select-all" /></th>
+                            <th data-sort="service">Service</th>
+                            <th data-sort="host">Host</th>
+                            <th data-sort="traceStart">Trace Start</th>
+                            <th data-sort="segIndex">Seg #</th>
+                            <th data-sort="size">Size</th>
+                            <th data-sort="last_modified">Uploaded</th>
+                        </tr>
+                    </thead>
+                    <tbody id="raw-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="actions" id="actions-bar">
+        <button onclick="rawSelectAll(true)">Select All</button>
+        <button onclick="rawSelectAll(false)">Deselect All</button>
         <button class="primary" id="view-btn" onclick="viewSelected()" disabled>
             View Selected in Trace Viewer
         </button>
@@ -126,34 +195,44 @@
     </footer>
 
     <script>
-    const bucketInput = document.getElementById('bucket-input');
-    const searchInput = document.getElementById('search-input');
-    const statusMsg = document.getElementById('status-msg');
-    const resultsTable = document.getElementById('results-table');
-    const resultsBody = document.getElementById('results-body');
-    const viewBtn = document.getElementById('view-btn');
-    const selectionCount = document.getElementById('selection-count');
-    const selectAllCb = document.getElementById('select-all');
+    // ── State ──
+    let useLocalTz = false;
+    let allObjects = [];       // all objects from time-range search
+    let hostGroups = {};       // { "service/host": [objects] }
+    let selectedHost = null;   // currently selected host key
+    let rawObjects = [];       // raw search results
+    let currentTab = 'browse';
 
-    // Pre-fill from URL params first, then fetch server defaults
+    const bucketInput = document.getElementById('bucket-input');
+    const browseStatus = document.getElementById('browse-status');
+    const hostGrid = document.getElementById('host-grid');
+    const segmentPanel = document.getElementById('segment-panel');
+
+    // ── Init: load config ──
     const params = new URLSearchParams(window.location.search);
     if (params.get('bucket')) bucketInput.value = params.get('bucket');
-    if (params.get('prefix')) searchInput.value = params.get('prefix');
 
-    // Fetch server-configured defaults for any fields not set via URL
     fetch('/api/config').then(r => r.json()).then(config => {
         if (!bucketInput.value && config.default_bucket) bucketInput.value = config.default_bucket;
-        if (!searchInput.value && config.default_prefix) searchInput.value = config.default_prefix;
-    }).catch(e => console.warn('Failed to load config:', e));
+    }).catch(() => {});
 
-    searchInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') doSearch();
+    // Default to last 1 hour
+    setQuickRange(1);
+
+    // ── Timezone toggle ──
+    document.getElementById('tz-btn').addEventListener('click', () => {
+        useLocalTz = !useLocalTz;
+        document.getElementById('tz-btn').textContent = useLocalTz ? 'TZ: Local' : 'TZ: UTC';
+        // Re-render current view
+        if (currentTab === 'browse') {
+            if (selectedHost) showSegments(selectedHost);
+            else if (Object.keys(hostGroups).length) renderHostGrid();
+        } else {
+            renderRawTable(rawObjects);
+        }
     });
 
-    selectAllCb.addEventListener('change', () => {
-        selectAll(selectAllCb.checked);
-    });
-
+    // ── Helpers ──
     function esc(s) {
         const d = document.createElement('div');
         d.textContent = s;
@@ -170,111 +249,319 @@
         if (!dateStr) return '';
         try {
             const d = new Date(dateStr);
+            if (useLocalTz) {
+                const pad = n => String(n).padStart(2, '0');
+                return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
+                    ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+            }
             return d.toISOString().replace('T', ' ').slice(0, 19);
         } catch { return dateStr; }
     }
 
-    async function doSearch() {
-        const bucket = bucketInput.value.trim();
-        if (!bucket) { alert('Bucket is required'); return; }
-
-        const q = searchInput.value.trim();
-        const url = `/api/search?bucket=${encodeURIComponent(bucket)}&q=${encodeURIComponent(q)}`;
-
-        statusMsg.textContent = 'Searching…';
-        statusMsg.className = 'status';
-        statusMsg.style.display = '';
-        resultsTable.style.display = 'none';
-
-        try {
-            const resp = await fetch(url);
-            if (!resp.ok) {
-                const text = await resp.text();
-                throw new Error(`HTTP ${resp.status}: ${text}`);
-            }
-            const objects = await resp.json();
-            renderResults(objects);
-        } catch (err) {
-            statusMsg.textContent = 'Error: ' + err.message;
-            statusMsg.className = 'status error';
-        }
+    function formatEpoch(epoch) {
+        if (!epoch) return '';
+        return formatDate(new Date(epoch * 1000).toISOString());
     }
 
     function parseKey(key) {
-        // Expected: {YYYY-MM-DD}/{HHMM}/{service}/{host}/{epoch}-{index}.bin.gz
         const parts = key.split('/');
         if (parts.length >= 5) {
             const file = parts[parts.length - 1];
-            // Parse epoch-index from filename like "1775138540-65.bin.gz"
             const match = file.match(/^(\d+)-(\d+)\.bin/);
-            let traceStart = '', segIndex = '';
+            let epoch = 0, segIndex = '';
             if (match) {
-                const epoch = parseInt(match[1], 10);
-                traceStart = formatDate(new Date(epoch * 1000).toISOString());
+                epoch = parseInt(match[1], 10);
                 segIndex = match[2];
             }
             return {
                 service: parts[parts.length - 3],
                 host: parts[parts.length - 2],
-                traceStart,
-                segIndex,
+                epoch, segIndex,
+                get traceStart() { return formatEpoch(epoch); },
             };
         }
-        return { service: '', host: key, traceStart: '', segIndex: '' };
+        return { service: '', host: key, epoch: 0, segIndex: '', get traceStart() { return ''; } };
     }
 
-    let currentObjects = [];
-    let currentSort = { col: null, asc: true };
-
-    function sortBy(col) {
-        if (currentSort.col === col) currentSort.asc = !currentSort.asc;
-        else { currentSort.col = col; currentSort.asc = true; }
-        renderResults(currentObjects);
+    function toLocalDatetime(d) {
+        const pad = n => String(n).padStart(2, '0');
+        return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
+            'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
     }
 
-    function renderResults(objects) {
-        currentObjects = objects;
-        resultsBody.innerHTML = '';
+    // ── Quick range buttons ──
+    function setQuickRange(hours) {
+        const now = new Date();
+        const from = new Date(now.getTime() - hours * 3600 * 1000);
+        document.getElementById('range-from').value = toLocalDatetime(from);
+        document.getElementById('range-to').value = toLocalDatetime(now);
+        // Highlight the selected quick button
+        document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('selected'));
+        const labels = {'1': 'Last 1hr', '3': 'Last 3hr', '24': 'Last 24hr'};
+        document.querySelectorAll('.quick-btns button').forEach(b => {
+            if (b.textContent === labels[hours]) b.classList.add('selected');
+        });
+    }
+
+    // Clear quick-button highlight when user manually edits the range
+    document.getElementById('range-from').addEventListener('input', () => {
+        document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('selected'));
+    });
+    document.getElementById('range-to').addEventListener('input', () => {
+        document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('selected'));
+    });
+
+    // ── Tab switching ──
+    function switchTab(tab) {
+        currentTab = tab;
+        document.getElementById('tab-browse').classList.toggle('active', tab === 'browse');
+        document.getElementById('tab-raw').classList.toggle('active', tab === 'raw');
+        document.getElementById('browse-view').style.display = tab === 'browse' ? '' : 'none';
+        document.getElementById('raw-view').style.display = tab === 'raw' ? '' : 'none';
+        updateSelectionCount();
+    }
+
+    // ── Generate hour-level prefixes for a time range ──
+    function hourPrefixes(from, to) {
+        const prefixes = [];
+        // Start at the beginning of `from`'s hour
+        const cur = new Date(from);
+        cur.setMinutes(0, 0, 0);
+        while (cur <= to) {
+            const pad = n => String(n).padStart(2, '0');
+            const dateStr = cur.getFullYear() + '-' + pad(cur.getMonth()+1) + '-' + pad(cur.getDate());
+            const hourStr = pad(cur.getHours());
+            prefixes.push(dateStr + '/' + hourStr);
+            cur.setTime(cur.getTime() + 3600 * 1000);
+        }
+        return prefixes;
+    }
+
+    // ── Time-range search (Browse mode) ──
+    async function doTimeRangeSearch() {
+        const bucket = bucketInput.value.trim();
+        if (!bucket) { alert('Bucket is required'); return; }
+
+        const fromStr = document.getElementById('range-from').value;
+        const toStr = document.getElementById('range-to').value;
+        if (!fromStr || !toStr) { alert('Select a time range'); return; }
+
+        const from = new Date(fromStr);
+        const to = new Date(toStr);
+        const prefixes = hourPrefixes(from, to);
+
+        browseStatus.textContent = `Searching ${prefixes.length} hour(s)…`;
+        browseStatus.className = 'status';
+        browseStatus.style.display = '';
+        hostGrid.style.display = 'none';
+        segmentPanel.style.display = 'none';
+        selectedHost = null;
+
+        try {
+            // Fire parallel queries for each hour prefix
+            const fetches = prefixes.map(p => {
+                const url = `/api/search?bucket=${encodeURIComponent(bucket)}&q=${encodeURIComponent(p)}`;
+                return fetch(url).then(r => {
+                    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                    return r.json();
+                });
+            });
+            const results = await Promise.all(fetches);
+            allObjects = results.flat();
+
+            // Filter to objects whose epoch falls within the actual range
+            const fromEpoch = from.getTime() / 1000;
+            const toEpoch = to.getTime() / 1000;
+            allObjects = allObjects.filter(obj => {
+                const p = parseKey(obj.key);
+                if (!p.epoch) return true; // keep if we can't parse
+                // Include if segment overlaps the range (use last_modified as end proxy)
+                const end = obj.last_modified ? new Date(obj.last_modified).getTime() / 1000 : p.epoch;
+                return p.epoch <= toEpoch && end >= fromEpoch;
+            });
+
+            if (allObjects.length === 0) {
+                browseStatus.textContent = 'No traces found in this time range.';
+                hostGroups = {};
+                return;
+            }
+
+            // Group by service/host
+            hostGroups = {};
+            for (const obj of allObjects) {
+                const p = parseKey(obj.key);
+                const groupKey = p.service + '/' + p.host;
+                if (!hostGroups[groupKey]) hostGroups[groupKey] = { service: p.service, host: p.host, objects: [] };
+                hostGroups[groupKey].objects.push(obj);
+            }
+
+            browseStatus.style.display = 'none';
+            renderHostGrid();
+        } catch (err) {
+            browseStatus.textContent = 'Error: ' + err.message;
+            browseStatus.className = 'status error';
+        }
+    }
+
+    // ── Host grid ──
+    function renderHostGrid() {
+        hostGrid.innerHTML = '';
+        hostGrid.style.display = '';
+        segmentPanel.style.display = 'none';
+        selectedHost = null;
+
+        const groups = Object.values(hostGroups).sort((a, b) =>
+            (a.service + a.host).localeCompare(b.service + b.host));
+
+        for (const g of groups) {
+            const epochs = g.objects.map(o => parseKey(o.key).epoch).filter(e => e > 0);
+            const minEpoch = epochs.length ? Math.min(...epochs) : 0;
+            const maxEpoch = epochs.length ? Math.max(...epochs) : 0;
+            const totalSize = g.objects.reduce((s, o) => s + o.size, 0);
+
+            const card = document.createElement('div');
+            card.className = 'host-card';
+            card.innerHTML = `
+                <div class="svc">${esc(g.service)}</div>
+                <div class="hostname">${esc(g.host)}</div>
+                <div class="meta">
+                    ${g.objects.length} segment${g.objects.length !== 1 ? 's' : ''} · ${formatSize(totalSize)}<br>
+                    ${formatEpoch(minEpoch)} → ${formatEpoch(maxEpoch)}
+                </div>
+            `;
+            card.addEventListener('click', () => showSegments(g.service + '/' + g.host));
+            hostGrid.appendChild(card);
+        }
+    }
+
+    // ── Segment list for a selected host ──
+    function showSegments(groupKey) {
+        selectedHost = groupKey;
+        hostGrid.style.display = 'none';
+        segmentPanel.style.display = '';
+
+        const g = hostGroups[groupKey];
+        if (!g) return;
+
+        // Sort segments by epoch
+        const sorted = [...g.objects].sort((a, b) => parseKey(a.key).epoch - parseKey(b.key).epoch);
+
+        segmentPanel.innerHTML = `
+            <span class="back-link" onclick="renderHostGrid()">← Back to hosts</span>
+            <h3>${esc(g.service)} / ${esc(g.host)}</h3>
+            <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center">
+                <button onclick="segSelectAll(true)">Select All</button>
+                <button onclick="segSelectAll(false)">Deselect All</button>
+                <button class="primary" onclick="viewSelected()" id="seg-view-btn">
+                    View Selected in Trace Viewer
+                </button>
+                <span class="count" id="seg-count"></span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:30px"><input type="checkbox" id="seg-select-all" checked /></th>
+                        <th>Trace Start</th>
+                        <th>Seg #</th>
+                        <th>Size</th>
+                        <th>Uploaded</th>
+                    </tr>
+                </thead>
+                <tbody id="seg-body"></tbody>
+            </table>
+        `;
+
+        const tbody = document.getElementById('seg-body');
+        for (const obj of sorted) {
+            const p = parseKey(obj.key);
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><input type="checkbox" class="seg-cb" data-key="${esc(obj.key)}" checked /></td>
+                <td>${esc(p.traceStart)}</td>
+                <td>${esc(p.segIndex)}</td>
+                <td class="size">${formatSize(obj.size)}</td>
+                <td class="date">${formatDate(obj.last_modified)}</td>
+            `;
+            tr.querySelector('.seg-cb').addEventListener('change', updateSegCount);
+            tbody.appendChild(tr);
+        }
+
+        document.getElementById('seg-select-all').addEventListener('change', (e) => {
+            segSelectAll(e.target.checked);
+        });
+        updateSegCount();
+    }
+
+    function segSelectAll(checked) {
+        document.querySelectorAll('.seg-cb').forEach(cb => { cb.checked = checked; });
+        const sa = document.getElementById('seg-select-all');
+        if (sa) sa.checked = checked;
+        updateSegCount();
+    }
+
+    function updateSegCount() {
+        const keys = getSegSelectedKeys();
+        const el = document.getElementById('seg-count');
+        if (el) el.textContent = keys.length ? `${keys.length} selected` : '';
+    }
+
+    function getSegSelectedKeys() {
+        return Array.from(document.querySelectorAll('.seg-cb:checked')).map(cb => cb.dataset.key);
+    }
+
+    // ── Raw search mode ──
+    async function doRawSearch() {
+        const bucket = bucketInput.value.trim();
+        if (!bucket) { alert('Bucket is required'); return; }
+
+        const q = document.getElementById('raw-search-input').value.trim();
+        const url = `/api/search?bucket=${encodeURIComponent(bucket)}&q=${encodeURIComponent(q)}`;
+
+        const rawStatus = document.getElementById('raw-status');
+        rawStatus.textContent = 'Searching…';
+        rawStatus.className = 'status';
+        rawStatus.style.display = '';
+        document.getElementById('raw-table').style.display = 'none';
+
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+            rawObjects = await resp.json();
+            renderRawTable(rawObjects);
+        } catch (err) {
+            rawStatus.textContent = 'Error: ' + err.message;
+            rawStatus.className = 'status error';
+        }
+    }
+
+    document.getElementById('raw-search-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doRawSearch();
+    });
+
+    function renderRawTable(objects) {
+        const rawStatus = document.getElementById('raw-status');
+        const rawTable = document.getElementById('raw-table');
+        const rawBody = document.getElementById('raw-body');
+        rawBody.innerHTML = '';
+
         if (objects.length === 0) {
-            statusMsg.textContent = 'No results found.';
-            statusMsg.style.display = '';
-            resultsTable.style.display = 'none';
-            updateSelectionCount();
+            rawStatus.textContent = 'No results found.';
+            rawStatus.style.display = '';
+            rawTable.style.display = 'none';
             return;
         }
 
-        // Parse all rows
-        let rows = objects.map(obj => ({ ...obj, parsed: parseKey(obj.key) }));
+        rawStatus.style.display = 'none';
+        rawTable.style.display = '';
 
-        // Sort
-        if (currentSort.col) {
-            const col = currentSort.col;
-            const dir = currentSort.asc ? 1 : -1;
-            rows.sort((a, b) => {
-                let va, vb;
-                if (col === 'size') { va = a.size; vb = b.size; }
-                else if (col === 'segIndex') { va = parseInt(a.parsed.segIndex)||0; vb = parseInt(b.parsed.segIndex)||0; }
-                else if (col === 'last_modified') { va = a.last_modified || ''; vb = b.last_modified || ''; }
-                else { va = a.parsed[col] || ''; vb = b.parsed[col] || ''; }
-                return va < vb ? -dir : va > vb ? dir : 0;
-            });
-        }
-
-        // Update sort arrows
-        document.querySelectorAll('thead th .sort-arrow').forEach(el => el.textContent = '');
-        if (currentSort.col) {
-            const th = document.querySelector(`th[data-sort="${currentSort.col}"] .sort-arrow`);
-            if (th) th.textContent = currentSort.asc ? ' ▲' : ' ▼';
-        }
-
-        statusMsg.style.display = 'none';
-        resultsTable.style.display = '';
+        const rows = objects.map(obj => ({ ...obj, parsed: parseKey(obj.key) }));
+        rows.sort((a, b) => a.parsed.epoch - b.parsed.epoch);
 
         for (const row of rows) {
             const p = row.parsed;
             const tr = document.createElement('tr');
             tr.innerHTML = `
-                <td><input type="checkbox" class="row-cb" data-key="${esc(row.key)}" /></td>
+                <td><input type="checkbox" class="raw-cb" data-key="${esc(row.key)}" /></td>
                 <td class="service">${esc(p.service)}</td>
                 <td class="host">${esc(p.host)}</td>
                 <td>${esc(p.traceStart)}</td>
@@ -282,27 +569,37 @@
                 <td class="size">${formatSize(row.size)}</td>
                 <td class="date">${formatDate(row.last_modified)}</td>
             `;
-            tr.querySelector('.row-cb').addEventListener('change', updateSelectionCount);
-            resultsBody.appendChild(tr);
+            tr.querySelector('.raw-cb').addEventListener('change', updateSelectionCount);
+            rawBody.appendChild(tr);
         }
         updateSelectionCount();
     }
 
+    document.getElementById('raw-select-all').addEventListener('change', (e) => {
+        rawSelectAll(e.target.checked);
+    });
+
+    function rawSelectAll(checked) {
+        document.querySelectorAll('.raw-cb').forEach(cb => { cb.checked = checked; });
+        document.getElementById('raw-select-all').checked = checked;
+        updateSelectionCount();
+    }
+
+    // ── Selection & view ──
     function getSelectedKeys() {
-        return Array.from(document.querySelectorAll('.row-cb:checked'))
-            .map(cb => cb.dataset.key);
+        // In browse mode with segments showing, use seg checkboxes
+        if (currentTab === 'browse' && selectedHost) {
+            return getSegSelectedKeys();
+        }
+        // In raw mode, use raw checkboxes
+        return Array.from(document.querySelectorAll('.raw-cb:checked')).map(cb => cb.dataset.key);
     }
 
     function updateSelectionCount() {
         const keys = getSelectedKeys();
-        selectionCount.textContent = keys.length ? `${keys.length} selected` : '';
-        viewBtn.disabled = keys.length === 0;
-    }
-
-    function selectAll(checked) {
-        document.querySelectorAll('.row-cb').forEach(cb => { cb.checked = checked; });
-        selectAllCb.checked = checked;
-        updateSelectionCount();
+        const el = document.getElementById('selection-count');
+        el.textContent = keys.length ? `${keys.length} selected` : '';
+        document.getElementById('view-btn').disabled = keys.length === 0;
     }
 
     function viewSelected() {
