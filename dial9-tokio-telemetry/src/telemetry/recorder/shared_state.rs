@@ -29,6 +29,8 @@ pub(crate) struct SharedState {
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
     pub(crate) start_time_ns: u64,
+    /// Whether task spawn/terminate tracking is enabled for this session.
+    pub(crate) task_tracking_enabled: bool,
     /// Global worker ID counter. Each runtime reserves a contiguous block
     /// via `fetch_add(num_workers)` so worker IDs don't collide.
     pub(crate) next_worker_id: AtomicU64,
@@ -52,11 +54,12 @@ pub(crate) struct SharedState {
 }
 
 impl SharedState {
-    pub(super) fn new(start_time_ns: u64) -> Self {
+    pub(super) fn new(start_time_ns: u64, task_tracking_enabled: bool) -> Self {
         Self {
             enabled: AtomicBool::new(false),
             collector: Arc::new(CentralCollector::new()),
             start_time_ns,
+            task_tracking_enabled,
             next_worker_id: AtomicU64::new(0),
             drain_epoch: AtomicU64::new(0),
             tl_buffers: Mutex::new(Vec::new()),
@@ -192,7 +195,7 @@ mod tests {
 
     /// Helper: create a SharedState with recording enabled.
     fn enabled_shared_state() -> SharedState {
-        let ss = SharedState::new(0);
+        let ss = SharedState::new(0, false);
         ss.enabled.store(true, Ordering::Relaxed);
         ss
     }

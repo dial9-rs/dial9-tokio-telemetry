@@ -22,7 +22,8 @@ pub use format::{
     WorkerUnparkEvent,
 };
 pub use recorder::{
-    HasTracePath, NoTracePath, TelemetryGuard, TelemetryHandle, TracedRuntime, TracedRuntimeBuilder,
+    HasTracePath, NoTracePath, TelemetryCore, TelemetryGuard, TelemetryHandle, TracedRuntime,
+    TracedRuntimeBuilder,
 };
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
 pub use writer::{NullWriter, RotatingWriter, TraceWriter};
