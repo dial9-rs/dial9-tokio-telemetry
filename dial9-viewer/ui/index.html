@@ -190,11 +190,39 @@
         <span class="count" id="selection-count"></span>
     </div>
 
-    <footer>
-        <a href="viewer.html">Open Trace Viewer</a> (drag &amp; drop)
+    <footer id="footer-drop"
+        style="padding:10px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;border:2px dashed transparent;transition:border-color 0.2s">
+        <a href="viewer.html">Open Trace Viewer</a>
+        <span style="color:#333">|</span>
+        <button class="primary" id="load-demo-btn" style="padding:4px 12px;font-size:0.8em">Load demo trace</button>
+        <span style="color:#555;font-size:0.8em;margin-left:auto">drop a .bin file to open viewer</span>
     </footer>
 
     <script>
+    // ── ?trace= passthrough: redirect to viewer ──
+    (function() {
+        const t = new URLSearchParams(window.location.search).get('trace');
+        if (t) { window.location.replace('viewer.html?trace=' + encodeURIComponent(t)); return; }
+    })();
+
+    // ── Demo trace button ──
+    document.getElementById('load-demo-btn').addEventListener('click', () => {
+        window.open('viewer.html?trace=demo-trace.bin', '_blank');
+    });
+    // ── Global drag-and-drop → open viewer ──
+    const footerDrop = document.getElementById('footer-drop');
+    document.body.addEventListener('dragover', (e) => { e.preventDefault(); footerDrop.style.borderColor = '#6c63ff'; });
+    document.body.addEventListener('dragleave', (e) => {
+        if (!e.relatedTarget || !document.body.contains(e.relatedTarget)) footerDrop.style.borderColor = 'transparent';
+    });
+    document.body.addEventListener('drop', (e) => {
+        e.preventDefault(); footerDrop.style.borderColor = 'transparent';
+        const file = e.dataTransfer.files[0];
+        if (file) {
+            const url = URL.createObjectURL(file);
+            window.open('viewer.html?trace=' + encodeURIComponent(url), '_blank');
+        }
+    });
     // ── State ──
     let useLocalTz = false;
     let allObjects = [];       // all objects from time-range search
