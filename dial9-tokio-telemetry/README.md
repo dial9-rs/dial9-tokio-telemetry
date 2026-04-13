@@ -219,14 +219,15 @@ guard.enable();
 
 let mut main_builder = tokio::runtime::Builder::new_multi_thread();
 main_builder.worker_threads(4).enable_all();
-let main_rt = guard.trace_runtime("main", main_builder)?;
+let (main_rt, main_handle) = guard.trace_runtime("main").build(main_builder)?;
 
 let mut io_builder = tokio::runtime::Builder::new_multi_thread();
 io_builder.worker_threads(2).enable_all();
-let io_rt = guard.trace_runtime("io", io_builder)?;
+let (io_rt, io_handle) = guard.trace_runtime("io").build(io_builder)?;
 
 // Both runtimes share a single trace file with unique worker IDs.
 // The trace viewer groups workers by runtime name.
+// Use main_handle.spawn() / io_handle.spawn() for wake-tracked futures.
 # Ok(())
 # }
 ```

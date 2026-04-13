@@ -35,20 +35,22 @@ fn main() -> std::io::Result<()> {
     // Primary runtime for request handling.
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
-    let main_rt = guard.trace_runtime("main", builder)?;
+    let (main_rt, main_handle) = guard.trace_runtime("main").build(builder)?;
 
     // Secondary runtime for background I/O, sharing the same trace session.
     let mut io_builder = tokio::runtime::Builder::new_multi_thread();
     io_builder.worker_threads(2).enable_all();
-    let io_rt = guard.trace_runtime("io", io_builder)?;
+    let (io_rt, io_handle) = guard.trace_runtime("io").build(io_builder)?;
 
     println!("Running workload on two named runtimes...");
 
     // Simulate request handling on the main runtime.
+    // Use handle.spawn() instead of tokio::spawn() for wake event tracking.
     main_rt.block_on(async {
         let mut handles = Vec::new();
         for i in 0..20 {
-            handles.push(tokio::spawn(async move {
+            // spawning into the traced handle allows for more tracking
+            handles.push(main_handle.spawn(async move {
                 // Simulate request processing: some CPU work + async I/O.
                 tokio::task::yield_now().await;
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -65,7 +67,8 @@ fn main() -> std::io::Result<()> {
     io_rt.block_on(async {
         let mut handles = Vec::new();
         for i in 0..10 {
-            handles.push(tokio::spawn(async move {
+            // spawning into the traced handle allows for more tracking
+            handles.push(io_handle.spawn(async move {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 tokio::task::yield_now().await;
                 println!("  [io]   batch {i} flushed");

@@ -48,11 +48,6 @@ fn main() -> std::io::Result<()> {
         .build()?;
     guard.enable();
 
-    // Attach a small coordinator runtime.
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let coordinator_rt = guard.trace_runtime("coordinator", builder)?;
-
     // Spawn one current-thread runtime per core.
     let num_cores = std::thread::available_parallelism()
         .map(|n| n.get().min(4)) // cap at 4 for the demo
@@ -65,15 +60,17 @@ fn main() -> std::io::Result<()> {
             let mut core_builder = tokio::runtime::Builder::new_current_thread();
             core_builder.enable_all();
 
-            let core_rt = guard
-                .trace_runtime(format!("core-{core_id}"), core_builder)
+            let (core_rt, handle) = guard
+                .trace_runtime(format!("core-{core_id}"))
+                .build(core_builder)
                 .unwrap();
 
             std::thread::Builder::new()
                 .name(format!("core-{core_id}"))
                 .spawn(move || {
                     core_rt
-                        .block_on(core_rt.spawn(async move {
+                        // spawning into the traced handle allows for more tracking
+                        .block_on(handle.spawn(async move {
                             for i in 0..20 {
                                 tokio::task::yield_now().await;
                                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -88,18 +85,11 @@ fn main() -> std::io::Result<()> {
         })
         .collect();
 
-    // Let the coordinator do some light work too.
-    coordinator_rt.block_on(async {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        println!("  [coordinator] health check done");
-    });
-
     for t in threads {
         t.join().unwrap();
     }
     println!("All cores finished.\n");
 
-    drop(coordinator_rt);
     let _ = guard.graceful_shutdown(Duration::from_secs(5));
 
     // ── Read back the trace and verify ──────────────────────────────────
