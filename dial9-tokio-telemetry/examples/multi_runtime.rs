@@ -2,9 +2,9 @@
 //!
 //! A common pattern is to run separate runtimes for different workload types
 //! (e.g. request handling vs background I/O). This example shows how to
-//! attach a second runtime to an existing telemetry session with
-//! `build_with_reuse`, so all workers appear in a single trace file with
-//! their runtime names in the segment metadata.
+//! create a telemetry session with `TelemetryCore`, then attach multiple
+//! runtimes via `trace_runtime`, so all workers appear in a single trace
+//! file with their runtime names in the segment metadata.
 //!
 //! Usage:
 //!   cargo run --example multi_runtime
@@ -12,7 +12,7 @@
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/multi_runtime/trace.0.bin
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryCore};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
@@ -25,22 +25,22 @@ fn main() -> std::io::Result<()> {
         .max_total_size(5 * 1024 * 1024)
         .build()?;
 
+    // Create the telemetry session — no runtime needed yet.
+    let guard = TelemetryCore::builder()
+        .writer(writer)
+        .trace_path(format!("{trace_dir}/trace.bin"))
+        .build()?;
+    guard.enable();
+
     // Primary runtime for request handling.
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
-
-    let (main_rt, guard) = TracedRuntime::builder()
-        .with_runtime_name("main")
-        .with_trace_path(format!("{trace_dir}/trace.bin"))
-        .build_and_start(builder, writer)?;
+    let main_rt = guard.trace_runtime("main", builder)?;
 
     // Secondary runtime for background I/O, sharing the same trace session.
     let mut io_builder = tokio::runtime::Builder::new_multi_thread();
     io_builder.worker_threads(2).enable_all();
-
-    let io_rt = TracedRuntime::builder()
-        .with_runtime_name("io")
-        .build_with_reuse(io_builder, &guard)?;
+    let io_rt = guard.trace_runtime("io", io_builder)?;
 
     println!("Running workload on two named runtimes...");
 
