@@ -122,9 +122,9 @@
    */
   async function parseTrace(buffer, options) {
     buffer = await maybeGunzip(buffer);
-    const maxEvents = (options && options.maxEvents) || MAX_EVENTS;
-    const startTime = (options && options.startTime) || 0;
-    const endTime = (options && options.endTime) || Infinity;
+    const maxEvents = (options && options.maxEvents != null) ? options.maxEvents : MAX_EVENTS;
+    const startTime = (options && options.startTime != null) ? options.startTime : 0;
+    const endTime = (options && options.endTime != null) ? options.endTime : Infinity;
     const onProgress = (options && options.onProgress) || null;
     const YIELD_BYTES = 100 * 1024; // yield to browser every 100KB
     const TD = getTraceDecoder();
