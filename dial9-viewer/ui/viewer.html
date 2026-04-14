@@ -980,6 +980,21 @@
             let queueChartRafId = null; // Throttle queue chart redraws
 
             /**
+             * Binary search for the span containing a given timestamp.
+             * Spans must be non-overlapping and sorted by start time.
+             */
+            function findSpanAt(spans, ns) {
+                let lo = 0, hi = spans.length - 1;
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (spans[mid].end < ns) lo = mid + 1;
+                    else if (spans[mid].start > ns) hi = mid - 1;
+                    else return spans[mid];
+                }
+                return null;
+            }
+
+            /**
              * Binary search for the first span whose end >= viewStart.
              * Spans must be sorted by start time.
              * Returns the index to start iterating from.
@@ -1695,23 +1710,42 @@
                     buckets[i] = { maxGlobal: 0, maxLocal: 0, hasData: false };
 
                 const viewDur = viewEnd - viewStart;
-                // Global queue from QueueSample events
-                for (const s of queueSamples) {
-                    if (s.t < viewStart || s.t > viewEnd) continue;
-                    const bi = Math.floor(
-                        ((s.t - viewStart) / viewDur) * (numBuckets - 1),
-                    );
-                    if (bi < 0 || bi >= numBuckets) continue;
-                    const b = buckets[bi];
-                    b.hasData = true;
-                    if (s.global > b.maxGlobal) b.maxGlobal = s.global;
+                // Global queue from QueueSample events (binary search for visible range)
+                {
+                    let lo = 0, hi = queueSamples.length - 1;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (queueSamples[mid].t < viewStart) lo = mid + 1;
+                        else hi = mid - 1;
+                    }
+                    for (let i = Math.max(0, lo - 1); i < queueSamples.length; i++) {
+                        const s = queueSamples[i];
+                        if (s.t > viewEnd) break;
+                        if (s.t < viewStart) continue;
+                        const bi = Math.floor(
+                            ((s.t - viewStart) / viewDur) * (numBuckets - 1),
+                        );
+                        if (bi < 0 || bi >= numBuckets) continue;
+                        const b = buckets[bi];
+                        b.hasData = true;
+                        if (s.global > b.maxGlobal) b.maxGlobal = s.global;
+                    }
                 }
-                // Build sorted timeline of all local queue changes
+                // Build sorted timeline of all local queue changes (binary search per worker for visible range)
                 const allLocalSamples = [];
                 for (const w of workerIds) {
                     const wSamples = workerQueueSamples[w] || [];
-                    for (const s of wSamples) {
-                        if (s.t >= viewStart && s.t <= viewEnd) {
+                    if (wSamples.length === 0) continue;
+                    let lo = 0, hi = wSamples.length - 1;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (wSamples[mid].t < viewStart) lo = mid + 1;
+                        else hi = mid - 1;
+                    }
+                    for (let i = Math.max(0, lo - 1); i < wSamples.length; i++) {
+                        const s = wSamples[i];
+                        if (s.t > viewEnd) break;
+                        if (s.t >= viewStart) {
                             allLocalSamples.push({ t: s.t, w, local: s.local });
                         }
                     }
@@ -1842,24 +1876,31 @@
                     return;
                 }
                 const ns = mouseNs;
-                // Find nearest global queue sample
+                // Find nearest global queue sample (binary search)
                 let globalQ = "-";
-                let bestDist = Infinity;
-                for (const s of queueSamples) {
-                    const d = Math.abs(s.t - ns);
-                    if (d < bestDist) { bestDist = d; globalQ = s.global; }
+                if (queueSamples.length > 0) {
+                    let lo = 0, hi = queueSamples.length - 1;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (queueSamples[mid].t < ns) lo = mid + 1;
+                        else hi = mid - 1;
+                    }
+                    const idx = (lo < queueSamples.length && (lo === 0 || Math.abs(queueSamples[lo].t - ns) < Math.abs(queueSamples[lo-1].t - ns))) ? lo : lo - 1;
+                    if (idx >= 0 && idx < queueSamples.length) globalQ = queueSamples[idx].global;
                 }
-                // Find max local queue across workers at this time
+                // Find max local queue across workers at this time (binary search per worker)
                 let maxLocal = 0;
                 for (const w of workerIds) {
                     const samples = workerQueueSamples[w] || [];
-                    let best = 0;
-                    let bd = Infinity;
-                    for (const s of samples) {
-                        const d = Math.abs(s.t - ns);
-                        if (d < bd) { bd = d; best = s.local; }
+                    if (samples.length === 0) continue;
+                    let lo = 0, hi = samples.length - 1;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (samples[mid].t < ns) lo = mid + 1;
+                        else hi = mid - 1;
                     }
-                    if (best > maxLocal) maxLocal = best;
+                    const idx = (lo < samples.length && (lo === 0 || Math.abs(samples[lo].t - ns) < Math.abs(samples[lo-1].t - ns))) ? lo : lo - 1;
+                    if (idx >= 0 && idx < samples.length && samples[idx].local > maxLocal) maxLocal = samples[idx].local;
                 }
                 // Active task count
                 let taskCount = 0;
@@ -2232,12 +2273,10 @@
                 const spans = workerSpans[w];
                 let found = null;
                 let foundSpan = null;
-                for (const s of spans.polls) {
-                    if (ns >= s.start && ns <= s.end) {
-                        if (s.taskId) found = s.taskId;
-                        foundSpan = s;
-                        break;
-                    }
+                const hitPoll = findSpanAt(spans.polls, ns);
+                if (hitPoll) {
+                    if (hitPoll.taskId) found = hitPoll.taskId;
+                    foundSpan = hitPoll;
                 }
 
                 // Show stack popup if poll has CPU samples or sched events
@@ -2682,17 +2721,16 @@
                     let stateDetail = "";
                     let schedInfo = "";
                     if (trace.hasCpuTime) {
-                        for (const s of spans.actives) {
-                            if (ns >= s.start && ns <= s.end) {
-                                const pct = (s.ratio * 100).toFixed(1);
-                                const icon = s.ratio >= 0.95 ? "🟢" : s.ratio >= 0.5 ? "🟡" : "🔴";
+                        const hitActive = findSpanAt(spans.actives, ns);
+                        if (hitActive) {
+                                const pct = (hitActive.ratio * 100).toFixed(1);
+                                const icon = hitActive.ratio >= 0.95 ? "🟢" : hitActive.ratio >= 0.5 ? "🟡" : "🔴";
                                 schedInfo = `<span class="label">Scheduling:</span> <span class="value">${icon} ${pct}% on-CPU</span><br>`;
-                                break;
-                            }
                         }
                     }
-                    for (const s of spans.parks) {
-                        if (ns >= s.start && ns <= s.end) {
+                    {
+                        const s = findSpanAt(spans.parks, ns);
+                        if (s) {
                             const durMs = (s.end - s.start) / 1e6;
                             state = "💤 Parked";
                             stateDetail = ` for <span class="value">${durMs < 1 ? (durMs * 1000).toFixed(1) + "µs" : durMs.toFixed(2) + "ms"}</span>`;
@@ -2702,13 +2740,13 @@
                                 const icon = swUs < 100 ? "🟢" : swUs < 1000 ? "🟡" : "🔴";
                                 stateDetail += `<br><span class="label">Kernel sched delay:</span> <span class="value">${icon} ${swUs.toFixed(0)}µs</span>`;
                             }
-                            break;
                         }
                     }
 
                     let pollInfo = "";
-                    for (const s of spans.polls) {
-                        if (ns >= s.start && ns <= s.end) {
+                    {
+                        const s = findSpanAt(spans.polls, ns);
+                        if (s) {
                             const durUs = (s.end - s.start) / 1e3;
                             state = "⚡ Polling";
                             pollInfo = `<span class="label">Poll duration:</span> <span class="value">${durUs.toFixed(1)}µs</span><br>`;
@@ -2724,29 +2762,45 @@
                             if (s.schedSamples && s.schedSamples.length > 0) {
                                 pollInfo += `<span class="label">Sched events:</span> <span class="value">⚠️ ${s.schedSamples.length} blocking</span> <span style="color:#666">(click to view)</span><br>`;
                             }
-                            break;
                         }
                     }
 
-                    // Find nearest local queue sample for this worker
-                    let nearest = null,
-                        bestDist = Infinity;
+                    // Find nearest local queue sample for this worker (binary search)
+                    let nearest = null;
                     const wSamples = workerQueueSamples[w] || [];
-                    for (const s of wSamples) {
-                        const d = Math.abs(s.t - ns);
-                        if (d < bestDist) {
-                            bestDist = d;
-                            nearest = s;
+                    if (wSamples.length > 0) {
+                        let lo = 0, hi = wSamples.length - 1;
+                        while (lo <= hi) {
+                            const mid = (lo + hi) >> 1;
+                            if (wSamples[mid].t < ns) lo = mid + 1;
+                            else hi = mid - 1;
+                        }
+                        // lo is the first sample with t >= ns; check lo and lo-1
+                        const candidates = [];
+                        if (lo < wSamples.length) candidates.push(lo);
+                        if (lo > 0) candidates.push(lo - 1);
+                        let bestDist = Infinity;
+                        for (const idx of candidates) {
+                            const d = Math.abs(wSamples[idx].t - ns);
+                            if (d < bestDist) { bestDist = d; nearest = wSamples[idx]; }
                         }
                     }
-                    // Find nearest global queue from QueueSample timeline
+                    // Find nearest global queue from QueueSample timeline (binary search)
                     let nearestGlobal = null;
-                    bestDist = Infinity;
-                    for (const s of queueSamples) {
-                        const d = Math.abs(s.t - ns);
-                        if (d < bestDist) {
-                            bestDist = d;
-                            nearestGlobal = s;
+                    if (queueSamples.length > 0) {
+                        let lo = 0, hi = queueSamples.length - 1;
+                        while (lo <= hi) {
+                            const mid = (lo + hi) >> 1;
+                            if (queueSamples[mid].t < ns) lo = mid + 1;
+                            else hi = mid - 1;
+                        }
+                        const candidates = [];
+                        if (lo < queueSamples.length) candidates.push(lo);
+                        if (lo > 0) candidates.push(lo - 1);
+                        let bestDist = Infinity;
+                        for (const idx of candidates) {
+                            const d = Math.abs(queueSamples[idx].t - ns);
+                            if (d < bestDist) { bestDist = d; nearestGlobal = queueSamples[idx]; }
                         }
                     }
 
