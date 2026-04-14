@@ -143,3 +143,56 @@ fn task_terminate_events_are_captured() {
         "expected at least {N} TaskTerminate events, got {terminate_count}"
     );
 }
+
+#[test]
+fn custom_event_appears_in_trace() {
+    use dial9_trace_format::TraceEvent as TraceEventDerive;
+
+    #[derive(TraceEventDerive)]
+    struct MyCustomEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+        request_count: u32,
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let trace_path = dir.path().join("trace.bin");
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let writer = RotatingWriter::single_file(&trace_path).unwrap();
+    let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
+
+    let handle = guard.handle();
+    runtime.block_on(async {
+        for i in 0..5 {
+            dial9_tokio_telemetry::telemetry::record_event(
+                MyCustomEvent {
+                    timestamp_ns: dial9_tokio_telemetry::telemetry::clock_monotonic_ns(),
+                    request_count: i,
+                },
+                &handle,
+            );
+        }
+        // Wait for flush cycle
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    // Decode at the trace-format level to find our custom event
+    let sealed_path = dir.path().join("trace.0.bin");
+    let data = std::fs::read(&sealed_path).unwrap();
+    let mut decoder = dial9_trace_format::decoder::Decoder::new(&data).unwrap();
+    let mut custom_count = 0u32;
+    decoder
+        .for_each_event(|ev| {
+            if ev.name == "MyCustomEvent" {
+                custom_count += 1;
+            }
+        })
+        .unwrap();
+    assert_eq!(custom_count, 5, "expected 5 MyCustomEvent events in trace");
+}

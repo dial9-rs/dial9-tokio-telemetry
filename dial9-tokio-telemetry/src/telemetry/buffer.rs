@@ -17,6 +17,209 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+// ── Public API types ────────────────────────────────────────────────────────
+
+/// Scoped encoder for writing events into the thread-local trace buffer.
+///
+/// Provides access to string interning and event encoding. The borrow lifetime
+/// ensures that [`InternedString`] handles created via [`intern_string`](Self::intern_string)
+/// are used within the same batch — they become invalid after the buffer flushes.
+///
+/// You don't construct this directly; it's passed to [`Encodable::encode`].
+pub struct ThreadLocalEncoder<'a> {
+    encoder: &'a mut Encoder<Vec<u8>>,
+    location_cache: &'a mut HashMap<&'static Location<'static>, String>,
+}
+
+impl std::fmt::Debug for ThreadLocalEncoder<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadLocalEncoder").finish_non_exhaustive()
+    }
+}
+
+impl ThreadLocalEncoder<'_> {
+    /// Intern a string into the trace's string pool, returning a compact handle.
+    ///
+    /// If the string was already interned in this batch, returns the existing handle
+    /// (no duplicate wire data). The returned [`InternedString`] is only valid for
+    /// encoding within this same [`Encodable::encode`] call.
+    pub fn intern_string(&mut self, s: &str) -> InternedString {
+        self.encoder.intern_string_infallible(s)
+    }
+
+    /// Encode a [`TraceEvent`](dial9_trace_format::TraceEvent) struct into the buffer.
+    pub fn encode(&mut self, event: &(impl dial9_trace_format::TraceEvent + 'static)) {
+        self.encoder.write_infallible(event);
+    }
+
+    /// Intern a `&'static Location` (caching the `to_string()` result).
+    pub(crate) fn intern_location(
+        &mut self,
+        location: &'static Location<'static>,
+    ) -> InternedString {
+        let s = self
+            .location_cache
+            .entry(location)
+            .or_insert_with(|| location.to_string());
+        self.encoder.intern_string_infallible(s)
+    }
+}
+
+/// Trait for types that can be encoded into a dial9 trace.
+///
+/// # Simple case — `#[derive(TraceEvent)]`
+///
+/// Any type implementing [`TraceEvent`](dial9_trace_format::TraceEvent) automatically
+/// implements `Encodable` via a blanket impl, so you can pass it directly to
+/// [`record_event`](crate::telemetry::record_event):
+///
+/// ```ignore
+/// #[derive(TraceEvent)]
+/// struct MyEvent {
+///     #[traceevent(timestamp)]
+///     timestamp_ns: u64,
+///     request_count: u32,
+/// }
+/// record_event(MyEvent { timestamp_ns: now, request_count: 42 }, &handle);
+/// ```
+///
+/// # Advanced case — string interning
+///
+/// Implement `Encodable` manually when you need [`InternedString`] fields
+/// for efficient repeated-string encoding:
+///
+/// ```ignore
+/// struct HttpRequest { timestamp_ns: u64, method: String, status: u32 }
+///
+/// impl Encodable for HttpRequest {
+///     fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
+///         let method = enc.intern_string(&self.method);
+///         enc.encode(&HttpRequestWire {
+///             timestamp_ns: self.timestamp_ns,
+///             method,
+///             status: self.status,
+///         });
+///     }
+/// }
+/// ```
+pub trait Encodable {
+    /// Encode this event into the thread-local trace buffer.
+    fn encode(&self, encoder: &mut ThreadLocalEncoder<'_>);
+}
+
+impl<T: dial9_trace_format::TraceEvent + 'static> Encodable for T {
+    fn encode(&self, encoder: &mut ThreadLocalEncoder<'_>) {
+        encoder.encode(self);
+    }
+}
+
+impl Encodable for RawEvent {
+    fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
+        match self {
+            RawEvent::PollStart {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                task_id,
+                location,
+            } => {
+                let spawn_loc = enc.intern_location(location);
+                enc.encode(&PollStartEvent {
+                    timestamp_ns: *timestamp_nanos,
+                    worker_id: *worker_id,
+                    local_queue: *worker_local_queue_depth as u8,
+                    task_id: *task_id,
+                    spawn_loc,
+                });
+            }
+            RawEvent::PollEnd {
+                timestamp_nanos,
+                worker_id,
+            } => enc.encode(&PollEndEvent {
+                timestamp_ns: *timestamp_nanos,
+                worker_id: *worker_id,
+            }),
+            RawEvent::WorkerPark {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                cpu_time_nanos,
+            } => enc.encode(&WorkerParkEvent {
+                timestamp_ns: *timestamp_nanos,
+                worker_id: *worker_id,
+                local_queue: *worker_local_queue_depth as u8,
+                cpu_time_ns: *cpu_time_nanos,
+            }),
+            RawEvent::WorkerUnpark {
+                timestamp_nanos,
+                worker_id,
+                worker_local_queue_depth,
+                cpu_time_nanos,
+                sched_wait_delta_nanos,
+            } => enc.encode(&WorkerUnparkEvent {
+                timestamp_ns: *timestamp_nanos,
+                worker_id: *worker_id,
+                local_queue: *worker_local_queue_depth as u8,
+                cpu_time_ns: *cpu_time_nanos,
+                sched_wait_ns: *sched_wait_delta_nanos,
+            }),
+            RawEvent::QueueSample {
+                timestamp_nanos,
+                global_queue_depth,
+            } => enc.encode(&QueueSampleEvent {
+                timestamp_ns: *timestamp_nanos,
+                global_queue: *global_queue_depth as u8,
+            }),
+            RawEvent::TaskSpawn {
+                timestamp_nanos,
+                task_id,
+                location,
+            } => {
+                let spawn_loc = enc.intern_location(location);
+                enc.encode(&TaskSpawnEvent {
+                    timestamp_ns: *timestamp_nanos,
+                    task_id: *task_id,
+                    spawn_loc,
+                });
+            }
+            RawEvent::TaskTerminate {
+                timestamp_nanos,
+                task_id,
+            } => enc.encode(&TaskTerminateEvent {
+                timestamp_ns: *timestamp_nanos,
+                task_id: *task_id,
+            }),
+            RawEvent::WakeEvent {
+                timestamp_nanos,
+                waker_task_id,
+                woken_task_id,
+                target_worker,
+            } => enc.encode(&WakeEventEvent {
+                timestamp_ns: *timestamp_nanos,
+                waker_task_id: *waker_task_id,
+                woken_task_id: *woken_task_id,
+                target_worker: *target_worker,
+            }),
+            RawEvent::CpuSample(data) => {
+                let thread_name = match &data.thread_name {
+                    Some(name) => enc.intern_string(name.as_str()),
+                    None => enc.intern_string("<no thread name>"),
+                };
+                enc.encode(&CpuSampleEvent {
+                    timestamp_ns: data.timestamp_nanos,
+                    worker_id: data.worker_id,
+                    tid: data.tid,
+                    source: data.source,
+                    thread_name,
+                    callchain: dial9_trace_format::StackFrames(data.callchain.clone()),
+                });
+            }
+        }
+    }
+}
+
+// ── Thread-local buffer internals ───────────────────────────────────────────
+
 /// Tracks the last drain epoch at which a particular thread-local buffer
 /// was flushed. The flush thread reads this (relaxed) to skip buffers
 /// that have self-flushed recently, avoiding contention with busy workers.
@@ -89,119 +292,15 @@ impl ThreadLocalBuffer {
         false
     }
 
-    fn encode_event(&mut self, event: &RawEvent) {
-        match event {
-            RawEvent::PollStart {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                task_id,
-                location,
-            } => {
-                let spawn_loc = self.intern_location(location);
-                self.encoder.write_infallible(&PollStartEvent {
-                    timestamp_ns: *timestamp_nanos,
-                    worker_id: *worker_id,
-                    local_queue: *worker_local_queue_depth as u8,
-                    task_id: *task_id,
-                    spawn_loc,
-                });
-            }
-            RawEvent::PollEnd {
-                timestamp_nanos,
-                worker_id,
-            } => self.encoder.write_infallible(&PollEndEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-            }),
-            RawEvent::WorkerPark {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                cpu_time_nanos,
-            } => self.encoder.write_infallible(&WorkerParkEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-                local_queue: *worker_local_queue_depth as u8,
-                cpu_time_ns: *cpu_time_nanos,
-            }),
-            RawEvent::WorkerUnpark {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                cpu_time_nanos,
-                sched_wait_delta_nanos,
-            } => self.encoder.write_infallible(&WorkerUnparkEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-                local_queue: *worker_local_queue_depth as u8,
-                cpu_time_ns: *cpu_time_nanos,
-                sched_wait_ns: *sched_wait_delta_nanos,
-            }),
-            RawEvent::QueueSample {
-                timestamp_nanos,
-                global_queue_depth,
-            } => self.encoder.write_infallible(&QueueSampleEvent {
-                timestamp_ns: *timestamp_nanos,
-                global_queue: *global_queue_depth as u8,
-            }),
-            RawEvent::TaskSpawn {
-                timestamp_nanos,
-                task_id,
-                location,
-            } => {
-                let spawn_loc = self.intern_location(location);
-                self.encoder.write_infallible(&TaskSpawnEvent {
-                    timestamp_ns: *timestamp_nanos,
-                    task_id: *task_id,
-                    spawn_loc,
-                });
-            }
-            RawEvent::TaskTerminate {
-                timestamp_nanos,
-                task_id,
-            } => self.encoder.write_infallible(&TaskTerminateEvent {
-                timestamp_ns: *timestamp_nanos,
-                task_id: *task_id,
-            }),
-            RawEvent::WakeEvent {
-                timestamp_nanos,
-                waker_task_id,
-                woken_task_id,
-                target_worker,
-            } => self.encoder.write_infallible(&WakeEventEvent {
-                timestamp_ns: *timestamp_nanos,
-                waker_task_id: *waker_task_id,
-                woken_task_id: *woken_task_id,
-                target_worker: *target_worker,
-            }),
-            RawEvent::CpuSample(data) => {
-                let thread_name = match &data.thread_name {
-                    Some(name) => self.encoder.intern_string_infallible(name.as_str()),
-                    None => self.encoder.intern_string_infallible("<no thread name>"),
-                };
-                self.encoder.write_infallible(&CpuSampleEvent {
-                    timestamp_ns: data.timestamp_nanos,
-                    worker_id: data.worker_id,
-                    tid: data.tid,
-                    source: data.source,
-                    thread_name,
-                    callchain: dial9_trace_format::StackFrames(data.callchain.clone()),
-                });
-            }
+    fn thread_local_encoder(&mut self) -> ThreadLocalEncoder<'_> {
+        ThreadLocalEncoder {
+            encoder: &mut self.encoder,
+            location_cache: &mut self.location_cache,
         }
     }
 
-    fn intern_location(&mut self, location: &'static Location<'static>) -> InternedString {
-        let s = self
-            .location_cache
-            .entry(location)
-            .or_insert_with(|| location.to_string());
-        self.encoder.intern_string_infallible(s)
-    }
-
-    fn record_event(&mut self, event: &RawEvent) {
-        self.encode_event(event);
+    fn record_encodable(&mut self, event: &dyn Encodable) {
+        event.encode(&mut self.thread_local_encoder());
         self.event_count += 1;
     }
 
@@ -210,7 +309,7 @@ impl ThreadLocalBuffer {
     #[cfg(test)]
     pub(crate) fn encode_single(event: &RawEvent) -> Vec<u8> {
         let mut buf = Self::with_batch_size(1024);
-        buf.encode_event(event);
+        buf.record_encodable(event);
         buf.flush().encoded_bytes
     }
 
@@ -289,7 +388,7 @@ pub(crate) fn record_event(
             }
         };
         let first_call = buf.set_collector(collector);
-        buf.record_event(&event);
+        buf.record_encodable(&event);
         let current_epoch = drain_epoch.load(Ordering::Relaxed);
         if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
             buf.flush_epoch.store(current_epoch);
@@ -325,6 +424,43 @@ pub(crate) fn drain_to_collector(collector: &CentralCollector) {
     });
 }
 
+/// Record a user-defined event into the thread-local trace buffer.
+///
+/// Like [`record_event`] but accepts any [`Encodable`] type, including
+/// user-defined `#[derive(TraceEvent)]` structs.
+pub(crate) fn record_encodable_event(
+    event: &dyn Encodable,
+    collector: &Arc<CentralCollector>,
+    drain_epoch: &AtomicU64,
+) -> Option<TlBufferHandle> {
+    BUFFER.with(|arc| {
+        let mut buf = match arc.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+                    tracing::error!("dial9: thread-local buffer mutex poisoned in record_encodable_event; dropping events for this thread");
+                });
+                return None;
+            }
+        };
+        let first_call = buf.set_collector(collector);
+        buf.record_encodable(event);
+        let current_epoch = drain_epoch.load(Ordering::Relaxed);
+        if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
+            buf.flush_epoch.store(current_epoch);
+            collector.accept_flush(buf.flush());
+        }
+        if first_call {
+            Some(TlBufferHandle {
+                buffer: Arc::downgrade(arc),
+                flush_epoch: buf.flush_epoch.clone(),
+            })
+        } else {
+            None
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,7 +481,7 @@ mod tests {
     #[test]
     fn test_record_event() {
         let mut buffer = ThreadLocalBuffer::new();
-        buffer.record_event(&poll_end_event());
+        buffer.record_encodable(&poll_end_event());
         assert_eq!(buffer.event_count, 1);
         assert!(buffer.encoder.bytes_written() > 0);
     }
@@ -355,7 +491,7 @@ mod tests {
         // Use a tiny batch size so a single event triggers flush.
         let mut buffer = ThreadLocalBuffer::with_batch_size(1);
         assert!(!buffer.should_flush());
-        buffer.record_event(&poll_end_event());
+        buffer.record_encodable(&poll_end_event());
         assert!(buffer.should_flush());
     }
 
@@ -363,7 +499,7 @@ mod tests {
     fn test_should_flush_default_batch_size() {
         let mut buffer = ThreadLocalBuffer::new();
         assert!(!buffer.should_flush());
-        buffer.record_event(&poll_end_event());
+        buffer.record_encodable(&poll_end_event());
         // A single small event should not exceed 1 MB.
         assert!(!buffer.should_flush());
     }
@@ -371,7 +507,7 @@ mod tests {
     #[test]
     fn test_flush() {
         let mut buffer = ThreadLocalBuffer::new();
-        buffer.record_event(&poll_end_event());
+        buffer.record_encodable(&poll_end_event());
         let batch = buffer.flush();
         assert!(!batch.encoded_bytes.is_empty());
         assert_eq!(buffer.event_count, 0);
@@ -405,7 +541,7 @@ mod tests {
         // logic directly: flush + stamp.
         let mut buffer = ThreadLocalBuffer::with_batch_size(1);
         buffer.set_collector(&collector);
-        buffer.record_event(&poll_end_event());
+        buffer.record_encodable(&poll_end_event());
         assert!(buffer.should_flush());
         buffer
             .flush_epoch
@@ -421,7 +557,7 @@ mod tests {
         // Write an event from a different thread.
         let handle = std::thread::spawn(move || {
             let mut guard = buf_clone.lock().unwrap();
-            guard.record_event(&poll_end_event());
+            guard.record_encodable(&poll_end_event());
             assert_eq!(guard.event_count, 1);
         });
         handle.join().unwrap();

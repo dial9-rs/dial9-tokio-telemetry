@@ -100,6 +100,18 @@ impl SharedState {
         }
     }
 
+    /// Record a user-defined [`Encodable`](crate::telemetry::buffer::Encodable) event.
+    pub(crate) fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(handle) =
+            buffer::record_encodable_event(event, &self.collector, &self.drain_epoch)
+        {
+            self.tl_buffers.lock().unwrap().push(handle);
+        }
+    }
+
     /// Bump the drain epoch and flush all idle/silent thread-local buffers.
     ///
     /// Buffers whose `FlushEpoch` matches the current epoch are skipped
