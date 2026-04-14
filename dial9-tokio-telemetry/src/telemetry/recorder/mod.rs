@@ -1041,6 +1041,20 @@ fn run_flush_loop(
         let mut flush_timer = Timer::start_now();
         let stats = flush_once(&mut event_writer, shared, drain_self);
         flush_timer.stop();
+
+        // Time-based rotation happens after flush_once so that all pending
+        // batches land in the current segment before the file is sealed.
+        // When rotation is due, drain all TL buffers first so stale events
+        // from idle workers land in the current (old) segment, then rotate.
+        if event_writer.rotation_due() {
+            shared.bump_drain_epoch();
+            shared.drain_all_tl_buffers();
+            flush_once(&mut event_writer, shared, true);
+            if let Err(e) = event_writer.rotate_if_due() {
+                tracing::warn!("failed to rotate trace segment: {e}");
+            }
+        }
+
         // Create the metrics guard up front; mutate on the exit path,
         // then let it drop (which emits the entry).
         let mut flush_guard =

@@ -139,6 +139,14 @@ impl EventWriter {
         self.writer.flush()
     }
 
+    pub(crate) fn rotate_if_due(&mut self) -> std::io::Result<bool> {
+        self.writer.rotate_if_due()
+    }
+
+    pub(crate) fn rotation_due(&self) -> bool {
+        self.writer.rotation_due()
+    }
+
     pub(crate) fn finalize(&mut self) -> std::io::Result<()> {
         self.writer.finalize()
     }

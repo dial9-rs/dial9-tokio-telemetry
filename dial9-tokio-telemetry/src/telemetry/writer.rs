@@ -39,6 +39,19 @@ pub trait TraceWriter: Send {
     fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+    /// Rotate the current segment if a time-based rotation boundary has been
+    /// crossed. Returns `true` if rotation occurred. The flush loop calls this
+    /// after draining all pending batches so that rotation happens at a clean
+    /// boundary. Default is a no-op.
+    fn rotate_if_due(&mut self) -> std::io::Result<bool> {
+        Ok(false)
+    }
+    /// Returns `true` if a time-based rotation boundary has been crossed and
+    /// the writer would rotate on the next `rotate_if_due` call. Used by the
+    /// flush loop to drain TL buffers before rotation.
+    fn rotation_due(&self) -> bool {
+        false
+    }
 }
 
 impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
@@ -62,6 +75,12 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     }
     fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
         (**self).write_current_segment_metadata()
+    }
+    fn rotate_if_due(&mut self) -> std::io::Result<bool> {
+        (**self).rotate_if_due()
+    }
+    fn rotation_due(&self) -> bool {
+        (**self).rotation_due()
     }
 }
 
@@ -435,17 +454,13 @@ impl RotatingWriter {
         Ok(())
     }
 
-    /// Rotate if the current file exceeds max_file_size or the wall-clock
-    /// rotation boundary has been crossed.
+    /// Rotate if the current file exceeds max_file_size.
     /// Called after writing a complete logical unit (def + event).
     fn maybe_rotate(&mut self) -> std::io::Result<()> {
         let WriterState::Active(raw) = &self.state else {
             return Ok(());
         };
-        let size_trigger = raw.bytes_written() > self.max_file_size;
-        let time_trigger =
-            self.has_real_events && time_source().system_time() >= self.next_rotation_time;
-        if size_trigger || time_trigger {
+        if raw.bytes_written() > self.max_file_size {
             self.rotate()?;
         }
         Ok(())
@@ -474,6 +489,18 @@ impl TraceWriter for RotatingWriter {
 
     fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
         self.write_segment_metadata()
+    }
+
+    fn rotate_if_due(&mut self) -> std::io::Result<bool> {
+        if self.has_real_events && time_source().system_time() >= self.next_rotation_time {
+            self.rotate()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn rotation_due(&self) -> bool {
+        self.has_real_events && time_source().system_time() >= self.next_rotation_time
     }
 
     fn finalize(&mut self) -> std::io::Result<()> {
@@ -1347,8 +1374,10 @@ mod tests {
         // Advance past the 60s boundary
         tokio::time::advance(Duration::from_secs(61)).await;
 
+        // Time-based rotation is now driven by rotate_if_due, not write_encoded_batch.
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
+        writer.rotate_if_due().unwrap();
 
         assert!(
             writer.next_index > initial_index,
@@ -1451,6 +1480,7 @@ mod tests {
         for _ in 0..5 {
             tokio::time::advance(Duration::from_secs(61)).await;
             writer.write_encoded_batch(&test_batch()).unwrap();
+            writer.rotate_if_due().unwrap();
         }
         writer.finalize().unwrap();
 
@@ -1499,6 +1529,7 @@ mod tests {
         writer.write_encoded_batch(&test_batch()).unwrap();
         tokio::time::advance(Duration::from_secs(61)).await;
         writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.rotate_if_due().unwrap();
         writer.finalize().unwrap();
 
         let total: usize = (0..10)
