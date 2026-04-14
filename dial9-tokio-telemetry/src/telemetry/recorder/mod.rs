@@ -14,6 +14,8 @@ use crate::telemetry::events::RawEvent;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::writer::{RotatingWriter, TraceWriter};
 use metrique::timers::Timer;
+use metrique::unit::Microsecond;
+use metrique::unit_of_work::metrics;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -30,11 +32,13 @@ enum ControlCommand {
 }
 
 /// Stats returned by flush for metrics publishing.
-// TODO: make this `#[metrics]` then flatten it
+#[metrics(subfield, rename_all = "PascalCase")]
+#[derive(Debug)]
 pub(crate) struct FlushStats {
     pub event_count: u64,
     pub dropped_batches: u64,
-    pub cpu_time: Duration,
+    #[metrics(unit = Microsecond)]
+    pub cpu_flush_duration: Duration,
 }
 
 /// Perform one flush cycle: drain CPU profilers, drain the collector, write
@@ -51,7 +55,7 @@ fn flush_once(
     {
         event_writer.flush_cpu(shared);
     }
-    let cpu_time = cpu_events_time.elapsed();
+    let cpu_flush_duration = cpu_events_time.elapsed();
 
     if drain_self {
         // Periodically flush the flush thread's own TL buffer (queue samples + CPU events).
@@ -77,7 +81,7 @@ fn flush_once(
             return FlushStats {
                 event_count: event_writer.events_written() - events_before,
                 dropped_batches: dropped as u64,
-                cpu_time,
+                cpu_flush_duration,
             };
         }
     }
@@ -87,7 +91,7 @@ fn flush_once(
     FlushStats {
         event_count: event_writer.events_written() - events_before,
         dropped_batches: dropped as u64,
-        cpu_time,
+        cpu_flush_duration,
     }
 }
 
@@ -1043,10 +1047,8 @@ fn run_flush_loop(
             (stats.event_count > 0 || stats.dropped_batches > 0 || exit).then(|| {
                 FlushMetrics {
                     operation: Operation::Flush,
-                    event_count: stats.event_count,
+                    stats,
                     flush_duration: flush_timer,
-                    dropped_batches: stats.dropped_batches,
-                    cpu_flush_duration: stats.cpu_time,
                     last_flush: exit,
                     write_metadata_failed: false,
                     finalize_failed: false,

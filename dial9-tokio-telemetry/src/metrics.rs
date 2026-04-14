@@ -1,8 +1,7 @@
 //! Operational metrics published via metrique.
 
-use std::time::Duration;
-
 use crate::background_task::pipeline_metrics::{MetriqueResult, PipelineMetrics};
+use crate::telemetry::recorder::FlushStats;
 use metrique::timers::Timer;
 use metrique::unit::{Byte, Microsecond, Millisecond};
 use metrique::unit_of_work::metrics;
@@ -21,17 +20,11 @@ pub(crate) enum Operation {
 #[derive(Debug)]
 pub(crate) struct FlushMetrics {
     pub operation: Operation,
-    /// Number of events written in this flush cycle.
-    pub event_count: u64,
+    #[metrics(flatten)]
+    pub stats: FlushStats,
     /// Wall-clock time spent draining and writing.
     #[metrics(unit = Microsecond)]
     pub flush_duration: Timer,
-    /// Oldest batches evicted since last flush.
-    pub dropped_batches: u64,
-
-    /// Duration spent flushing CPU metircs
-    #[metrics(unit = Microsecond)]
-    pub cpu_flush_duration: Duration,
 
     /// The last flush during shutdown
     pub last_flush: bool,
