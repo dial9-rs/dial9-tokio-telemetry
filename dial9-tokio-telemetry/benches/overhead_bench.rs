@@ -30,7 +30,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 const NUM_CLIENTS: usize = 50;
-const DEFAULT_DURATION_SECS: u64 = 30;
+const DEFAULT_DURATION_SECS: u64 = 60;
 const WARMUP_SECS: u64 = 3;
 
 // ── Echo server (runs on the traced runtime) ─────────────────────────────────
