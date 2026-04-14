@@ -46,6 +46,21 @@
                 display: none;
             }
 
+            @keyframes spin { to { transform: rotate(360deg); } }
+            .loading-spinner {
+                width: 32px; height: 32px;
+                border: 3px solid #333;
+                border-top-color: #6c63ff;
+                border-radius: 50%;
+                animation: spin 0.8s linear infinite;
+                margin: 0 auto 12px;
+            }
+            .loading-progress {
+                font-size: 0.85em;
+                color: #888;
+                margin-top: 8px;
+            }
+
             #viewer {
                 display: none;
                 flex-direction: column;
@@ -666,14 +681,24 @@
                 });
 
             function loadFile(file) {
+                showLoadingState(`Loading ${file.name}…`);
                 const reader = new FileReader();
                 reader.onload = async (e) => {
                     try {
-                        trace = await parseTrace(e.target.result, getParseOptions());
+                        const opts = getParseOptions();
+                        opts.onProgress = ({ bytesRead, totalBytes, eventCount }) => {
+                            const pct = ((bytesRead / totalBytes) * 100) | 0;
+                            updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
+                        };
+                        updateLoadProgress("Decompressing…");
+                        trace = await parseTrace(e.target.result, opts);
+                        updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
+                        await new Promise((r) => setTimeout(r, 0));
                         processTrace();
                         showViewer(file.name);
                     } catch (err) {
                         alert("Error: " + err.message);
+                        resetDropZone();
                     }
                 };
                 // Read the full file — time range filtering handles large traces
@@ -687,14 +712,19 @@
                 dropZone.innerHTML = '';
                 const wrap = document.createElement("div");
                 wrap.style.textAlign = "center";
-                wrap.innerHTML = `<div style="margin-bottom:12px">${esc(label)}</div>`;
+                wrap.innerHTML = `<div class="loading-spinner"></div><div style="margin-bottom:8px">${esc(label)}</div><div class="loading-progress" id="load-progress"></div>`;
                 const btn = document.createElement("button");
                 btn.textContent = "← Back";
-                btn.style.cssText = "background:#2a2a4a;border:1px solid #444;color:#ccc;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:0.9em";
+                btn.style.cssText = "background:#2a2a4a;border:1px solid #444;color:#ccc;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:0.9em;margin-top:12px";
                 btn.addEventListener("click", cancelLoad);
                 wrap.appendChild(btn);
                 wrap.insertAdjacentHTML("beforeend", '<div style="margin-top:8px;font-size:0.8em;color:#666">or press Escape</div>');
                 dropZone.appendChild(wrap);
+            }
+
+            function updateLoadProgress(text) {
+                const el = document.getElementById("load-progress");
+                if (el) el.textContent = text;
             }
 
             function cancelLoad() {
@@ -718,11 +748,20 @@
 
             async function loadTraceFromUrl(url) {
                 try {
+                    updateLoadProgress("Fetching…");
                     const response = await fetch(url, { signal: loadAbortController?.signal });
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const arrayBuffer = await response.arrayBuffer();
                     loadAbortController = null;
-                    trace = await parseTrace(arrayBuffer, getParseOptions());
+                    const opts = getParseOptions();
+                    opts.onProgress = ({ bytesRead, totalBytes, eventCount }) => {
+                        const pct = ((bytesRead / totalBytes) * 100) | 0;
+                        updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
+                    };
+                    updateLoadProgress("Decompressing…");
+                    trace = await parseTrace(arrayBuffer, opts);
+                    updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
+                    await new Promise((r) => setTimeout(r, 0));
                     processTrace();
                     showViewer(url.split('/').pop() || 'trace.bin');
                 } catch (err) {
