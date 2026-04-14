@@ -1,0 +1,19 @@
+[package]
+name = "dial9-macro"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Proc-macro crate that provides the dial9_tokio_telemetry::main attribute macro"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[dev-dependencies]
+insta = "1"
+prettyplease = "0.2"

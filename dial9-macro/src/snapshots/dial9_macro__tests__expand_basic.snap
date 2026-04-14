@@ -1,0 +1,23 @@
+---
+source: dial9-macro/src/lib.rs
+assertion_line: 127
+expression: output
+---
+fn main() {
+    let __dial9_config = my_config();
+    let (__dial9_runtime, __dial9_guard) = __dial9_config
+        .build()
+        .expect("failed to initialize dial9 runtime");
+    let __dial9_handle = __dial9_guard.handle();
+    let __dial9_body_handle = __dial9_handle.clone();
+    __dial9_runtime
+        .block_on(async move {
+            __dial9_handle
+                .spawn(async move {
+                    let handle = __dial9_body_handle;
+                    do_work().await;
+                })
+                .await
+                .expect("dial9 root task panicked")
+        })
+}

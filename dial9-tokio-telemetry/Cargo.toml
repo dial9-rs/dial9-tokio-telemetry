@@ -39,6 +39,7 @@ time = { version = "0.3", features = ["formatting", "macros"], optional = true }
 metrique-writer = "0.1"
 metrique = { version = "0.1.23", features = ["local-format"] }
 metrique-timesource = "0.1"
+dial9-macro = { workspace = true }
 
 [features]
 analysis = []
