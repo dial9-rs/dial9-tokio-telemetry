@@ -674,10 +674,8 @@
                         alert("Error: " + err.message);
                     }
                 };
-                // Only read first 20MB — parser caps at MAX_EVENTS anyway
-                const maxBytes = 20 * 1024 * 1024;
-                const blob = file.size > maxBytes ? file.slice(0, maxBytes) : file;
-                reader.readAsArrayBuffer(blob);
+                // Read the full file — time range filtering handles large traces
+                reader.readAsArrayBuffer(file);
             }
 
             let loadAbortController = null;
