@@ -794,7 +794,7 @@
                 viewStart = minTs;
                 viewEnd = maxTs;
 
-                // Build spans
+                // Build spans (also extracts queue samples and indexes wake events)
                 const spanResult = buildWorkerSpans(evts, workerIds, maxTs);
                 workerSpans = spanResult.workerSpans;
                 const perWorker = spanResult.perWorker;
@@ -814,19 +814,18 @@
                     console.log(`CPU samples: ${trace.cpuSamples.length}, polls with cpu samples: ${pollsWithCpuSamples}, polls with sched events: ${pollsWithSchedSamples}`);
                 }
 
-                // Per-worker local queue samples
-                const lqResult = extractLocalQueueSamples(perWorker, workerIds);
-                workerQueueSamples = lqResult.workerQueueSamples;
-                maxLocalQueue = lqResult.maxLocalQueue;
+                // Per-worker local queue samples (already extracted by buildWorkerSpans)
+                workerQueueSamples = spanResult.workerQueueSamples;
+                maxLocalQueue = spanResult.maxLocalQueue;
 
                 // Build active task count timeline from TaskSpawn/TaskTerminate
                 const atResult = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
                 activeTaskSamples = atResult.activeTaskSamples;
                 taskFirstPoll = atResult.taskFirstPoll;
 
-                const wakeResult = indexWakeEvents(evts);
-                wakesByTask = wakeResult.wakesByTask;
-                wakesByWorker = wakeResult.wakesByWorker;
+                // Wake events (already indexed by buildWorkerSpans)
+                wakesByTask = spanResult.wakesByTask;
+                wakesByWorker = spanResult.wakesByWorker;
 
                 schedDelays = computeSchedulingDelays(workerSpans, workerIds, wakesByTask);
                 console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);

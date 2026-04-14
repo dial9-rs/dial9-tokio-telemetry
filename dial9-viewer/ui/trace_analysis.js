@@ -27,6 +27,10 @@
    *   workerSpans: Object<number, { polls: Array<{start: number, end: number, taskId?: number, spawnLocId?: string|null, spawnLoc?: string|null}>, parks: Array<{start: number, end: number, schedWait: number}>, actives: Array<{start: number, end: number, ratio: number}>, cpuSampleTimes: number[] }>,
    *   perWorker: Object<number, import('./trace_parser.js').TraceEvent[]>,
    *   queueSamples: Array<{t: number, global: number}>,
+   *   workerQueueSamples: Object<number, Array<{t: number, local: number}>>,
+   *   maxLocalQueue: number,
+   *   wakesByTask: Object<number, Array<{timestamp: number, wakerTaskId: number, targetWorker: number}>>,
+   *   wakesByWorker: Object<number, Array<{timestamp: number, wakerTaskId: number, wokenTaskId: number}>>,
    * }}
    */
   function buildWorkerSpans(events, workerIds, maxTs) {
@@ -35,6 +39,10 @@
       openPark = {},
       openUnpark = {};
     const openPollMeta = {};
+    const workerQueueSamples = {};
+    let maxLocalQueue = 1;
+    const wakesByTask = {};
+    const wakesByWorker = {};
     for (const w of workerIds) {
       workerSpans[w] = {
         polls: [],
@@ -42,24 +50,51 @@
         actives: [],
         cpuSampleTimes: [],
       };
+      workerQueueSamples[w] = [];
     }
 
     // Group events by worker and sort per-worker by timestamp
+    // Also index wake events in the same pass
     const perWorker = {};
     for (const e of events) {
-      if (
-        e.eventType !== EVENT_TYPES.QueueSample &&
-        e.eventType !== EVENT_TYPES.WakeEvent
-      ) {
+      if (e.eventType === EVENT_TYPES.WakeEvent) {
+        (wakesByTask[e.wokenTaskId] ??= []).push({
+          timestamp: e.timestamp,
+          wakerTaskId: e.wakerTaskId,
+          targetWorker: e.targetWorker,
+        });
+        (wakesByWorker[e.targetWorker] ??= []).push({
+          timestamp: e.timestamp,
+          wakerTaskId: e.wakerTaskId,
+          wokenTaskId: e.wokenTaskId,
+        });
+      } else if (e.eventType !== EVENT_TYPES.QueueSample) {
         (perWorker[e.workerId] ??= []).push(e);
       }
     }
     for (const wEvents of Object.values(perWorker)) {
       wEvents.sort((a, b) => a.timestamp - b.timestamp);
     }
+    for (const arr of Object.values(wakesByTask)) {
+      arr.sort((a, b) => a.timestamp - b.timestamp);
+    }
+    for (const arr of Object.values(wakesByWorker)) {
+      arr.sort((a, b) => a.timestamp - b.timestamp);
+    }
 
     for (const [w, wEvents] of Object.entries(perWorker)) {
       for (const e of wEvents) {
+        // Extract local queue samples inline
+        if (
+          e.eventType === EVENT_TYPES.PollStart ||
+          e.eventType === EVENT_TYPES.WorkerPark ||
+          e.eventType === EVENT_TYPES.WorkerUnpark
+        ) {
+          workerQueueSamples[w] ??= [];
+          workerQueueSamples[w].push({ t: e.timestamp, local: e.localQueue });
+          if (e.localQueue > maxLocalQueue) maxLocalQueue = e.localQueue;
+        }
+
         if (e.eventType === EVENT_TYPES.PollStart) {
           openPoll[w] = e.timestamp;
           openPollMeta[w] = {
@@ -124,7 +159,7 @@
       .filter((e) => e.eventType === EVENT_TYPES.QueueSample)
       .map((e) => ({ t: e.timestamp, global: e.globalQueue }));
 
-    return { workerSpans, perWorker, queueSamples };
+    return { workerSpans, perWorker, queueSamples, workerQueueSamples, maxLocalQueue, wakesByTask, wakesByWorker };
   }
 
   /**
