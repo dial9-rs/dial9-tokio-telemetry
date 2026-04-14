@@ -35,6 +35,12 @@ pub(crate) struct FlushMetrics {
 
     /// The last flush during shutdown
     pub last_flush: bool,
+
+    /// True when writing segment metadata failed during the final flush.
+    pub write_metadata_failed: bool,
+
+    /// True when finalizing (sealing) the segment failed during the final flush.
+    pub finalize_failed: bool,
 }
 
 /// Per-cycle counters produced by the intrusive thread-local buffer

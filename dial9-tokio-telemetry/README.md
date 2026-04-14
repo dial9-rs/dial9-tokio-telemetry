@@ -234,6 +234,8 @@ let (io_rt, io_handle) = guard.trace_runtime("io").build(io_builder)?;
 
 See [`examples/thread_per_core.rs`](/dial9-tokio-telemetry/examples/thread_per_core.rs) and [`examples/multi_runtime.rs`](/dial9-tokio-telemetry/examples/multi_runtime.rs) for complete examples.
 
+**Shutdown**: Drop all runtimes before the `TelemetryGuard` so worker threads exit and flush their thread-local buffers. For a clean shutdown that waits for the background worker (e.g. S3 uploads) to drain, call `guard.graceful_shutdown(timeout)` instead of dropping the guard.
+
 ### Writers
 
 `RotatingWriter` rotates files based on size and time, and evicts old ones to stay within a total size budget. By default, segments rotate every 60 seconds (wall-clock-aligned) or when they exceed `max_file_size`, whichever comes first. For quick experiments, `RotatingWriter::single_file(path)` writes a single file with no rotation.
