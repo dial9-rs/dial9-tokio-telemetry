@@ -4,7 +4,7 @@
 (function (exports) {
   "use strict";
 
-  const MAX_EVENTS = 2_000_000; // cap parsed events to keep UI responsive
+  const MAX_EVENTS = Infinity; // no cap — use time range filtering for large traces
 
   function getTraceDecoder() {
     if (typeof require !== "undefined") {
@@ -114,34 +114,37 @@
    * Automatically decompresses gzip input.
    * @param {ArrayBuffer|Uint8Array} buffer - The binary trace data (may be gzipped)
    * @param {Object} [options] - Optional parsing options
-   * @param {number} [options.maxEvents] - Maximum number of events to parse (default: 2,000,000)
+   * @param {number} [options.maxEvents] - Maximum number of events to parse (default: Infinity)
+   * @param {number} [options.startTime] - Start of time range filter (absolute ns, inclusive)
+   * @param {number} [options.endTime] - End of time range filter (absolute ns, inclusive)
+   * @param {function} [options.onProgress] - Called with {bytesRead, totalBytes, eventCount} periodically
    * @returns {Promise<ParsedTrace>}
    */
   async function parseTrace(buffer, options) {
     buffer = await maybeGunzip(buffer);
-    const maxEvents = (options && options.maxEvents) || MAX_EVENTS;
+    const maxEvents = (options && options.maxEvents != null) ? options.maxEvents : MAX_EVENTS;
+    const startTime = (options && options.startTime != null) ? options.startTime : 0;
+    const endTime = (options && options.endTime != null) ? options.endTime : Infinity;
+    const onProgress = (options && options.onProgress) || null;
+    const YIELD_BYTES = 100 * 1024; // yield to browser every 100KB
     const TD = getTraceDecoder();
     const dec = new TD(
       buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer
     );
     if (!dec.decodeHeader()) throw new Error("Invalid trace header");
-    const frames = dec.decodeAll();
+    const totalBytes = dec.byteLength;
 
     const events = [];
-    const spawnLocations = new Map(); // string → string (identity, for compat)
-    const taskSpawnLocs = new Map(); // taskId → spawn location string
+    const spawnLocations = new Map();
+    const taskSpawnLocs = new Map();
     const taskSpawnTimes = new Map();
     const taskTerminateTimes = new Map();
     const callframeSymbols = new Map();
     const cpuSamples = [];
     const threadNames = new Map();
-    const runtimeWorkers = new Map(); // runtime name → [workerId, ...]
+    const runtimeWorkers = new Map();
 
     const capped = () => events.length >= maxEvents;
-    // Frames processed regardless of event cap:
-    // - SymbolTableEntry: symbol tables are needed to resolve addresses in all other frames
-    // - TaskSpawnEvent/TaskTerminateEvent: task lifecycle tracking for the task list view
-    // - CpuSampleEvent: CPU samples feed the flame graph, which should reflect the full trace
     const UNCAPPED_FRAMES = new Set([
       "TaskSpawnEvent",
       "TaskTerminateEvent",
@@ -150,12 +153,26 @@
       "SegmentMetadataEvent",
     ]);
 
-    for (const frame of frames) {
+    let lastYieldPos = 0;
+    let frame;
+    while ((frame = dec.nextFrame()) !== null) {
+      // Yield to browser periodically so spinner can update
+      if (onProgress && dec.position - lastYieldPos >= YIELD_BYTES) {
+        lastYieldPos = dec.position;
+        onProgress({ bytesRead: dec.position, totalBytes, eventCount: events.length });
+        await new Promise((r) => setTimeout(r, 0));
+      }
+
       if (frame.type !== "event") continue;
       const v = frame.values;
       const ts = num(frame.timestamp_ns);
 
       if (capped() && !UNCAPPED_FRAMES.has(frame.name)) continue;
+
+      // Time range filtering: skip events outside the requested range
+      // (uncapped frames like symbols/metadata are always processed)
+      const inTimeRange = ts >= startTime && ts <= endTime;
+      if (!inTimeRange && !UNCAPPED_FRAMES.has(frame.name)) continue;
 
       switch (frame.name) {
         case "PollStartEvent": {
@@ -323,11 +340,16 @@
       }
     }
 
+    const hasTimeFilter = startTime > 0 || endTime < Infinity;
+
     return {
       magic: "D9TF",
       version: dec.version,
       events,
       truncated: events.length >= maxEvents,
+      timeFiltered: hasTimeFilter,
+      filterStartTime: hasTimeFilter ? startTime : null,
+      filterEndTime: hasTimeFilter ? endTime : null,
       hasCpuTime: true,
       hasSchedWait: true,
       hasTaskTracking: true,

@@ -203,6 +203,12 @@ class TraceDecoder {
     return result;
   }
 
+  /** Current byte offset into the buffer. */
+  get position() { return this._pos; }
+
+  /** Total byte length of the buffer. */
+  get byteLength() { return this._view.byteLength; }
+
   _decodeStringPool() {
     const count = this._view.getUint32(this._pos, true); this._pos += 4;
     const entries = [];
