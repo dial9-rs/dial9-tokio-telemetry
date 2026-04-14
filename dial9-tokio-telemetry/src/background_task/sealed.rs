@@ -19,11 +19,13 @@ pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
     match parse_segment_timestamp(data) {
         Ok(ts) => return (ts / 1_000_000_000, true),
         Err(e) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "failed to parse segment timestamp, falling back to mtime"
-            );
+            crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to parse segment timestamp, falling back to mtime"
+                );
+            });
         }
     }
     let secs = std::fs::metadata(path)
