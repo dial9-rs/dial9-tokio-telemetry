@@ -1037,33 +1037,39 @@ fn run_flush_loop(
         let mut flush_timer = Timer::start_now();
         let stats = flush_once(&mut event_writer, shared, drain_self);
         flush_timer.stop();
-        let mut write_metadata_failed = false;
-        let mut finalize_failed = false;
+        // Create the metrics guard up front; mutate on the exit path,
+        // then let it drop (which emits the entry).
+        let mut flush_guard =
+            (stats.event_count > 0 || stats.dropped_batches > 0 || exit).then(|| {
+                FlushMetrics {
+                    operation: Operation::Flush,
+                    event_count: stats.event_count,
+                    flush_duration: flush_timer,
+                    dropped_batches: stats.dropped_batches,
+                    cpu_flush_duration: stats.cpu_time,
+                    last_flush: exit,
+                    write_metadata_failed: false,
+                    finalize_failed: false,
+                }
+                .append_on_drop(flush_metrics_sink.clone())
+            });
         if exit {
             // Write final metadata before sealing so single-segment
             // traces contain runtime→worker mappings.
             if let Err(e) = event_writer.write_current_segment_metadata() {
                 tracing::warn!("failed to write final segment metadata: {e}");
-                write_metadata_failed = true;
+                if let Some(g) = flush_guard.as_mut() {
+                    g.write_metadata_failed = true;
+                }
             }
             if let Err(e) = event_writer.finalize() {
                 tracing::warn!("failed to finalize trace segment: {e}");
-                finalize_failed = true;
+                if let Some(g) = flush_guard.as_mut() {
+                    g.finalize_failed = true;
+                }
             }
         }
-        if stats.event_count > 0 || stats.dropped_batches > 0 || exit {
-            let _guard = FlushMetrics {
-                operation: Operation::Flush,
-                event_count: stats.event_count,
-                flush_duration: flush_timer,
-                dropped_batches: stats.dropped_batches,
-                cpu_flush_duration: stats.cpu_time,
-                last_flush: exit,
-                write_metadata_failed,
-                finalize_failed,
-            }
-            .append_on_drop(flush_metrics_sink.clone());
-        }
+        drop(flush_guard);
         if let Some(tx) = ack_tx.take() {
             let _ = tx.send(());
         }
