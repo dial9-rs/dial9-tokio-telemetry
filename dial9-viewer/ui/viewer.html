@@ -496,7 +496,7 @@
         <script src="trace_parser.js"></script>
         <script src="trace_analysis.js"></script>
         <script>
-            const { EVENT_TYPES: ET, parseTrace, ChunkManager, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
+            const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
             const { buildWorkerSpans, attachCpuSamples, extractLocalQueueSamples, buildActiveTaskTimeline, indexWakeEvents, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData } = TraceAnalysis;
 
             function esc(s) {
@@ -908,7 +908,7 @@
                 const counter = document.getElementById("poi-counter");
                 const prevBtn = document.getElementById("btn-prev-poi");
                 const nextBtn = document.getElementById("btn-next-poi");
-                
+
                 if (pointsOfInterest.length === 0) {
                     counter.textContent = "None found";
                     prevBtn.disabled = true;
@@ -925,7 +925,7 @@
                 if (index < 0 || index >= pointsOfInterest.length) return;
                 currentPoiIndex = index;
                 const poi = pointsOfInterest[index];
-                
+
                 // Center view on this POI with appropriate zoom
                 const spanDur = poi.span.end - poi.span.start;
                 const viewDur = Math.max(spanDur * 5, 1e6); // Show 5x the span duration, min 1ms
@@ -941,14 +941,14 @@
                     viewEnd = Math.min(maxTs, viewStart + padded);
                     selectedTaskId = sd.taskId;
                 }
-                
+
                 // Scroll to worker lane
                 const laneIdx = workerIds.indexOf(poi.worker);
                 if (laneIdx >= 0) {
                     const scrollTop = laneIdx * LANE_H;
                     lanesContainer.scrollTop = scrollTop;
                 }
-                
+
                 updatePoiCounter();
                 renderAll();
             }
@@ -1153,12 +1153,12 @@
                     const x1 = Math.max(0, nsToX(s.start, pw));
                     const x2 = Math.min(pw, nsToX(s.end, pw));
                     const w = Math.max(x2 - x1, 1);
-                    
+
                     // If we have scheduling delay info, split the park visually
                     if (trace.hasSchedWait && s.schedWait > 0) {
                         const schedWaitNs = s.schedWait * 1000; // convert µs to ns
                         const wakeupShouldBe = s.end - schedWaitNs;
-                        
+
                         // Normal park portion (before wakeup should have happened)
                         if (wakeupShouldBe > s.start) {
                             const xSplit = Math.min(pw, nsToX(wakeupShouldBe, pw));
@@ -1169,7 +1169,7 @@
                                 ctx.fillStyle = "#cc5533";
                                 ctx.fillRect(x1, 0, normalW, 4);
                             }
-                            
+
                             // Scheduling delay portion (bright red)
                             const delayW = Math.max(x2 - xSplit, 0);
                             if (delayW > 0) {
@@ -1383,7 +1383,7 @@
                     for (let i = iStart; i <= iEnd; i++) {
                         const x = Math.max(0, Math.min(pw, nsToX(samples[i].t, pw)));
                         const y = qTop + qH - (samples[i].local / laneMaxQ) * qH;
-                        
+
                         if (!started) {
                             ctx.moveTo(x, y);
                             started = true;
@@ -1751,15 +1751,15 @@
                     }
                 }
                 allLocalSamples.sort((a, b) => a.t - b.t);
-                
+
                 // Single pass: maintain per-worker state and compute max for each bucket
                 const workerState = {};
                 for (const w of workerIds) workerState[w] = 0;
                 let sampleIdx = 0;
-                
+
                 for (let bi = 0; bi < numBuckets; bi++) {
                     const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
-                    
+
                     // Apply all samples up to this bucket's end
                     while (sampleIdx < allLocalSamples.length && allLocalSamples[sampleIdx].t < bucketEnd) {
                         const s = allLocalSamples[sampleIdx];
@@ -1767,7 +1767,7 @@
                         buckets[bi].hasData = true;
                         sampleIdx++;
                     }
-                    
+
                     // Max across all workers
                     let max = 0;
                     for (const w of workerIds) {
@@ -2696,7 +2696,7 @@
                     const ns =
                         viewStart + (mouseX / drawW) * (viewEnd - viewStart);
                     mouseNs = ns;
-                    
+
                     // Throttle crosshair redraw with RAF
                     if (!queueChartRafId) {
                         queueChartRafId = requestAnimationFrame(() => {
