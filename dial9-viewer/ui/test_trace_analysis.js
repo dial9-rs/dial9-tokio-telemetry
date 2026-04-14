@@ -7,9 +7,7 @@ const { EVENT_TYPES, parseTrace } = require("./trace_parser.js");
 const {
   buildWorkerSpans,
   attachCpuSamples,
-  extractLocalQueueSamples,
   buildActiveTaskTimeline,
-  indexWakeEvents,
   computeSchedulingDelays,
   filterPointsOfInterest,
   buildFlamegraphTree,
@@ -56,7 +54,7 @@ async function main() {
 
   // ── buildWorkerSpans ──
 
-  const { workerSpans, perWorker, queueSamples } = buildWorkerSpans(
+  const { workerSpans, perWorker, queueSamples, workerQueueSamples, maxLocalQueue, wakesByTask, wakesByWorker } = buildWorkerSpans(
     evts,
     workerIds,
     maxTs
@@ -146,12 +144,7 @@ async function main() {
     );
   }
 
-  // ── extractLocalQueueSamples ──
-
-  const { workerQueueSamples, maxLocalQueue } = extractLocalQueueSamples(
-    perWorker,
-    workerIds
-  );
+  // ── extractLocalQueueSamples (via buildWorkerSpans) ──
 
   function testLocalQueueNonNegative() {
     for (const w of workerIds) {
@@ -189,9 +182,7 @@ async function main() {
     pass("Task counts non-negative");
   }
 
-  // ── indexWakeEvents ──
-
-  const { wakesByTask, wakesByWorker } = indexWakeEvents(evts);
+  // ── indexWakeEvents (via buildWorkerSpans) ──
 
   function testWakesByTaskSorted() {
     for (const arr of Object.values(wakesByTask)) {

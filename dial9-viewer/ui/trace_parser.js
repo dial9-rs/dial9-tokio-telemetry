@@ -132,7 +132,7 @@
       buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer
     );
     if (!dec.decodeHeader()) throw new Error("Invalid trace header");
-    const totalBytes = dec._view.byteLength;
+    const totalBytes = dec.byteLength;
 
     const events = [];
     const spawnLocations = new Map();
@@ -157,9 +157,9 @@
     let frame;
     while ((frame = dec.nextFrame()) !== null) {
       // Yield to browser periodically so spinner can update
-      if (onProgress && dec._pos - lastYieldPos >= YIELD_BYTES) {
-        lastYieldPos = dec._pos;
-        onProgress({ bytesRead: dec._pos, totalBytes, eventCount: events.length });
+      if (onProgress && dec.position - lastYieldPos >= YIELD_BYTES) {
+        lastYieldPos = dec.position;
+        onProgress({ bytesRead: dec.position, totalBytes, eventCount: events.length });
         await new Promise((r) => setTimeout(r, 0));
       }
 
