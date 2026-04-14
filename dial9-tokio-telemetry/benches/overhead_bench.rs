@@ -253,6 +253,9 @@ fn main() {
     if is_bmf {
         let mut report = bmf::Report::new();
         let mut results = std::collections::HashMap::new();
+        // Discarded warmup run so the first measured mode doesn't pay
+        // cold-process costs (CPU freq ramp, allocator/page faults).
+        let _ = run_bench("baseline", WARMUP_SECS);
         for mode in ["baseline", "telemetry", "noop"] {
             let r = run_bench(mode, duration_secs);
             let rps = r.hist.len() as f64 / r.wall.as_secs_f64();
