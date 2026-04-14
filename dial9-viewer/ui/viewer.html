@@ -387,6 +387,8 @@
                 <button id="btn-zoom-in">Zoom +</button>
                 <button id="btn-zoom-out">Zoom −</button>
                 <button id="btn-fit">Fit All</button>
+                <button id="btn-set-range" title="Set time range filter (reloads with only events in range)">Set Range</button>
+                <button id="btn-clear-range" title="Clear time range filter" style="display:none">Clear Range</button>
                 <button id="btn-time-mode" title="Toggle between relative (offset from trace start) and absolute timestamps">Time: Relative</button>
                 <button id="btn-tz-mode" title="Toggle between UTC and local timezone for absolute timestamps" style="display:none">TZ: UTC</button>
                 <button id="btn-reset">New File</button>
@@ -479,7 +481,7 @@
         <script src="trace_parser.js"></script>
         <script src="trace_analysis.js"></script>
         <script>
-            const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
+            const { EVENT_TYPES: ET, parseTrace, ChunkManager, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
             const { buildWorkerSpans, attachCpuSamples, extractLocalQueueSamples, buildActiveTaskTimeline, indexWakeEvents, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData } = TraceAnalysis;
 
             function esc(s) {
@@ -667,7 +669,7 @@
                 const reader = new FileReader();
                 reader.onload = async (e) => {
                     try {
-                        trace = await parseTrace(e.target.result);
+                        trace = await parseTrace(e.target.result, getParseOptions());
                         processTrace();
                         showViewer(file.name);
                     } catch (err) {
@@ -720,7 +722,7 @@
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const arrayBuffer = await response.arrayBuffer();
                     loadAbortController = null;
-                    trace = await parseTrace(arrayBuffer);
+                    trace = await parseTrace(arrayBuffer, getParseOptions());
                     processTrace();
                     showViewer(url.split('/').pop() || 'trace.bin');
                 } catch (err) {
@@ -733,6 +735,28 @@
             // Check for URL parameter on load
             const urlParams = new URLSearchParams(window.location.search);
             const traceUrl = urlParams.get('trace');
+            const urlStartNs = urlParams.get('start') ? Number(urlParams.get('start')) : null;
+            const urlEndNs = urlParams.get('end') ? Number(urlParams.get('end')) : null;
+
+            /** Build parseTrace options from current URL time range params. */
+            function getParseOptions() {
+                const opts = {};
+                if (urlStartNs != null) opts.startTime = urlStartNs;
+                if (urlEndNs != null) opts.endTime = urlEndNs;
+                return opts;
+            }
+
+            /** Update URL with current time range without reloading. */
+            function updateUrlTimeRange(startNs, endNs) {
+                const params = new URLSearchParams(window.location.search);
+                if (startNs != null) params.set('start', Math.round(startNs).toString());
+                else params.delete('start');
+                if (endNs != null) params.set('end', Math.round(endNs).toString());
+                else params.delete('end');
+                const newUrl = window.location.pathname + '?' + params.toString();
+                window.history.replaceState(null, '', newUrl);
+            }
+
             if (traceUrl) {
                 showLoadingState('Loading trace…');
                 loadTraceFromUrl(traceUrl);
@@ -814,8 +838,9 @@
                 document.getElementById("tb-filename").textContent = filename;
                 const durMs = durationNs / 1e6;
                 const truncNote = trace.truncated ? " (truncated)" : "";
+                const filterNote = trace.timeFiltered ? " (time-filtered)" : "";
                 document.getElementById("tb-stats").textContent =
-                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durMs.toFixed(1)}ms${truncNote}`;
+                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durMs.toFixed(1)}ms${truncNote}${filterNote}`;
 
                 buildLanes();
                 updatePointsOfInterest();
@@ -1796,6 +1821,23 @@
                 viewEnd = maxTs;
                 renderAll();
             });
+
+            // ── Time Range Filter ──
+            document.getElementById("btn-set-range").addEventListener("click", () => {
+                // Use current view window as the time range filter
+                const startNs = Math.round(viewStart);
+                const endNs = Math.round(viewEnd);
+                updateUrlTimeRange(startNs, endNs);
+                window.location.reload();
+            });
+            document.getElementById("btn-clear-range").addEventListener("click", () => {
+                updateUrlTimeRange(null, null);
+                window.location.reload();
+            });
+            // Show/hide clear range button based on whether a filter is active
+            if (urlStartNs != null || urlEndNs != null) {
+                document.getElementById("btn-clear-range").style.display = "";
+            }
             document.getElementById("btn-time-mode").addEventListener("click", () => {
                 useAbsoluteTime = !useAbsoluteTime;
                 document.getElementById("btn-time-mode").textContent =
