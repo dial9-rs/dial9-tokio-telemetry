@@ -1023,10 +1023,15 @@ fn run_flush_loop(
         // and the intrusive drain only locks truly idle buffers.
         // On exit we bump + drain in the same tick since there is
         // no next tick for the grace period.
-        if exit || (cycle_count + 1).is_multiple_of(TL_DRAIN_INTERVAL) {
+        //
+        // When time-based rotation is due, we piggyback on the same
+        // drain cycle so all stale TL events land in the current
+        // segment before it is sealed.
+        let rotation_due = event_writer.rotation_due();
+        if exit || rotation_due || (cycle_count + 1).is_multiple_of(TL_DRAIN_INTERVAL) {
             shared.bump_drain_epoch();
         }
-        if exit || cycle_count.is_multiple_of(TL_DRAIN_INTERVAL) {
+        if exit || rotation_due || cycle_count.is_multiple_of(TL_DRAIN_INTERVAL) {
             let mut tl_drain_timer = Timer::start_now();
             let stats = shared.drain_all_tl_buffers();
             tl_drain_timer.stop();
@@ -1042,17 +1047,8 @@ fn run_flush_loop(
         let stats = flush_once(&mut event_writer, shared, drain_self);
         flush_timer.stop();
 
-        // Time-based rotation happens after flush_once so that all pending
-        // batches land in the current segment before the file is sealed.
-        // When rotation is due, drain all TL buffers first so stale events
-        // from idle workers land in the current (old) segment, then rotate.
-        if event_writer.rotation_due() {
-            shared.bump_drain_epoch();
-            shared.drain_all_tl_buffers();
-            flush_once(&mut event_writer, shared, true);
-            if let Err(e) = event_writer.rotate_if_due() {
-                tracing::warn!("failed to rotate trace segment: {e}");
-            }
+        if let Err(e) = event_writer.rotate_if_due() {
+            tracing::warn!("failed to rotate trace segment: {e}");
         }
 
         // Create the metrics guard up front; mutate on the exit path,
