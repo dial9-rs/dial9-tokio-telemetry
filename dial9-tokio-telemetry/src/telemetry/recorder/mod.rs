@@ -1024,11 +1024,13 @@ fn run_flush_loop(
         // On exit we bump + drain in the same tick since there is
         // no next tick for the grace period.
         //
-        // When time-based rotation is due, we piggyback on the same
-        // drain cycle so all stale TL events land in the current
-        // segment before it is sealed.
+        // When time-based rotation is due, we also trigger a drain so
+        // all stale TL events land in the current segment before it is
+        // sealed. The epoch bump is not added here — rotation is
+        // infrequent (~1/min) so the extra lock contention on that one
+        // drain cycle is acceptable.
         let rotation_due = event_writer.rotation_due();
-        if exit || rotation_due || (cycle_count + 1).is_multiple_of(TL_DRAIN_INTERVAL) {
+        if exit || (cycle_count + 1).is_multiple_of(TL_DRAIN_INTERVAL) {
             shared.bump_drain_epoch();
         }
         if exit || rotation_due || cycle_count.is_multiple_of(TL_DRAIN_INTERVAL) {
