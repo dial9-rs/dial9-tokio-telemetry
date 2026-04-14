@@ -1144,6 +1144,7 @@
                     bandH = 20;
                 const poiSpan = (currentPoiIndex >= 0) ? pointsOfInterest[currentPoiIndex].span : null;
                 const pollStart = findFirstVisible(spans.polls, viewStart);
+                const nsPerPx = (viewEnd - viewStart) / pw;
                 if (selectedTaskId) {
                     for (let i = pollStart; i < spans.polls.length; i++) {
                         const s = spans.polls[i];
@@ -1162,6 +1163,34 @@
                         const x1 = Math.max(0, nsToX(s.start, pw));
                         const x2 = Math.min(pw, nsToX(s.end, pw));
                         ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
+                    }
+                } else if (nsPerPx > 5000) {
+                    // LOD: when zoomed out, bucket polls by pixel and draw worst-case color
+                    // Each pixel bucket tracks the max poll duration seen
+                    let prevPx = -2, prevColor = null, runStart = -1;
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        const x1 = Math.max(0, nsToX(s.start, pw)) | 0;
+                        const x2 = Math.min(pw, nsToX(s.end, pw)) | 0;
+                        const color = pollColor(s.start, s.end);
+                        if (x1 <= prevPx + 1 && color === prevColor) {
+                            // Extend current run
+                            prevPx = Math.max(prevPx, x2);
+                        } else {
+                            // Flush previous run
+                            if (prevColor) {
+                                ctx.fillStyle = prevColor;
+                                ctx.fillRect(runStart, bandTop, Math.max(prevPx - runStart, 1), bandH);
+                            }
+                            runStart = x1;
+                            prevPx = Math.max(x1, x2);
+                            prevColor = color;
+                        }
+                    }
+                    if (prevColor) {
+                        ctx.fillStyle = prevColor;
+                        ctx.fillRect(runStart, bandTop, Math.max(prevPx - runStart, 1), bandH);
                     }
                 } else {
                     for (let i = pollStart; i < spans.polls.length; i++) {
