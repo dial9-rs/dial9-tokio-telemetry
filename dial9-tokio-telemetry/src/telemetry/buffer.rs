@@ -48,6 +48,9 @@ impl ThreadLocalEncoder<'_> {
     }
 
     /// Encode a [`TraceEvent`](dial9_trace_format::TraceEvent) struct into the buffer.
+    ///
+    /// The `'static` bound is required because the encoder uses [`TypeId`](std::any::TypeId)
+    /// to cache schema registrations per concrete type.
     pub fn encode(&mut self, event: &(impl dial9_trace_format::TraceEvent + 'static)) {
         self.encoder.write_infallible(event);
     }
@@ -102,8 +105,20 @@ impl ThreadLocalEncoder<'_> {
 ///     }
 /// }
 /// ```
+///
+/// # Wire event naming
+///
+/// The event name in the trace comes from the struct passed to
+/// [`ThreadLocalEncoder::encode`], not from the type implementing `Encodable`.
+/// In the example above, the trace will contain events named `"HttpRequestWire"`,
+/// not `"HttpRequest"`.
 pub trait Encodable {
     /// Encode this event into the thread-local trace buffer.
+    ///
+    /// Implementations should call [`ThreadLocalEncoder::encode`] exactly once.
+    /// Each `encode` call is counted as one event for buffer flush decisions;
+    /// calling `encode` multiple times will produce multiple wire events but
+    /// only one event will be counted.
     fn encode(&self, encoder: &mut ThreadLocalEncoder<'_>);
 }
 
@@ -372,37 +387,7 @@ pub(crate) fn record_event(
     collector: &Arc<CentralCollector>,
     drain_epoch: &AtomicU64,
 ) -> Option<TlBufferHandle> {
-    BUFFER.with(|arc| {
-        // Poisoning requires a panic while the lock is held. Since the only code
-        // under the lock is the encoder (which should never panic), this should be
-        // unreachable. If it does happen, the encoder's internal buffer may be
-        // corrupt, so drop the event rather than writing into garbage state.
-        // The mutex stays poisoned, so this thread silently stops recording.
-        let mut buf = match arc.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                crate::rate_limit::rate_limited!(Duration::from_secs(60), {
-                    tracing::error!("dial9: thread-local buffer mutex poisoned in record_event; dropping events for this thread");
-                });
-                return None;
-            }
-        };
-        let first_call = buf.set_collector(collector);
-        buf.record_encodable(&event);
-        let current_epoch = drain_epoch.load(Ordering::Relaxed);
-        if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
-            buf.flush_epoch.store(current_epoch);
-            collector.accept_flush(buf.flush());
-        }
-        if first_call {
-            Some(TlBufferHandle {
-                buffer: Arc::downgrade(arc),
-                flush_epoch: buf.flush_epoch.clone(),
-            })
-        } else {
-            None
-        }
-    })
+    record_encodable_event(&event, collector, drain_epoch)
 }
 
 /// Drain the current thread's buffer into `collector`, even if not full.
