@@ -276,7 +276,7 @@ fn main() {
         let telemetry_p99 = results["telemetry"].hist.value_at_percentile(99.0);
         report.insert(
             "overhead::telemetry_p99_added_latency_ns".to_string(),
-            bmf::Metric::latency((telemetry_p99 - baseline_p99) as f64),
+            bmf::Metric::latency((telemetry_p99 as i64 - baseline_p99 as i64) as f64),
         );
         println!("{}", serde_json::to_string_pretty(&report).unwrap());
         return;
