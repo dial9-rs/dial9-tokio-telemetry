@@ -136,24 +136,45 @@
     const cpuSamples = [];
     const threadNames = new Map();
     const runtimeWorkers = new Map(); // runtime name → [workerId, ...]
+    // { monotonicNs, realtimeNs } anchors used to recover wall clock.
+    const clockSyncAnchors = [];
+    // Legacy classifier: epoch ns are ~1e18, monotonic ns are much smaller.
+    // 2020 is a practical floor that separates those ranges.
+    const LEGACY_EPOCH_FLOOR_MS = 1_577_836_800_000; // 2020-01-01
+    let legacySegmentMetaWallNs = null;
+    // Smallest monotonic ts seen across all event frames.
+    // Used as the monotonic timestamp for the legacy synthesized anchor.
+    let minMonoTs = null;
 
     const capped = () => events.length >= maxEvents;
     // Frames processed regardless of event cap:
     // - SymbolTableEntry: symbol tables are needed to resolve addresses in all other frames
     // - TaskSpawnEvent/TaskTerminateEvent: task lifecycle tracking for the task list view
     // - CpuSampleEvent: CPU samples feed the flame graph, which should reflect the full trace
+    // - ClockSyncEvent: to convert any timestamp to wall clock
     const UNCAPPED_FRAMES = new Set([
       "TaskSpawnEvent",
       "TaskTerminateEvent",
       "CpuSampleEvent",
       "SymbolTableEntry",
       "SegmentMetadataEvent",
+      "ClockSyncEvent",
     ]);
 
     for (const frame of frames) {
       if (frame.type !== "event") continue;
       const v = frame.values;
       const ts = num(frame.timestamp_ns);
+      // Track smallest monotonic ts for legacy anchor synthesis.
+      // Skip SegmentMetadata (legacy wall clock) and SymbolTableEntry.
+      if (
+        ts != null &&
+        frame.name !== "SegmentMetadataEvent" &&
+        frame.name !== "SymbolTableEntry" &&
+        (minMonoTs == null || ts < minMonoTs)
+      ) {
+        minMonoTs = ts;
+      }
 
       if (capped() && !UNCAPPED_FRAMES.has(frame.name)) continue;
 
@@ -280,7 +301,22 @@
           }
           break;
         }
+        case "ClockSyncEvent": {
+          const real = num(v.realtime_ns);
+          if (real > 0) {
+            clockSyncAnchors.push({ monotonicNs: ts, realtimeNs: real });
+          }
+          break;
+        }
         case "SegmentMetadataEvent": {
+          // If this looks epoch-scale, treat it as legacy wall clock.
+          if (
+            legacySegmentMetaWallNs == null &&
+            ts != null &&
+            ts / 1e6 >= LEGACY_EPOCH_FLOOR_MS
+          ) {
+            legacySegmentMetaWallNs = ts;
+          }
           const entries = v.entries || {};
           for (const [key, val] of Object.entries(entries)) {
             if (key.startsWith("runtime.")) {
@@ -323,6 +359,31 @@
       }
     }
 
+    // Legacy fallback: synthesize an anchor from legacy SegmentMetadata wall
+    // time + earliest monotonic event timestamp. This is best-effort only.
+    if (
+      clockSyncAnchors.length === 0 &&
+      legacySegmentMetaWallNs != null &&
+      minMonoTs != null
+    ) {
+      clockSyncAnchors.push({
+        monotonicNs: minMonoTs,
+        realtimeNs: legacySegmentMetaWallNs,
+      });
+    }
+
+    clockSyncAnchors.sort((a, b) => {
+      if (a.monotonicNs < b.monotonicNs) return -1;
+      if (a.monotonicNs > b.monotonicNs) return 1;
+      return 0;
+    });
+
+    let clockOffsetNs = null;
+    if (clockSyncAnchors.length > 0) {
+      const a0 = clockSyncAnchors[0];
+      clockOffsetNs = a0.realtimeNs - a0.monotonicNs;
+    }
+
     return {
       magic: "D9TF",
       version: dec.version,
@@ -339,6 +400,8 @@
       threadNames,
       taskTerminateTimes,
       runtimeWorkers,
+      clockSyncAnchors,
+      clockOffsetNs,
     };
   }
 

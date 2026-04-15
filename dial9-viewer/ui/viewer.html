@@ -576,7 +576,13 @@
             }
 
             function fmtWallClock(ns) {
-                const ms = ns / 1e6;
+                // Apply the clock-sync offset to render as wall clock. Fall back to
+                // relative time if the trace has no anchors.
+                if (!trace || trace.clockOffsetNs == null) {
+                    return fmtDuration(ns - minTs);
+                }
+                const wallNs = ns + trace.clockOffsetNs;
+                const ms = wallNs / 1e6;
                 const d = new Date(ms);
                 const pad2 = n => String(n).padStart(2, "0");
                 if (useLocalTz) {
