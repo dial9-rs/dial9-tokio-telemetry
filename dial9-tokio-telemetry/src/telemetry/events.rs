@@ -409,8 +409,8 @@ pub(crate) fn clock_realtime_ns() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+        .expect("system clock should not be before the unix epoch")
+        .as_nanos() as u64
 }
 
 /// Snapshot `(monotonic_ns, realtime_ns)` as close together as possible.
