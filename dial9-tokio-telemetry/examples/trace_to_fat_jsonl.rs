@@ -165,6 +165,7 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
         TelemetryEvent::TaskSpawn { .. }
         | TelemetryEvent::TaskTerminate { .. }
         | TelemetryEvent::ThreadNameDef { .. }
-        | TelemetryEvent::SegmentMetadata { .. } => None,
+        | TelemetryEvent::SegmentMetadata { .. }
+        | TelemetryEvent::TaskDump { .. } => None,
     }
 }

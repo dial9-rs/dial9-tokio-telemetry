@@ -188,6 +188,17 @@ pub enum TelemetryEvent {
         /// Key-value metadata pairs.
         entries: Vec<(String, String)>,
     },
+    /// Async backtrace captured at a yield point after the task was idle
+    /// longer than the configured threshold.
+    TaskDump {
+        /// Wall-clock timestamp in nanoseconds (monotonic) — capture time.
+        #[serde(rename = "timestamp_ns")]
+        timestamp_nanos: u64,
+        /// Task that was idle.
+        task_id: TaskId,
+        /// Raw instruction pointer addresses (leaf first).
+        callchain: Vec<u64>,
+    },
 }
 
 impl TelemetryEvent {
@@ -225,6 +236,9 @@ impl TelemetryEvent {
             TelemetryEvent::SegmentMetadata {
                 timestamp_nanos, ..
             } => Some(*timestamp_nanos),
+            TelemetryEvent::TaskDump {
+                timestamp_nanos, ..
+            } => Some(*timestamp_nanos),
         }
     }
 
@@ -241,7 +255,8 @@ impl TelemetryEvent {
             | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. }
-            | TelemetryEvent::SegmentMetadata { .. } => None,
+            | TelemetryEvent::SegmentMetadata { .. }
+            | TelemetryEvent::TaskDump { .. } => None,
         }
     }
 
@@ -303,6 +318,12 @@ pub(crate) enum RawEvent {
     /// A CPU stack trace sample from perf_event, attributed to a worker thread.
     #[cfg_attr(not(feature = "cpu-profiling"), allow(dead_code))]
     CpuSample(Box<CpuSampleData>),
+    /// A task dump: async backtrace captured at a yield point after idle threshold.
+    TaskDump {
+        timestamp_nanos: u64,
+        task_id: crate::telemetry::task_metadata::TaskId,
+        callchain: Vec<u64>,
+    },
 }
 
 /// Data for a CPU stack trace sample. Boxed inside [`RawEvent`] to keep the

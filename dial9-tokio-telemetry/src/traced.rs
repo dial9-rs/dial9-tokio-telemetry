@@ -127,6 +127,22 @@ fn make_traced_waker(data: Arc<TracedWakerData>) -> Waker {
     arc_waker(data)
 }
 
+/// Emit `RawEvent::TaskDump` for each stored backtrace, then clear the vec.
+fn emit_task_dumps(
+    shared: &SharedState,
+    task_id: TaskId,
+    capture_ts: u64,
+    frames: &mut Vec<Vec<u64>>,
+) {
+    for callchain in frames.drain(..) {
+        shared.record_event(crate::telemetry::events::RawEvent::TaskDump {
+            timestamp_nanos: capture_ts,
+            task_id,
+            callchain,
+        });
+    }
+}
+
 /// Capture backtraces at yield points using `trace_with`.
 ///
 /// Re-polls the inner future with a no-op waker inside `trace_with`.
@@ -161,6 +177,21 @@ impl<F: Future> Future for Traced<F> {
             return this.inner.poll(cx);
         }
 
+        // --- Pre-poll: compute elapsed since last capture ---
+        let now = crate::telemetry::events::clock_monotonic_ns();
+        let threshold = this
+            .handle
+            .shared
+            .task_dump_idle_threshold_ns
+            .load(Ordering::Relaxed);
+        let had_frames = !this.pending_frames.is_empty();
+        let elapsed = if had_frames {
+            now.saturating_sub(*this.pending_capture_ts)
+        } else {
+            0
+        };
+        let should_emit = had_frames && elapsed > threshold;
+
         // Store (or replace) the executor's waker so that when our custom
         // waker fires it can forward the notification to the correct waker,
         // even if the task has been moved to a different executor thread
@@ -173,9 +204,14 @@ impl<F: Future> Future for Traced<F> {
 
         match &result {
             Poll::Ready(_) => {
-                // TODO(task-dump): If pending_frames is non-empty and elapsed > threshold,
-                // emit TaskDumpEvents before dropping. The task completed after a long idle,
-                // and we want to capture what it was waiting on.
+                if should_emit {
+                    emit_task_dumps(
+                        &this.handle.shared,
+                        *this.task_id,
+                        *this.pending_capture_ts,
+                        this.pending_frames,
+                    );
+                }
                 this.pending_frames.clear();
             }
             Poll::Pending => {
@@ -191,8 +227,20 @@ impl<F: Future> Future for Traced<F> {
                     .load(Ordering::Relaxed)
                     || *this.task_dump_override;
                 if dumps_enabled {
-                    capture_task_dump(this.inner, this.pending_frames);
-                    *this.pending_capture_ts = crate::telemetry::events::clock_monotonic_ns();
+                    if should_emit {
+                        emit_task_dumps(
+                            &this.handle.shared,
+                            *this.task_id,
+                            *this.pending_capture_ts,
+                            this.pending_frames,
+                        );
+                    }
+                    // Capture new frames if: first pending (no stored frames) OR elapsed > threshold
+                    if !had_frames || elapsed > threshold {
+                        capture_task_dump(this.inner, this.pending_frames);
+                        *this.pending_capture_ts = crate::telemetry::events::clock_monotonic_ns();
+                    }
+                    // else: keep existing frames (elapsed <= threshold)
                 }
             }
         }

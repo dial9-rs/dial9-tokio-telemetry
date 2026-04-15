@@ -189,6 +189,17 @@ impl ThreadLocalBuffer {
                     callchain: dial9_trace_format::StackFrames(data.callchain.clone()),
                 });
             }
+            RawEvent::TaskDump {
+                timestamp_nanos,
+                task_id,
+                callchain,
+            } => {
+                self.encoder.write_infallible(&TaskDumpEvent {
+                    timestamp_ns: *timestamp_nanos,
+                    task_id: *task_id,
+                    callchain: dial9_trace_format::StackFrames(callchain.clone()),
+                });
+            }
         }
     }
 

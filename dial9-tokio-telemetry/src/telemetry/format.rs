@@ -215,6 +215,14 @@ pub(crate) struct SegmentMetadataEvent {
     pub entries: Vec<(String, String)>,
 }
 
+#[derive(TraceEvent)]
+pub(crate) struct TaskDumpEvent {
+    #[traceevent(timestamp)]
+    pub timestamp_ns: u64,
+    pub task_id: TaskId,
+    pub callchain: StackFrames,
+}
+
 // ── dial9-trace-format: decode ──────────────────────────────────────────────
 
 /// Decode all events from a `dial9-trace-format` byte slice into `TelemetryEvent`s.
@@ -254,6 +262,7 @@ pub(crate) enum TelemetryEventRef<'a> {
     CpuSample(CpuSampleEventRef<'a>),
     WakeEvent(WakeEventEventRef<'a>),
     SegmentMetadata(SegmentMetadataEventRef<'a>),
+    TaskDump(TaskDumpEventRef<'a>),
 }
 
 #[cfg(any(feature = "analysis", test))]
@@ -272,6 +281,7 @@ impl<'a> TelemetryEventRef<'a> {
             Self::CpuSample(e) => Some(e.timestamp_ns),
             Self::WakeEvent(e) => Some(e.timestamp_ns),
             Self::SegmentMetadata(e) => Some(e.timestamp_ns),
+            Self::TaskDump(e) => Some(e.timestamp_ns),
         }
     }
 }
@@ -313,6 +323,9 @@ pub(crate) fn decode_ref<'a>(
         }
         "SegmentMetadataEvent" => {
             TelemetryEventRef::SegmentMetadata(SegmentMetadataEvent::decode(timestamp_ns, fields)?)
+        }
+        "TaskDumpEvent" => {
+            TelemetryEventRef::TaskDump(TaskDumpEvent::decode(timestamp_ns, fields)?)
         }
         _ => return None,
     })
@@ -391,6 +404,11 @@ pub(crate) fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> Tel
                 .iter()
                 .map(|(k, v)| (k.to_owned(), v.to_owned()))
                 .collect(),
+        },
+        TelemetryEventRef::TaskDump(e) => TelemetryEvent::TaskDump {
+            timestamp_nanos: e.timestamp_ns,
+            task_id: e.task_id,
+            callchain: e.callchain.iter().collect(),
         },
     }
 }
