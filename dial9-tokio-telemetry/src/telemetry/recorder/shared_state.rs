@@ -26,6 +26,8 @@ thread_local! {
 /// No tokio imports. All runtime-specific logic lives in `RuntimeContext`.
 pub(crate) struct SharedState {
     pub(crate) enabled: AtomicBool,
+    pub(crate) task_dumps_enabled: AtomicBool,
+    pub(crate) task_dump_idle_threshold_ns: AtomicU64,
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
     pub(crate) start_time_ns: u64,
@@ -55,6 +57,8 @@ impl SharedState {
     pub(super) fn new(start_time_ns: u64) -> Self {
         Self {
             enabled: AtomicBool::new(false),
+            task_dumps_enabled: AtomicBool::new(false),
+            task_dump_idle_threshold_ns: AtomicU64::new(10_000_000), // 10ms default
             collector: Arc::new(CentralCollector::new()),
             start_time_ns,
             next_worker_id: AtomicU64::new(0),

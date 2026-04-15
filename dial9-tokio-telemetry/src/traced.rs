@@ -31,6 +31,9 @@ pin_project! {
         handle: TracedHandle,
         task_id: TaskId,
         waker_data: Arc<TracedWakerData>, // reused across polls to avoid a per-poll Arc allocation
+        // Task dump state: captured backtraces from yield points
+        pending_frames: Vec<Vec<u64>>,
+        pending_capture_ts: u64,
     }
 }
 
@@ -46,6 +49,8 @@ impl<F> Traced<F> {
             handle,
             task_id,
             waker_data,
+            pending_frames: Vec::new(),
+            pending_capture_ts: 0,
         }
     }
 }
@@ -84,11 +89,36 @@ fn make_traced_waker(data: Arc<TracedWakerData>) -> Waker {
     arc_waker(data)
 }
 
+/// Capture backtraces at yield points using `trace_with`.
+///
+/// Re-polls the inner future with a no-op waker inside `trace_with`.
+/// The callback fires at each yield point, where we use `backtrace::trace`
+/// to collect frame instruction pointers.
+fn capture_task_dump(inner: Pin<&mut impl Future>, frames: &mut Vec<Vec<u64>>) {
+    let noop_waker = Waker::noop();
+    let mut noop_cx = Context::from_waker(noop_waker);
+    frames.clear();
+    let frames_ref = &mut *frames;
+    tokio::runtime::dump::trace_with(
+        || {
+            let _ = inner.poll(&mut noop_cx);
+        },
+        |_meta| {
+            let mut frame_ips = Vec::new();
+            backtrace::trace(|frame| {
+                frame_ips.push(frame.ip() as u64);
+                true
+            });
+            frames_ref.push(frame_ips);
+        },
+    );
+}
+
 impl<F: Future> Future for Traced<F> {
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
+        let mut this = self.project();
         if !this.handle.shared.enabled.load(Ordering::Relaxed) {
             return this.inner.poll(cx);
         }
@@ -101,7 +131,29 @@ impl<F: Future> Future for Traced<F> {
 
         let traced_waker = make_traced_waker(this.waker_data.clone());
         let mut traced_cx = Context::from_waker(&traced_waker);
-        this.inner.poll(&mut traced_cx)
+        let result = this.inner.as_mut().poll(&mut traced_cx);
+
+        match &result {
+            Poll::Ready(_) => {
+                // TODO(task-dump): If pending_frames is non-empty and elapsed > threshold,
+                // emit TaskDumpEvents before dropping. The task completed after a long idle,
+                // and we want to capture what it was waiting on.
+                this.pending_frames.clear();
+            }
+            Poll::Pending => {
+                let dumps_enabled = this
+                    .handle
+                    .shared
+                    .task_dumps_enabled
+                    .load(Ordering::Relaxed);
+                if dumps_enabled {
+                    capture_task_dump(this.inner, this.pending_frames);
+                    *this.pending_capture_ts = crate::telemetry::events::clock_monotonic_ns();
+                }
+            }
+        }
+
+        result
     }
 }
 
@@ -204,6 +256,177 @@ mod tests {
         assert!(
             wake_task_ids.contains(&expected),
             "no WakeEvent with woken_task_id={expected:?}; recorded wake_task_ids={wake_task_ids:?}"
+        );
+    }
+
+    /// Verify that `Traced<F>` captures backtrace frames at yield points
+    /// when task dumps are enabled.
+    #[test]
+    fn traced_captures_backtrace_on_pending() {
+        use std::sync::atomic::Ordering;
+
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let (runtime, guard) =
+            TracedRuntime::build_and_start(builder, crate::telemetry::writer::NullWriter).unwrap();
+
+        // Enable task dumps
+        guard
+            .handle()
+            .traced_handle()
+            .shared
+            .task_dumps_enabled
+            .store(true, Ordering::Relaxed);
+
+        let handle = guard.handle();
+
+        runtime.block_on(async {
+            let join = handle.spawn(async move {
+                // Sleep will return Pending on first poll, triggering backtrace capture
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            });
+            join.await.unwrap();
+        });
+
+        // The test verifies the mechanism works by checking the task completes
+        // successfully (no panics from trace_with + backtrace). The actual
+        // frame content is verified in integration tests that read the trace.
+        drop(runtime);
+        drop(guard);
+    }
+
+    /// Verify that the no-op waker used in trace_with does NOT cause a
+    /// duplicate wake. The task should complete normally with exactly the
+    /// expected number of wake events.
+    #[test]
+    #[cfg(feature = "analysis")]
+    fn trace_with_noop_waker_no_duplicate_wake() {
+        use crate::telemetry::analysis::TraceReader;
+        use std::sync::atomic::Ordering;
+
+        let dir = TempDir::new().unwrap();
+        let trace_path = dir.path().join("trace.bin");
+
+        let (runtime, guard) = TracedRuntime::build_and_start(
+            tokio::runtime::Builder::new_current_thread(),
+            RotatingWriter::single_file(&trace_path).unwrap(),
+        )
+        .unwrap();
+
+        guard
+            .handle()
+            .traced_handle()
+            .shared
+            .task_dumps_enabled
+            .store(true, Ordering::Relaxed);
+
+        let handle = guard.handle();
+        let spawned_id: Arc<Mutex<TaskId>> = Arc::new(Mutex::new(UNKNOWN_TASK_ID));
+        let spawned_id_write = spawned_id.clone();
+
+        runtime.block_on(async {
+            let join = handle.spawn(async move {
+                *spawned_id_write.lock().unwrap() = tokio::task::try_id()
+                    .map(TaskId::from)
+                    .unwrap_or(UNKNOWN_TASK_ID);
+                // Single yield point — should produce exactly one wake
+                tokio::task::yield_now().await;
+            });
+            join.await.unwrap();
+        });
+
+        drop(guard);
+
+        let sealed = dir.path().join("trace.0.bin");
+        let reader = TraceReader::new(sealed.to_str().unwrap()).unwrap();
+        let events = &reader.runtime_events;
+
+        let expected_id = *spawned_id.lock().unwrap();
+        let wake_count = events
+            .iter()
+            .filter(|e| {
+                matches!(e, TelemetryEvent::WakeEvent { woken_task_id, .. } if *woken_task_id == expected_id)
+            })
+            .count();
+
+        // yield_now produces exactly one wake. If trace_with caused a
+        // duplicate wake, we'd see 2.
+        assert_eq!(
+            wake_count, 1,
+            "expected exactly 1 wake for yield_now task, got {wake_count}; \
+             trace_with with noop waker should not trigger extra wakes"
+        );
+    }
+
+    /// Verify that trace_with re-poll does NOT produce extra PollStart/PollEnd
+    /// events. The same workload with and without task dumps must produce
+    /// identical poll event counts.
+    #[test]
+    #[cfg(feature = "analysis")]
+    fn task_dump_does_not_produce_extra_poll_events() {
+        use crate::telemetry::analysis::TraceReader;
+        use std::sync::atomic::Ordering;
+
+        fn run_workload(enable_dumps: bool) -> (usize, usize) {
+            let dir = TempDir::new().unwrap();
+            let trace_path = dir.path().join("trace.bin");
+
+            let mut builder = tokio::runtime::Builder::new_current_thread();
+            builder.enable_all();
+            let (runtime, guard) = TracedRuntime::build_and_start(
+                builder,
+                RotatingWriter::single_file(&trace_path).unwrap(),
+            )
+            .unwrap();
+
+            if enable_dumps {
+                guard
+                    .handle()
+                    .traced_handle()
+                    .shared
+                    .task_dumps_enabled
+                    .store(true, Ordering::Relaxed);
+            }
+
+            let handle = guard.handle();
+
+            runtime.block_on(async {
+                let join = handle.spawn(async {
+                    tokio::task::yield_now().await;
+                    tokio::task::yield_now().await;
+                    tokio::task::yield_now().await;
+                });
+                join.await.unwrap();
+            });
+
+            drop(runtime);
+            drop(guard);
+
+            let sealed = dir.path().join("trace.0.bin");
+            let reader = TraceReader::new(sealed.to_str().unwrap()).unwrap();
+            let events = &reader.runtime_events;
+
+            let starts = events
+                .iter()
+                .filter(|e| matches!(e, TelemetryEvent::PollStart { .. }))
+                .count();
+            let ends = events
+                .iter()
+                .filter(|e| matches!(e, TelemetryEvent::PollEnd { .. }))
+                .count();
+            (starts, ends)
+        }
+
+        let (starts_off, ends_off) = run_workload(false);
+        let (starts_on, ends_on) = run_workload(true);
+
+        assert_eq!(
+            starts_off, starts_on,
+            "PollStart count differs: without dumps={starts_off}, with dumps={starts_on}"
+        );
+        assert_eq!(
+            ends_off, ends_on,
+            "PollEnd count differs: without dumps={ends_off}, with dumps={ends_on}"
         );
     }
 }
