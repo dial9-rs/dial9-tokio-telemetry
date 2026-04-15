@@ -13,16 +13,17 @@ use std::task::{Context, Poll, Waker};
 
 thread_local! {
     /// Per-task opt-in override for task dump capture.
-    /// When set to `true`, task dumps are captured for futures on this thread
-    /// even if global task dumps are disabled.
+    /// Set by `enable_task_dumps()`, read and latched by `Traced<F>` on each poll.
+    /// Once a `Traced` instance reads `true`, it stores the flag on itself and
+    /// the thread-local is cleared so it doesn't leak to other tasks on the same thread.
     static TASK_DUMP_OVERRIDE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Enable task dump capture for the current task.
 ///
-/// Call this inside a future to opt in to task dump capture even when
-/// global task dumps are disabled. This sets a thread-local flag that
-/// `Traced<F>` checks on each poll.
+/// Call this inside a `Traced` future to opt in to task dump capture even when
+/// global task dumps are disabled. The next poll of the enclosing `Traced`
+/// wrapper will latch this flag, enabling dumps for that task only.
 ///
 /// ```rust,no_run
 /// dial9_tokio_telemetry::enable_task_dumps();
@@ -31,9 +32,17 @@ pub fn enable_task_dumps() {
     TASK_DUMP_OVERRIDE.with(|c| c.set(true));
 }
 
-/// Check whether the per-task override is set.
-pub(crate) fn task_dump_override_enabled() -> bool {
-    TASK_DUMP_OVERRIDE.with(|c| c.get())
+/// Read and clear the per-task override. Called by `Traced::poll` to latch
+/// the flag onto the per-instance `task_dump_override` field.
+fn take_task_dump_override() -> bool {
+    TASK_DUMP_OVERRIDE.with(|c| {
+        if c.get() {
+            c.set(false);
+            true
+        } else {
+            false
+        }
+    })
 }
 
 /// Handle used by `Traced<F>` to emit events into the telemetry system.
@@ -60,6 +69,8 @@ pin_project! {
         // Task dump state: captured backtraces from yield points
         pending_frames: Vec<Vec<u64>>,
         pending_capture_ts: u64,
+        // Per-task opt-in: latched from thread-local on first poll that sees it
+        task_dump_override: bool,
     }
 }
 
@@ -77,6 +88,7 @@ impl<F> Traced<F> {
             waker_data,
             pending_frames: Vec::new(),
             pending_capture_ts: 0,
+            task_dump_override: false,
         }
     }
 }
@@ -167,12 +179,17 @@ impl<F: Future> Future for Traced<F> {
                 this.pending_frames.clear();
             }
             Poll::Pending => {
+                // Latch the thread-local override onto this instance so it
+                // persists across polls and doesn't leak to other tasks.
+                if take_task_dump_override() {
+                    *this.task_dump_override = true;
+                }
                 let dumps_enabled = this
                     .handle
                     .shared
                     .task_dumps_enabled
                     .load(Ordering::Relaxed)
-                    || task_dump_override_enabled();
+                    || *this.task_dump_override;
                 if dumps_enabled {
                     capture_task_dump(this.inner, this.pending_frames);
                     *this.pending_capture_ts = crate::telemetry::events::clock_monotonic_ns();

@@ -2233,9 +2233,8 @@ mod tests {
 
         runtime.block_on(async {
             let join = handle.spawn(async {
-                // Enable per-task override
+                // Enable per-task override — Traced::poll will latch this
                 crate::traced::enable_task_dumps();
-                assert!(crate::traced::task_dump_override_enabled());
                 tokio::task::yield_now().await;
                 42
             });
