@@ -526,24 +526,35 @@
       idlesByTask.set(taskId, idles);
     }
 
-    // Attach each dump to its idle gap using binary search
+    // Attach each dump to its idle gap.
+    // The dump timestamp is captured during the poll (before poll-end is
+    // recorded), so it may fall inside the poll span rather than in the
+    // idle gap. We find the poll that contains or precedes the dump, then
+    // attach to the idle gap that follows that poll.
     for (const dump of dumps) {
+      const polls = pollsByTask.get(dump.task_id);
       const idles = idlesByTask.get(dump.task_id);
-      if (!idles) {
+      if (!idles || !polls) {
         // Unknown task — create a single catch-all idle
-        const catchAll = [{ start: 0, end: Infinity, dumps: [dump] }];
-        idlesByTask.set(dump.task_id, catchAll);
+        if (!idlesByTask.has(dump.task_id)) {
+          idlesByTask.set(dump.task_id, [{ start: 0, end: Infinity, dumps: [] }]);
+        }
+        idlesByTask.get(dump.task_id)[0].dumps.push(dump);
         continue;
       }
-      // Binary search: find rightmost idle where idle.start <= dump.timestamp
-      let lo = 0, hi = idles.length - 1, best = -1;
+      // Binary search polls: find rightmost poll where poll.start <= dump.timestamp
+      let lo = 0, hi = polls.length - 1, best = -1;
       while (lo <= hi) {
         const mid = (lo + hi) >> 1;
-        if (idles[mid].start <= dump.timestamp) { best = mid; lo = mid + 1; }
+        if (polls[mid].start <= dump.timestamp) { best = mid; lo = mid + 1; }
         else hi = mid - 1;
       }
-      if (best >= 0 && dump.timestamp < idles[best].end) {
+      // The idle gap at index `best` follows polls[best]
+      if (best >= 0 && best < idles.length) {
         idles[best].dumps.push(dump);
+      } else if (idles.length > 0) {
+        // Dump is before first poll — attach to first idle
+        idles[0].dumps.push(dump);
       }
     }
 

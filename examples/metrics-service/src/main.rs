@@ -151,7 +151,8 @@ fn main() -> std::io::Result<()> {
     #[allow(unused_mut)]
     let mut traced_builder = TracedRuntime::builder()
         .with_trace_path(&args.trace_path)
-        .with_task_tracking(true);
+        .with_task_tracking(true)
+        .with_task_dumps(dial9_tokio_telemetry::telemetry::TaskDumpConfig::enabled());
     #[cfg(target_os = "linux")]
     {
         traced_builder = traced_builder
