@@ -30,6 +30,3 @@ metrique = { version = "0.1.23", features = ["local-format"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dial9-tokio-telemetry = { path = "../../dial9-tokio-telemetry", features = ["cpu-profiling", "worker-s3", "taskdump"] }
-
-[profile.release]
-debug = true

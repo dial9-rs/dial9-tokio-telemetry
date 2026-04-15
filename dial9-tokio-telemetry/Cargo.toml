@@ -17,7 +17,6 @@ all-features = true
 
 [dependencies]
 tokio = { version = "1.52.0", features = ["rt", "macros", "time", "rt-multi-thread", "sync", "net", "io-util", "taskdump"] }
-backtrace = "0.3"
 tokio-util = "0.7"
 arc-swap = "1"
 crossbeam-queue = "0.3"

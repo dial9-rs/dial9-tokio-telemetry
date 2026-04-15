@@ -124,6 +124,8 @@ fn per_task_override_does_not_leak_across_tasks() {
             dial9_tokio_telemetry::enable_task_dumps();
             // Sleep long enough to exceed the 10ms default threshold
             tokio::time::sleep(Duration::from_millis(50)).await;
+            // Sleep long enough to exceed the 10ms default threshold
+            tokio::time::sleep(Duration::from_millis(50)).await;
         });
 
         // Task B: does NOT opt in — must produce zero TaskDump events

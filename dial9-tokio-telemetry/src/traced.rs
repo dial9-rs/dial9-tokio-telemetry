@@ -66,8 +66,10 @@ pin_project! {
         handle: TracedHandle,
         task_id: TaskId,
         waker_data: Arc<TracedWakerData>, // reused across polls to avoid a per-poll Arc allocation
-        // Task dump state: captured backtraces from yield points
-        pending_frames: Vec<Vec<u64>>,
+        // Task dump state: flat buffer of IPs from all yield-point backtraces,
+        // with `frame_offsets` marking the start of each callchain.
+        // Reused across captures to avoid per-poll allocation.
+        frames: FrameBuf,
         pending_capture_ts: u64,
         // Per-task opt-in: latched from thread-local on first poll that sees it
         task_dump_override: bool,
@@ -92,7 +94,7 @@ impl<F> Traced<F> {
             handle,
             task_id,
             waker_data,
-            pending_frames: Vec::new(),
+            frames: FrameBuf::new(),
             pending_capture_ts: 0,
             task_dump_override: false,
             task_dump_threshold_ns,
@@ -134,58 +136,77 @@ fn make_traced_waker(data: Arc<TracedWakerData>) -> Waker {
     arc_waker(data)
 }
 
-/// Emit `RawEvent::TaskDump` for each stored backtrace, then clear the vec.
-fn emit_task_dumps(
-    shared: &SharedState,
-    task_id: TaskId,
-    capture_ts: u64,
-    frames: &mut Vec<Vec<u64>>,
-) {
-    for callchain in frames.drain(..) {
-        shared.record_event(crate::telemetry::events::RawEvent::TaskDump {
-            timestamp_nanos: capture_ts,
-            task_id,
-            callchain,
-        });
-    }
+/// Flat, reusable buffer for storing multiple callchains without per-chain allocation.
+///
+/// IPs from all yield-point backtraces are appended to `ips`, with `offsets`
+/// recording the start index of each callchain. Reused across captures so the
+/// only allocation after the first capture is the `to_vec()` slice in `emit`.
+///
+/// Most futures have a small number of yield points, so `offsets` uses a
+/// `SmallVec` to avoid heap allocation in the common case.
+struct FrameBuf {
+    ips: Vec<u64>,
+    offsets: smallvec::SmallVec<[usize; 8]>,
 }
 
-/// Capture backtraces at yield points using `trace_with`.
-///
-/// Re-polls the inner future with a no-op waker inside `trace_with`.
-/// The callback fires at each yield point, where we use `backtrace::trace`
-/// to collect frame instruction pointers.
-fn capture_task_dump(inner: Pin<&mut impl Future>, frames: &mut Vec<Vec<u64>>) {
-    let noop_waker = Waker::noop();
-    let mut noop_cx = Context::from_waker(noop_waker);
-    frames.clear();
-    let frames_ref = &mut *frames;
-    tokio::runtime::dump::trace_with(
-        || {
-            let _ = inner.poll(&mut noop_cx);
-        },
-        |meta| {
-            let mut frame_ips = Vec::new();
-            let mut above_leaf = false;
-            let root_addr = meta.root_addr;
-            let leaf_addr = meta.trace_leaf_addr;
-            backtrace::trace(|frame| {
-                let below_root = root_addr
-                    .map_or(true, |root| !std::ptr::eq(frame.symbol_address(), root));
+/// Initial capacity for the IP buffer, reserved on first capture.
+const FRAME_BUF_INITIAL_CAPACITY: usize = 256;
 
-                if above_leaf && below_root {
-                    frame_ips.push(frame.ip() as u64);
-                }
+impl FrameBuf {
+    fn new() -> Self {
+        Self {
+            ips: Vec::new(),
+            offsets: smallvec::SmallVec::new(),
+        }
+    }
 
-                if std::ptr::eq(frame.symbol_address(), leaf_addr) {
-                    above_leaf = true;
-                }
+    fn clear(&mut self) {
+        self.ips.clear();
+        self.offsets.clear();
+    }
 
-                below_root
+    fn has_data(&self) -> bool {
+        !self.offsets.is_empty()
+    }
+
+    /// Emit each callchain as a `TaskDump` event, then clear.
+    fn emit(&mut self, shared: &SharedState, task_id: TaskId, capture_ts: u64) {
+        for i in 0..self.offsets.len() {
+            let start = self.offsets[i];
+            let end = self.offsets.get(i + 1).copied().unwrap_or(self.ips.len());
+            shared.record_event(crate::telemetry::events::RawEvent::TaskDump {
+                timestamp_nanos: capture_ts,
+                task_id,
+                callchain: self.ips[start..end].to_vec(),
             });
-            frames_ref.push(frame_ips);
-        },
-    );
+        }
+        self.clear();
+    }
+
+    /// Capture backtraces at yield points using `trace_with`.
+    ///
+    /// Re-polls the inner future with a no-op waker inside `trace_with`.
+    /// The callback fires at each yield point, where we call `_Unwind_Backtrace`
+    /// directly — without the global mutex that `backtrace::trace` acquires.
+    fn capture(&mut self, inner: Pin<&mut impl Future>) {
+        let noop_waker = Waker::noop();
+        let mut noop_cx = Context::from_waker(noop_waker);
+        if self.ips.capacity() == 0 {
+            self.ips.reserve(FRAME_BUF_INITIAL_CAPACITY);
+        }
+        self.clear();
+        let ips = &mut self.ips;
+        let offsets = &mut self.offsets;
+        tokio::runtime::dump::trace_with(
+            || {
+                let _ = inner.poll(&mut noop_cx);
+            },
+            |meta| {
+                offsets.push(ips.len());
+                crate::unwind::collect_frames(ips, meta.root_addr, meta.trace_leaf_addr);
+            },
+        );
+    }
 }
 
 impl<F: Future> Future for Traced<F> {
@@ -200,13 +221,13 @@ impl<F: Future> Future for Traced<F> {
         // --- Pre-poll: compute elapsed since last capture ---
         let now = crate::telemetry::events::clock_monotonic_ns();
         let threshold = *this.task_dump_threshold_ns;
-        let had_frames = !this.pending_frames.is_empty();
+        let had_frames = this.frames.has_data();
         let elapsed = if had_frames {
-            now.saturating_sub(*this.pending_capture_ts)
+            Some(now.saturating_sub(*this.pending_capture_ts))
         } else {
-            0
+            None
         };
-        let should_emit = had_frames && elapsed > threshold;
+        let should_emit = elapsed.is_some_and(|elapsed| elapsed > threshold);
 
         // Store (or replace) the executor's waker so that when our custom
         // waker fires it can forward the notification to the correct waker,
@@ -214,49 +235,43 @@ impl<F: Future> Future for Traced<F> {
         // between polls.
         this.waker_data.inner.register(cx.waker());
 
+        let dumps_enabled = this
+            .handle
+            .shared
+            .task_dumps_enabled
+            .load(Ordering::Relaxed)
+            || *this.task_dump_override;
+
         let traced_waker = make_traced_waker(this.waker_data.clone());
         let mut traced_cx = Context::from_waker(&traced_waker);
         let result = this.inner.as_mut().poll(&mut traced_cx);
 
+        // Latch the thread-local override onto this instance so it
+        // persists across polls and doesn't leak to other tasks.
+        // (this must happen after the first call to poll)
+        if take_task_dump_override() {
+            *this.task_dump_override = true;
+        }
+
         match &result {
             Poll::Ready(_) => {
                 if should_emit {
-                    emit_task_dumps(
-                        &this.handle.shared,
-                        *this.task_id,
-                        *this.pending_capture_ts,
-                        this.pending_frames,
-                    );
+                    this.frames
+                        .emit(&this.handle.shared, *this.task_id, *this.pending_capture_ts);
                 }
-                this.pending_frames.clear();
+                this.frames.clear();
             }
             Poll::Pending => {
-                // Latch the thread-local override onto this instance so it
-                // persists across polls and doesn't leak to other tasks.
-                if take_task_dump_override() {
-                    *this.task_dump_override = true;
-                }
-                let dumps_enabled = this
-                    .handle
-                    .shared
-                    .task_dumps_enabled
-                    .load(Ordering::Relaxed)
-                    || *this.task_dump_override;
                 if dumps_enabled {
                     if should_emit {
-                        emit_task_dumps(
+                        this.frames.emit(
                             &this.handle.shared,
                             *this.task_id,
                             *this.pending_capture_ts,
-                            this.pending_frames,
                         );
                     }
-                    // Capture new frames if: first pending (no stored frames) OR elapsed > threshold
-                    if !had_frames || elapsed > threshold {
-                        capture_task_dump(this.inner, this.pending_frames);
-                        *this.pending_capture_ts = crate::telemetry::events::clock_monotonic_ns();
-                    }
-                    // else: keep existing frames (elapsed <= threshold)
+                    this.frames.capture(this.inner);
+                    *this.pending_capture_ts = crate::telemetry::events::clock_monotonic_ns();
                 }
             }
         }

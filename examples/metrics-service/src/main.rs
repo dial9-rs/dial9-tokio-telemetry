@@ -160,9 +160,8 @@ fn main() -> std::io::Result<()> {
     // Write flush metrics (including dropped_batches) to a file for diagnostics
     let metrics_path = format!("{}.metrics.jsonl", args.trace_path);
     let metrics_file = std::fs::File::create(&metrics_path)?;
-    let metrics_sink = FlushImmediatelyBuilder::new().build_boxed(
-        LocalFormat::compact_json().output_to(std::io::BufWriter::new(metrics_file)),
-    );
+    let metrics_sink = FlushImmediatelyBuilder::new()
+        .build_boxed(LocalFormat::compact_json().output_to(std::io::BufWriter::new(metrics_file)));
     let mut traced_builder = traced_builder.with_worker_metrics_sink(metrics_sink);
     #[cfg(target_os = "linux")]
     {

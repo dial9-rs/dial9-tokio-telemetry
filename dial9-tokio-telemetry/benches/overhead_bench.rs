@@ -20,7 +20,7 @@ mod bmf;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    NullWriter, RotatingWriter, TelemetryGuard, TelemetryHandle, TracedRuntime,
+    NullWriter, RotatingWriter, TaskDumpConfig, TelemetryGuard, TelemetryHandle, TracedRuntime,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -124,9 +124,21 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
                 .unwrap();
             (rt, Some(g))
         }
+        "taskdump" => {
+            let writer = RotatingWriter::single_file("/tmp/overhead_bench_trace.bin").unwrap();
+            let mut tb = TracedRuntime::builder()
+                .with_task_tracking(true)
+                .with_task_dumps(TaskDumpConfig::enabled());
+            #[cfg(target_os = "linux")]
+            {
+                tb = tb.with_cpu_profiling(CpuProfilingConfig::default());
+            }
+            let (rt, g) = tb.build_and_start(builder, writer).unwrap();
+            (rt, Some(g))
+        }
         "baseline" => (builder.build().unwrap(), None),
         other => {
-            eprintln!("unknown mode: {other} (expected: baseline, telemetry, noop)");
+            eprintln!("unknown mode: {other} (expected: baseline, telemetry, taskdump, noop)");
             std::process::exit(1);
         }
     };
