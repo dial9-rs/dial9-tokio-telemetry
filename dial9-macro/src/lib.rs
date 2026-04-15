@@ -76,8 +76,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// use dial9_tokio_telemetry::{main, config::Dial9Config, telemetry::TelemetryHandle};
 ///
 /// fn my_config() -> Dial9Config {
-///     Dial9Config::builder("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024)
-///         .build()
+///     Dial9Config::new("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024)
 /// }
 ///
 /// #[dial9_tokio_telemetry::main(config = my_config)]

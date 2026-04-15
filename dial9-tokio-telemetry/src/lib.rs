@@ -39,8 +39,7 @@ pub mod config;
 /// use dial9_tokio_telemetry::{main, config::Dial9Config, telemetry::TelemetryHandle};
 ///
 /// fn my_config() -> Dial9Config {
-///     Dial9Config::builder("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024)
-///         .build()
+///     Dial9Config::new("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024)
 /// }
 ///
 /// #[dial9_tokio_telemetry::main(config = my_config)]

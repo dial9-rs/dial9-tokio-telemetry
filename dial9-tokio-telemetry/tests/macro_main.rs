@@ -10,7 +10,7 @@ fn tmp_base_path() -> PathBuf {
 }
 
 fn test_config() -> Dial9Config {
-    Dial9Config::builder(tmp_base_path(), 1024 * 1024, 4 * 1024 * 1024).build()
+    Dial9Config::new(tmp_base_path(), 1024 * 1024, 4 * 1024 * 1024)
 }
 
 #[dial9_tokio_telemetry::main(config = test_config)]

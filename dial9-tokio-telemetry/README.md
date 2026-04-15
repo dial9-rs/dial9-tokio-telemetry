@@ -32,7 +32,7 @@ There are two ways to set up dial9: the `#[main]` macro (recommended for most ap
 use dial9_tokio_telemetry::{main, config::Dial9Config, telemetry::TelemetryHandle};
 
 fn my_config() -> Dial9Config {
-    Dial9Config::builder(
+    Dial9Config::new(
         "/tmp/my_traces/trace.bin",
         1024 * 1024,      // rotate after 1 MiB per file
         5 * 1024 * 1024,  // keep at most 5 MiB on disk
@@ -40,7 +40,6 @@ fn my_config() -> Dial9Config {
     .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
     .with_runtime(|r| r.with_runtime_name("main").with_task_tracking(true))  // TracedRuntime knobs
     .with_tokio(|t| { t.worker_threads(4); }) // tokio knobs
-    .build()
 }
 
 #[dial9_tokio_telemetry::main(config = my_config)]
