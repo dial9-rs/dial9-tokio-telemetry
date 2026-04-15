@@ -2,7 +2,7 @@ use dial9_trace_format::encoder::{Encoder, RawEncoder};
 
 use crate::rate_limit::rate_limited;
 use crate::telemetry::collector::Batch;
-use crate::telemetry::events::{clock_monotonic_ns, clock_pair};
+use crate::telemetry::events::clock_pair;
 use crate::telemetry::format::{ClockSyncEvent, SegmentMetadataEvent};
 use std::collections::VecDeque;
 use std::fs::{self, File};
@@ -277,11 +277,11 @@ impl RotatingWriter {
     ) -> std::io::Result<RawEncoder<BufWriter<File>>> {
         let mut encoder = Encoder::new_to(writer)?;
         let entries = segment_metadata.to_vec();
+        let (mono, real) = clock_pair();
         encoder.write(&SegmentMetadataEvent {
-            timestamp_ns: clock_monotonic_ns(),
+            timestamp_ns: mono,
             entries,
         })?;
-        let (mono, real) = clock_pair();
         encoder.write(&ClockSyncEvent {
             timestamp_ns: mono,
             realtime_ns: real,
@@ -297,11 +297,11 @@ impl RotatingWriter {
         };
         let entries = self.segment_metadata.clone();
         let mut enc = Encoder::new();
+        let (mono, real) = clock_pair();
         enc.write(&SegmentMetadataEvent {
-            timestamp_ns: clock_monotonic_ns(),
+            timestamp_ns: mono,
             entries,
         })?;
-        let (mono, real) = clock_pair();
         enc.write(&ClockSyncEvent {
             timestamp_ns: mono,
             realtime_ns: real,
