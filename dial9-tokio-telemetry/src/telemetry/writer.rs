@@ -1,5 +1,6 @@
 use dial9_trace_format::encoder::{Encoder, RawEncoder};
 
+use crate::rate_limit::rate_limited;
 use crate::telemetry::collector::Batch;
 use crate::telemetry::format::SegmentMetadataEvent;
 use std::collections::VecDeque;
@@ -433,16 +434,23 @@ impl RotatingWriter {
                                     && name_str != file_name
                                     && let Err(e2) = fs::remove_file(entry.path())
                                 {
-                                    tracing::warn!(
-                                        "failed to evict old trace segment {}: {e2}",
-                                        entry.path().display()
-                                    );
+                                    rate_limited!(Duration::from_secs(60), {
+                                        tracing::warn!(
+                                            "failed to evict old trace segment {}: {e2}",
+                                            entry.path().display()
+                                        );
+                                    });
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("failed to evict old trace segment {}: {e}", path.display());
+                        rate_limited!(Duration::from_secs(60), {
+                            tracing::warn!(
+                                "failed to evict old trace segment {}: {e}",
+                                path.display()
+                            );
+                        });
                     }
                 }
             }
@@ -505,7 +513,9 @@ impl TraceWriter for RotatingWriter {
 
     fn finalize(&mut self) -> std::io::Result<()> {
         if matches!(self.state, WriterState::Finished) {
-            tracing::warn!("writer is already closed.")
+            rate_limited!(Duration::from_secs(60), {
+                tracing::warn!("writer is already closed.");
+            });
         }
         self.flush()?;
         // Rename .active → .bin for the current segment (if it has .active suffix)
@@ -563,11 +573,13 @@ impl TraceWriter for RotatingWriter {
 impl Drop for RotatingWriter {
     fn drop(&mut self) {
         if self.dropped_events > 0 {
-            tracing::info!(
-                target: "dial9_telemetry",
-                dropped_events = self.dropped_events,
-                "RotatingWriter dropped events after finalization"
-            );
+            rate_limited!(Duration::from_secs(60), {
+                tracing::info!(
+                    target: "dial9_telemetry",
+                    dropped_events = self.dropped_events,
+                    "RotatingWriter dropped events after finalization"
+                );
+            });
         }
     }
 }

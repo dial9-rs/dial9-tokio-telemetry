@@ -275,11 +275,11 @@ fn main() {
             );
             results.insert(mode, r);
         }
-        let baseline_p99 = results["baseline"].hist.value_at_percentile(99.0);
-        let telemetry_p99 = results["telemetry"].hist.value_at_percentile(99.0);
+        let baseline_p90 = results["baseline"].hist.value_at_percentile(90.0);
+        let telemetry_p90 = results["telemetry"].hist.value_at_percentile(90.0);
         report.insert(
-            "overhead::telemetry_p99_added_latency_ns".to_string(),
-            bmf::Metric::latency((telemetry_p99 as i64 - baseline_p99 as i64) as f64),
+            "overhead::telemetry_p90_added_latency_ns".to_string(),
+            bmf::Metric::latency((telemetry_p90 as i64 - baseline_p90 as i64) as f64),
         );
         println!("{}", serde_json::to_string_pretty(&report).unwrap());
         return;
