@@ -55,7 +55,7 @@ async fn main() {
 }
 ```
 
-The macro automatically spawns your function body as a task, so top-level code is visible in traces (unlike plain `#[tokio::main]` where `block_on` work is invisible — see [below](#the-root-future-is-not-instrumented)). On every runtime-owned thread, dial9 installs a [`TelemetryHandle`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/telemetry/struct.TelemetryHandle.html) via `on_thread_start` — `TelemetryHandle::current()` returns it for spawning sub-tasks with wake-event tracking.
+The macro automatically spawns your function body as a task, so top-level code is visible in traces (unlike plain `#[tokio::main]` where `block_on` work is invisible — see [below](#the-root-future-is-not-instrumented)). On every runtime-owned thread, dial9 installs a `TelemetryHandle` via `on_thread_start` — `TelemetryHandle::current()` returns it for spawning sub-tasks with wake-event tracking.
 
 ### Manual setup
 
@@ -320,7 +320,7 @@ See [TRACE_ANALYSIS_GUIDE.md](/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) fo
 
 With the `worker-s3` feature, sealed trace segments are automatically gzip-compressed and uploaded to S3 by a background worker thread. The application process is unaffected: uploads happen asynchronously after segments are sealed.
 
-Only `bucket` and `service_name` are required. See [`S3Config`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/background_task/s3/struct.S3Config.html) for additional options.
+Only `bucket` and `service_name` are required. See `S3Config` for additional options.
 
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
@@ -396,7 +396,7 @@ Overhead:   3.2%
 This repo is a Cargo workspace with four members:
 
 - [`dial9-tokio-telemetry`](/dial9-tokio-telemetry) — the main crate
-- [`dial9-macro`](/dial9-macro) — the `#[dial9_tokio_telemetry::main]` attribute macro ([docs](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/attr.main.html))
+- [`dial9-macro`](/dial9-macro) — the `#[dial9_tokio_telemetry::main]` attribute macro
 - [`dial9-perf-self-profile`](/perf-self-profile) — minimal Linux `perf_event_open` wrapper for CPU profiling and scheduler events
 - [`examples/metrics-service`](/examples/metrics-service) — end-to-end example service
 
