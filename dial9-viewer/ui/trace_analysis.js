@@ -549,11 +549,24 @@
         if (polls[mid].start <= dump.timestamp) { best = mid; lo = mid + 1; }
         else hi = mid - 1;
       }
-      // The idle gap at index `best` follows polls[best]
-      if (best >= 0 && best < idles.length) {
-        idles[best].dumps.push(dump);
+      // Determine whether the dump falls inside polls[best] or in the
+      // idle gap after it.  Dumps captured by Traced::poll have their
+      // timestamp set at the end of the poll (inside the poll span),
+      // representing what the task was waiting on during the idle
+      // *before* that poll — so attach to idles[best - 1].
+      // If the timestamp is after polls[best].end it genuinely falls
+      // in the idle gap following that poll — attach to idles[best].
+      let idleIdx;
+      if (best >= 0 && dump.timestamp <= polls[best].end) {
+        // Inside the poll → belongs to the preceding idle
+        idleIdx = best - 1;
+      } else {
+        // After the poll → belongs to the following idle
+        idleIdx = best;
+      }
+      if (idleIdx >= 0 && idleIdx < idles.length) {
+        idles[idleIdx].dumps.push(dump);
       } else if (idles.length > 0) {
-        // Dump is before first poll — attach to first idle
         idles[0].dumps.push(dump);
       }
     }

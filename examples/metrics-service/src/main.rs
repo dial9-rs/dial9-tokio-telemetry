@@ -11,6 +11,9 @@ use clap::Parser;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use metrique::local::LocalFormat;
+use metrique::writer::FormatExt;
+use metrique::writer::sink::FlushImmediatelyBuilder;
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
@@ -127,10 +130,10 @@ fn main() -> std::io::Result<()> {
     let mut args = Args::parse();
 
     if args.demo {
-        args.run_duration = 4;
+        args.run_duration = 8;
         args.worker_threads = 2;
-        args.trace_max_file_size = 5_000_000;
-        args.trace_max_total_size = 5_000_000;
+        args.trace_max_file_size = 50_000_000;
+        args.trace_max_total_size = 50_000_000;
     }
 
     let writer = RotatingWriter::builder()
@@ -153,6 +156,14 @@ fn main() -> std::io::Result<()> {
         .with_trace_path(&args.trace_path)
         .with_task_tracking(true)
         .with_task_dumps(dial9_tokio_telemetry::telemetry::TaskDumpConfig::enabled());
+
+    // Write flush metrics (including dropped_batches) to a file for diagnostics
+    let metrics_path = format!("{}.metrics.jsonl", args.trace_path);
+    let metrics_file = std::fs::File::create(&metrics_path)?;
+    let metrics_sink = FlushImmediatelyBuilder::new().build_boxed(
+        LocalFormat::compact_json().output_to(std::io::BufWriter::new(metrics_file)),
+    );
+    let mut traced_builder = traced_builder.with_worker_metrics_sink(metrics_sink);
     #[cfg(target_os = "linux")]
     {
         traced_builder = traced_builder

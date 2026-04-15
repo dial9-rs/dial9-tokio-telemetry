@@ -164,11 +164,24 @@ fn capture_task_dump(inner: Pin<&mut impl Future>, frames: &mut Vec<Vec<u64>>) {
         || {
             let _ = inner.poll(&mut noop_cx);
         },
-        |_meta| {
+        |meta| {
             let mut frame_ips = Vec::new();
+            let mut above_leaf = false;
+            let root_addr = meta.root_addr;
+            let leaf_addr = meta.trace_leaf_addr;
             backtrace::trace(|frame| {
-                frame_ips.push(frame.ip() as u64);
-                true
+                let below_root = root_addr
+                    .map_or(true, |root| !std::ptr::eq(frame.symbol_address(), root));
+
+                if above_leaf && below_root {
+                    frame_ips.push(frame.ip() as u64);
+                }
+
+                if std::ptr::eq(frame.symbol_address(), leaf_addr) {
+                    above_leaf = true;
+                }
+
+                below_root
             });
             frames_ref.push(frame_ips);
         },
@@ -523,5 +536,70 @@ mod tests {
             ends_off, ends_on,
             "PollEnd count differs: without dumps={ends_off}, with dumps={ends_on}"
         );
+    }
+
+    /// A future that sleeps 20ms five times should produce ~5 TaskDump events
+    /// (one per idle period that exceeds the threshold).
+    #[test]
+    #[cfg(feature = "analysis")]
+    fn repeated_sleeps_produce_multiple_task_dumps() {
+        use crate::telemetry::analysis::TraceReader;
+        use crate::telemetry::task_dump_config::TaskDumpConfig;
+
+        let dir = TempDir::new().unwrap();
+        let trace_path = dir.path().join("trace.bin");
+
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let (runtime, guard) = TracedRuntime::builder()
+            .with_task_tracking(true)
+            .with_task_dumps(
+                TaskDumpConfig::builder()
+                    .idle_threshold(std::time::Duration::from_millis(5))
+                    .build(),
+            )
+            .build_and_start(builder, RotatingWriter::single_file(&trace_path).unwrap())
+            .unwrap();
+
+        let handle = guard.handle();
+        let spawned_id: Arc<Mutex<TaskId>> = Arc::new(Mutex::new(UNKNOWN_TASK_ID));
+        let id_write = spawned_id.clone();
+
+        runtime.block_on(async {
+            let join = handle.spawn(async move {
+                *id_write.lock().unwrap() = tokio::task::try_id()
+                    .map(TaskId::from)
+                    .unwrap_or(UNKNOWN_TASK_ID);
+                for _ in 0..5 {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            });
+            join.await.unwrap();
+        });
+
+        drop(runtime);
+        drop(guard);
+
+        let sealed = dir.path().join("trace.0.bin");
+        let reader = TraceReader::new(sealed.to_str().unwrap()).unwrap();
+        let expected_id = *spawned_id.lock().unwrap();
+
+        let dump_count = reader
+            .runtime_events
+            .iter()
+            .filter(|e| {
+                matches!(e, TelemetryEvent::TaskDump { task_id, .. } if *task_id == expected_id)
+            })
+            .count();
+
+        // Each 20ms sleep exceeds the 5ms threshold, so we expect a dump
+        // emitted for each idle period. With 5 sleeps there are 5 idle
+        // periods, so we should see at least 4 dumps (first capture has
+        // nothing to emit yet; subsequent polls emit the previous capture).
+        assert!(
+            dump_count >= 4,
+            "expected at least 4 TaskDump events for 5×20ms sleeps, got {dump_count}"
+        );
+        eprintln!("dump_count = {dump_count}");
     }
 }
