@@ -391,9 +391,7 @@ pub fn clock_monotonic_ns() -> u64 {
     EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64
 }
 
-/// `CLOCK_REALTIME` in nanoseconds since the Unix epoch. Only for
-/// clock-correlation anchors — never as an event time source, since
-/// realtime jumps under NTP/suspend/manual edits.
+/// `CLOCK_REALTIME` in nanoseconds since the Unix epoch.
 #[cfg(target_os = "linux")]
 pub(crate) fn clock_realtime_ns() -> u64 {
     let mut ts = libc::timespec {
@@ -416,7 +414,7 @@ pub(crate) fn clock_realtime_ns() -> u64 {
 }
 
 /// Snapshot `(monotonic_ns, realtime_ns)` as close together as possible.
-/// Reads M₁ → R → M₂ and pairs `R` with the midpoint of M₁ and M₂ so
+/// Reads M₁ -> R -> M₂ and pairs `R` with the midpoint of M₁ and M₂ so
 /// the correlation error is half the `clock_gettime` interval.
 pub(crate) fn clock_pair() -> (u64, u64) {
     let m1 = clock_monotonic_ns();

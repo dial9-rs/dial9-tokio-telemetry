@@ -154,11 +154,6 @@
     let minMonoTs = null;
 
     const capped = () => events.length >= maxEvents;
-    // Frames processed regardless of event cap:
-    // - SymbolTableEntry: symbol tables are needed to resolve addresses in all other frames
-    // - TaskSpawnEvent/TaskTerminateEvent: task lifecycle tracking for the task list view
-    // - CpuSampleEvent: CPU samples feed the flame graph, which should reflect the full trace
-    // - ClockSyncEvent: to convert any timestamp to wall clock
     const UNCAPPED_FRAMES = new Set([
       "TaskSpawnEvent",
       "TaskTerminateEvent",
