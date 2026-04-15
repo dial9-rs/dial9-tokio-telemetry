@@ -26,8 +26,9 @@
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                height: 100vh;
-                width: 100vw;
+                flex: 1;
+                min-height: 0;
+                box-sizing: border-box;
                 border: 3px dashed #444;
                 border-radius: 12px;
                 margin: 20px;
@@ -44,6 +45,33 @@
             }
             #drop-zone input {
                 display: none;
+            }
+
+            #drag-overlay {
+                display: none;
+                position: fixed;
+                inset: 20px;
+                z-index: 300;
+                pointer-events: none;
+                align-items: center;
+                justify-content: center;
+                background: rgba(26, 26, 46, 0.75);
+                border: 3px dashed #6c63ff;
+                border-radius: 12px;
+                backdrop-filter: blur(2px);
+            }
+            #drag-overlay .drag-overlay-msg {
+                color: #6c63ff;
+                font-size: 1.4em;
+                font-weight: 600;
+                text-align: center;
+            }
+            #drag-overlay .drag-overlay-msg small {
+                display: block;
+                font-size: 0.65em;
+                font-weight: 400;
+                color: #8a8ac0;
+                margin-top: 8px;
             }
 
             @keyframes spin { to { transform: rotate(360deg); } }
@@ -64,7 +92,8 @@
             #viewer {
                 display: none;
                 flex-direction: column;
-                height: 100vh;
+                flex: 1;
+                min-height: 0;
                 overflow: hidden;
             }
 
@@ -363,6 +392,12 @@
         </style>
     </head>
     <body>
+        <div id="drag-overlay">
+            <div class="drag-overlay-msg">
+                Drop trace file to load
+                <small>Replaces the current trace</small>
+            </div>
+        </div>
         <div id="drop-zone">
             <div>
                 <div style="font-size: 2em; margin-bottom: 12px">📊</div>
@@ -649,8 +684,12 @@
 
             // ── DOM refs ──
             const dropZone = document.getElementById("drop-zone");
+            const dragOverlay = document.getElementById("drag-overlay");
             const fileInput = document.getElementById("file-input");
             const viewer = document.getElementById("viewer");
+            const fgPanel = document.getElementById("flamegraph-panel");
+            const taskDetailPanel = document.getElementById("task-detail");
+            const clearRangeBtn = document.getElementById("btn-clear-range");
             const tooltip = document.getElementById("tooltip");
             const timelineCanvas = document.getElementById("timeline-canvas");
             const queueCanvas = document.getElementById("queue-canvas");
@@ -658,50 +697,118 @@
 
             // ── File loading ──
             dropZone.addEventListener("click", () => fileInput.click());
-            dropZone.addEventListener("dragover", (e) => {
-                e.preventDefault();
-                dropZone.classList.add("dragover");
-            });
-            dropZone.addEventListener("dragleave", () =>
-                dropZone.classList.remove("dragover"),
-            );
-            dropZone.addEventListener("drop", (e) => {
-                e.preventDefault();
+
+            // Drop a trace file anywhere in the window to load (or replace) it.
+            let dragCounter = 0;
+            const isFileDrag = (e) => e.dataTransfer?.types.includes("Files");
+
+            // The drop-zone has its own dragover styling, so on first load let
+            // it do the talking; use the full-screen overlay only when a trace
+            // is already loaded (replacement).
+            const showDragFeedback = () => {
+                if (viewer.style.display === "flex") dragOverlay.style.display = "flex";
+                else dropZone.classList.add("dragover");
+            };
+            const hideDragFeedback = () => {
+                dragOverlay.style.display = "none";
                 dropZone.classList.remove("dragover");
-                loadFile(e.dataTransfer.files[0]);
+            };
+
+            document.addEventListener("dragenter", (e) => {
+                if (!isFileDrag(e)) return;
+                e.preventDefault();
+                if (++dragCounter === 1) showDragFeedback();
             });
+            document.addEventListener("dragover", (e) => {
+                if (isFileDrag(e)) e.preventDefault(); // required so `drop` fires
+            });
+            document.addEventListener("dragleave", (e) => {
+                if (!isFileDrag(e)) return;
+                if (--dragCounter <= 0) {
+                    dragCounter = 0;
+                    hideDragFeedback();
+                }
+            });
+            document.addEventListener("drop", (e) => {
+                if (!isFileDrag(e)) return;
+                e.preventDefault();
+                dragCounter = 0;
+                hideDragFeedback();
+                const file = e.dataTransfer.files[0];
+                if (file) loadFile(file);
+            });
+
             fileInput.addEventListener("change", (e) => {
                 if (e.target.files[0]) loadFile(e.target.files[0]);
             });
-            document
-                .getElementById("btn-reset")
-                .addEventListener("click", () => {
-                    viewer.style.display = "none";
-                    resetDropZone();
-                });
+            document.getElementById("btn-reset").addEventListener("click", () => {
+                resetTraceState({ clearUrlRange: true });
+                currentTraceBuffer = null;
+                currentTraceName = null;
+                viewer.style.display = "none";
+                resetDropZone();
+            });
 
-            function loadFile(file) {
-                showLoadingState(`Loading ${file.name}…`);
-                const reader = new FileReader();
-                reader.onload = async (e) => {
-                    try {
-                        const opts = getParseOptions();
-                        opts.onProgress = ({ bytesRead, totalBytes, eventCount }) => {
+            // Raw bytes of the current trace, retained so Set/Clear Range can
+            // re-parse in memory with a different time filter.
+            let currentTraceBuffer = null;
+            let currentTraceName = null;
+
+            /** Clear UI state tied to the current trace so it doesn't leak into the next one. */
+            function resetTraceState({ clearUrlRange } = {}) {
+                selectedTaskId = null;
+                hoveredWakerTaskId = null;
+                fgPanel.style.display = "none";
+                taskDetailPanel.style.display = "none";
+                schedPanelTimeRange = null;
+
+                // Default: clear the URL range only when replacing a visible
+                // trace. On first load the user may have navigated here with
+                // ?start/?end deliberately.
+                const shouldClear = clearUrlRange ?? (viewer.style.display === "flex");
+                if (shouldClear) {
+                    updateUrlTimeRange(null, null);
+                    clearRangeBtn.style.display = "none";
+                }
+            }
+
+            function enterLoadingView(label) {
+                viewer.style.display = "none";
+                dropZone.style.display = "flex";
+                showLoadingState(label);
+            }
+
+            /** Parse an already-fetched buffer and show the viewer. */
+            async function parseAndShowTrace(buffer, name, opts = {}) {
+                try {
+                    const fullOpts = {
+                        ...opts,
+                        onProgress: ({ bytesRead, totalBytes, eventCount }) => {
                             const pct = ((bytesRead / totalBytes) * 100) | 0;
                             updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
-                        };
-                        updateLoadProgress("Decompressing…");
-                        trace = await parseTrace(e.target.result, opts);
-                        updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
-                        await new Promise((r) => setTimeout(r, 0));
-                        processTrace();
-                        showViewer(file.name);
-                    } catch (err) {
-                        alert("Error: " + err.message);
-                        resetDropZone();
-                    }
-                };
-                // Read the full file — time range filtering handles large traces
+                        },
+                    };
+                    updateLoadProgress("Decompressing…");
+                    trace = await parseTrace(buffer, fullOpts);
+                    updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
+                    await new Promise((r) => setTimeout(r, 0));
+                    processTrace();
+                    currentTraceBuffer = buffer;
+                    currentTraceName = name;
+                    showViewer(name);
+                } catch (err) {
+                    if (err.name === "AbortError") return;
+                    alert("Error: " + err.message);
+                    resetDropZone();
+                }
+            }
+
+            function loadFile(file) {
+                resetTraceState();
+                enterLoadingView(`Loading ${file.name}…`);
+                const reader = new FileReader();
+                reader.onload = (e) =>
+                    parseAndShowTrace(e.target.result, file.name, getParseOptions());
                 reader.readAsArrayBuffer(file);
             }
 
@@ -753,22 +860,28 @@
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const arrayBuffer = await response.arrayBuffer();
                     loadAbortController = null;
-                    const opts = getParseOptions();
-                    opts.onProgress = ({ bytesRead, totalBytes, eventCount }) => {
-                        const pct = ((bytesRead / totalBytes) * 100) | 0;
-                        updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
-                    };
-                    updateLoadProgress("Decompressing…");
-                    trace = await parseTrace(arrayBuffer, opts);
-                    updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
-                    await new Promise((r) => setTimeout(r, 0));
-                    processTrace();
-                    showViewer(url.split('/').pop() || 'trace.bin');
+                    const name = url.split('/').pop() || 'trace.bin';
+                    await parseAndShowTrace(arrayBuffer, name, getParseOptions());
                 } catch (err) {
                     if (err.name === 'AbortError') return;
                     alert("Error loading trace from URL: " + err.message);
                     resetDropZone();
                 }
+            }
+
+            /** Re-parse the current buffer with a different time range, no reload. */
+            async function reparseWithRange(startNs, endNs) {
+                if (!currentTraceBuffer) return;
+                updateUrlTimeRange(startNs, endNs);
+                resetTraceState({ clearUrlRange: false });
+                enterLoadingView(`Loading ${currentTraceName}…`);
+
+                const opts = {};
+                if (startNs != null) opts.startTime = startNs;
+                if (endNs != null) opts.endTime = endNs;
+                await parseAndShowTrace(currentTraceBuffer, currentTraceName, opts);
+
+                clearRangeBtn.style.display = (startNs != null || endNs != null) ? "" : "none";
             }
 
             // Check for URL parameter on load
@@ -1992,19 +2105,11 @@
 
             // ── Time Range Filter ──
             document.getElementById("btn-set-range").addEventListener("click", () => {
-                // Use current view window as the time range filter
-                const startNs = Math.round(viewStart);
-                const endNs = Math.round(viewEnd);
-                updateUrlTimeRange(startNs, endNs);
-                window.location.reload();
+                reparseWithRange(Math.round(viewStart), Math.round(viewEnd));
             });
-            document.getElementById("btn-clear-range").addEventListener("click", () => {
-                updateUrlTimeRange(null, null);
-                window.location.reload();
-            });
-            // Show/hide clear range button based on whether a filter is active
+            clearRangeBtn.addEventListener("click", () => reparseWithRange(null, null));
             if (urlParams.get('start') != null || urlParams.get('end') != null) {
-                document.getElementById("btn-clear-range").style.display = "";
+                clearRangeBtn.style.display = "";
             }
             document.getElementById("btn-time-mode").addEventListener("click", () => {
                 useAbsoluteTime = !useAbsoluteTime;
