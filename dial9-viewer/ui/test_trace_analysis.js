@@ -7,9 +7,7 @@ const { EVENT_TYPES, parseTrace } = require("./trace_parser.js");
 const {
   buildWorkerSpans,
   attachCpuSamples,
-  extractLocalQueueSamples,
   buildActiveTaskTimeline,
-  indexWakeEvents,
   computeSchedulingDelays,
   filterPointsOfInterest,
   buildFlamegraphTree,
@@ -56,7 +54,7 @@ async function main() {
 
   // ── buildWorkerSpans ──
 
-  const { workerSpans, perWorker, queueSamples } = buildWorkerSpans(
+  const { workerSpans, perWorker, queueSamples, workerQueueSamples, maxLocalQueue, wakesByTask, wakesByWorker } = buildWorkerSpans(
     evts,
     workerIds,
     maxTs
@@ -146,12 +144,7 @@ async function main() {
     );
   }
 
-  // ── extractLocalQueueSamples ──
-
-  const { workerQueueSamples, maxLocalQueue } = extractLocalQueueSamples(
-    perWorker,
-    workerIds
-  );
+  // ── extractLocalQueueSamples (via buildWorkerSpans) ──
 
   function testLocalQueueNonNegative() {
     for (const w of workerIds) {
@@ -189,9 +182,7 @@ async function main() {
     pass("Task counts non-negative");
   }
 
-  // ── indexWakeEvents ──
-
-  const { wakesByTask, wakesByWorker } = indexWakeEvents(evts);
+  // ── indexWakeEvents (via buildWorkerSpans) ──
 
   function testWakesByTaskSorted() {
     for (const arr of Object.values(wakesByTask)) {
@@ -376,9 +367,28 @@ async function main() {
     pass("buildFgData returns null for empty samples");
   }
 
+  // ── Regression: open PollStart at trace end must not create phantom poll (#194) ──
+
+  function testOpenPollStartDiscarded() {
+    // Simulate a rotated segment where PollStart is the last event (no PollEnd).
+    const syntheticEvents = [
+      { eventType: EVENT_TYPES.PollStart, timestamp: 1000, workerId: 0, taskId: 1, spawnLocId: null, spawnLoc: null, localQueue: 0 },
+      { eventType: EVENT_TYPES.PollEnd,   timestamp: 2000, workerId: 0 },
+      // This PollStart has no matching PollEnd — file rotated
+      { eventType: EVENT_TYPES.PollStart, timestamp: 3000, workerId: 0, taskId: 2, spawnLocId: null, spawnLoc: null, localQueue: 0 },
+    ];
+    const syntheticMaxTs = 1_000_000; // 1ms later — would create a huge phantom poll
+    const result = buildWorkerSpans(syntheticEvents, [0], syntheticMaxTs);
+    const polls = result.workerSpans[0].polls;
+    if (polls.length !== 1) fail(`Expected 1 poll, got ${polls.length} — open PollStart was not discarded`);
+    if (polls[0].start !== 1000 || polls[0].end !== 2000) fail(`Unexpected poll range`);
+    pass("Open PollStart at trace end is discarded (no phantom long poll)");
+  }
+
   // ── Run all tests ──
 
   console.log("\nbuildWorkerSpans:");
+  testOpenPollStartDiscarded();
   testPollsHaveValidRange();
   testNoOverlappingPolls();
   testActiveRatiosInRange();

@@ -249,8 +249,17 @@
 
     // ── Timezone toggle ──
     document.getElementById('tz-btn').addEventListener('click', () => {
+        // Read current picker values in the OLD tz mode before toggling
+        const fromDate = pickerToDate(document.getElementById('range-from').value);
+        const toDate = pickerToDate(document.getElementById('range-to').value);
+
         useLocalTz = !useLocalTz;
         document.getElementById('tz-btn').textContent = useLocalTz ? 'TZ: Local' : 'TZ: UTC';
+
+        // Re-write picker values in the NEW tz mode
+        if (fromDate) document.getElementById('range-from').value = dateToPickerStr(fromDate);
+        if (toDate) document.getElementById('range-to').value = dateToPickerStr(toDate);
+
         // Re-render current view
         if (currentTab === 'browse') {
             if (selectedHost) showSegments(selectedHost);
@@ -317,12 +326,31 @@
             'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
     }
 
+    function toUTCDatetime(d) {
+        const pad = n => String(n).padStart(2, '0');
+        return d.getUTCFullYear() + '-' + pad(d.getUTCMonth()+1) + '-' + pad(d.getUTCDate()) +
+            'T' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
+    }
+
+    /** Format a Date for the datetime-local picker in the current TZ mode */
+    function dateToPickerStr(d) {
+        return useLocalTz ? toLocalDatetime(d) : toUTCDatetime(d);
+    }
+
+    /** Parse a datetime-local picker value into a Date using the current TZ mode */
+    function pickerToDate(str) {
+        if (!str) return null;
+        if (useLocalTz) return new Date(str);
+        // Treat the picker value as UTC
+        return new Date(str + 'Z');
+    }
+
     // ── Quick range buttons ──
     function setQuickRange(hours) {
         const now = new Date();
         const from = new Date(now.getTime() - hours * 3600 * 1000);
-        document.getElementById('range-from').value = toLocalDatetime(from);
-        document.getElementById('range-to').value = toLocalDatetime(now);
+        document.getElementById('range-from').value = dateToPickerStr(from);
+        document.getElementById('range-to').value = dateToPickerStr(now);
         // Highlight the selected quick button
         document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('selected'));
         const labels = {'1': 'Last 1hr', '3': 'Last 3hr', '24': 'Last 24hr'};
@@ -352,13 +380,13 @@
     // ── Generate hour-level prefixes for a time range ──
     function hourPrefixes(from, to) {
         const prefixes = [];
-        // Start at the beginning of `from`'s hour
+        // Start at the beginning of `from`'s hour (UTC — S3 keys use UTC)
         const cur = new Date(from);
-        cur.setMinutes(0, 0, 0);
+        cur.setUTCMinutes(0, 0, 0);
         while (cur <= to) {
             const pad = n => String(n).padStart(2, '0');
-            const dateStr = cur.getFullYear() + '-' + pad(cur.getMonth()+1) + '-' + pad(cur.getDate());
-            const hourStr = pad(cur.getHours());
+            const dateStr = cur.getUTCFullYear() + '-' + pad(cur.getUTCMonth()+1) + '-' + pad(cur.getUTCDate());
+            const hourStr = pad(cur.getUTCHours());
             prefixes.push(dateStr + '/' + hourStr);
             cur.setTime(cur.getTime() + 3600 * 1000);
         }
@@ -374,8 +402,8 @@
         const toStr = document.getElementById('range-to').value;
         if (!fromStr || !toStr) { alert('Select a time range'); return; }
 
-        const from = new Date(fromStr);
-        const to = new Date(toStr);
+        const from = pickerToDate(fromStr);
+        const to = pickerToDate(toStr);
         const prefixes = hourPrefixes(from, to);
 
         browseStatus.textContent = `Searching ${prefixes.length} hour(s)…`;

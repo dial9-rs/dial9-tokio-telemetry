@@ -9,6 +9,7 @@ use event_writer::EventWriter;
 use runtime_context::{make_poll_end, make_poll_start, make_worker_park, make_worker_unpark};
 
 use crate::metrics::{FlushMetrics, Operation, TlDrainMetrics};
+use crate::rate_limit::rate_limited;
 use crate::telemetry::buffer;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::task_metadata::TaskId;
@@ -66,17 +67,21 @@ fn flush_once(
 
     let dropped = shared.collector.take_dropped_batches();
     if dropped > 0 {
-        tracing::warn!(
-            dropped_batches = dropped,
-            "telemetry flush fell behind, dropped batches"
-        );
+        rate_limited!(Duration::from_secs(60), {
+            tracing::warn!(
+                dropped_batches = dropped,
+                "telemetry flush fell behind, dropped batches"
+            );
+        });
     }
 
     while let Some(batch) = shared.collector.next() {
         if batch.event_count > 0
             && let Err(e) = event_writer.write_encoded_batch(&batch)
         {
-            tracing::warn!("failed to transcode batch: {e}");
+            rate_limited!(Duration::from_secs(60), {
+                tracing::warn!("failed to transcode batch: {e}");
+            });
             shared.enabled.store(false, Ordering::Relaxed);
             return FlushStats {
                 event_count: event_writer.events_written() - events_before,
@@ -86,7 +91,9 @@ fn flush_once(
         }
     }
     if let Err(e) = event_writer.flush() {
-        tracing::warn!("failed to flush trace data: {e}");
+        rate_limited!(Duration::from_secs(60), {
+            tracing::warn!("failed to flush trace data: {e}");
+        });
     }
     FlushStats {
         event_count: event_writer.events_written() - events_before,
@@ -222,9 +229,11 @@ fn attach_runtime(
     ctx.metrics_and_base
         .set((metrics, base))
         .unwrap_or_else(|_| {
-            tracing::warn!(
-                "metrics_and_base already set for runtime context; ignoring duplicate attach"
-            );
+            rate_limited!(Duration::from_secs(60), {
+                tracing::warn!(
+                    "metrics_and_base already set for runtime context; ignoring duplicate attach"
+                );
+            });
         });
 
     shared.contexts.lock().unwrap().push(ctx);
@@ -855,13 +864,17 @@ impl TelemetryCore {
             if let Some(ref config) = cpu_profiling {
                 match crate::telemetry::cpu_profile::CpuProfiler::start(config.clone()) {
                     Ok(sampler) => event_writer.cpu_profiler = Some(sampler),
-                    Err(e) => tracing::warn!("failed to start CPU profiler: {e}"),
+                    Err(e) => rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!("failed to start CPU profiler: {e}");
+                    }),
                 }
             }
             if let Some(sched_cfg) = sched_events {
                 match crate::telemetry::cpu_profile::SchedProfiler::new(sched_cfg) {
                     Ok(sched) => *shared.sched_profiler.lock().unwrap() = Some(sched),
-                    Err(e) => tracing::warn!("failed to start scheduler event profiler: {e}"),
+                    Err(e) => rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!("failed to start scheduler event profiler: {e}");
+                    }),
                 }
             }
         }
@@ -1059,13 +1072,17 @@ fn run_flush_loop(
             // Write final metadata before sealing so single-segment
             // traces contain runtime→worker mappings.
             if let Err(e) = event_writer.write_current_segment_metadata() {
-                tracing::warn!("failed to write final segment metadata: {e}");
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!("failed to write final segment metadata: {e}");
+                });
                 if let Some(g) = flush_guard.as_mut() {
                     g.write_metadata_failed = true;
                 }
             }
             if let Err(e) = event_writer.finalize() {
-                tracing::warn!("failed to finalize trace segment: {e}");
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!("failed to finalize trace segment: {e}");
+                });
                 if let Some(g) = flush_guard.as_mut() {
                     g.finalize_failed = true;
                 }

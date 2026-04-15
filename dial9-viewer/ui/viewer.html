@@ -46,6 +46,21 @@
                 display: none;
             }
 
+            @keyframes spin { to { transform: rotate(360deg); } }
+            .loading-spinner {
+                width: 32px; height: 32px;
+                border: 3px solid #333;
+                border-top-color: #6c63ff;
+                border-radius: 50%;
+                animation: spin 0.8s linear infinite;
+                margin: 0 auto 12px;
+            }
+            .loading-progress {
+                font-size: 0.85em;
+                color: #888;
+                margin-top: 8px;
+            }
+
             #viewer {
                 display: none;
                 flex-direction: column;
@@ -387,6 +402,8 @@
                 <button id="btn-zoom-in">Zoom +</button>
                 <button id="btn-zoom-out">Zoom −</button>
                 <button id="btn-fit">Fit All</button>
+                <button id="btn-set-range" title="Set time range filter (reloads with only events in range)">Set Range</button>
+                <button id="btn-clear-range" title="Clear time range filter" style="display:none">Clear Range</button>
                 <button id="btn-time-mode" title="Toggle between relative (offset from trace start) and absolute timestamps">Time: Relative</button>
                 <button id="btn-tz-mode" title="Toggle between UTC and local timezone for absolute timestamps" style="display:none">TZ: UTC</button>
                 <button id="btn-reset">New File</button>
@@ -480,7 +497,7 @@
         <script src="trace_analysis.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, extractLocalQueueSamples, buildActiveTaskTimeline, indexWakeEvents, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -703,20 +720,28 @@
                 });
 
             function loadFile(file) {
+                showLoadingState(`Loading ${file.name}…`);
                 const reader = new FileReader();
                 reader.onload = async (e) => {
                     try {
-                        trace = await parseTrace(e.target.result);
+                        const opts = getParseOptions();
+                        opts.onProgress = ({ bytesRead, totalBytes, eventCount }) => {
+                            const pct = ((bytesRead / totalBytes) * 100) | 0;
+                            updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
+                        };
+                        updateLoadProgress("Decompressing…");
+                        trace = await parseTrace(e.target.result, opts);
+                        updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
+                        await new Promise((r) => setTimeout(r, 0));
                         processTrace();
                         showViewer(file.name);
                     } catch (err) {
                         alert("Error: " + err.message);
+                        resetDropZone();
                     }
                 };
-                // Only read first 20MB — parser caps at MAX_EVENTS anyway
-                const maxBytes = 20 * 1024 * 1024;
-                const blob = file.size > maxBytes ? file.slice(0, maxBytes) : file;
-                reader.readAsArrayBuffer(blob);
+                // Read the full file — time range filtering handles large traces
+                reader.readAsArrayBuffer(file);
             }
 
             let loadAbortController = null;
@@ -726,14 +751,19 @@
                 dropZone.innerHTML = '';
                 const wrap = document.createElement("div");
                 wrap.style.textAlign = "center";
-                wrap.innerHTML = `<div style="margin-bottom:12px">${esc(label)}</div>`;
+                wrap.innerHTML = `<div class="loading-spinner"></div><div style="margin-bottom:8px">${esc(label)}</div><div class="loading-progress" id="load-progress"></div>`;
                 const btn = document.createElement("button");
                 btn.textContent = "← Back";
-                btn.style.cssText = "background:#2a2a4a;border:1px solid #444;color:#ccc;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:0.9em";
+                btn.style.cssText = "background:#2a2a4a;border:1px solid #444;color:#ccc;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:0.9em;margin-top:12px";
                 btn.addEventListener("click", cancelLoad);
                 wrap.appendChild(btn);
                 wrap.insertAdjacentHTML("beforeend", '<div style="margin-top:8px;font-size:0.8em;color:#666">or press Escape</div>');
                 dropZone.appendChild(wrap);
+            }
+
+            function updateLoadProgress(text) {
+                const el = document.getElementById("load-progress");
+                if (el) el.textContent = text;
             }
 
             function cancelLoad() {
@@ -757,11 +787,20 @@
 
             async function loadTraceFromUrl(url) {
                 try {
+                    updateLoadProgress("Fetching…");
                     const response = await fetch(url, { signal: loadAbortController?.signal });
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const arrayBuffer = await response.arrayBuffer();
                     loadAbortController = null;
-                    trace = await parseTrace(arrayBuffer);
+                    const opts = getParseOptions();
+                    opts.onProgress = ({ bytesRead, totalBytes, eventCount }) => {
+                        const pct = ((bytesRead / totalBytes) * 100) | 0;
+                        updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
+                    };
+                    updateLoadProgress("Decompressing…");
+                    trace = await parseTrace(arrayBuffer, opts);
+                    updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
+                    await new Promise((r) => setTimeout(r, 0));
                     processTrace();
                     showViewer(url.split('/').pop() || 'trace.bin');
                 } catch (err) {
@@ -774,6 +813,29 @@
             // Check for URL parameter on load
             const urlParams = new URLSearchParams(window.location.search);
             const traceUrl = urlParams.get('trace');
+
+            /** Build parseTrace options from current URL time range params. */
+            function getParseOptions() {
+                const params = new URLSearchParams(window.location.search);
+                const opts = {};
+                const s = params.get('start');
+                const e = params.get('end');
+                if (s != null) opts.startTime = Number(s);
+                if (e != null) opts.endTime = Number(e);
+                return opts;
+            }
+
+            /** Update URL with current time range without reloading. */
+            function updateUrlTimeRange(startNs, endNs) {
+                const params = new URLSearchParams(window.location.search);
+                if (startNs != null) params.set('start', Math.round(startNs).toString());
+                else params.delete('start');
+                if (endNs != null) params.set('end', Math.round(endNs).toString());
+                else params.delete('end');
+                const newUrl = window.location.pathname + '?' + params.toString();
+                window.history.replaceState(null, '', newUrl);
+            }
+
             if (traceUrl) {
                 showLoadingState('Loading trace…');
                 loadTraceFromUrl(traceUrl);
@@ -811,7 +873,7 @@
                 viewStart = minTs;
                 viewEnd = maxTs;
 
-                // Build spans
+                // Build spans (also extracts queue samples and indexes wake events)
                 const spanResult = buildWorkerSpans(evts, workerIds, maxTs);
                 workerSpans = spanResult.workerSpans;
                 const perWorker = spanResult.perWorker;
@@ -831,19 +893,18 @@
                     console.log(`CPU samples: ${trace.cpuSamples.length}, polls with cpu samples: ${pollsWithCpuSamples}, polls with sched events: ${pollsWithSchedSamples}`);
                 }
 
-                // Per-worker local queue samples
-                const lqResult = extractLocalQueueSamples(perWorker, workerIds);
-                workerQueueSamples = lqResult.workerQueueSamples;
-                maxLocalQueue = lqResult.maxLocalQueue;
+                // Per-worker local queue samples (already extracted by buildWorkerSpans)
+                workerQueueSamples = spanResult.workerQueueSamples;
+                maxLocalQueue = spanResult.maxLocalQueue;
 
                 // Build active task count timeline from TaskSpawn/TaskTerminate
                 const atResult = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
                 activeTaskSamples = atResult.activeTaskSamples;
                 taskFirstPoll = atResult.taskFirstPoll;
 
-                const wakeResult = indexWakeEvents(evts);
-                wakesByTask = wakeResult.wakesByTask;
-                wakesByWorker = wakeResult.wakesByWorker;
+                // Wake events (already indexed by buildWorkerSpans)
+                wakesByTask = spanResult.wakesByTask;
+                wakesByWorker = spanResult.wakesByWorker;
 
                 schedDelays = computeSchedulingDelays(workerSpans, workerIds, wakesByTask);
                 console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);
@@ -855,8 +916,9 @@
                 document.getElementById("tb-filename").textContent = filename;
                 const durMs = durationNs / 1e6;
                 const truncNote = trace.truncated ? " (truncated)" : "";
+                const filterNote = trace.timeFiltered ? " (time-filtered)" : "";
                 document.getElementById("tb-stats").textContent =
-                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durMs.toFixed(1)}ms${truncNote}`;
+                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durMs.toFixed(1)}ms${truncNote}${filterNote}`;
 
                 buildLanes();
                 updatePointsOfInterest();
@@ -886,7 +948,7 @@
                 const counter = document.getElementById("poi-counter");
                 const prevBtn = document.getElementById("btn-prev-poi");
                 const nextBtn = document.getElementById("btn-next-poi");
-                
+
                 if (pointsOfInterest.length === 0) {
                     counter.textContent = "None found";
                     prevBtn.disabled = true;
@@ -903,7 +965,7 @@
                 if (index < 0 || index >= pointsOfInterest.length) return;
                 currentPoiIndex = index;
                 const poi = pointsOfInterest[index];
-                
+
                 // Center view on this POI with appropriate zoom
                 const spanDur = poi.span.end - poi.span.start;
                 const viewDur = Math.max(spanDur * 5, 1e6); // Show 5x the span duration, min 1ms
@@ -919,14 +981,14 @@
                     viewEnd = Math.min(maxTs, viewStart + padded);
                     selectedTaskId = sd.taskId;
                 }
-                
+
                 // Scroll to worker lane
                 const laneIdx = workerIds.indexOf(poi.worker);
                 if (laneIdx >= 0) {
                     const scrollTop = laneIdx * LANE_H;
                     lanesContainer.scrollTop = scrollTop;
                 }
-                
+
                 updatePoiCounter();
                 renderAll();
             }
@@ -956,6 +1018,91 @@
             // ── Rendering ──
             let mouseNs = null; // Track mouse position for crosshair
             let queueChartRafId = null; // Throttle queue chart redraws
+
+            // ── Shared binary search helpers ──
+
+            /**
+             * Return the first index i where arr[i].t >= val.
+             * If no such index exists, returns arr.length.
+             * Array must be sorted by .t ascending.
+             */
+            function lowerBound(arr, val) {
+                let lo = 0, hi = arr.length - 1;
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (arr[mid].t < val) lo = mid + 1;
+                    else hi = mid - 1;
+                }
+                return lo;
+            }
+
+            /**
+             * Return the first index i where arr[i].t > val.
+             * If no such index exists, returns arr.length.
+             * Array must be sorted by .t ascending.
+             */
+            function upperBound(arr, val) {
+                let lo = 0, hi = arr.length - 1;
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (arr[mid].t <= val) lo = mid + 1;
+                    else hi = mid - 1;
+                }
+                return lo;
+            }
+
+            /**
+             * Find the element in arr whose .t is closest to val.
+             * Returns the element, or null if arr is empty.
+             */
+            function findNearest(arr, val) {
+                if (!arr.length) return null;
+                const i = lowerBound(arr, val);
+                const candidates = [];
+                if (i < arr.length) candidates.push(i);
+                if (i > 0) candidates.push(i - 1);
+                let best = null, bestDist = Infinity;
+                for (const idx of candidates) {
+                    const d = Math.abs(arr[idx].t - val);
+                    if (d < bestDist) { bestDist = d; best = arr[idx]; }
+                }
+                return best;
+            }
+
+            /**
+             * Binary search for the span containing a given timestamp.
+             * Spans must be non-overlapping and sorted by start time.
+             */
+            function findSpanAt(spans, ns) {
+                let lo = 0, hi = spans.length - 1;
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (spans[mid].end < ns) lo = mid + 1;
+                    else if (spans[mid].start > ns) hi = mid - 1;
+                    else return spans[mid];
+                }
+                return null;
+            }
+
+            /**
+             * Binary search for the first span whose end >= viewStart.
+             * Spans must be sorted by start time.
+             * Returns the index to start iterating from.
+             */
+            function findFirstVisible(spans, viewStart) {
+                let lo = 0, hi = spans.length - 1;
+                // Find first span that could be visible: its end >= viewStart
+                // Since spans are sorted by start, we look for the first span
+                // where start >= viewStart, then back up to catch spans that
+                // started before viewStart but extend into it.
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (spans[mid].end < viewStart) lo = mid + 1;
+                    else hi = mid - 1;
+                }
+                return lo;
+            }
+
             function renderAll() {
                 const rect = lanesContainer.getBoundingClientRect();
                 const drawW = rect.width - LABEL_W;
@@ -970,10 +1117,10 @@
                 for (const w of workerIds) {
                     const samples = workerQueueSamples[w];
                     if (!samples || !samples.length) continue;
-                    for (const s of samples) {
-                        if (s.t >= viewStart && s.t <= viewEnd && s.local > maxVisibleQ) {
-                            maxVisibleQ = s.local;
-                        }
+                    const start = Math.max(0, lowerBound(samples, viewStart) - 1);
+                    const end = Math.min(samples.length - 1, upperBound(samples, viewEnd));
+                    for (let i = start; i <= end; i++) {
+                        if (samples[i].local > maxVisibleQ) maxVisibleQ = samples[i].local;
                     }
                 }
                 window.sharedVisibleMaxQ = maxVisibleQ;
@@ -1056,8 +1203,10 @@
 
                 // Color-code active periods by scheduling ratio (v5+ only)
                 if (trace.hasCpuTime) {
-                    for (const s of spans.actives) {
-                        if (s.end < viewStart || s.start > viewEnd) continue;
+                    const startIdx = findFirstVisible(spans.actives, viewStart);
+                    for (let i = startIdx; i < spans.actives.length; i++) {
+                        const s = spans.actives[i];
+                        if (s.start > viewEnd) break;
                         const x1 = Math.max(0, nsToX(s.start, pw));
                         const x2 = Math.min(pw, nsToX(s.end, pw));
                         const w = Math.max(x2 - x1, 1);
@@ -1073,17 +1222,20 @@
                 }
 
                 // Draw park spans — split into normal park (muted) and scheduling delay (bright red)
-                for (const s of spans.parks) {
-                    if (s.end < viewStart || s.start > viewEnd) continue;
+                {
+                const parkStart = findFirstVisible(spans.parks, viewStart);
+                for (let i = parkStart; i < spans.parks.length; i++) {
+                    const s = spans.parks[i];
+                    if (s.start > viewEnd) break;
                     const x1 = Math.max(0, nsToX(s.start, pw));
                     const x2 = Math.min(pw, nsToX(s.end, pw));
                     const w = Math.max(x2 - x1, 1);
-                    
+
                     // If we have scheduling delay info, split the park visually
                     if (trace.hasSchedWait && s.schedWait > 0) {
                         const schedWaitNs = s.schedWait * 1000; // convert µs to ns
                         const wakeupShouldBe = s.end - schedWaitNs;
-                        
+
                         // Normal park portion (before wakeup should have happened)
                         if (wakeupShouldBe > s.start) {
                             const xSplit = Math.min(pw, nsToX(wakeupShouldBe, pw));
@@ -1094,7 +1246,7 @@
                                 ctx.fillStyle = "#cc5533";
                                 ctx.fillRect(x1, 0, normalW, 4);
                             }
-                            
+
                             // Scheduling delay portion (bright red)
                             const delayW = Math.max(x2 - xSplit, 0);
                             if (delayW > 0) {
@@ -1114,30 +1266,66 @@
                         ctx.fillRect(x1, 0, w, 4);
                     }
                 }
+                } // end parks block
 
                 // Draw poll spans (solid blue bars, center band)
                 // When a task is selected, draw in two passes: dim first, selected on top
                 const bandTop = 10,
                     bandH = 20;
                 const poiSpan = (currentPoiIndex >= 0) ? pointsOfInterest[currentPoiIndex].span : null;
+                const pollStart = findFirstVisible(spans.polls, viewStart);
+                const nsPerPx = (viewEnd - viewStart) / pw;
                 if (selectedTaskId) {
-                    for (const s of spans.polls) {
-                        if (s.end < viewStart || s.start > viewEnd || s.taskId === selectedTaskId) continue;
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        if (s.taskId === selectedTaskId) continue;
                         const x1 = Math.max(0, nsToX(s.start, pw));
                         const x2 = Math.min(pw, nsToX(s.end, pw));
                         ctx.fillStyle = pollColorDim(s.start, s.end);
                         ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
                     }
                     ctx.fillStyle = "#ffeb3b";
-                    for (const s of spans.polls) {
-                        if (s.end < viewStart || s.start > viewEnd || s.taskId !== selectedTaskId) continue;
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        if (s.taskId !== selectedTaskId) continue;
                         const x1 = Math.max(0, nsToX(s.start, pw));
                         const x2 = Math.min(pw, nsToX(s.end, pw));
                         ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
                     }
+                } else if (nsPerPx > 5000) {
+                    // LOD: when zoomed out, bucket polls by pixel and draw worst-case color
+                    // Each pixel bucket tracks the max poll duration seen
+                    let prevPx = -2, prevColor = null, runStart = -1;
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        const x1 = Math.max(0, nsToX(s.start, pw)) | 0;
+                        const x2 = Math.min(pw, nsToX(s.end, pw)) | 0;
+                        const color = pollColor(s.start, s.end);
+                        if (x1 <= prevPx + 1 && color === prevColor) {
+                            // Extend current run
+                            prevPx = Math.max(prevPx, x2);
+                        } else {
+                            // Flush previous run
+                            if (prevColor) {
+                                ctx.fillStyle = prevColor;
+                                ctx.fillRect(runStart, bandTop, Math.max(prevPx - runStart, 1), bandH);
+                            }
+                            runStart = x1;
+                            prevPx = Math.max(x1, x2);
+                            prevColor = color;
+                        }
+                    }
+                    if (prevColor) {
+                        ctx.fillStyle = prevColor;
+                        ctx.fillRect(runStart, bandTop, Math.max(prevPx - runStart, 1), bandH);
+                    }
                 } else {
-                    for (const s of spans.polls) {
-                        if (s.end < viewStart || s.start > viewEnd) continue;
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
                         const x1 = Math.max(0, nsToX(s.start, pw));
                         const x2 = Math.min(pw, nsToX(s.end, pw));
                         ctx.fillStyle = pollColor(s.start, s.end);
@@ -1146,8 +1334,10 @@
                 }
                 // Highlight current POI span
                 if (poiSpan) {
-                    for (const s of spans.polls) {
-                        if (s !== poiSpan || s.end < viewStart || s.start > viewEnd) continue;
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        if (s !== poiSpan) continue;
                         const x1 = Math.max(0, nsToX(s.start, pw));
                         const x2 = Math.min(pw, nsToX(s.end, pw));
                         const w = Math.max(x2 - x1, 5);
@@ -1161,15 +1351,27 @@
 
                 // Mark CPU sample positions with ticks below the poll band
                 ctx.fillStyle = "#ce93d8";
-                for (const t of spans.cpuSampleTimes) {
-                    if (t < viewStart || t > viewEnd) continue;
-                    const x = nsToX(t, pw);
-                    ctx.fillRect(x, bandTop + bandH, 3, 4);
+                {
+                    const times = spans.cpuSampleTimes;
+                    // Binary search for first visible sample
+                    let lo = 0, hi = times.length - 1;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (times[mid] < viewStart) lo = mid + 1;
+                        else hi = mid - 1;
+                    }
+                    for (let i = lo; i < times.length; i++) {
+                        if (times[i] > viewEnd) break;
+                        const x = nsToX(times[i], pw);
+                        ctx.fillRect(x, bandTop + bandH, 3, 4);
+                    }
                 }
 
                 // Mark polls that have sched events with red triangles below the poll band
-                for (const s of spans.polls) {
-                    if (!s.schedSamples || s.end < viewStart || s.start > viewEnd) continue;
+                for (let i = pollStart; i < spans.polls.length; i++) {
+                    const s = spans.polls[i];
+                    if (s.start > viewEnd) break;
+                    if (!s.schedSamples) continue;
                     for (const sample of s.schedSamples) {
                         if (sample.timestamp < viewStart || sample.timestamp > viewEnd) continue;
                         const x = nsToX(sample.timestamp, pw);
@@ -1186,8 +1388,10 @@
                 // Highlight hovered waker task's polls (orange)
                 if (hoveredWakerTaskId) {
                     ctx.fillStyle = "#ff8a65";
-                    for (const s of spans.polls) {
-                        if (s.end < viewStart || s.start > viewEnd || s.taskId !== hoveredWakerTaskId) continue;
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        if (s.taskId !== hoveredWakerTaskId) continue;
                         const x1 = Math.max(0, nsToX(s.start, pw));
                         const x2 = Math.min(pw, nsToX(s.end, pw));
                         ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 2), bandH);
@@ -1217,23 +1421,8 @@
                 // Overlay local queue depth as a step chart in the bottom portion
                 const samples = workerQueueSamples[workerId];
                 if (samples && samples.length) {
-                    // Find visible range with one sample before and after for continuity
-                    let iStart = 0,
-                        iEnd = samples.length - 1;
-                    // Find first sample >= viewStart
-                    for (let i = 0; i < samples.length; i++) {
-                        if (samples[i].t >= viewStart) {
-                            iStart = Math.max(0, i - 1);
-                            break;
-                        }
-                    }
-                    // Find last sample <= viewEnd
-                    for (let i = samples.length - 1; i >= 0; i--) {
-                        if (samples[i].t <= viewEnd) {
-                            iEnd = Math.min(samples.length - 1, i + 1);
-                            break;
-                        }
-                    }
+                    const iStart = Math.max(0, lowerBound(samples, viewStart) - 1);
+                    const iEnd = Math.min(samples.length - 1, upperBound(samples, viewEnd));
 
                     // Store visible range for later max calculation
                     if (!window.visibleQueueRanges) window.visibleQueueRanges = {};
@@ -1258,7 +1447,7 @@
                     for (let i = iStart; i <= iEnd; i++) {
                         const x = Math.max(0, Math.min(pw, nsToX(samples[i].t, pw)));
                         const y = qTop + qH - (samples[i].local / laneMaxQ) * qH;
-                        
+
                         if (!started) {
                             ctx.moveTo(x, y);
                             started = true;
@@ -1586,36 +1775,45 @@
 
                 const viewDur = viewEnd - viewStart;
                 // Global queue from QueueSample events
-                for (const s of queueSamples) {
-                    if (s.t < viewStart || s.t > viewEnd) continue;
-                    const bi = Math.floor(
-                        ((s.t - viewStart) / viewDur) * (numBuckets - 1),
-                    );
-                    if (bi < 0 || bi >= numBuckets) continue;
-                    const b = buckets[bi];
-                    b.hasData = true;
-                    if (s.global > b.maxGlobal) b.maxGlobal = s.global;
+                {
+                    const startIdx = Math.max(0, lowerBound(queueSamples, viewStart) - 1);
+                    for (let i = startIdx; i < queueSamples.length; i++) {
+                        const s = queueSamples[i];
+                        if (s.t > viewEnd) break;
+                        if (s.t < viewStart) continue;
+                        const bi = Math.floor(
+                            ((s.t - viewStart) / viewDur) * (numBuckets - 1),
+                        );
+                        if (bi < 0 || bi >= numBuckets) continue;
+                        const b = buckets[bi];
+                        b.hasData = true;
+                        if (s.global > b.maxGlobal) b.maxGlobal = s.global;
+                    }
                 }
                 // Build sorted timeline of all local queue changes
                 const allLocalSamples = [];
                 for (const w of workerIds) {
                     const wSamples = workerQueueSamples[w] || [];
-                    for (const s of wSamples) {
-                        if (s.t >= viewStart && s.t <= viewEnd) {
+                    if (wSamples.length === 0) continue;
+                    const startIdx = Math.max(0, lowerBound(wSamples, viewStart) - 1);
+                    for (let i = startIdx; i < wSamples.length; i++) {
+                        const s = wSamples[i];
+                        if (s.t > viewEnd) break;
+                        if (s.t >= viewStart) {
                             allLocalSamples.push({ t: s.t, w, local: s.local });
                         }
                     }
                 }
                 allLocalSamples.sort((a, b) => a.t - b.t);
-                
+
                 // Single pass: maintain per-worker state and compute max for each bucket
                 const workerState = {};
                 for (const w of workerIds) workerState[w] = 0;
                 let sampleIdx = 0;
-                
+
                 for (let bi = 0; bi < numBuckets; bi++) {
                     const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
-                    
+
                     // Apply all samples up to this bucket's end
                     while (sampleIdx < allLocalSamples.length && allLocalSamples[sampleIdx].t < bucketEnd) {
                         const s = allLocalSamples[sampleIdx];
@@ -1623,7 +1821,7 @@
                         buckets[bi].hasData = true;
                         sampleIdx++;
                     }
-                    
+
                     // Max across all workers
                     let max = 0;
                     for (const w of workerIds) {
@@ -1734,22 +1932,15 @@
                 const ns = mouseNs;
                 // Find nearest global queue sample
                 let globalQ = "-";
-                let bestDist = Infinity;
-                for (const s of queueSamples) {
-                    const d = Math.abs(s.t - ns);
-                    if (d < bestDist) { bestDist = d; globalQ = s.global; }
+                {
+                    const s = findNearest(queueSamples, ns);
+                    if (s) globalQ = s.global;
                 }
                 // Find max local queue across workers at this time
                 let maxLocal = 0;
                 for (const w of workerIds) {
-                    const samples = workerQueueSamples[w] || [];
-                    let best = 0;
-                    let bd = Infinity;
-                    for (const s of samples) {
-                        const d = Math.abs(s.t - ns);
-                        if (d < bd) { bd = d; best = s.local; }
-                    }
-                    if (best > maxLocal) maxLocal = best;
+                    const s = findNearest(workerQueueSamples[w] || [], ns);
+                    if (s && s.local > maxLocal) maxLocal = s.local;
                 }
                 // Active task count
                 let taskCount = 0;
@@ -1837,6 +2028,23 @@
                 viewEnd = maxTs;
                 renderAll();
             });
+
+            // ── Time Range Filter ──
+            document.getElementById("btn-set-range").addEventListener("click", () => {
+                // Use current view window as the time range filter
+                const startNs = Math.round(viewStart);
+                const endNs = Math.round(viewEnd);
+                updateUrlTimeRange(startNs, endNs);
+                window.location.reload();
+            });
+            document.getElementById("btn-clear-range").addEventListener("click", () => {
+                updateUrlTimeRange(null, null);
+                window.location.reload();
+            });
+            // Show/hide clear range button based on whether a filter is active
+            if (urlParams.get('start') != null || urlParams.get('end') != null) {
+                document.getElementById("btn-clear-range").style.display = "";
+            }
             document.getElementById("btn-time-mode").addEventListener("click", () => {
                 useAbsoluteTime = !useAbsoluteTime;
                 document.getElementById("btn-time-mode").textContent =
@@ -2105,12 +2313,10 @@
                 const spans = workerSpans[w];
                 let found = null;
                 let foundSpan = null;
-                for (const s of spans.polls) {
-                    if (ns >= s.start && ns <= s.end) {
-                        if (s.taskId) found = s.taskId;
-                        foundSpan = s;
-                        break;
-                    }
+                const hitPoll = findSpanAt(spans.polls, ns);
+                if (hitPoll) {
+                    if (hitPoll.taskId) found = hitPoll.taskId;
+                    foundSpan = hitPoll;
                 }
 
                 // Show stack popup if poll has CPU samples or sched events
@@ -2530,7 +2736,7 @@
                     const ns =
                         viewStart + (mouseX / drawW) * (viewEnd - viewStart);
                     mouseNs = ns;
-                    
+
                     // Throttle crosshair redraw with RAF
                     if (!queueChartRafId) {
                         queueChartRafId = requestAnimationFrame(() => {
@@ -2555,17 +2761,16 @@
                     let stateDetail = "";
                     let schedInfo = "";
                     if (trace.hasCpuTime) {
-                        for (const s of spans.actives) {
-                            if (ns >= s.start && ns <= s.end) {
-                                const pct = (s.ratio * 100).toFixed(1);
-                                const icon = s.ratio >= 0.95 ? "🟢" : s.ratio >= 0.5 ? "🟡" : "🔴";
+                        const hitActive = findSpanAt(spans.actives, ns);
+                        if (hitActive) {
+                                const pct = (hitActive.ratio * 100).toFixed(1);
+                                const icon = hitActive.ratio >= 0.95 ? "🟢" : hitActive.ratio >= 0.5 ? "🟡" : "🔴";
                                 schedInfo = `<span class="label">Scheduling:</span> <span class="value">${icon} ${pct}% on-CPU</span><br>`;
-                                break;
-                            }
                         }
                     }
-                    for (const s of spans.parks) {
-                        if (ns >= s.start && ns <= s.end) {
+                    {
+                        const s = findSpanAt(spans.parks, ns);
+                        if (s) {
                             const durMs = (s.end - s.start) / 1e6;
                             state = "💤 Parked";
                             stateDetail = ` for <span class="value">${durMs < 1 ? (durMs * 1000).toFixed(1) + "µs" : durMs.toFixed(2) + "ms"}</span>`;
@@ -2575,13 +2780,13 @@
                                 const icon = swUs < 100 ? "🟢" : swUs < 1000 ? "🟡" : "🔴";
                                 stateDetail += `<br><span class="label">Kernel sched delay:</span> <span class="value">${icon} ${swUs.toFixed(0)}µs</span>`;
                             }
-                            break;
                         }
                     }
 
                     let pollInfo = "";
-                    for (const s of spans.polls) {
-                        if (ns >= s.start && ns <= s.end) {
+                    {
+                        const s = findSpanAt(spans.polls, ns);
+                        if (s) {
                             const durUs = (s.end - s.start) / 1e3;
                             state = "⚡ Polling";
                             pollInfo = `<span class="label">Poll duration:</span> <span class="value">${durUs.toFixed(1)}µs</span><br>`;
@@ -2597,31 +2802,13 @@
                             if (s.schedSamples && s.schedSamples.length > 0) {
                                 pollInfo += `<span class="label">Sched events:</span> <span class="value">⚠️ ${s.schedSamples.length} blocking</span> <span style="color:#666">(click to view)</span><br>`;
                             }
-                            break;
                         }
                     }
 
                     // Find nearest local queue sample for this worker
-                    let nearest = null,
-                        bestDist = Infinity;
-                    const wSamples = workerQueueSamples[w] || [];
-                    for (const s of wSamples) {
-                        const d = Math.abs(s.t - ns);
-                        if (d < bestDist) {
-                            bestDist = d;
-                            nearest = s;
-                        }
-                    }
+                    const nearest = findNearest(workerQueueSamples[w] || [], ns);
                     // Find nearest global queue from QueueSample timeline
-                    let nearestGlobal = null;
-                    bestDist = Infinity;
-                    for (const s of queueSamples) {
-                        const d = Math.abs(s.t - ns);
-                        if (d < bestDist) {
-                            bestDist = d;
-                            nearestGlobal = s;
-                        }
-                    }
+                    const nearestGlobal = findNearest(queueSamples, ns);
 
                     let qInfo = "";
                     const globalStr = nearestGlobal != null ? nearestGlobal.global : "-";
