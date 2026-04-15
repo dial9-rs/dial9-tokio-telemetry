@@ -13,6 +13,7 @@ const {
   buildFlamegraphTree,
   flattenFlamegraph,
   buildFgData,
+  attachTaskDumps,
 } = require("./trace_analysis.js");
 
 async function main() {
@@ -385,6 +386,151 @@ async function main() {
     pass("Open PollStart at trace end is discarded (no phantom long poll)");
   }
 
+  // ── attachTaskDumps ──
+
+  function testAttachTaskDumpsBasic() {
+    // Task 1: polls at [100,200] and [400,500] → idle gap [200,400] + trailing [500,∞)
+    // Task dump at t=300 for task 1 should land in the [200,400] gap
+    const ws = {
+      0: {
+        polls: [
+          { start: 100, end: 200, taskId: 1 },
+          { start: 400, end: 500, taskId: 1 },
+        ],
+        parks: [], actives: [], cpuSampleTimes: [],
+      },
+    };
+    const dumps = [
+      { timestamp: 300, task_id: 1, callchain: ["0xaaa"] },
+    ];
+    const result = attachTaskDumps({ taskDumps: dumps }, ws);
+    const idles = result.get(1);
+    if (!idles) fail("No idle periods for task 1");
+    if (idles.length !== 2) fail(`Expected 2 idle periods, got ${idles.length}`);
+    if (idles[0].start !== 200 || idles[0].end !== 400) fail(`Wrong idle bounds: [${idles[0].start}, ${idles[0].end}]`);
+    if (idles[0].dumps.length !== 1) fail(`Expected 1 dump, got ${idles[0].dumps.length}`);
+    if (idles[0].dumps[0].timestamp !== 300) fail("Wrong dump timestamp");
+    if (idles[1].dumps.length !== 0) fail("Trailing idle should have no dumps");
+    pass("attachTaskDumps: basic case");
+  }
+
+  function testAttachTaskDumpsAtPollEndBoundary() {
+    // Dump at exact poll-end boundary (t=200) should be in the idle gap [200,400]
+    const ws = {
+      0: {
+        polls: [
+          { start: 100, end: 200, taskId: 1 },
+          { start: 400, end: 500, taskId: 1 },
+        ],
+        parks: [], actives: [], cpuSampleTimes: [],
+      },
+    };
+    const dumps = [{ timestamp: 200, task_id: 1, callchain: [] }];
+    const result = attachTaskDumps({ taskDumps: dumps }, ws);
+    const idles = result.get(1);
+    if (!idles || idles[0].dumps.length !== 1) fail("Dump at poll-end boundary not attached");
+    pass("attachTaskDumps: dump at exact poll-end boundary");
+  }
+
+  function testAttachTaskDumpsMultipleInOneIdle() {
+    const ws = {
+      0: {
+        polls: [
+          { start: 100, end: 200, taskId: 1 },
+          { start: 600, end: 700, taskId: 1 },
+        ],
+        parks: [], actives: [], cpuSampleTimes: [],
+      },
+    };
+    const dumps = [
+      { timestamp: 300, task_id: 1, callchain: ["0x1"] },
+      { timestamp: 400, task_id: 1, callchain: ["0x2"] },
+      { timestamp: 500, task_id: 1, callchain: ["0x3"] },
+    ];
+    const result = attachTaskDumps({ taskDumps: dumps }, ws);
+    const idles = result.get(1);
+    if (!idles || idles[0].dumps.length !== 3) fail(`Expected 3 dumps in idle, got ${idles ? idles[0].dumps.length : 0}`);
+    pass("attachTaskDumps: multiple dumps in one idle");
+  }
+
+  function testAttachTaskDumpsAfterLastPoll() {
+    // Dump after the last poll (task idle at end)
+    const ws = {
+      0: {
+        polls: [{ start: 100, end: 200, taskId: 1 }],
+        parks: [], actives: [], cpuSampleTimes: [],
+      },
+    };
+    const dumps = [{ timestamp: 500, task_id: 1, callchain: ["0xbb"] }];
+    const result = attachTaskDumps({ taskDumps: dumps }, ws);
+    const idles = result.get(1);
+    if (!idles) fail("No idle periods for task with dump after last poll");
+    const trailing = idles.find(g => g.end === Infinity);
+    if (!trailing) fail("No trailing idle period found");
+    if (trailing.dumps.length !== 1) fail("Dump after last poll not attached");
+    pass("attachTaskDumps: dump after last poll");
+  }
+
+  function testAttachTaskDumpsUnknownTask() {
+    // Dump for a task_id with no polls → should still appear in result
+    const ws = {
+      0: {
+        polls: [{ start: 100, end: 200, taskId: 1 }],
+        parks: [], actives: [], cpuSampleTimes: [],
+      },
+    };
+    const dumps = [{ timestamp: 300, task_id: 99, callchain: [] }];
+    const result = attachTaskDumps({ taskDumps: dumps }, ws);
+    const idles = result.get(99);
+    if (!idles) fail("No idle periods for unknown task");
+    if (idles.length !== 1) fail(`Expected 1 idle for unknown task, got ${idles.length}`);
+    if (idles[0].dumps.length !== 1) fail("Dump for unknown task not attached");
+    if (idles[0].start !== 0 || idles[0].end !== Infinity) fail("Unknown task idle should span [0, Infinity)");
+    pass("attachTaskDumps: dump for unknown task");
+  }
+
+  function testAttachTaskDumpsNotWrongIdle() {
+    // Many short poll cycles; dump should only attach to the correct idle gap
+    const polls = [];
+    for (let i = 0; i < 100; i++) {
+      polls.push({ start: i * 10, end: i * 10 + 5, taskId: 1 });
+    }
+    const ws = { 0: { polls, parks: [], actives: [], cpuSampleTimes: [] } };
+    // Dump at t=47 should be in idle gap [45, 50] (between poll[4] end=45 and poll[5] start=50)
+    const dumps = [{ timestamp: 47, task_id: 1, callchain: ["0xcc"] }];
+    const result = attachTaskDumps({ taskDumps: dumps }, ws);
+    const idles = result.get(1);
+    const match = idles.find(g => g.dumps.length > 0);
+    if (!match) fail("Dump not attached to any idle");
+    if (match.start !== 45 || match.end !== 50) fail(`Wrong idle: [${match.start}, ${match.end}], expected [45, 50]`);
+    // Verify no other idle has dumps
+    const others = idles.filter(g => g.dumps.length > 0 && g !== match);
+    if (others.length > 0) fail("Dump attached to wrong idle period(s)");
+    pass("attachTaskDumps: dump not attached to wrong idle with many short cycles");
+  }
+
+  function testAttachTaskDumpsMultiWorker() {
+    // Task polls on different workers
+    const ws = {
+      0: {
+        polls: [{ start: 100, end: 200, taskId: 1 }],
+        parks: [], actives: [], cpuSampleTimes: [],
+      },
+      1: {
+        polls: [{ start: 400, end: 500, taskId: 1 }],
+        parks: [], actives: [], cpuSampleTimes: [],
+      },
+    };
+    const dumps = [{ timestamp: 300, task_id: 1, callchain: [] }];
+    const result = attachTaskDumps({ taskDumps: dumps }, ws);
+    const idles = result.get(1);
+    if (!idles) fail("No idle periods for multi-worker task");
+    const match = idles.find(g => g.dumps.length > 0);
+    if (!match) fail("Dump not attached in multi-worker case");
+    if (match.start !== 200 || match.end !== 400) fail(`Wrong idle: [${match.start}, ${match.end}]`);
+    pass("attachTaskDumps: polls across multiple workers");
+  }
+
   // ── Run all tests ──
 
   console.log("\nbuildWorkerSpans:");
@@ -429,6 +575,15 @@ async function main() {
   testFlattenFlamegraph();
   testBuildFgData();
   testBuildFgDataEmpty();
+
+  console.log("\nattachTaskDumps:");
+  testAttachTaskDumpsBasic();
+  testAttachTaskDumpsAtPollEndBoundary();
+  testAttachTaskDumpsMultipleInOneIdle();
+  testAttachTaskDumpsAfterLastPoll();
+  testAttachTaskDumpsUnknownTask();
+  testAttachTaskDumpsNotWrongIdle();
+  testAttachTaskDumpsMultiWorker();
 
   console.log("\n✓ All analysis checks passed!");
 }

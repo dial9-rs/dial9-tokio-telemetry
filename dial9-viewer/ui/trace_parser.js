@@ -82,6 +82,14 @@
 
   /**
    * @typedef {{
+   *   timestamp: number,
+   *   task_id: number,
+   *   callchain: string[],
+   * }} TaskDump
+   */
+
+  /**
+   * @typedef {{
    *   magic: "D9TF",
    *   version: number,
    *   events: TraceEvent[],
@@ -94,6 +102,7 @@
    *   taskSpawnTimes: Map<number, number>,
    *   taskTerminateTimes: Map<number, number>,
    *   cpuSamples: CpuSample[],
+   *   taskDumps: TaskDump[],
    *   callframeSymbols: Map<string, SymbolFrame|SymbolFrame[]>,
    *   threadNames: Map<number, string>,
    *   runtimeWorkers: Map<string, number[]>,
@@ -141,6 +150,7 @@
     const taskTerminateTimes = new Map();
     const callframeSymbols = new Map();
     const cpuSamples = [];
+    const taskDumps = [];
     const threadNames = new Map();
     const runtimeWorkers = new Map();
 
@@ -151,6 +161,7 @@
       "CpuSampleEvent",
       "SymbolTableEntry",
       "SegmentMetadataEvent",
+      "TaskDumpEvent",
     ]);
 
     let lastYieldPos = 0;
@@ -297,6 +308,17 @@
           }
           break;
         }
+        case "TaskDumpEvent": {
+          const chain = (v.callchain || []).map(
+            (addr) => "0x" + BigInt(addr).toString(16)
+          );
+          taskDumps.push({
+            timestamp: ts,
+            task_id: num(v.task_id),
+            callchain: chain,
+          });
+          break;
+        }
         case "SegmentMetadataEvent": {
           const entries = v.entries || {};
           for (const [key, val] of Object.entries(entries)) {
@@ -359,6 +381,7 @@
       cpuSamples,
       callframeSymbols,
       threadNames,
+      taskDumps,
       taskTerminateTimes,
       runtimeWorkers,
     };

@@ -490,6 +490,66 @@
     };
   }
 
+  /**
+   * Attach task dump events to idle gaps between polls for each task.
+   * @param {{ taskDumps: Array<{timestamp: number, task_id: number, callchain: string[]}> }} trace
+   * @param {Object} workerSpans - as returned by buildWorkerSpans
+   * @returns {Map<number, Array<{start: number, end: number, dumps: Array}>>}
+   */
+  function attachTaskDumps(trace, workerSpans) {
+    const dumps = trace.taskDumps || [];
+    if (!dumps.length) return new Map();
+
+    // Collect all polls per task across all workers, sorted by start time
+    const pollsByTask = new Map();
+    for (const spans of Object.values(workerSpans)) {
+      for (const p of spans.polls) {
+        if (!p.taskId) continue;
+        let arr = pollsByTask.get(p.taskId);
+        if (!arr) { arr = []; pollsByTask.set(p.taskId, arr); }
+        arr.push(p);
+      }
+    }
+    for (const arr of pollsByTask.values()) {
+      arr.sort((a, b) => a.start - b.start);
+    }
+
+    // Build idle gaps per task
+    const idlesByTask = new Map();
+    for (const [taskId, polls] of pollsByTask) {
+      const idles = [];
+      for (let i = 0; i < polls.length - 1; i++) {
+        idles.push({ start: polls[i].end, end: polls[i + 1].start, dumps: [] });
+      }
+      // Trailing idle after last poll
+      idles.push({ start: polls[polls.length - 1].end, end: Infinity, dumps: [] });
+      idlesByTask.set(taskId, idles);
+    }
+
+    // Attach each dump to its idle gap using binary search
+    for (const dump of dumps) {
+      const idles = idlesByTask.get(dump.task_id);
+      if (!idles) {
+        // Unknown task — create a single catch-all idle
+        const catchAll = [{ start: 0, end: Infinity, dumps: [dump] }];
+        idlesByTask.set(dump.task_id, catchAll);
+        continue;
+      }
+      // Binary search: find rightmost idle where idle.start <= dump.timestamp
+      let lo = 0, hi = idles.length - 1, best = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (idles[mid].start <= dump.timestamp) { best = mid; lo = mid + 1; }
+        else hi = mid - 1;
+      }
+      if (best >= 0 && dump.timestamp < idles[best].end) {
+        idles[best].dumps.push(dump);
+      }
+    }
+
+    return idlesByTask;
+  }
+
   // Export for both browser and Node.js
   const analysisExports = {
     buildWorkerSpans,
@@ -500,6 +560,7 @@
     buildFlamegraphTree,
     flattenFlamegraph,
     buildFgData,
+    attachTaskDumps,
   };
 
   if (typeof module !== "undefined" && module.exports) {
