@@ -1,6 +1,6 @@
 mod common;
 
-use dial9_tokio_telemetry::telemetry::{TelemetryEvent, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{TaskDumpConfig, TelemetryEvent, TracedRuntime};
 use std::time::Duration;
 
 /// Task dumps are emitted for tasks that sleep longer than the idle threshold.
@@ -13,12 +13,11 @@ fn task_dump_emitted_for_long_sleep() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
+        .with_task_dumps(TaskDumpConfig::enabled())
         .build_and_start(builder, writer)
         .unwrap();
 
     let handle = guard.handle();
-    handle.enable_task_dumps();
-    handle.set_task_dump_threshold(Duration::from_millis(10));
 
     runtime.block_on(async {
         let join = handle.spawn(async {
@@ -67,12 +66,11 @@ fn no_task_dump_for_short_sleep() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
+        .with_task_dumps(TaskDumpConfig::enabled())
         .build_and_start(builder, writer)
         .unwrap();
 
     let handle = guard.handle();
-    handle.enable_task_dumps();
-    handle.set_task_dump_threshold(Duration::from_millis(10));
 
     runtime.block_on(async {
         let join = handle.spawn(async {

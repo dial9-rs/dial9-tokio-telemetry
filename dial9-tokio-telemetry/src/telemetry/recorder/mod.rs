@@ -280,27 +280,6 @@ impl TelemetryHandle {
         self.shared.enabled.store(false, Ordering::Relaxed);
     }
 
-    /// Enable task dump capture at runtime.
-    pub fn enable_task_dumps(&self) {
-        self.shared
-            .task_dumps_enabled
-            .store(true, Ordering::Relaxed);
-    }
-
-    /// Disable task dump capture at runtime.
-    pub fn disable_task_dumps(&self) {
-        self.shared
-            .task_dumps_enabled
-            .store(false, Ordering::Relaxed);
-    }
-
-    /// Set the idle threshold for task dump emission.
-    pub fn set_task_dump_threshold(&self, threshold: Duration) {
-        self.shared
-            .task_dump_idle_threshold_ns
-            .store(threshold.as_nanos() as u64, Ordering::Relaxed);
-    }
-
     /// Get a [`TracedHandle`](crate::traced::TracedHandle) for wrapping futures with wake tracking.
     pub fn traced_handle(&self) -> crate::traced::TracedHandle {
         crate::traced::TracedHandle {
@@ -2240,77 +2219,6 @@ mod tests {
             });
             assert_eq!(join.await.unwrap(), 42);
         });
-
-        drop(runtime);
-        drop(guard);
-    }
-
-    /// handle.set_task_dump_threshold() should update the shared state.
-    #[test]
-    fn handle_set_task_dump_threshold() {
-        let mut builder = tokio::runtime::Builder::new_current_thread();
-        builder.enable_all();
-        let (runtime, guard) = TracedRuntime::build_and_start(builder, NullWriter).unwrap();
-
-        let handle = guard.handle();
-
-        // Default is 10ms
-        assert_eq!(
-            handle
-                .traced_handle()
-                .shared
-                .task_dump_idle_threshold_ns
-                .load(Ordering::Relaxed),
-            10_000_000,
-        );
-
-        handle.set_task_dump_threshold(Duration::from_millis(100));
-        assert_eq!(
-            handle
-                .traced_handle()
-                .shared
-                .task_dump_idle_threshold_ns
-                .load(Ordering::Relaxed),
-            100_000_000,
-        );
-
-        drop(runtime);
-        drop(guard);
-    }
-
-    /// handle.enable_task_dumps() / disable_task_dumps() should toggle the flag.
-    #[test]
-    fn handle_enable_disable_task_dumps() {
-        let mut builder = tokio::runtime::Builder::new_current_thread();
-        builder.enable_all();
-        let (runtime, guard) = TracedRuntime::build_and_start(builder, NullWriter).unwrap();
-
-        let handle = guard.handle();
-        assert!(
-            !handle
-                .traced_handle()
-                .shared
-                .task_dumps_enabled
-                .load(Ordering::Relaxed)
-        );
-
-        handle.enable_task_dumps();
-        assert!(
-            handle
-                .traced_handle()
-                .shared
-                .task_dumps_enabled
-                .load(Ordering::Relaxed)
-        );
-
-        handle.disable_task_dumps();
-        assert!(
-            !handle
-                .traced_handle()
-                .shared
-                .task_dumps_enabled
-                .load(Ordering::Relaxed)
-        );
 
         drop(runtime);
         drop(guard);
