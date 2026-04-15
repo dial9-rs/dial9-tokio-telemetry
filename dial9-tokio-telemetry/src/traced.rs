@@ -71,11 +71,17 @@ pin_project! {
         pending_capture_ts: u64,
         // Per-task opt-in: latched from thread-local on first poll that sees it
         task_dump_override: bool,
+        // Snapshot of the idle threshold at construction time (nanos)
+        task_dump_threshold_ns: u64,
     }
 }
 
 impl<F> Traced<F> {
     pub(crate) fn new(inner: F, handle: TracedHandle, task_id: TaskId) -> Self {
+        let task_dump_threshold_ns = handle
+            .shared
+            .task_dump_idle_threshold_ns
+            .load(Ordering::Relaxed);
         let waker_data = Arc::new(TracedWakerData {
             inner: AtomicWaker::new(),
             woken_task_id: task_id,
@@ -89,6 +95,7 @@ impl<F> Traced<F> {
             pending_frames: Vec::new(),
             pending_capture_ts: 0,
             task_dump_override: false,
+            task_dump_threshold_ns,
         }
     }
 }
@@ -179,11 +186,7 @@ impl<F: Future> Future for Traced<F> {
 
         // --- Pre-poll: compute elapsed since last capture ---
         let now = crate::telemetry::events::clock_monotonic_ns();
-        let threshold = this
-            .handle
-            .shared
-            .task_dump_idle_threshold_ns
-            .load(Ordering::Relaxed);
+        let threshold = *this.task_dump_threshold_ns;
         let had_frames = !this.pending_frames.is_empty();
         let elapsed = if had_frames {
             now.saturating_sub(*this.pending_capture_ts)
