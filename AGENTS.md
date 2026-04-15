@@ -65,6 +65,22 @@ The demo trace is used for:
 
 Failing to update it will cause the viewer to fail when loading the demo.
 
+## Reviewing subagent work
+
+When delegating to subagents, you MUST review their output from first
+principles before committing. Subagents will write tests that pass but may
+not cover the actual invariants. Ask yourself:
+
+- **Does the test prove the property, or just exercise the code path?** A test
+  that "verifies the task completes without panicking" does not prove isolation,
+  correctness, or absence of side effects.
+- **Are there concurrency/sharing concerns the subagent missed?** For example,
+  a thread-local flag in a tokio runtime is shared across all tasks on that
+  worker thread — a per-task opt-in stored in a thread-local will leak to
+  other tasks unless it is latched onto the per-instance struct and cleared.
+- **Would this test catch a regression?** If you removed the feature, would
+  the test fail? If not, it's not testing the right thing.
+
 ## Meta
 
 - Never declare done after pushing or opening a PR until CI is green. Check CI status and fix any failures before moving on.
