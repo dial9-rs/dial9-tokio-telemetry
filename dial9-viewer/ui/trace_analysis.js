@@ -145,10 +145,10 @@
       }
     }
 
-    // Close any open spans at trace end
+    // Close any open park spans at trace end.
+    // Open polls are discarded: a PollStart without a matching PollEnd
+    // means the segment rotated mid-poll, not that the poll was long (#194).
     for (const w of workerIds) {
-      if (openPoll[w] != null)
-        workerSpans[w].polls.push({ start: openPoll[w], end: maxTs });
       if (openPark[w] != null)
         workerSpans[w].parks.push({ start: openPark[w], end: maxTs });
     }
