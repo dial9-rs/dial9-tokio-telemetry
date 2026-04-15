@@ -1,0 +1,3239 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Tokio Trace Viewer</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            body {
+                font-family:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                    monospace;
+                background: #1a1a2e;
+                color: #e0e0e0;
+                overflow: hidden;
+                height: 100vh;
+                display: flex;
+                flex-direction: column;
+            }
+
+            #drop-zone {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: 100vh;
+                width: 100vw;
+                border: 3px dashed #444;
+                border-radius: 12px;
+                margin: 20px;
+                font-size: 1.2em;
+                color: #888;
+                cursor: pointer;
+                transition: all 0.2s;
+            }
+            #drop-zone:hover,
+            #drop-zone.dragover {
+                border-color: #6c63ff;
+                color: #6c63ff;
+                background: rgba(108, 99, 255, 0.05);
+            }
+            #drop-zone input {
+                display: none;
+            }
+
+            @keyframes spin { to { transform: rotate(360deg); } }
+            .loading-spinner {
+                width: 32px; height: 32px;
+                border: 3px solid #333;
+                border-top-color: #6c63ff;
+                border-radius: 50%;
+                animation: spin 0.8s linear infinite;
+                margin: 0 auto 12px;
+            }
+            .loading-progress {
+                font-size: 0.85em;
+                color: #888;
+                margin-top: 8px;
+            }
+
+            #viewer {
+                display: none;
+                flex-direction: column;
+                height: 100vh;
+                overflow: hidden;
+            }
+
+            #toolbar {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 8px 16px;
+                background: #16213e;
+                border-bottom: 1px solid #333;
+                flex-shrink: 0;
+                min-height: 44px;
+                overflow-x: auto;
+                overflow-y: hidden;
+            }
+            #toolbar .filename {
+                font-weight: 600;
+                color: #6c63ff;
+            }
+            #toolbar .filename::after {
+                content: " v15";
+                font-size: 0.7em;
+                color: #888;
+            }
+            #toolbar .stats {
+                color: #888;
+                font-size: 0.85em;
+            }
+            #toolbar button {
+                background: #2a2a4a;
+                border: 1px solid #444;
+                color: #ccc;
+                padding: 4px 12px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 0.85em;
+            }
+            #toolbar button:hover {
+                background: #3a3a5a;
+            }
+            #toolbar button:disabled {
+                opacity: 0.4;
+                cursor: not-allowed;
+            }
+            #toolbar select {
+                background: #2a2a4a;
+                border: 1px solid #444;
+                color: #ccc;
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-size: 0.85em;
+            }
+
+            #tooltip {
+                display: none;
+                position: fixed;
+                background: #222244;
+                border: 1px solid #555;
+                padding: 8px 12px;
+                border-radius: 6px;
+                font-size: 0.8em;
+                pointer-events: none;
+                z-index: 100;
+                max-width: 320px;
+                line-height: 1.5;
+            }
+            #tooltip .label {
+                color: #888;
+            }
+            #tooltip .value {
+                color: #fff;
+                font-weight: 600;
+            }
+
+            #main-area {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+                position: relative;
+            }
+
+            #timeline-header {
+                height: 30px;
+                background: #16213e;
+                border-bottom: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+
+            #lanes-container {
+                flex: 1;
+                overflow-y: auto;
+                overflow-x: hidden;
+                position: relative;
+            }
+
+            #task-detail {
+                display: none;
+                height: 160px;
+                background: #16213e;
+                border-top: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+            #task-detail .chart-label {
+                position: absolute;
+                top: 4px;
+                left: 8px;
+                font-size: 0.75em;
+                color: #888;
+                z-index: 2;
+            }
+
+            #queue-chart {
+                height: 120px;
+                background: #16213e;
+                border-top: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+            #queue-chart .chart-label {
+                position: absolute;
+                top: 4px;
+                left: 8px;
+                font-size: 0.75em;
+                color: #888;
+                z-index: 2;
+            }
+
+            #info-panel {
+                position: absolute;
+                top: 4px;
+                right: 12px;
+                font-size: 0.75em;
+                color: #ccc;
+                z-index: 2;
+                text-align: right;
+                line-height: 1.6;
+            }
+            #info-panel .ip-label { color: #888; }
+            #info-panel .ip-value { color: #fff; font-weight: 600; }
+
+            .lane {
+                height: 60px;
+                border-bottom: 1px solid #222;
+                position: relative;
+                display: flex;
+            }
+            .lane-label {
+                width: 100px;
+                flex-shrink: 0;
+                display: flex;
+                align-items: center;
+                padding-left: 12px;
+                font-size: 0.8em;
+                color: #aaa;
+                background: #16213e;
+                border-right: 1px solid #333;
+                z-index: 1;
+            }
+            .lane-content {
+                flex: 1;
+                position: relative;
+                overflow: hidden;
+            }
+
+            canvas {
+                display: block;
+            }
+
+            #selection-overlay {
+                position: absolute;
+                background: rgba(66, 133, 244, 0.15);
+                border: 1px solid rgba(66, 133, 244, 0.6);
+                pointer-events: none;
+                z-index: 9;
+                display: none;
+            }
+
+            #flamegraph-panel {
+                display: none;
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: #1a1a2e;
+                z-index: 50;
+                flex-direction: column;
+            }
+            #flamegraph-panel .fg-header {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 6px 12px;
+                background: #16213e;
+                border-bottom: 1px solid #333;
+                font-size: 0.8em;
+                flex-shrink: 0;
+            }
+            #flamegraph-panel .fg-header .fg-title { color: #6c63ff; font-weight: 600; }
+            #flamegraph-panel .fg-header .fg-stats { color: #888; }
+            #flamegraph-panel .fg-header .fg-close { cursor: pointer; color: #888; margin-left: auto; padding: 0 4px; }
+            #flamegraph-panel .fg-header .fg-close:hover { color: #fff; }
+            .fg-section-label {
+                padding: 4px 12px;
+                font-size: 0.78em;
+                color: #aaa;
+                background: #16213e;
+                border-bottom: 1px solid #222;
+                flex-shrink: 0;
+            }
+            #fg-tooltip {
+                display: none;
+                position: fixed;
+                background: #222244;
+                border: 1px solid #555;
+                padding: 6px 10px;
+                border-radius: 4px;
+                font-size: 0.78em;
+                pointer-events: none;
+                z-index: 200;
+                max-width: 600px;
+                white-space: nowrap;
+                color: #e0e0e0;
+            }
+            @keyframes toast-in {
+                from { opacity: 0; transform: translateY(-8px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            @keyframes toast-wiggle {
+                0%, 100% { transform: translateX(0); }
+                20% { transform: translateX(-4px); }
+                40% { transform: translateX(4px); }
+                60% { transform: translateX(-3px); }
+                80% { transform: translateX(2px); }
+            }
+            .toast {
+                z-index: 60;
+                padding: 4px 12px;
+                border-radius: 6px;
+                font-size: 0.78em;
+                pointer-events: auto;
+                animation: toast-in 0.2s ease-out;
+                white-space: nowrap;
+            }
+            .toast-info {
+                background: #1e2050;
+                border: 1px solid rgba(108, 99, 255, 0.7);
+                color: #d0ccff;
+            }
+            .toast-warn {
+                background: #2a1e00;
+                border: 1px solid rgba(255, 152, 0, 0.7);
+                color: #ffd180;
+            }
+            .toast-error {
+                background: #2a0a0a;
+                border: 1px solid rgba(255, 68, 68, 0.7);
+                color: #ff8a8a;
+            }
+            #help-overlay {
+                display: none;
+                position: fixed;
+                top: 0; left: 0; right: 0; bottom: 0;
+                z-index: 200;
+                background: rgba(0,0,0,0.6);
+                justify-content: center;
+                align-items: center;
+            }
+            #help-overlay.visible { display: flex; }
+            #help-content {
+                background: #1a1a2e;
+                border: 1px solid #444;
+                border-radius: 8px;
+                padding: 24px 32px;
+                max-width: 520px;
+                color: #ccc;
+                font-size: 0.9em;
+                line-height: 1.6;
+            }
+            #help-content h3 { color: #eee; margin: 16px 0 8px; font-size: 1em; }
+            #help-content h3:first-child { margin-top: 0; }
+            #help-content table { border-collapse: collapse; width: 100%; }
+            #help-content td { padding: 3px 8px; vertical-align: top; }
+            #help-content td:first-child { white-space: nowrap; color: #a0a0ff; font-family: monospace; }
+            #help-content .close-hint { text-align: center; color: #666; font-size: 0.85em; margin-top: 12px; }
+            #main-area:focus-visible, #queue-chart:focus-visible, #btn-info:focus-visible {
+                outline: 2px solid #6c63ff;
+                outline-offset: -2px;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="drop-zone">
+            <div>
+                <div style="font-size: 2em; margin-bottom: 12px">📊</div>
+                <div>
+                    Drop a <code>.bin</code> trace file here or click to open
+                </div>
+                <div style="font-size: 0.8em; margin-top: 8px; color: #666">
+                    Expects D9TF binary format
+                </div>
+                <div style="margin-top: 12px">
+                    <a href="#" id="load-demo" style="color: #6c63ff; font-size: 0.9em">or load demo trace</a>
+                </div>
+            </div>
+            <input type="file" id="file-input" accept=".bin" />
+        </div>
+
+        <div id="viewer">
+            <div id="toolbar">
+                <span class="filename" id="tb-filename"></span>
+                <span class="stats" id="tb-stats"></span>
+                <span style="flex: 1"></span>
+                <select id="poi-filter">
+                    <option value="sched">Kernel Scheduling Delays</option>
+                    <option value="long-poll">Long Polls (>1ms)</option>
+                    <option value="cpu-sampled">Polls with CPU Samples</option>
+                    <option value="wake-delay">Wake→Poll Delays (>100µs)</option>
+                </select>
+                <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer">
+                    <input type="checkbox" id="sort-by-worst" style="cursor:pointer">
+                    Worst first
+                </label>
+                <button id="btn-prev-poi">◀ Prev</button>
+                <button id="btn-next-poi">Next ▶</button>
+                <span id="poi-counter" style="font-size:0.85em;color:#888"></span>
+                <span style="width:1px;height:20px;background:#444;margin:0 8px"></span>
+                <button id="btn-sched-panel" style="background:#3a1a1a;border-color:#ff4444;color:#ff8a65">⚠ Blocking Calls</button>
+                <button id="btn-zoom-in">Zoom +</button>
+                <button id="btn-zoom-out">Zoom −</button>
+                <button id="btn-fit">Fit All</button>
+                <button id="btn-set-range" title="Set time range filter (reloads with only events in range)">Set Range</button>
+                <button id="btn-clear-range" title="Clear time range filter" style="display:none">Clear Range</button>
+                <button id="btn-time-mode" title="Toggle between relative (offset from trace start) and absolute timestamps">Time: Relative</button>
+                <button id="btn-tz-mode" title="Toggle between UTC and local timezone for absolute timestamps" style="display:none">TZ: UTC</button>
+                <button id="btn-reset">New File</button>
+            </div>
+            <div id="main-area" tabindex="0" role="application" aria-label="Trace timeline">
+                <div id="selection-overlay"></div>
+                <canvas id="crosshair-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10"></canvas>
+                <div id="timeline-header">
+                    <canvas id="timeline-canvas"></canvas>
+                    <div id="toast-container" style="position:absolute;top:0;bottom:0;left:0;display:flex;align-items:center;gap:8px;z-index:60;pointer-events:none"></div>
+                </div>
+                <div id="lanes-container" id="lanes"></div>
+                <div id="task-detail">
+                    <span class="chart-label" id="task-detail-label">Task Detail</span>
+                    <span id="task-detail-status" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2"></span>
+                    <canvas id="task-detail-canvas"></canvas>
+                </div>
+                <div id="queue-chart" tabindex="0" aria-label="Queue depth chart">
+                    <span class="chart-label"
+                        >Queue Depth (global=blue, local max=orange)</span
+                    >
+                    <div id="info-panel"></div>
+                    <canvas id="queue-canvas"></canvas>
+                </div>
+                <div id="flamegraph-panel">
+                    <div class="fg-header">
+                        <span class="fg-title" id="fg-title">Flamegraph</span>
+                        <span class="fg-stats" id="fg-stats"></span>
+                        <select id="fg-spawn-filter" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em;max-width:350px"></select>
+                        <span class="fg-close" id="fg-close" tabindex="0" role="button">✕ Close (Esc)</span>
+                    </div>
+                    <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column">
+                        <div class="fg-section-label" id="fg-worker-label">Worker threads</div>
+                        <canvas id="fg-canvas-worker"></canvas>
+                        <div class="fg-section-label" id="fg-offworker-label">Off-worker (sampler thread)</div>
+                        <canvas id="fg-canvas-offworker"></canvas>
+                    </div>
+                </div>
+                <div id="sched-panel" style="display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:#1a1a2e;z-index:50;flex-direction:column">
+                    <div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16213e;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0">
+                        <span style="color:#ff4444;font-weight:600" id="sched-panel-title">⚠ Scheduling Events</span>
+                        <span style="color:#888" id="sched-panel-stats"></span>
+                        <select id="sched-group-by" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em">
+                            <option value="leaf">Group by blocking call</option>
+                            <option value="full">Group by full stack</option>
+                        </select>
+                        <span style="flex:1"></span>
+                        <span id="sched-panel-close" style="cursor:pointer;color:#888;padding:0 4px" tabindex="0" role="button">✕ Close (Esc)</span>
+                    </div>
+                    <div id="sched-panel-body" style="flex:1;overflow-y:auto;padding:8px 12px;font-family:monospace;font-size:0.82em;line-height:1.5"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="tooltip"></div>
+        <div id="fg-tooltip"></div>
+        <div id="stack-popup" style="display:none;position:fixed;background:#1a1a2e;border:1px solid #6c63ff;border-radius:8px;padding:12px 16px;z-index:200;max-width:800px;max-height:600px;overflow-y:auto;font-size:0.8em;line-height:1.6;box-shadow:0 4px 20px rgba(0,0,0,0.5)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                <span id="stack-popup-title" style="color:#6c63ff;font-weight:600"></span>
+                <span id="stack-popup-close" style="cursor:pointer;color:#888;font-size:1.2em;padding:0 4px">&times;</span>
+            </div>
+            <div id="stack-popup-body" style="font-family:monospace;font-size:0.9em"></div>
+        </div>
+
+        <div id="help-overlay" role="dialog" aria-label="Keyboard and mouse shortcuts">
+            <div id="help-content">
+                <h3>🖱 Mouse</h3>
+                <table>
+                    <tr><td>Scroll wheel</td><td>Zoom in/out (centered on cursor)</td></tr>
+                    <tr><td>Drag</td><td>Pan left/right</td></tr>
+                    <tr><td>Click poll</td><td>Select task &amp; show wake timeline</td></tr>
+                    <tr><td>⇧ Shift+drag</td><td>Select region → flamegraph / blocking calls</td></tr>
+                    <tr><td>⌥ Option+drag</td><td>Select region → zoom to fit</td></tr>
+                </table>
+                <h3>⌨ Keyboard</h3>
+                <table>
+                    <tr><td>Tab</td><td>Navigate between UI regions</td></tr>
+                    <tr><td>↑ / ↓</td><td>Zoom in / out</td></tr>
+                    <tr><td>← / →</td><td>Pan left / right</td></tr>
+                    <tr><td>Shift</td><td>Toggle region selection (analysis). Press once to start, ← → to extend, press again or Enter to confirm</td></tr>
+                    <tr><td>Option / Alt</td><td>Toggle region selection (zoom). Press once to start, ← → to extend, press again or Enter to confirm</td></tr>
+                    <tr><td>Esc</td><td>Cancel selection / close panels</td></tr>
+                </table>
+                <div class="close-hint">Press Esc or click outside to close</div>
+            </div>
+        </div>
+        <div id="aria-live" aria-live="polite" style="position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden"></div>
+
+        <script src="decode.js"></script>
+        <script src="trace_parser.js"></script>
+        <script src="trace_analysis.js"></script>
+        <script>
+            const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData } = TraceAnalysis;
+
+            function esc(s) {
+                return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            }
+
+            /** Render a raw frame {symbol, location} as HTML, with docs.rs link if available. */
+            function renderFrame(frame) {
+                const f = formatFrame(frame);
+                if (f.docsUrl) return `<a href="${esc(f.docsUrl)}" target="_blank" style="color:inherit;text-decoration:underline dotted">${esc(f.text)}</a>`;
+                return esc(f.text);
+            }
+            // ── Toast notifications ──
+            const _toasts = {};  // id → element
+            const _toastTimers = {};  // id → timeout
+            const _persistentToasts = new Set();  // ids that survive clearToasts
+            function showToast(id, msg, type = "info", autoHideMs = 0, persistent = false) {
+                const container = document.getElementById("toast-container");
+                let el = _toasts[id];
+                if (el) {
+                    el.style.animation = "none";
+                    el.offsetHeight;
+                    el.style.animation = "toast-wiggle 0.4s ease";
+                    return;
+                }
+                el = document.createElement("div");
+                el.className = `toast toast-${type}`;
+                el.textContent = msg;
+                container.appendChild(el);
+                _toasts[id] = el;
+                if (persistent) _persistentToasts.add(id);
+                if (autoHideMs > 0) {
+                    _toastTimers[id] = setTimeout(() => hideToast(id), autoHideMs);
+                }
+            }
+            function hideToast(id) {
+                const el = _toasts[id];
+                if (!el) return;
+                el.remove();
+                delete _toasts[id];
+                _persistentToasts.delete(id);
+                clearTimeout(_toastTimers[id]);
+                delete _toastTimers[id];
+            }
+            function clearToasts() {
+                for (const id of Object.keys(_toasts)) {
+                    if (!_persistentToasts.has(id)) hideToast(id);
+                }
+            }
+
+            // ── Event type helpers ──
+            const ET_NAMES = [
+                "PollStart",
+                "PollEnd",
+                "WorkerPark",
+                "WorkerUnpark",
+                "QueueSample",
+            ];
+            const ET_COLORS = { poll: "#4fc3f7", park: "#ff8a65" };
+
+            // Duration-based poll coloring: short=dim, long=hot
+            function pollColor(startNs, endNs) {
+                const durUs = (endNs - startNs) / 1e3;
+                if (durUs > 1000) return "#ff4444"; // >1ms: red
+                if (durUs > 100)  return "#ff8a65"; // >100µs: orange
+                if (durUs > 10)   return "#4fc3f7"; // >10µs: bright blue
+                return "#2a5a7a";                    // ≤10µs: dim blue
+            }
+
+            function pollColorDim(startNs, endNs) {
+                const durUs = (endNs - startNs) / 1e3;
+                if (durUs > 1000) return "#803030"; // >1ms: muted red
+                if (durUs > 100)  return "#805540"; // >100µs: muted orange
+                if (durUs > 10)   return "#2a5a7a"; // >10µs: dim blue
+                return "#1e3040";                    // ≤10µs: very dim
+            }
+
+            // ── State ──
+            let trace = null;
+            let workerIds = [];
+            let minTs = 0,
+                maxTs = 0,
+                durationNs = 0;
+            let useAbsoluteTime = false;
+            let useLocalTz = false;
+
+            function fmtDuration(ns) {
+                const prefix = "+";
+                const v = ns;
+                if (v >= 1e9) return prefix + (v / 1e9).toFixed(2) + "s";
+                if (v >= 1e6) return prefix + (v / 1e6).toFixed(2) + "ms";
+                if (v >= 1e3) return prefix + (v / 1e3).toFixed(1) + "µs";
+                return prefix + v.toFixed(0) + "ns";
+            }
+
+            function fmtWallClock(ns) {
+                const ms = ns / 1e6;
+                const d = new Date(ms);
+                const pad2 = n => String(n).padStart(2, "0");
+                if (useLocalTz) {
+                    return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" +
+                        pad2(d.getSeconds());
+                } else {
+                    return pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes()) + ":" +
+                        pad2(d.getUTCSeconds());
+                }
+            }
+
+            // Format a timestamp (ns) for display. In relative mode, shows
+            // offset from trace start with a "+" prefix. In absolute mode,
+            // shows wall-clock time.
+            function fmtTs(ns) {
+                if (useAbsoluteTime) return fmtWallClock(ns);
+                return fmtDuration(ns - minTs);
+            }
+            // View window in nanoseconds
+            let viewStart = 0,
+                viewEnd = 0;
+            // Precomputed spans per worker: { polls: [{start,end}], parks: [{start,end}] }
+            let workerSpans = {};
+            // Queue depth samples sorted by time
+            let queueSamples = [];
+            // Per-worker local queue samples
+            let workerQueueSamples = {};
+            let maxLocalQueue = 1;
+            // Points of interest for navigation
+            let pointsOfInterest = [];
+            let currentPoiIndex = -1;
+            // Task selection state
+            let selectedTaskId = null;
+            // Active task count timeline: [{t, count}]
+            let activeTaskSamples = [];
+            // First poll time per task: taskId → timestamp (ns)
+            let taskFirstPoll = new Map();
+            // Hovered waker task in task detail panel
+            let hoveredWakerTaskId = null;
+            // Stored wake hit regions for task detail mouseover: [{x1, x2, y1, y2, wakerTaskId}]
+            let taskDetailWakeRegions = [];
+            // Wake events indexed by woken task ID
+            let wakesByTask = {}; // taskId → [{timestamp, wakerTaskId, targetWorker}]
+            // Wake events indexed by target worker
+            let wakesByWorker = {}; // workerId → [{timestamp, wakerTaskId, wokenTaskId}]
+            // Scheduling delays: wake → next poll for same task
+            let schedDelays = []; // [{wakeTime, pollTime, delay, taskId, wakerTaskId, worker}]
+            // Lane canvases per worker (populated by buildLanes)
+            let laneCanvases = {};
+
+            const LABEL_W = 100;
+            const LANE_H = 60;
+
+            // ── DOM refs ──
+            const dropZone = document.getElementById("drop-zone");
+            const fileInput = document.getElementById("file-input");
+            const viewer = document.getElementById("viewer");
+            const tooltip = document.getElementById("tooltip");
+            const timelineCanvas = document.getElementById("timeline-canvas");
+            const queueCanvas = document.getElementById("queue-canvas");
+            const lanesContainer = document.getElementById("lanes-container");
+
+            // ── File loading ──
+            dropZone.addEventListener("click", () => fileInput.click());
+            dropZone.addEventListener("dragover", (e) => {
+                e.preventDefault();
+                dropZone.classList.add("dragover");
+            });
+            dropZone.addEventListener("dragleave", () =>
+                dropZone.classList.remove("dragover"),
+            );
+            dropZone.addEventListener("drop", (e) => {
+                e.preventDefault();
+                dropZone.classList.remove("dragover");
+                loadFile(e.dataTransfer.files[0]);
+            });
+            fileInput.addEventListener("change", (e) => {
+                if (e.target.files[0]) loadFile(e.target.files[0]);
+            });
+            document
+                .getElementById("btn-reset")
+                .addEventListener("click", () => {
+                    viewer.style.display = "none";
+                    resetDropZone();
+                });
+
+            function loadFile(file) {
+                showLoadingState(`Loading ${file.name}…`);
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    try {
+                        const opts = getParseOptions();
+                        opts.onProgress = ({ bytesRead, totalBytes, eventCount }) => {
+                            const pct = ((bytesRead / totalBytes) * 100) | 0;
+                            updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
+                        };
+                        updateLoadProgress("Decompressing…");
+                        trace = await parseTrace(e.target.result, opts);
+                        updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
+                        await new Promise((r) => setTimeout(r, 0));
+                        processTrace();
+                        showViewer(file.name);
+                    } catch (err) {
+                        alert("Error: " + err.message);
+                        resetDropZone();
+                    }
+                };
+                // Read the full file — time range filtering handles large traces
+                reader.readAsArrayBuffer(file);
+            }
+
+            let loadAbortController = null;
+
+            function showLoadingState(label) {
+                loadAbortController = new AbortController();
+                dropZone.innerHTML = '';
+                const wrap = document.createElement("div");
+                wrap.style.textAlign = "center";
+                wrap.innerHTML = `<div class="loading-spinner"></div><div style="margin-bottom:8px">${esc(label)}</div><div class="loading-progress" id="load-progress"></div>`;
+                const btn = document.createElement("button");
+                btn.textContent = "← Back";
+                btn.style.cssText = "background:#2a2a4a;border:1px solid #444;color:#ccc;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:0.9em;margin-top:12px";
+                btn.addEventListener("click", cancelLoad);
+                wrap.appendChild(btn);
+                wrap.insertAdjacentHTML("beforeend", '<div style="margin-top:8px;font-size:0.8em;color:#666">or press Escape</div>');
+                dropZone.appendChild(wrap);
+            }
+
+            function updateLoadProgress(text) {
+                const el = document.getElementById("load-progress");
+                if (el) el.textContent = text;
+            }
+
+            function cancelLoad() {
+                if (loadAbortController) { loadAbortController.abort(); loadAbortController = null; }
+                resetDropZone();
+            }
+
+            function resetDropZone() {
+                dropZone.innerHTML = `
+                    <div>
+                        <div style="font-size: 2em; margin-bottom: 12px">📊</div>
+                        <div>Drop a <code>.bin</code> trace file here or click to open</div>
+                        <div style="font-size: 0.8em; margin-top: 8px; color: #666">Expects D9TF binary format</div>
+                        <div style="margin-top: 12px">
+                            <a href="#" id="load-demo" style="color: #6c63ff; font-size: 0.9em">or load demo trace</a>
+                        </div>
+                    </div>`;
+                dropZone.style.display = "flex";
+                document.getElementById("load-demo")?.addEventListener("click", onLoadDemo);
+            }
+
+            async function loadTraceFromUrl(url) {
+                try {
+                    updateLoadProgress("Fetching…");
+                    const response = await fetch(url, { signal: loadAbortController?.signal });
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const arrayBuffer = await response.arrayBuffer();
+                    loadAbortController = null;
+                    const opts = getParseOptions();
+                    opts.onProgress = ({ bytesRead, totalBytes, eventCount }) => {
+                        const pct = ((bytesRead / totalBytes) * 100) | 0;
+                        updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
+                    };
+                    updateLoadProgress("Decompressing…");
+                    trace = await parseTrace(arrayBuffer, opts);
+                    updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
+                    await new Promise((r) => setTimeout(r, 0));
+                    processTrace();
+                    showViewer(url.split('/').pop() || 'trace.bin');
+                } catch (err) {
+                    if (err.name === 'AbortError') return;
+                    alert("Error loading trace from URL: " + err.message);
+                    resetDropZone();
+                }
+            }
+
+            // Check for URL parameter on load
+            const urlParams = new URLSearchParams(window.location.search);
+            const traceUrl = urlParams.get('trace');
+
+            /** Build parseTrace options from current URL time range params. */
+            function getParseOptions() {
+                const params = new URLSearchParams(window.location.search);
+                const opts = {};
+                const s = params.get('start');
+                const e = params.get('end');
+                if (s != null) opts.startTime = Number(s);
+                if (e != null) opts.endTime = Number(e);
+                return opts;
+            }
+
+            /** Update URL with current time range without reloading. */
+            function updateUrlTimeRange(startNs, endNs) {
+                const params = new URLSearchParams(window.location.search);
+                if (startNs != null) params.set('start', Math.round(startNs).toString());
+                else params.delete('start');
+                if (endNs != null) params.set('end', Math.round(endNs).toString());
+                else params.delete('end');
+                const newUrl = window.location.pathname + '?' + params.toString();
+                window.history.replaceState(null, '', newUrl);
+            }
+
+            if (traceUrl) {
+                showLoadingState('Loading trace…');
+                loadTraceFromUrl(traceUrl);
+            }
+
+            function onLoadDemo(e) {
+                e.stopPropagation();
+                e.preventDefault();
+                showLoadingState('Loading demo trace…');
+                loadTraceFromUrl("demo-trace.bin");
+            }
+            document.getElementById("load-demo")?.addEventListener("click", onLoadDemo);
+
+            function processTrace() {
+                const evts = trace.events;
+                if (!evts.length) {
+                    alert("No events in trace");
+                    return;
+                }
+
+                const wSet = new Set();
+                evts.forEach((e) => {
+                    if (e.eventType !== ET.QueueSample && e.eventType !== ET.WakeEvent) wSet.add(e.workerId);
+                });
+                workerIds = [...wSet].sort((a, b) => a - b);
+
+                minTs = evts[0].timestamp;
+                maxTs = evts[evts.length - 1].timestamp;
+                // Scan for true min/max in case events aren't sorted
+                for (const e of evts) {
+                    if (e.timestamp < minTs) minTs = e.timestamp;
+                    if (e.timestamp > maxTs) maxTs = e.timestamp;
+                }
+                durationNs = maxTs - minTs || 1;
+                viewStart = minTs;
+                viewEnd = maxTs;
+
+                // Build spans (also extracts queue samples and indexes wake events)
+                const spanResult = buildWorkerSpans(evts, workerIds, maxTs);
+                workerSpans = spanResult.workerSpans;
+                const perWorker = spanResult.perWorker;
+                queueSamples = spanResult.queueSamples;
+
+                // Debug: log active period stats
+                for (const w of workerIds) {
+                    const a = workerSpans[w].actives;
+                    console.log(`Worker ${w}: ${a.length} active periods` +
+                        (a.length > 0 ? `, first ratio=${a[0].ratio.toFixed(3)}` : ''));
+                }
+                console.log(`Found ${queueSamples.length} global queue samples`);
+
+                // Attach CPU samples to poll spans they fall within
+                if (trace.cpuSamples.length > 0) {
+                    const { pollsWithCpuSamples, pollsWithSchedSamples } = attachCpuSamples(trace.cpuSamples, workerSpans);
+                    console.log(`CPU samples: ${trace.cpuSamples.length}, polls with cpu samples: ${pollsWithCpuSamples}, polls with sched events: ${pollsWithSchedSamples}`);
+                }
+
+                // Per-worker local queue samples (already extracted by buildWorkerSpans)
+                workerQueueSamples = spanResult.workerQueueSamples;
+                maxLocalQueue = spanResult.maxLocalQueue;
+
+                // Build active task count timeline from TaskSpawn/TaskTerminate
+                const atResult = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
+                activeTaskSamples = atResult.activeTaskSamples;
+                taskFirstPoll = atResult.taskFirstPoll;
+
+                // Wake events (already indexed by buildWorkerSpans)
+                wakesByTask = spanResult.wakesByTask;
+                wakesByWorker = spanResult.wakesByWorker;
+
+                schedDelays = computeSchedulingDelays(workerSpans, workerIds, wakesByTask);
+                console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);
+            }
+
+            function showViewer(filename) {
+                dropZone.style.display = "none";
+                viewer.style.display = "flex";
+                document.getElementById("tb-filename").textContent = filename;
+                const durMs = durationNs / 1e6;
+                const truncNote = trace.truncated ? " (truncated)" : "";
+                const filterNote = trace.timeFiltered ? " (time-filtered)" : "";
+                document.getElementById("tb-stats").textContent =
+                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durMs.toFixed(1)}ms${truncNote}${filterNote}`;
+
+                buildLanes();
+                updatePointsOfInterest();
+                // Show/hide sched panel button based on whether sched events exist
+                let hasSchedEvents = false;
+                for (const w of workerIds) {
+                    for (const p of workerSpans[w].polls) {
+                        if (p.schedSamples && p.schedSamples.length > 0) { hasSchedEvents = true; break; }
+                    }
+                    if (hasSchedEvents) break;
+                }
+                document.getElementById("btn-sched-panel").style.display = hasSchedEvents ? "" : "none";
+                showToast("shift-drag-hint", "⇧ Shift+drag to select a region", "info", 0, true);
+                showToast("option-drag-hint", "⌥ Option+drag to zoom", "info", 0, true);
+                requestAnimationFrame(renderAll);
+            }
+
+            function updatePointsOfInterest() {
+                const filterType = document.getElementById("poi-filter").value;
+                const sortByWorst = document.getElementById("sort-by-worst").checked;
+                pointsOfInterest = filterPointsOfInterest(filterType, workerSpans, workerIds, schedDelays, trace.hasSchedWait, { sortByWorst });
+                currentPoiIndex = -1;
+                updatePoiCounter();
+            }
+
+            function updatePoiCounter() {
+                const counter = document.getElementById("poi-counter");
+                const prevBtn = document.getElementById("btn-prev-poi");
+                const nextBtn = document.getElementById("btn-next-poi");
+
+                if (pointsOfInterest.length === 0) {
+                    counter.textContent = "None found";
+                    prevBtn.disabled = true;
+                    nextBtn.disabled = true;
+                } else {
+                    const idx = currentPoiIndex >= 0 ? currentPoiIndex + 1 : 0;
+                    counter.textContent = `${idx}/${pointsOfInterest.length}`;
+                    prevBtn.disabled = currentPoiIndex <= 0;
+                    nextBtn.disabled = currentPoiIndex >= pointsOfInterest.length - 1;
+                }
+            }
+
+            function jumpToPoi(index) {
+                if (index < 0 || index >= pointsOfInterest.length) return;
+                currentPoiIndex = index;
+                const poi = pointsOfInterest[index];
+
+                // Center view on this POI with appropriate zoom
+                const spanDur = poi.span.end - poi.span.start;
+                const viewDur = Math.max(spanDur * 5, 1e6); // Show 5x the span duration, min 1ms
+                viewStart = Math.max(minTs, poi.time - viewDur * 0.3);
+                viewEnd = Math.min(maxTs, viewStart + viewDur);
+
+                // For wake-delay POIs, include the wake event in the view and select the task
+                if (poi.schedDelay) {
+                    const sd = poi.schedDelay;
+                    const totalDur = sd.poll.end - sd.wakeTime;
+                    const padded = Math.max(totalDur * 3, 1e6);
+                    viewStart = Math.max(minTs, sd.wakeTime - padded * 0.2);
+                    viewEnd = Math.min(maxTs, viewStart + padded);
+                    selectedTaskId = sd.taskId;
+                }
+
+                // Scroll to worker lane
+                const laneIdx = workerIds.indexOf(poi.worker);
+                if (laneIdx >= 0) {
+                    const scrollTop = laneIdx * LANE_H;
+                    lanesContainer.scrollTop = scrollTop;
+                }
+
+                updatePoiCounter();
+                renderAll();
+            }
+
+            // ── Lane DOM ──
+            function buildLanes() {
+                lanesContainer.innerHTML = "";
+                laneCanvases = {};
+                for (const w of workerIds) {
+                    const lane = document.createElement("div");
+                    lane.className = "lane";
+                    const label = document.createElement("div");
+                    label.className = "lane-label";
+                    label.textContent = `Worker ${w}`;
+                    const content = document.createElement("div");
+                    content.className = "lane-content";
+                    const canvas = document.createElement("canvas");
+                    canvas.id = `worker-${w}-canvas`;
+                    content.appendChild(canvas);
+                    lane.appendChild(label);
+                    lane.appendChild(content);
+                    lanesContainer.appendChild(lane);
+                    laneCanvases[w] = canvas;
+                }
+            }
+
+            // ── Rendering ──
+            let mouseNs = null; // Track mouse position for crosshair
+            let queueChartRafId = null; // Throttle queue chart redraws
+
+            // ── Shared binary search helpers ──
+
+            /**
+             * Return the first index i where arr[i].t >= val.
+             * If no such index exists, returns arr.length.
+             * Array must be sorted by .t ascending.
+             */
+            function lowerBound(arr, val) {
+                let lo = 0, hi = arr.length - 1;
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (arr[mid].t < val) lo = mid + 1;
+                    else hi = mid - 1;
+                }
+                return lo;
+            }
+
+            /**
+             * Return the first index i where arr[i].t > val.
+             * If no such index exists, returns arr.length.
+             * Array must be sorted by .t ascending.
+             */
+            function upperBound(arr, val) {
+                let lo = 0, hi = arr.length - 1;
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (arr[mid].t <= val) lo = mid + 1;
+                    else hi = mid - 1;
+                }
+                return lo;
+            }
+
+            /**
+             * Find the element in arr whose .t is closest to val.
+             * Returns the element, or null if arr is empty.
+             */
+            function findNearest(arr, val) {
+                if (!arr.length) return null;
+                const i = lowerBound(arr, val);
+                const candidates = [];
+                if (i < arr.length) candidates.push(i);
+                if (i > 0) candidates.push(i - 1);
+                let best = null, bestDist = Infinity;
+                for (const idx of candidates) {
+                    const d = Math.abs(arr[idx].t - val);
+                    if (d < bestDist) { bestDist = d; best = arr[idx]; }
+                }
+                return best;
+            }
+
+            /**
+             * Binary search for the span containing a given timestamp.
+             * Spans must be non-overlapping and sorted by start time.
+             */
+            function findSpanAt(spans, ns) {
+                let lo = 0, hi = spans.length - 1;
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (spans[mid].end < ns) lo = mid + 1;
+                    else if (spans[mid].start > ns) hi = mid - 1;
+                    else return spans[mid];
+                }
+                return null;
+            }
+
+            /**
+             * Binary search for the first span whose end >= viewStart.
+             * Spans must be sorted by start time.
+             * Returns the index to start iterating from.
+             */
+            function findFirstVisible(spans, viewStart) {
+                let lo = 0, hi = spans.length - 1;
+                // Find first span that could be visible: its end >= viewStart
+                // Since spans are sorted by start, we look for the first span
+                // where start >= viewStart, then back up to catch spans that
+                // started before viewStart but extend into it.
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (spans[mid].end < viewStart) lo = mid + 1;
+                    else hi = mid - 1;
+                }
+                return lo;
+            }
+
+            function renderAll() {
+                const rect = lanesContainer.getBoundingClientRect();
+                const drawW = rect.width - LABEL_W;
+                if (drawW <= 0) return;
+
+                // Scrollbar width: difference between container and its usable content area
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+
+                // First pass: calculate max visible queue across all workers
+                window.visibleQueueRanges = {};
+                let maxVisibleQ = 1;
+                for (const w of workerIds) {
+                    const samples = workerQueueSamples[w];
+                    if (!samples || !samples.length) continue;
+                    const start = Math.max(0, lowerBound(samples, viewStart) - 1);
+                    const end = Math.min(samples.length - 1, upperBound(samples, viewEnd));
+                    for (let i = start; i <= end; i++) {
+                        if (samples[i].local > maxVisibleQ) maxVisibleQ = samples[i].local;
+                    }
+                }
+                window.sharedVisibleMaxQ = maxVisibleQ;
+
+                renderTimeline(drawW - scrollbarW);
+                for (const w of workerIds) renderLane(w, drawW);
+                renderTaskDetail(scrollbarW);
+                renderQueueChart(drawW, scrollbarW);
+            }
+
+            function nsToX(ns, drawW) {
+                return ((ns - viewStart) / (viewEnd - viewStart)) * drawW;
+            }
+
+            function renderTimeline(drawW) {
+                const c = timelineCanvas;
+                const parent = c.parentElement;
+                const dpr = devicePixelRatio || 1;
+                c.width = parent.clientWidth * dpr;
+                c.height = 30 * dpr;
+                c.style.width = parent.clientWidth + "px";
+                c.style.height = "30px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+                const w = parent.clientWidth;
+
+                ctx.fillStyle = "#16213e";
+                ctx.fillRect(0, 0, w, 30);
+
+                const viewDur = viewEnd - viewStart;
+                // Pick nice tick interval
+                const targetTicks = Math.max(4, Math.floor(drawW / 100));
+                const rawInterval = viewDur / targetTicks;
+                const niceIntervals = [
+                    1e3, 5e3, 1e4, 5e4, 1e5, 5e5, 1e6, 5e6, 1e7, 5e7, 1e8, 5e8,
+                    1e9, 5e9, 1e10,
+                ];
+                let interval =
+                    niceIntervals.find((i) => i >= rawInterval) || rawInterval;
+
+                ctx.fillStyle = "#888";
+                ctx.font = "10px monospace";
+                ctx.textAlign = "center";
+                ctx.strokeStyle = "#333";
+
+                const firstTick = Math.ceil(viewStart / interval) * interval;
+                for (let t = firstTick; t <= viewEnd; t += interval) {
+                    const x = LABEL_W + nsToX(t, drawW);
+                    ctx.beginPath();
+                    ctx.moveTo(x, 20);
+                    ctx.lineTo(x, 30);
+                    ctx.stroke();
+                    ctx.fillText(fmtTs(t), x, 16);
+                }
+            }
+
+            function renderLane(workerId, drawW) {
+                const c = laneCanvases[workerId];
+                if (!c) {
+                    console.error(`No canvas for worker ${workerId}`);
+                    return;
+                }
+                const parent = c.parentElement;
+                const dpr = devicePixelRatio || 1;
+                const pw = parent.clientWidth,
+                    ph = LANE_H;
+                c.width = pw * dpr;
+                c.height = ph * dpr;
+                c.style.width = pw + "px";
+                c.style.height = ph + "px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+
+                const spans = workerSpans[workerId];
+
+                // Background: active = dark, parked = distinct reddish-brown
+                // First fill entire lane as "active" (dark)
+                ctx.fillStyle = "#1a1e2a";
+                ctx.fillRect(0, 0, pw, ph);
+
+                // Color-code active periods by scheduling ratio (v5+ only)
+                if (trace.hasCpuTime) {
+                    const startIdx = findFirstVisible(spans.actives, viewStart);
+                    for (let i = startIdx; i < spans.actives.length; i++) {
+                        const s = spans.actives[i];
+                        if (s.start > viewEnd) break;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        const w = Math.max(x2 - x1, 1);
+                        if (s.ratio >= 0.95) {
+                            ctx.fillStyle = "#1a2a1a"; // green tint — healthy
+                        } else if (s.ratio >= 0.5) {
+                            ctx.fillStyle = "#2a2a1a"; // yellow tint — some preemption
+                        } else {
+                            ctx.fillStyle = "#2a1a1a"; // red tint — heavily descheduled
+                        }
+                        ctx.fillRect(x1, 0, w, ph);
+                    }
+                }
+
+                // Draw park spans — split into normal park (muted) and scheduling delay (bright red)
+                {
+                const parkStart = findFirstVisible(spans.parks, viewStart);
+                for (let i = parkStart; i < spans.parks.length; i++) {
+                    const s = spans.parks[i];
+                    if (s.start > viewEnd) break;
+                    const x1 = Math.max(0, nsToX(s.start, pw));
+                    const x2 = Math.min(pw, nsToX(s.end, pw));
+                    const w = Math.max(x2 - x1, 1);
+
+                    // If we have scheduling delay info, split the park visually
+                    if (trace.hasSchedWait && s.schedWait > 0) {
+                        const schedWaitNs = s.schedWait * 1000; // convert µs to ns
+                        const wakeupShouldBe = s.end - schedWaitNs;
+
+                        // Normal park portion (before wakeup should have happened)
+                        if (wakeupShouldBe > s.start) {
+                            const xSplit = Math.min(pw, nsToX(wakeupShouldBe, pw));
+                            const normalW = Math.max(xSplit - x1, 0);
+                            if (normalW > 0) {
+                                ctx.fillStyle = "#2a1520";
+                                ctx.fillRect(x1, 0, normalW, ph);
+                                ctx.fillStyle = "#cc5533";
+                                ctx.fillRect(x1, 0, normalW, 4);
+                            }
+
+                            // Scheduling delay portion (bright red)
+                            const delayW = Math.max(x2 - xSplit, 0);
+                            if (delayW > 0) {
+                                ctx.fillStyle = "#ff0000";
+                                ctx.fillRect(xSplit, 0, delayW, ph);
+                            }
+                        } else {
+                            // Entire park is scheduling delay
+                            ctx.fillStyle = "#ff0000";
+                            ctx.fillRect(x1, 0, w, ph);
+                        }
+                    } else {
+                        // No scheduling delay info, draw as normal park
+                        ctx.fillStyle = "#2a1520";
+                        ctx.fillRect(x1, 0, w, ph);
+                        ctx.fillStyle = "#cc5533";
+                        ctx.fillRect(x1, 0, w, 4);
+                    }
+                }
+                } // end parks block
+
+                // Draw poll spans (solid blue bars, center band)
+                // When a task is selected, draw in two passes: dim first, selected on top
+                const bandTop = 10,
+                    bandH = 20;
+                const poiSpan = (currentPoiIndex >= 0) ? pointsOfInterest[currentPoiIndex].span : null;
+                const pollStart = findFirstVisible(spans.polls, viewStart);
+                const nsPerPx = (viewEnd - viewStart) / pw;
+                if (selectedTaskId) {
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        if (s.taskId === selectedTaskId) continue;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        ctx.fillStyle = pollColorDim(s.start, s.end);
+                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
+                    }
+                    ctx.fillStyle = "#ffeb3b";
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        if (s.taskId !== selectedTaskId) continue;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
+                    }
+                } else if (nsPerPx > 5000) {
+                    // LOD: when zoomed out, bucket polls by pixel and draw worst-case color
+                    // Each pixel bucket tracks the max poll duration seen
+                    let prevPx = -2, prevColor = null, runStart = -1;
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        const x1 = Math.max(0, nsToX(s.start, pw)) | 0;
+                        const x2 = Math.min(pw, nsToX(s.end, pw)) | 0;
+                        const color = pollColor(s.start, s.end);
+                        if (x1 <= prevPx + 1 && color === prevColor) {
+                            // Extend current run
+                            prevPx = Math.max(prevPx, x2);
+                        } else {
+                            // Flush previous run
+                            if (prevColor) {
+                                ctx.fillStyle = prevColor;
+                                ctx.fillRect(runStart, bandTop, Math.max(prevPx - runStart, 1), bandH);
+                            }
+                            runStart = x1;
+                            prevPx = Math.max(x1, x2);
+                            prevColor = color;
+                        }
+                    }
+                    if (prevColor) {
+                        ctx.fillStyle = prevColor;
+                        ctx.fillRect(runStart, bandTop, Math.max(prevPx - runStart, 1), bandH);
+                    }
+                } else {
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        ctx.fillStyle = pollColor(s.start, s.end);
+                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
+                    }
+                }
+                // Highlight current POI span
+                if (poiSpan) {
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        if (s !== poiSpan) continue;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        const w = Math.max(x2 - x1, 5);
+                        ctx.fillStyle = "#ff4444";
+                        ctx.fillRect(x1, bandTop, w, bandH);
+                        ctx.strokeStyle = "#ffffff";
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(x1, bandTop, w, bandH);
+                    }
+                }
+
+                // Mark CPU sample positions with ticks below the poll band
+                ctx.fillStyle = "#ce93d8";
+                {
+                    const times = spans.cpuSampleTimes;
+                    // Binary search for first visible sample
+                    let lo = 0, hi = times.length - 1;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (times[mid] < viewStart) lo = mid + 1;
+                        else hi = mid - 1;
+                    }
+                    for (let i = lo; i < times.length; i++) {
+                        if (times[i] > viewEnd) break;
+                        const x = nsToX(times[i], pw);
+                        ctx.fillRect(x, bandTop + bandH, 3, 4);
+                    }
+                }
+
+                // Mark polls that have sched events with red triangles below the poll band
+                for (let i = pollStart; i < spans.polls.length; i++) {
+                    const s = spans.polls[i];
+                    if (s.start > viewEnd) break;
+                    if (!s.schedSamples) continue;
+                    for (const sample of s.schedSamples) {
+                        if (sample.timestamp < viewStart || sample.timestamp > viewEnd) continue;
+                        const x = nsToX(sample.timestamp, pw);
+                        ctx.fillStyle = "#ff2222";
+                        ctx.beginPath();
+                        ctx.moveTo(x, bandTop + bandH + 1);
+                        ctx.lineTo(x - 3, bandTop + bandH + 7);
+                        ctx.lineTo(x + 3, bandTop + bandH + 7);
+                        ctx.closePath();
+                        ctx.fill();
+                    }
+                }
+
+                // Highlight hovered waker task's polls (orange)
+                if (hoveredWakerTaskId) {
+                    ctx.fillStyle = "#ff8a65";
+                    for (let i = pollStart; i < spans.polls.length; i++) {
+                        const s = spans.polls[i];
+                        if (s.start > viewEnd) break;
+                        if (s.taskId !== hoveredWakerTaskId) continue;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 2), bandH);
+                    }
+                }
+
+                // Draw wake event markers on this worker lane (only when a task is selected)
+                if (selectedTaskId) {
+                    const wakes = wakesByWorker[workerId];
+                    if (wakes && wakes.length) {
+                        ctx.fillStyle = "#66bb6a";
+                        for (const w of wakes) {
+                            if (w.timestamp < viewStart || w.timestamp > viewEnd) continue;
+                            if (w.wokenTaskId !== selectedTaskId) continue;
+                            const x = nsToX(w.timestamp, pw);
+                            // Small downward triangle at top of lane
+                            ctx.beginPath();
+                            ctx.moveTo(x, 2);
+                            ctx.lineTo(x - 3, 8);
+                            ctx.lineTo(x + 3, 8);
+                            ctx.closePath();
+                            ctx.fill();
+                        }
+                    }
+                }
+
+                // Overlay local queue depth as a step chart in the bottom portion
+                const samples = workerQueueSamples[workerId];
+                if (samples && samples.length) {
+                    const iStart = Math.max(0, lowerBound(samples, viewStart) - 1);
+                    const iEnd = Math.min(samples.length - 1, upperBound(samples, viewEnd));
+
+                    // Store visible range for later max calculation
+                    if (!window.visibleQueueRanges) window.visibleQueueRanges = {};
+                    window.visibleQueueRanges[workerId] = { iStart, iEnd };
+
+                    const qTop = 34,
+                        qH = ph - 38;
+
+                    // Use shared max (calculated in renderAllLanes)
+                    const laneMaxQ = window.sharedVisibleMaxQ || 1;
+
+                    // Draw scale label
+                    ctx.fillStyle = "#666";
+                    ctx.font = "8px monospace";
+                    ctx.textAlign = "left";
+                    ctx.fillText("q:" + laneMaxQ, 2, qTop + 8);
+
+                    // Draw step chart - stroke only, no fill to avoid artifacts
+                    ctx.beginPath();
+                    let started = false;
+                    let lastY = qTop + qH;
+                    for (let i = iStart; i <= iEnd; i++) {
+                        const x = Math.max(0, Math.min(pw, nsToX(samples[i].t, pw)));
+                        const y = qTop + qH - (samples[i].local / laneMaxQ) * qH;
+
+                        if (!started) {
+                            ctx.moveTo(x, y);
+                            started = true;
+                        } else {
+                            ctx.lineTo(x, lastY);
+                            ctx.lineTo(x, y);
+                        }
+                        lastY = y;
+                    }
+                    ctx.lineTo(pw, lastY);
+                    const colors = ["rgba(255,200,50,0.8)", "rgba(50,255,200,0.8)", "rgba(255,50,200,0.8)", "rgba(200,50,255,0.8)"];
+                    ctx.strokeStyle = colors[workerId % colors.length];
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
+
+                // Separator line between poll band and queue area
+                ctx.strokeStyle = "#333";
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(0, 33);
+                ctx.lineTo(pw, 33);
+                ctx.stroke();
+            }
+
+            // Hit regions for task detail tooltip: [{x1, x2, y1, y2, type, detail}]
+            let taskDetailHitRegions = [];
+
+            function renderTaskDetail(scrollbarW) {
+                const panel = document.getElementById("task-detail");
+                const c = document.getElementById("task-detail-canvas");
+                if (!selectedTaskId) {
+                    panel.style.display = "none";
+                    return;
+                }
+
+                // Collect all polls for this task across all workers, sorted by start time
+                const polls = [];
+                for (const w of workerIds) {
+                    for (const s of workerSpans[w].polls) {
+                        if (s.taskId === selectedTaskId) polls.push(s);
+                    }
+                }
+                polls.sort((a, b) => a.start - b.start);
+                if (polls.length < 1) { panel.style.display = "none"; return; }
+
+                // Get wake events for this task
+                const wakes = wakesByTask[selectedTaskId] || [];
+
+                panel.style.display = "block";
+                const loc = trace.spawnLocations.get(polls[0].spawnLocId);
+                const wakeCount = wakes.length;
+                const terminateTs = trace.taskTerminateTimes?.get(selectedTaskId);
+                const hasTerminate = terminateTs != null;
+                const spawnTs = trace.taskSpawnTimes?.get(selectedTaskId);
+                let lifecycleStr = "";
+                if (hasTerminate && spawnTs != null) {
+                    const dur = terminateTs - spawnTs;
+                    const durMs = dur / 1e6;
+                    lifecycleStr = ` · lifetime ${durMs < 1 ? (durMs * 1000).toFixed(1) + "µs" : durMs.toFixed(2) + "ms"}`;
+                }
+                document.getElementById("task-detail-label").textContent =
+                    `Task 0x${selectedTaskId.toString(16)}${loc ? " — " + loc : ""} · ${polls.length} polls · ${wakeCount} wakes${lifecycleStr}${hasTerminate ? " ✓" : ""}`;
+
+                const parent = c.parentElement;
+                const dpr = devicePixelRatio || 1;
+                const pw = parent.clientWidth, ph = parent.clientHeight;
+                c.width = pw * dpr;
+                c.height = ph * dpr;
+                c.style.width = pw + "px";
+                c.style.height = ph + "px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+
+                ctx.fillStyle = "#16213e";
+                ctx.fillRect(0, 0, pw, ph);
+
+                // Account for scrollbar: draw area must match lane canvas width
+                const drawW = pw - LABEL_W - (scrollbarW || 0);
+                if (drawW <= 0) return;
+
+                function fmtDur(ns) {
+                    if (ns >= 1e6) return (ns / 1e6).toFixed(2) + "ms";
+                    if (ns >= 1e3) return (ns / 1e3).toFixed(1) + "µs";
+                    return ns.toFixed(0) + "ns";
+                }
+
+                const bandTop = 50, bandH = 30;
+                ctx.font = "9px monospace";
+                ctx.textAlign = "center";
+
+                // For each poll, find the most recent wake before it to show wake→poll delay
+                const pollWakes = []; // parallel to polls: {wake, effectiveWake} or null
+                for (let pi = 0; pi < polls.length; pi++) {
+                    const s = polls[pi];
+                    let best = null;
+                    if (wakes.length) {
+                        let lo = 0, hi = wakes.length - 1, bi = -1;
+                        while (lo <= hi) {
+                            const mid = (lo + hi) >> 1;
+                            if (wakes[mid].timestamp <= s.start) { bi = mid; lo = mid + 1; }
+                            else hi = mid - 1;
+                        }
+                        if (bi >= 0) {
+                            const w = wakes[bi];
+                            // If wake arrived during an earlier poll, effective wait starts at that poll's end
+                            let effectiveWake = w.timestamp;
+                            for (let j = 0; j < pi; j++) {
+                                if (w.timestamp >= polls[j].start && w.timestamp <= polls[j].end) {
+                                    effectiveWake = polls[j].end;
+                                    break;
+                                }
+                            }
+                            const delay = s.start - effectiveWake;
+                            if (delay >= 0 && delay < 1e9) best = { wake: w, effectiveWake };
+                        }
+                    }
+                    pollWakes.push(best);
+                }
+
+                // Draw wake→poll scheduling delay regions
+                taskDetailWakeRegions = [];
+                taskDetailHitRegions = [];
+                for (let i = 0; i < polls.length; i++) {
+                    const pollWake = pollWakes[i];
+                    if (!pollWake) continue;
+                    const { wake, effectiveWake } = pollWake;
+                    const s = polls[i];
+                    if (s.start < viewStart || effectiveWake > viewEnd) continue;
+                    const delay = s.start - effectiveWake;
+                    const x1 = LABEL_W + Math.max(0, nsToX(effectiveWake, drawW));
+                    const x2 = LABEL_W + Math.min(drawW, nsToX(s.start, drawW));
+                    const w = x2 - x1;
+                    if (w < 1) continue;
+
+                    // Color by severity
+                    const delayUs = delay / 1000;
+                    if (delayUs > 1000) ctx.fillStyle = "rgba(255,50,50,0.3)";
+                    else if (delayUs > 100) ctx.fillStyle = "rgba(255,150,50,0.3)";
+                    else ctx.fillStyle = "rgba(100,200,100,0.15)";
+                    ctx.fillRect(x1, bandTop, w, bandH);
+
+                    // Dashed border
+                    ctx.strokeStyle = delayUs > 1000 ? "#ff4444" : delayUs > 100 ? "#ff8a65" : "#555";
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([2, 2]);
+                    ctx.strokeRect(x1, bandTop, w, bandH);
+                    ctx.setLineDash([]);
+
+                    // Delay label above
+                    if (w > 25) {
+                        ctx.fillStyle = delayUs > 1000 ? "#ff4444" : delayUs > 100 ? "#ff8a65" : "#888";
+                        ctx.fillText(fmtDur(delay), x1 + w / 2, bandTop - 6);
+                    }
+
+                    // Wake marker (triangle)
+                    const wx = x1;
+                    ctx.fillStyle = "#66bb6a";
+                    ctx.beginPath();
+                    ctx.moveTo(wx, bandTop + bandH + 2);
+                    ctx.lineTo(wx - 4, bandTop + bandH + 9);
+                    ctx.lineTo(wx + 4, bandTop + bandH + 9);
+                    ctx.closePath();
+                    ctx.fill();
+
+                    // Hit region for scheduled section
+                    taskDetailHitRegions.push({
+                        x1, x2: x1 + w, y1: bandTop, y2: bandTop + bandH,
+                        type: "scheduled",
+                        detail: `Scheduled — waiting ${fmtDur(delay)} for worker to poll after wake`,
+                    });
+
+                    // Show waker info: spawn location for tracked tasks, "io" for runtime/worker wakes
+                    {
+                        let label;
+                        const wid = wake.wakerTaskId;
+                        if (!wid || wid === 0 || (wid >= 1 && wid <= workerIds.length)) {
+                            label = "io";
+                        } else {
+                            const wakerLoc = trace.taskSpawnLocs.get(wid);
+                            const wakerLocStr = wakerLoc ? trace.spawnLocations.get(wakerLoc) : null;
+                            label = wakerLocStr ? wakerLocStr.replace(/.*\//, '') : `task 0x${wid.toString(16)}`;
+                        }
+                        if (w > 40) {
+                            const isHovered = hoveredWakerTaskId === wake.wakerTaskId;
+                            ctx.fillStyle = isHovered ? "#fff" : "#66bb6a";
+                            ctx.font = isHovered ? "bold 8px monospace" : "8px monospace";
+                            ctx.textAlign = "left";
+                            ctx.fillText("⬆ " + label, wx, bandTop + bandH + 20);
+                            ctx.font = "9px monospace";
+                            // Record hit region for hover detection
+                            taskDetailWakeRegions.push({
+                                x1, x2: x1 + w,
+                                y1: bandTop + bandH, y2: bandTop + bandH + 24,
+                                wakerTaskId: wake.wakerTaskId,
+                            });
+                        }
+                    }
+                }
+
+                // Draw task lifespan bar (spawn → terminate) if it fits in view
+                if (hasTerminate && spawnTs != null) {
+                    const lifeStart = spawnTs;
+                    const lifeEnd = terminateTs;
+                    if (lifeStart < viewEnd && lifeEnd > viewStart) {
+                        const lx1 = LABEL_W + Math.max(0, nsToX(lifeStart, drawW));
+                        const lx2 = LABEL_W + Math.min(drawW, nsToX(lifeEnd, drawW));
+                        ctx.fillStyle = "rgba(129,199,132,0.08)";
+                        ctx.fillRect(lx1, bandTop - 2, lx2 - lx1, bandH + 4);
+                        ctx.strokeStyle = "rgba(129,199,132,0.3)";
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([]);
+                        ctx.beginPath();
+                        ctx.moveTo(lx1, bandTop - 2); ctx.lineTo(lx2, bandTop - 2);
+                        ctx.moveTo(lx1, bandTop + bandH + 2); ctx.lineTo(lx2, bandTop + bandH + 2);
+                        ctx.stroke();
+                        if (lifeStart >= viewStart) {
+                            ctx.strokeStyle = "#81c784";
+                            ctx.beginPath(); ctx.moveTo(lx1, bandTop - 6); ctx.lineTo(lx1, bandTop + bandH + 6); ctx.stroke();
+                            ctx.fillStyle = "#81c784"; ctx.font = "8px monospace"; ctx.textAlign = "left";
+                            ctx.fillText("spawn▸", lx1 + 2, bandTop - 8);
+                        }
+                        if (lifeEnd <= viewEnd) {
+                            ctx.strokeStyle = "#81c784";
+                            ctx.beginPath(); ctx.moveTo(lx2, bandTop - 6); ctx.lineTo(lx2, bandTop + bandH + 6); ctx.stroke();
+                            ctx.fillStyle = "#81c784"; ctx.font = "8px monospace"; ctx.textAlign = "right";
+                            ctx.fillText("◂done", lx2 - 2, bandTop - 8);
+                        }
+                        ctx.font = "9px monospace";
+                    }
+                }
+
+                // Draw poll spans
+                for (const s of polls) {
+                    if (s.end < viewStart || s.start > viewEnd) continue;
+                    const x1 = LABEL_W + Math.max(0, nsToX(s.start, drawW));
+                    const x2 = LABEL_W + Math.min(drawW, nsToX(s.end, drawW));
+                    const w = Math.max(x2 - x1, 1);
+                    ctx.fillStyle = "#4fc3f7";
+                    ctx.fillRect(x1, bandTop, w, bandH);
+                    if (w > 35) {
+                        ctx.fillStyle = "#000";
+                        ctx.fillText(fmtDur(s.end - s.start), x1 + w / 2, bandTop + bandH / 2 + 3);
+                    }
+                    // Hit region for polling section
+                    taskDetailHitRegions.push({
+                        x1, x2, y1: bandTop, y2: bandTop + bandH,
+                        type: "polling",
+                        detail: `Polling — actively executing for ${fmtDur(s.end - s.start)}`,
+                    });
+                }
+
+                // Draw idle gaps between consecutive polls (where no wake→poll delay is shown)
+                for (let i = 0; i < polls.length - 1; i++) {
+                    const gapStart = polls[i].end;
+                    const gapEnd = polls[i + 1].start;
+                    if (gapEnd < viewStart || gapStart > viewEnd) continue;
+                    // Skip if the next poll's wake covers this gap
+                    const nextPw = pollWakes[i + 1];
+                    const nextWakeTs = nextPw ? nextPw.effectiveWake : null;
+                    if (nextWakeTs !== null && nextWakeTs <= gapStart) continue;
+                    const x1 = LABEL_W + Math.max(0, nsToX(gapStart, drawW));
+                    const wakeX = nextWakeTs !== null ? LABEL_W + Math.max(0, nsToX(nextWakeTs, drawW)) : LABEL_W + Math.min(drawW, nsToX(gapEnd, drawW));
+                    const x2 = Math.min(wakeX, LABEL_W + Math.min(drawW, nsToX(gapEnd, drawW)));
+                    const w = Math.max(x2 - x1, 0);
+                    if (w < 1) continue;
+                    ctx.fillStyle = "#2a2a4a";
+                    ctx.fillRect(x1, bandTop, w, bandH);
+                    ctx.strokeStyle = "#444";
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([3, 3]);
+                    ctx.strokeRect(x1, bandTop, w, bandH);
+                    ctx.setLineDash([]);
+                    const dur = (nextWakeTs !== null ? nextWakeTs : gapEnd) - gapStart;
+                    ctx.fillStyle = dur > 1e6 ? "#ff8a65" : "#888";
+                    if (w > 35) {
+                        ctx.fillText(fmtDur(dur), x1 + w / 2, bandTop - 6);
+                    }
+                    // Hit region for idle section
+                    taskDetailHitRegions.push({
+                        x1, x2, y1: bandTop, y2: bandTop + bandH,
+                        type: "idle",
+                        detail: `Idle — waiting ${fmtDur(dur)} for waker (no wake received yet)`,
+                    });
+                }
+
+                // Legend
+                ctx.fillStyle = "#aaa";
+                ctx.font = "9px monospace";
+                ctx.textAlign = "left";
+                ctx.fillText("Task", 12, bandTop + bandH / 2 + 4);
+                ctx.fillStyle = "#66bb6a";
+                ctx.fillText("▲ = wake", 12, bandTop + bandH + 18);
+            }
+
+            function renderQueueChart(drawW, scrollbarW) {
+                const c = queueCanvas;
+                const parent = c.parentElement;
+                const dpr = devicePixelRatio || 1;
+                const pw = parent.clientWidth,
+                    ph = parent.clientHeight;
+                c.width = pw * dpr;
+                c.height = ph * dpr;
+                c.style.width = pw + "px";
+                c.style.height = ph + "px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+
+                ctx.fillStyle = "#16213e";
+                ctx.fillRect(0, 0, pw, ph);
+
+                if (!queueSamples.length && !activeTaskSamples.length) return;
+
+                const chartLeft = LABEL_W,
+                    chartW = pw - LABEL_W - (scrollbarW || 0);
+                const chartTop = 24,
+                    chartH = ph - 30;
+                if (chartW <= 0) return;
+
+                // Bucket samples into pixels — take max global and max local per pixel bucket
+                const numBuckets = Math.ceil(chartW);
+                const buckets = new Array(numBuckets);
+                for (let i = 0; i < numBuckets; i++)
+                    buckets[i] = { maxGlobal: 0, maxLocal: 0, hasData: false };
+
+                const viewDur = viewEnd - viewStart;
+                // Global queue from QueueSample events
+                {
+                    const startIdx = Math.max(0, lowerBound(queueSamples, viewStart) - 1);
+                    for (let i = startIdx; i < queueSamples.length; i++) {
+                        const s = queueSamples[i];
+                        if (s.t > viewEnd) break;
+                        if (s.t < viewStart) continue;
+                        const bi = Math.floor(
+                            ((s.t - viewStart) / viewDur) * (numBuckets - 1),
+                        );
+                        if (bi < 0 || bi >= numBuckets) continue;
+                        const b = buckets[bi];
+                        b.hasData = true;
+                        if (s.global > b.maxGlobal) b.maxGlobal = s.global;
+                    }
+                }
+                // Build sorted timeline of all local queue changes
+                const allLocalSamples = [];
+                for (const w of workerIds) {
+                    const wSamples = workerQueueSamples[w] || [];
+                    if (wSamples.length === 0) continue;
+                    const startIdx = Math.max(0, lowerBound(wSamples, viewStart) - 1);
+                    for (let i = startIdx; i < wSamples.length; i++) {
+                        const s = wSamples[i];
+                        if (s.t > viewEnd) break;
+                        if (s.t >= viewStart) {
+                            allLocalSamples.push({ t: s.t, w, local: s.local });
+                        }
+                    }
+                }
+                allLocalSamples.sort((a, b) => a.t - b.t);
+
+                // Single pass: maintain per-worker state and compute max for each bucket
+                const workerState = {};
+                for (const w of workerIds) workerState[w] = 0;
+                let sampleIdx = 0;
+
+                for (let bi = 0; bi < numBuckets; bi++) {
+                    const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
+
+                    // Apply all samples up to this bucket's end
+                    while (sampleIdx < allLocalSamples.length && allLocalSamples[sampleIdx].t < bucketEnd) {
+                        const s = allLocalSamples[sampleIdx];
+                        workerState[s.w] = s.local;
+                        buckets[bi].hasData = true;
+                        sampleIdx++;
+                    }
+
+                    // Max across all workers
+                    let max = 0;
+                    for (const w of workerIds) {
+                        if (workerState[w] > max) max = workerState[w];
+                    }
+                    buckets[bi].maxLocal = max;
+                }
+
+                // Find max for scaling
+                let maxQ = 1;
+                for (const b of buckets) {
+                    if (b.maxGlobal > maxQ) maxQ = b.maxGlobal;
+                    if (b.maxLocal > maxQ) maxQ = b.maxLocal;
+                }
+
+                // Y-axis labels
+                ctx.fillStyle = "#666";
+                ctx.font = "10px monospace";
+                ctx.textAlign = "right";
+                ctx.fillText(maxQ.toString(), LABEL_W - 6, chartTop + 10);
+                ctx.fillText("0", LABEL_W - 6, chartTop + chartH);
+
+                // Draw global queue as filled step area
+                ctx.beginPath();
+                ctx.moveTo(chartLeft, chartTop + chartH);
+                let lastY = chartTop + chartH;
+                for (let i = 0; i < numBuckets; i++) {
+                    const x = chartLeft + i;
+                    if (buckets[i].hasData) {
+                        lastY =
+                            chartTop +
+                            chartH -
+                            (buckets[i].maxGlobal / maxQ) * chartH;
+                    }
+                    ctx.lineTo(x, lastY);
+                }
+                ctx.lineTo(chartLeft + numBuckets - 1, chartTop + chartH);
+                ctx.closePath();
+                ctx.fillStyle = "rgba(79,195,247,0.3)";
+                ctx.fill();
+                ctx.strokeStyle = "#4fc3f7";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Draw max local queue as step line
+                ctx.beginPath();
+                lastY = chartTop + chartH;
+                let started = false;
+                for (let i = 0; i < numBuckets; i++) {
+                    const x = chartLeft + i;
+                    if (buckets[i].hasData) {
+                        lastY =
+                            chartTop +
+                            chartH -
+                            (buckets[i].maxLocal / maxQ) * chartH;
+                    }
+                    if (!started) {
+                        ctx.moveTo(x, lastY);
+                        started = true;
+                    } else ctx.lineTo(x, lastY);
+                }
+                ctx.strokeStyle = "#ff8a65";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Draw active task count as step line (green, separate Y-axis)
+                if (activeTaskSamples.length > 0) {
+                    let maxTasks = 1;
+                    for (const s of activeTaskSamples) {
+                        if (s.t >= viewStart && s.t <= viewEnd && s.count > maxTasks) maxTasks = s.count;
+                    }
+                    let countAtViewStart = 0;
+                    for (const s of activeTaskSamples) {
+                        if (s.t > viewStart) break;
+                        countAtViewStart = s.count;
+                    }
+                    if (countAtViewStart > maxTasks) maxTasks = countAtViewStart;
+
+                    ctx.fillStyle = "#81c784";
+                    ctx.font = "10px monospace";
+                    ctx.textAlign = "left";
+                    ctx.fillText("tasks:" + maxTasks, chartLeft + chartW + 4, chartTop + 10);
+
+                    ctx.beginPath();
+                    let ty = chartTop + chartH - (countAtViewStart / maxTasks) * chartH;
+                    ctx.moveTo(chartLeft, ty);
+                    for (const s of activeTaskSamples) {
+                        if (s.t < viewStart) continue;
+                        if (s.t > viewEnd) break;
+                        const x = chartLeft + ((s.t - viewStart) / viewDur) * chartW;
+                        ctx.lineTo(x, ty);
+                        ty = chartTop + chartH - (s.count / maxTasks) * chartH;
+                        ctx.lineTo(x, ty);
+                    }
+                    ctx.lineTo(chartLeft + chartW, ty);
+                    ctx.strokeStyle = "#81c784";
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
+            }
+
+            function updateInfoPanel() {
+                const panel = document.getElementById("info-panel");
+                if (mouseNs === null || mouseNs < viewStart || mouseNs > viewEnd) {
+                    panel.innerHTML = "";
+                    return;
+                }
+                const ns = mouseNs;
+                // Find nearest global queue sample
+                let globalQ = "-";
+                {
+                    const s = findNearest(queueSamples, ns);
+                    if (s) globalQ = s.global;
+                }
+                // Find max local queue across workers at this time
+                let maxLocal = 0;
+                for (const w of workerIds) {
+                    const s = findNearest(workerQueueSamples[w] || [], ns);
+                    if (s && s.local > maxLocal) maxLocal = s.local;
+                }
+                // Active task count
+                let taskCount = 0;
+                if (activeTaskSamples.length > 0) {
+                    for (const s of activeTaskSamples) {
+                        if (s.t > ns) break;
+                        taskCount = s.count;
+                    }
+                }
+                let html = `<span class="ip-label">Global Q:</span> <span class="ip-value">${globalQ}</span>`;
+                html += ` · <span class="ip-label">Local max:</span> <span class="ip-value">${maxLocal}</span>`;
+                if (activeTaskSamples.length > 0) {
+                    html += ` · <span class="ip-label">Active tasks:</span> <span class="ip-value">${taskCount}</span>`;
+                }
+                panel.innerHTML = html;
+            }
+
+            function renderCrosshair() {
+                const overlay = document.getElementById("crosshair-overlay");
+                const mainArea = document.getElementById("main-area");
+                const dpr = devicePixelRatio || 1;
+                const w = mainArea.clientWidth, h = mainArea.clientHeight;
+                overlay.width = w * dpr;
+                overlay.height = h * dpr;
+                overlay.style.width = w + "px";
+                overlay.style.height = h + "px";
+                const ctx = overlay.getContext("2d");
+                ctx.scale(dpr, dpr);
+                ctx.clearRect(0, 0, w, h);
+
+                updateInfoPanel();
+
+                // Compute shared layout values
+                const lanesRect = lanesContainer.getBoundingClientRect();
+                const mainRect = mainArea.getBoundingClientRect();
+                const laneDrawW = lanesRect.width - LABEL_W;
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const effectiveDrawW = laneDrawW - scrollbarW;
+
+                // Mouse crosshair (dashed)
+                if (mouseNs !== null && mouseNs >= viewStart && mouseNs <= viewEnd) {
+                    const x = (lanesRect.left - mainRect.left) + LABEL_W + nsToX(mouseNs, effectiveDrawW);
+                    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([4, 4]);
+                    ctx.beginPath();
+                    ctx.moveTo(x, 0);
+                    ctx.lineTo(x, h);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+
+                // Keyboard selection cursor (solid bright)
+                if (kbSelecting && kbCursorNs !== null && kbCursorNs >= viewStart && kbCursorNs <= viewEnd) {
+                    const kx = (lanesRect.left - mainRect.left) + LABEL_W + nsToX(kbCursorNs, effectiveDrawW);
+                    ctx.strokeStyle = "rgba(255,255,255,0.8)";
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    ctx.moveTo(kx, 0);
+                    ctx.lineTo(kx, h);
+                    ctx.stroke();
+                }
+            }
+
+            // ── Zoom & Pan ──
+            document.getElementById("poi-filter").addEventListener("change", updatePointsOfInterest);
+            document.getElementById("sort-by-worst").addEventListener("change", updatePointsOfInterest);
+            document.getElementById("btn-sched-panel").addEventListener("click", showSchedPanel);
+            document.getElementById("btn-prev-poi").addEventListener("click", () => {
+                if (currentPoiIndex > 0) jumpToPoi(currentPoiIndex - 1);
+                else if (currentPoiIndex < 0 && pointsOfInterest.length > 0) jumpToPoi(0);
+            });
+            document.getElementById("btn-next-poi").addEventListener("click", () => {
+                if (currentPoiIndex < pointsOfInterest.length - 1) jumpToPoi(currentPoiIndex + 1);
+                else if (currentPoiIndex < 0 && pointsOfInterest.length > 0) jumpToPoi(0);
+            });
+            document
+                .getElementById("btn-zoom-in")
+                .addEventListener("click", () => zoom(0.5));
+            document
+                .getElementById("btn-zoom-out")
+                .addEventListener("click", () => zoom(2));
+            document.getElementById("btn-fit").addEventListener("click", () => {
+                viewStart = minTs;
+                viewEnd = maxTs;
+                renderAll();
+            });
+
+            // ── Time Range Filter ──
+            document.getElementById("btn-set-range").addEventListener("click", () => {
+                // Use current view window as the time range filter
+                const startNs = Math.round(viewStart);
+                const endNs = Math.round(viewEnd);
+                updateUrlTimeRange(startNs, endNs);
+                window.location.reload();
+            });
+            document.getElementById("btn-clear-range").addEventListener("click", () => {
+                updateUrlTimeRange(null, null);
+                window.location.reload();
+            });
+            // Show/hide clear range button based on whether a filter is active
+            if (urlParams.get('start') != null || urlParams.get('end') != null) {
+                document.getElementById("btn-clear-range").style.display = "";
+            }
+            document.getElementById("btn-time-mode").addEventListener("click", () => {
+                useAbsoluteTime = !useAbsoluteTime;
+                document.getElementById("btn-time-mode").textContent =
+                    useAbsoluteTime ? "Time: Absolute" : "Time: Relative";
+                document.getElementById("btn-tz-mode").style.display =
+                    useAbsoluteTime ? "" : "none";
+                renderAll();
+            });
+            document.getElementById("btn-tz-mode").addEventListener("click", () => {
+                useLocalTz = !useLocalTz;
+                document.getElementById("btn-tz-mode").textContent =
+                    useLocalTz ? "TZ: Local" : "TZ: UTC";
+                renderAll();
+            });
+
+            function zoom(factor, centerFrac = 0.5) {
+                clearToasts();
+                const viewDur = viewEnd - viewStart;
+                const center = viewStart + viewDur * centerFrac;
+                const newDur = Math.max(viewDur * factor, 100); // min 100ns
+                viewStart = Math.max(minTs, center - newDur * centerFrac);
+                viewEnd = Math.min(maxTs, center + newDur * (1 - centerFrac));
+                renderAll();
+            }
+
+            // Mouse wheel zoom on main area
+            document.getElementById("main-area").addEventListener(
+                "wheel",
+                (e) => {
+                    if (document.getElementById("flamegraph-panel").style.display === "flex") return;
+                    e.preventDefault();
+                    const rect = lanesContainer.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left - LABEL_W;
+                    const drawW = rect.width - LABEL_W;
+                    const frac = Math.max(0, Math.min(1, mouseX / drawW));
+                    const factor = e.deltaY > 0 ? 1.3 : 1 / 1.3;
+                    zoom(factor, frac);
+                },
+                { passive: false },
+            );
+
+            // Pan with mouse drag (normal) or region select (shift+drag)
+            let dragging = false,
+                dragStartX = 0,
+                dragViewStart = 0,
+                dragViewEnd = 0,
+                dragMoved = false;
+            let regionSelecting = false,
+                regionStartNs = 0,
+                regionEndNs = 0;
+            let altZooming = false;
+            let kbSelecting = false, kbSelMode = null, kbSelStartNs = null, kbCursorNs = null;
+            const selOverlay = document.getElementById("selection-overlay");
+            const SEL_COLORS = {
+                shift: { bg: "rgba(66, 133, 244, 0.15)", border: "rgba(66, 133, 244, 0.6)" },
+                alt:   { bg: "rgba(0, 188, 180, 0.15)",  border: "rgba(0, 188, 180, 0.6)" },
+            };
+            function setSelOverlayColor(mode) {
+                const c = SEL_COLORS[mode] || SEL_COLORS.shift;
+                selOverlay.style.background = c.bg;
+                selOverlay.style.borderColor = c.border;
+            }
+
+            document
+                .getElementById("main-area")
+                .addEventListener("mousedown", (e) => {
+                    if (kbSelecting) cancelKbSelection();
+                    if (e.shiftKey && !e.altKey && trace && trace.cpuSamples.length === 0) {
+                        showToast("no-cpu-samples", "No CPU samples in trace — enable cpu-profiling for flamegraphs", "error", 4000);
+                        return;
+                    }
+                    if ((e.shiftKey || e.altKey) && trace) {
+                        // Shift+drag: region select; Alt/Option+drag: zoom to region
+                        regionSelecting = true;
+                        altZooming = e.altKey && !e.shiftKey;
+                        setSelOverlayColor(altZooming ? "alt" : "shift");
+                        if (altZooming) hideToast("option-drag-hint");
+                        else hideToast("shift-drag-hint");
+                        dragMoved = false;
+                        dragStartX = e.clientX;
+                        const rect = lanesContainer.getBoundingClientRect();
+                        const mouseX = e.clientX - rect.left - LABEL_W;
+                        const drawW = rect.width - LABEL_W;
+                        regionStartNs = viewStart + (Math.max(0, mouseX) / drawW) * (viewEnd - viewStart);
+                        regionEndNs = regionStartNs;
+                        // Position overlay
+                        const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                        selOverlay.style.top = "0px";
+                        selOverlay.style.height = mainRect.height + "px";
+                        selOverlay.style.display = "block";
+                        updateSelOverlay(e.clientX);
+                        document.body.style.cursor = "crosshair";
+                        return;
+                    }
+                    dragging = true;
+                    dragMoved = false;
+                    dragStartX = e.clientX;
+                    dragViewStart = viewStart;
+                    dragViewEnd = viewEnd;
+                    document.body.style.cursor = "grabbing";
+                });
+
+            function updateSelOverlay(clientX) {
+                const rect = lanesContainer.getBoundingClientRect();
+                const drawW = rect.width - LABEL_W;
+                const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                const lanesLeft = rect.left - mainRect.left + LABEL_W;
+                const x1 = lanesLeft + nsToX(Math.min(regionStartNs, regionEndNs), drawW);
+                const x2 = lanesLeft + nsToX(Math.max(regionStartNs, regionEndNs), drawW);
+                selOverlay.style.left = x1 + "px";
+                selOverlay.style.width = Math.max(1, x2 - x1) + "px";
+            }
+
+            function updateKbSelOverlay() {
+                setSelOverlayColor(kbSelMode);
+                const rect = lanesContainer.getBoundingClientRect();
+                const drawW = rect.width - LABEL_W;
+                const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                const lanesLeft = rect.left - mainRect.left + LABEL_W;
+                const s = Math.min(kbSelStartNs, kbCursorNs);
+                const e = Math.max(kbSelStartNs, kbCursorNs);
+                const x1 = lanesLeft + nsToX(s, drawW);
+                const x2 = lanesLeft + nsToX(e, drawW);
+                selOverlay.style.left = x1 + "px";
+                selOverlay.style.width = Math.max(1, x2 - x1) + "px";
+                selOverlay.style.top = "0px";
+                selOverlay.style.height = mainRect.height + "px";
+                selOverlay.style.display = "block";
+            }
+
+            function announce(msg) {
+                document.getElementById("aria-live").textContent = msg;
+            }
+
+            function cancelKbSelection() {
+                kbSelecting = false;
+                kbSelMode = null;
+                kbCursorNs = null;
+                kbSelStartNs = null;
+                selOverlay.style.display = "none";
+                renderCrosshair();
+            }
+
+            function completeKbSelection() {
+                const selStart = Math.min(kbSelStartNs, kbCursorNs);
+                const selEnd = Math.max(kbSelStartNs, kbCursorNs);
+                const mode = kbSelMode;
+                cancelKbSelection();
+                if (selEnd - selStart < 100) return; // too small
+                if (mode === "alt") {
+                    hideToast("option-drag-hint");
+                    viewStart = Math.max(minTs, selStart);
+                    viewEnd = Math.min(maxTs, selEnd);
+                    renderAll();
+                    announce("Zoomed to selected region");
+                } else {
+                    hideToast("shift-drag-hint");
+                    const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
+                    const hasCpu = trace.cpuSamples.some(s =>
+                        s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
+                    );
+                    if (hasSched && !hasCpu) {
+                        showSchedPanel(selStart, selEnd);
+                    } else if (hasSched) {
+                        showSelectionPicker(selStart, selEnd);
+                    } else {
+                        showFlamegraph(selStart, selEnd);
+                    }
+                    announce("Selected region opened");
+                }
+            }
+
+            window.addEventListener("mousemove", (e) => {
+                if (regionSelecting) {
+                    if (Math.abs(e.clientX - dragStartX) > 3) dragMoved = true;
+                    const rect = lanesContainer.getBoundingClientRect();
+                    const drawW = rect.width - LABEL_W;
+                    const mouseX = e.clientX - rect.left - LABEL_W;
+                    regionEndNs = viewStart + (Math.max(0, Math.min(drawW, mouseX)) / drawW) * (viewEnd - viewStart);
+                    updateSelOverlay(e.clientX);
+                    return;
+                }
+                if (!dragging) return;
+                if (Math.abs(e.clientX - dragStartX) > 3) dragMoved = true;
+                const rect = lanesContainer.getBoundingClientRect();
+                const drawW = rect.width - LABEL_W;
+                const dx = e.clientX - dragStartX;
+                const nsPerPx = (dragViewEnd - dragViewStart) / drawW;
+                const shift = -dx * nsPerPx;
+                let newStart = dragViewStart + shift;
+                let newEnd = dragViewEnd + shift;
+                // Clamp
+                if (newStart < minTs) {
+                    newEnd += minTs - newStart;
+                    newStart = minTs;
+                }
+                if (newEnd > maxTs) {
+                    newStart -= newEnd - maxTs;
+                    newEnd = maxTs;
+                }
+                viewStart = Math.max(minTs, newStart);
+                viewEnd = Math.min(maxTs, newEnd);
+                renderAll();
+            });
+            window.addEventListener("mouseup", () => {
+                if (regionSelecting) {
+                    regionSelecting = false;
+                    document.body.style.cursor = "";
+                    if (dragMoved) {
+                        clearToasts();
+                        const selStart = Math.min(regionStartNs, regionEndNs);
+                        const selEnd = Math.max(regionStartNs, regionEndNs);
+                        if (altZooming) {
+                            // Alt/Option+drag: zoom to selected region
+                            hideToast("option-drag-hint");
+                            selOverlay.style.display = "none";
+                            viewStart = Math.max(minTs, selStart);
+                            viewEnd = Math.min(maxTs, selEnd);
+                            renderAll();
+                        } else {
+                            // Shift+drag: flamegraph / sched panel
+                            hideToast("shift-drag-hint");
+                            const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
+                            const hasCpu = trace.cpuSamples.some(s =>
+                                s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
+                            );
+                            if (hasSched && !hasCpu) {
+                                selOverlay.style.display = "none";
+                                showSchedPanel(selStart, selEnd);
+                            } else if (hasSched) {
+                                // Keep overlay visible while picker is shown
+                                showSelectionPicker(selStart, selEnd);
+                            } else {
+                                selOverlay.style.display = "none";
+                                showFlamegraph(selStart, selEnd);
+                            }
+                        }
+                    } else {
+                        selOverlay.style.display = "none";
+                    }
+                    altZooming = false;
+                    return;
+                }
+                dragging = false;
+                document.body.style.cursor = "";
+            });
+
+            // Click on a poll to highlight all polls for the same task
+            document.getElementById("main-area").addEventListener("click", (e) => {
+                if (dragMoved) return; // was a drag, not a click
+                clearToasts();
+                // Only handle clicks inside the lanes container
+                const lanesRect = lanesContainer.getBoundingClientRect();
+                if (e.clientY < lanesRect.top || e.clientY > lanesRect.bottom ||
+                    e.clientX < lanesRect.left || e.clientX > lanesRect.right) return;
+                const mouseX = e.clientX - lanesRect.left - LABEL_W;
+                const mouseY = e.clientY - lanesRect.top;
+                const drawW = lanesRect.width - LABEL_W;
+                if (mouseX < 0 || mouseX > drawW) { selectedTaskId = null; renderAll(); return; }
+
+                const ns = viewStart + (mouseX / drawW) * (viewEnd - viewStart);
+                const laneIdx = Math.floor((mouseY + lanesContainer.scrollTop) / LANE_H);
+                if (laneIdx < 0 || laneIdx >= workerIds.length) { selectedTaskId = null; renderAll(); return; }
+
+                const w = workerIds[laneIdx];
+                const spans = workerSpans[w];
+                let found = null;
+                let foundSpan = null;
+                const hitPoll = findSpanAt(spans.polls, ns);
+                if (hitPoll) {
+                    if (hitPoll.taskId) found = hitPoll.taskId;
+                    foundSpan = hitPoll;
+                }
+
+                // Show stack popup if poll has CPU samples or sched events
+                if (foundSpan && ((foundSpan.cpuSamples && foundSpan.cpuSamples.length > 0) ||
+                                  (foundSpan.schedSamples && foundSpan.schedSamples.length > 0))) {
+                    showStackPopup(foundSpan, e.clientX, e.clientY);
+                } else {
+                    hideStackPopup();
+                }
+
+                selectedTaskId = (found && found !== selectedTaskId) ? found : null;
+                renderAll();
+            });
+
+            function showStackPopup(poll, x, y) {
+                const popup = document.getElementById("stack-popup");
+                const title = document.getElementById("stack-popup-title");
+                const body = document.getElementById("stack-popup-body");
+                const durUs = ((poll.end - poll.start) / 1e3).toFixed(1);
+                const cpuCount = poll.cpuSamples ? poll.cpuSamples.length : 0;
+                const schedCount = poll.schedSamples ? poll.schedSamples.length : 0;
+                title.textContent = `Poll ${durUs}µs` +
+                    (cpuCount ? ` · ${cpuCount} CPU sample${cpuCount > 1 ? "s" : ""}` : "") +
+                    (schedCount ? ` · ${schedCount} sched event${schedCount > 1 ? "s" : ""}` : "");
+
+                let html = "";
+
+                // Sched events: deduplicate by symbolized stack, show counts
+                if (poll.schedSamples && poll.schedSamples.length > 0) {
+                    html += `<div style="color:#ff4444;font-weight:600;margin-bottom:6px">⚠ Blocking during poll (${schedCount} sched event${schedCount > 1 ? "s" : ""})</div>`;
+                    const groups = deduplicateSamples(poll.schedSamples, trace.callframeSymbols);
+                    for (const g of groups) {
+                        const pct = ((g.count / schedCount) * 100).toFixed(0);
+                        const barW = Math.max(2, (g.count / schedCount) * 200);
+                        html += `<div style="margin-bottom:10px;border-left:3px solid #ff4444;padding-left:8px">`;
+                        html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">`;
+                        html += `<span style="color:#ff4444;font-weight:600;font-size:1.1em">${g.count}×</span>`;
+                        html += `<span style="color:#fff;font-weight:600">${g.leaf}</span>`;
+                        html += `<span style="color:#888">(${pct}%)</span>`;
+                        html += `<span style="display:inline-block;height:8px;width:${barW}px;background:#ff4444;border-radius:2px;opacity:0.6"></span>`;
+                        html += `</div>`;
+                        // Show abbreviated context: leaf + first interesting caller
+                        const ctx = g.frames.slice(0, 3);
+                        for (let i = 0; i < ctx.length; i++) {
+                            html += `<div style="color:${i === 0 ? '#ff8a65' : '#777'};padding-left:${i * 8}px;font-size:0.9em">${renderFrame(ctx[i])}</div>`;
+                        }
+                        if (g.frames.length > 3) {
+                            const id = 'sched-expand-' + Math.random().toString(36).slice(2);
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:16px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▶ ${g.frames.length - 3} more frames</div>`;
+                            html += `<div id="${id}" style="display:none">`;
+                            for (let i = 3; i < g.frames.length; i++) {
+                                html += `<div style="color:#666;padding-left:24px;font-size:0.85em">${renderFrame(g.frames[i])}</div>`;
+                            }
+                            html += `</div>`;
+                        }
+                        html += `</div>`;
+                    }
+                }
+
+                // CPU profile samples: same dedup treatment
+                if (poll.cpuSamples && poll.cpuSamples.length > 0) {
+                    if (schedCount > 0) {
+                        html += `<div style="color:#ff8c00;font-weight:600;margin:8px 0 6px">CPU Profile (${cpuCount} sample${cpuCount > 1 ? "s" : ""})</div>`;
+                    }
+                    const groups = deduplicateSamples(poll.cpuSamples, trace.callframeSymbols);
+                    for (const g of groups) {
+                        const pct = ((g.count / cpuCount) * 100).toFixed(0);
+                        html += `<div style="margin-bottom:8px;border-left:2px solid #333;padding-left:8px">`;
+                        html += `<span style="color:#ff8c00">${g.count}×</span> `;
+                        html += `<span style="color:#fff">${g.leaf}</span> `;
+                        html += `<span style="color:#888">(${pct}%)</span>`;
+                        const ctx = g.frames.slice(1, 3);
+                        for (const f of ctx) {
+                            html += `<div style="color:#777;padding-left:8px;font-size:0.9em">${renderFrame(f)}</div>`;
+                        }
+                        if (g.frames.length > 3) {
+                            const id = 'cpu-expand-' + Math.random().toString(36).slice(2);
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:8px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▶ ${g.frames.length - 3} more frames</div>`;
+                            html += `<div id="${id}" style="display:none">`;
+                            for (let i = 3; i < g.frames.length; i++) {
+                                html += `<div style="color:#666;padding-left:16px;font-size:0.85em">${renderFrame(g.frames[i])}</div>`;
+                            }
+                            html += `</div>`;
+                        }
+                        html += `</div>`;
+                    }
+                }
+
+                body.innerHTML = html;
+                popup.style.display = "block";
+                popup.style.left = Math.min(x + 12, window.innerWidth - 820) + "px";
+                popup.style.top = Math.min(y - 20, window.innerHeight - 620) + "px";
+            }
+
+            function hideStackPopup() {
+                document.getElementById("stack-popup").style.display = "none";
+                selOverlay.style.display = "none";
+            }
+
+            document.getElementById("stack-popup-close").addEventListener("click", hideStackPopup);
+            // Close popup when clicking outside it
+            document.addEventListener("click", (e) => {
+                const popup = document.getElementById("stack-popup");
+                if (popup.style.display !== "none" && !popup.contains(e.target) &&
+                    !e.target.closest("#main-area")) {
+                    hideStackPopup();
+                }
+            });
+
+            // ── Sched Events Panel (global view of all blocking operations) ──
+            let schedPanelTimeRange = null; // {start, end} or null for full trace
+
+            function showSchedPanel(startNs, endNs) {
+                schedPanelTimeRange = (startNs != null && endNs != null) ? { start: startNs, end: endNs } : null;
+                const allSched = collectSchedSamples(schedPanelTimeRange);
+                if (!allSched.length) {
+                    showToast("no-sched-events", "No scheduling events found" + (schedPanelTimeRange ? " in selected range" : " in trace"), "error", 4000);
+                    return;
+                }
+                renderSchedPanel(allSched);
+                clearToasts();
+                document.getElementById("sched-panel").style.display = "flex";
+                document.getElementById("sched-panel-close").focus();
+            }
+
+            function collectSchedSamples(range) {
+                const allSched = [];
+                for (const w of workerIds) {
+                    for (const poll of workerSpans[w].polls) {
+                        if (!poll.schedSamples) continue;
+                        if (range && (poll.end < range.start || poll.start > range.end)) continue;
+                        for (const s of poll.schedSamples) {
+                            if (range && (s.timestamp < range.start || s.timestamp > range.end)) continue;
+                            allSched.push({ sample: s, poll, worker: w });
+                        }
+                    }
+                }
+                return allSched;
+            }
+
+            function renderSchedPanel(allSched) {
+                const groupBy = document.getElementById("sched-group-by").value;
+                const body = document.getElementById("sched-panel-body");
+                const total = allSched.length;
+                const rangeLabel = schedPanelTimeRange
+                    ? ` in ${((schedPanelTimeRange.end - schedPanelTimeRange.start) / 1e6).toFixed(2)}ms selection`
+                    : " (full trace)";
+                document.getElementById("sched-panel-stats").textContent =
+                    `${total} events across ${workerIds.length} workers${rangeLabel}`;
+
+                // Group by leaf frame or full stack
+                const groups = new Map();
+                for (const { sample, poll, worker } of allSched) {
+                    const frames = symbolizeChain(sample.callchain, trace.callframeSymbols);
+                    const leafRaw = frames[0] ? frames[0].symbol : '(unknown)';
+                    const leafDisplay = frames[0] ? renderFrame(frames[0]) : '(unknown)';
+                    const key = groupBy === "leaf" ? leafRaw : frames.map(f => f.symbol).join('\0');
+                    if (!groups.has(key)) {
+                        groups.set(key, { leaf: leafDisplay, leafRaw, count: 0, stacks: new Map(), polls: [] });
+                    }
+                    const g = groups.get(key);
+                    g.count++;
+                    g.polls.push({ poll, worker, timestamp: sample.timestamp });
+                    // Sub-group by full stack within each leaf group
+                    const fullKey = frames.map(f => f.symbol).join('\0');
+                    if (!g.stacks.has(fullKey)) {
+                        g.stacks.set(fullKey, { count: 0, frames });
+                    }
+                    g.stacks.get(fullKey).count++;
+                }
+
+                const sorted = [...groups.values()].sort((a, b) => b.count - a.count);
+
+                let html = `<div style="margin-bottom:12px;color:#aaa;font-size:0.9em">
+                    Blocking calls that caused the kernel to deschedule a tokio worker thread during a poll.
+                    These indicate synchronous/blocking operations on the async runtime.
+                </div>`;
+
+                // Summary bar chart
+                html += `<div style="margin-bottom:16px">`;
+                for (const g of sorted) {
+                    const pct = ((g.count / total) * 100).toFixed(1);
+                    const barW = Math.max(4, (g.count / total) * 100);
+                    const lr = g.leafRaw;
+                    const color = lr.includes("lock") || lr.includes("mutex") ? "#ff4444"
+                        : lr.includes("epoll") || lr.includes("poll") ? "#4fc3f7"
+                        : lr.includes("write") || lr.includes("read") || lr.includes("recv") || lr.includes("send") ? "#ff8a65"
+                        : lr.includes("syscall") ? "#888"
+                        : "#cc66ff";
+                    html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;cursor:pointer" class="sched-row" data-leaf="${encodeURIComponent(g.leafRaw)}">`;
+                    html += `<span style="width:50px;text-align:right;color:${color};font-weight:600">${g.count}</span>`;
+                    html += `<span style="display:inline-block;height:14px;width:${barW}%;background:${color};border-radius:2px;opacity:0.7"></span>`;
+                    html += `<span style="color:#fff">${g.leaf}</span>`;
+                    html += `<span style="color:#666">${pct}%</span>`;
+                    html += `</div>`;
+                }
+                html += `</div>`;
+
+                // Detailed stacks per group
+                for (const g of sorted) {
+                    const pct = ((g.count / total) * 100).toFixed(1);
+                    const color = g.leafRaw.includes("lock") || g.leafRaw.includes("mutex") ? "#ff4444" : "#ff8a65";
+                    const gid = 'sg-' + Math.random().toString(36).slice(2);
+
+                    html += `<div style="border:1px solid #333;border-radius:6px;margin-bottom:8px;overflow:hidden">`;
+                    html += `<div style="padding:8px 12px;background:#16213e;display:flex;align-items:center;gap:8px;cursor:pointer" onclick="document.getElementById('${gid}').style.display=document.getElementById('${gid}').style.display==='none'?'block':'none'">`;
+                    html += `<span style="color:${color};font-weight:700;font-size:1.1em">${g.count}×</span>`;
+                    html += `<span style="color:#fff;font-weight:600">${g.leaf}</span>`;
+                    html += `<span style="color:#888">(${pct}% of all sched events)</span>`;
+                    html += `<span style="color:#6c63ff;margin-left:auto;font-size:0.9em">▼ details</span>`;
+                    html += `</div>`;
+
+                    html += `<div id="${gid}" style="display:none;padding:8px 12px">`;
+
+                    // Show unique stacks within this group
+                    const subStacks = [...g.stacks.values()].sort((a, b) => b.count - a.count);
+                    for (const sub of subStacks) {
+                        const subPct = ((sub.count / g.count) * 100).toFixed(0);
+                        html += `<div style="margin-bottom:10px;border-left:3px solid ${color};padding-left:10px">`;
+                        html += `<div style="color:${color};margin-bottom:2px"><strong>${sub.count}×</strong> <span style="color:#888">(${subPct}% of group)</span></div>`;
+                        // Show full symbolized stack
+                        for (let i = 0; i < sub.frames.length; i++) {
+                            const isLeaf = i === 0;
+                            const raw = sub.frames[i].symbol || '';
+                            const isTokio = raw.includes("tokio::runtime");
+                            const c = isLeaf ? "#fff" : isTokio ? "#555" : "#aaa";
+                            const weight = isLeaf ? "font-weight:600" : "";
+                            html += `<div style="color:${c};${weight};padding-left:${Math.min(i, 1) * 12}px">${renderFrame(sub.frames[i])}</div>`;
+                        }
+                        html += `</div>`;
+                    }
+
+                    // Jump-to links: show a few example polls
+                    const examples = g.polls.slice(0, 5);
+                    html += `<div style="margin-top:6px;color:#6c63ff;font-size:0.9em">`;
+                    html += `Example polls: `;
+                    for (let i = 0; i < examples.length; i++) {
+                        const ex = examples[i];
+                        const durUs = ((ex.poll.end - ex.poll.start) / 1e3).toFixed(0);
+                        html += `<span class="sched-jump" style="cursor:pointer;text-decoration:underline;margin-right:8px" data-time="${ex.poll.start}" data-end="${ex.poll.end}" data-worker="${ex.worker}">W${ex.worker} @${fmtTs(ex.poll.start)} (${durUs}µs)</span>`;
+                    }
+                    if (g.polls.length > 5) html += `<span style="color:#888">… ${g.polls.length - 5} more</span>`;
+                    html += `</div>`;
+
+                    html += `</div></div>`;
+                }
+
+                body.innerHTML = html;
+
+                // Wire up jump-to-poll links
+                body.querySelectorAll('.sched-jump').forEach(el => {
+                    el.addEventListener('click', (e) => {
+                        const t = parseFloat(el.dataset.time);
+                        const end = parseFloat(el.dataset.end);
+                        const w = parseInt(el.dataset.worker);
+                        const dur = end - t;
+                        const pad = Math.max(dur * 5, 1e6);
+                        viewStart = Math.max(minTs, t - pad * 0.3);
+                        viewEnd = Math.min(maxTs, viewStart + pad);
+                        document.getElementById("sched-panel").style.display = "none";
+                        // Scroll to worker lane
+                        const laneIdx = workerIds.indexOf(w);
+                        if (laneIdx >= 0) lanesContainer.scrollTop = laneIdx * LANE_H;
+                        renderAll();
+                    });
+                });
+            }
+
+            document.getElementById("sched-group-by").addEventListener("change", () => {
+                const allSched = collectSchedSamples(schedPanelTimeRange);
+                renderSchedPanel(allSched);
+            });
+
+            document.getElementById("sched-panel-close").addEventListener("click", () => {
+                document.getElementById("sched-panel").style.display = "none";
+            });
+
+            // Enter activates role="button" elements and toggles checkboxes
+            document.addEventListener("keydown", (e) => {
+                if (e.key !== "Enter") return;
+                const el = document.activeElement;
+                if (el && el.getAttribute("role") === "button") { e.preventDefault(); el.click(); }
+                if (el && el.type === "checkbox") { e.preventDefault(); el.click(); }
+            });
+
+            // ── Keyboard navigation ──
+            window.addEventListener("keydown", (e) => {
+                if (e.key === "Escape" && loadAbortController) {
+                    e.preventDefault();
+                    cancelLoad();
+                    return;
+                }
+                if (!trace) return;
+                const viewDur = viewEnd - viewStart;
+
+                // Keyboard selection: toggle start/complete with Shift or Alt
+                if (e.key === "Shift" || e.key === "Alt") {
+                    e.preventDefault();
+                    const mode = e.key === "Shift" ? "shift" : "alt";
+                    if (!kbSelecting) {
+                        kbSelecting = true;
+                        kbSelMode = mode;
+                        kbCursorNs = kbSelStartNs = (mouseNs !== null && mouseNs >= viewStart && mouseNs <= viewEnd) ? mouseNs : (viewStart + viewEnd) / 2;
+                        updateKbSelOverlay();
+                        renderCrosshair();
+                        announce(mode === "shift" ? "Selection started — use ← → to extend, Shift or Enter to confirm" : "Zoom selection started — use ← → to extend, Alt or Enter to confirm");
+                        if (mode === "shift") hideToast("shift-drag-hint");
+                        else hideToast("option-drag-hint");
+                    } else if (kbSelMode === mode) {
+                        completeKbSelection();
+                    }
+                    return;
+                }
+
+                // During keyboard selection: Enter confirms, Escape cancels, arrows move cursor
+                if (kbSelecting) {
+                    if (e.key === "Enter") {
+                        e.preventDefault();
+                        completeKbSelection();
+                        return;
+                    }
+                    if (e.key === "Escape") {
+                        e.preventDefault();
+                        cancelKbSelection();
+                        announce("Selection cancelled");
+                        return;
+                    }
+                    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                        e.preventDefault();
+                        const step = viewDur * 0.05;
+                        kbCursorNs += e.key === "ArrowLeft" ? -step : step;
+                        kbCursorNs = Math.max(minTs, Math.min(maxTs, kbCursorNs));
+                        updateKbSelOverlay();
+                        renderCrosshair();
+                        return;
+                    }
+                }
+
+                switch (e.key) {
+                    case "Escape":
+                        e.preventDefault();
+                        if (document.getElementById("help-overlay").classList.contains("visible")) {
+                            document.getElementById("help-overlay").classList.remove("visible");
+                            break;
+                        }
+                        clearToasts();
+                        hideStackPopup();
+                        if (document.getElementById("sched-panel").style.display === "flex") {
+                            document.getElementById("sched-panel").style.display = "none";
+                        } else if (document.getElementById("flamegraph-panel").style.display === "flex") {
+                            document.getElementById("flamegraph-panel").style.display = "none";
+                            document.getElementById("fg-tooltip").style.display = "none";
+                        }
+                        selectedTaskId = null;
+                        document.getElementById("main-area").focus();
+                        renderAll();
+                        break;
+                    case "ArrowUp":
+                        e.preventDefault();
+                        zoom(0.5);
+                        break;
+                    case "ArrowDown":
+                        e.preventDefault();
+                        zoom(2);
+                        break;
+                    case "ArrowLeft": {
+                        e.preventDefault();
+                        const shift = viewDur * 0.2;
+                        viewStart = Math.max(minTs, viewStart - shift);
+                        viewEnd = viewStart + viewDur;
+                        if (viewEnd > maxTs) {
+                            viewEnd = maxTs;
+                            viewStart = viewEnd - viewDur;
+                        }
+                        renderAll();
+                        break;
+                    }
+                    case "ArrowRight": {
+                        e.preventDefault();
+                        const shift = viewDur * 0.2;
+                        viewEnd = Math.min(maxTs, viewEnd + shift);
+                        viewStart = viewEnd - viewDur;
+                        if (viewStart < minTs) {
+                            viewStart = minTs;
+                            viewEnd = viewStart + viewDur;
+                        }
+                        renderAll();
+                        break;
+                    }
+                }
+            });
+
+            // ── Tooltip ──
+            document
+                .getElementById("main-area")
+                .addEventListener("mousemove", (e) => {
+                    if (dragging) {
+                        tooltip.style.display = "none";
+                        mouseNs = null;
+                        return;
+                    }
+                    if (document.getElementById("flamegraph-panel").style.display === "flex") {
+                        tooltip.style.display = "none";
+                        mouseNs = null;
+                        return;
+                    }
+                    const rect = lanesContainer.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left - LABEL_W;
+                    const mouseY = e.clientY - rect.top;
+                    const drawW = rect.width - LABEL_W;
+                    if (mouseX < 0 || mouseX > drawW) {
+                        tooltip.style.display = "none";
+                        mouseNs = null;
+                        return;
+                    }
+
+                    const ns =
+                        viewStart + (mouseX / drawW) * (viewEnd - viewStart);
+                    mouseNs = ns;
+
+                    // Throttle crosshair redraw with RAF
+                    if (!queueChartRafId) {
+                        queueChartRafId = requestAnimationFrame(() => {
+                            renderCrosshair();
+                            queueChartRafId = null;
+                        });
+                    }
+
+                    const laneIdx = Math.floor(
+                        (mouseY + lanesContainer.scrollTop) / LANE_H,
+                    );
+                    if (laneIdx < 0 || laneIdx >= workerIds.length) {
+                        tooltip.style.display = "none";
+                        return;
+                    }
+
+                    const w = workerIds[laneIdx];
+                    const spans = workerSpans[w];
+
+                    // Determine worker state at this point in time
+                    let state = "🟢 Active";
+                    let stateDetail = "";
+                    let schedInfo = "";
+                    if (trace.hasCpuTime) {
+                        const hitActive = findSpanAt(spans.actives, ns);
+                        if (hitActive) {
+                                const pct = (hitActive.ratio * 100).toFixed(1);
+                                const icon = hitActive.ratio >= 0.95 ? "🟢" : hitActive.ratio >= 0.5 ? "🟡" : "🔴";
+                                schedInfo = `<span class="label">Scheduling:</span> <span class="value">${icon} ${pct}% on-CPU</span><br>`;
+                        }
+                    }
+                    {
+                        const s = findSpanAt(spans.parks, ns);
+                        if (s) {
+                            const durMs = (s.end - s.start) / 1e6;
+                            state = "💤 Parked";
+                            stateDetail = ` for <span class="value">${durMs < 1 ? (durMs * 1000).toFixed(1) + "µs" : durMs.toFixed(2) + "ms"}</span>`;
+                            schedInfo = "";
+                            if (trace.hasSchedWait && s.schedWait != null) {
+                                const swUs = s.schedWait;
+                                const icon = swUs < 100 ? "🟢" : swUs < 1000 ? "🟡" : "🔴";
+                                stateDetail += `<br><span class="label">Kernel sched delay:</span> <span class="value">${icon} ${swUs.toFixed(0)}µs</span>`;
+                            }
+                        }
+                    }
+
+                    let pollInfo = "";
+                    {
+                        const s = findSpanAt(spans.polls, ns);
+                        if (s) {
+                            const durUs = (s.end - s.start) / 1e3;
+                            state = "⚡ Polling";
+                            pollInfo = `<span class="label">Poll duration:</span> <span class="value">${durUs.toFixed(1)}µs</span><br>`;
+                            if (trace.hasTaskTracking && s.taskId) {
+                                pollInfo += `<span class="label">Task ID:</span> <span class="value">0x${s.taskId.toString(16)}</span><br>`;
+                                if (s.spawnLoc) {
+                                    pollInfo += `<span class="label">Spawned at:</span> <span class="value">${s.spawnLoc}</span><br>`;
+                                }
+                            }
+                            if (s.cpuSamples && s.cpuSamples.length > 0) {
+                                pollInfo += `<span class="label">CPU samples:</span> <span class="value">🔥 ${s.cpuSamples.length}</span> <span style="color:#666">(click to view)</span><br>`;
+                            }
+                            if (s.schedSamples && s.schedSamples.length > 0) {
+                                pollInfo += `<span class="label">Sched events:</span> <span class="value">⚠️ ${s.schedSamples.length} blocking</span> <span style="color:#666">(click to view)</span><br>`;
+                            }
+                        }
+                    }
+
+                    // Find nearest local queue sample for this worker
+                    const nearest = findNearest(workerQueueSamples[w] || [], ns);
+                    // Find nearest global queue from QueueSample timeline
+                    const nearestGlobal = findNearest(queueSamples, ns);
+
+                    let qInfo = "";
+                    const globalStr = nearestGlobal != null ? nearestGlobal.global : "-";
+                    const localStr = nearest != null ? nearest.local : "-";
+                    const totalEst = (nearestGlobal != null ? nearestGlobal.global : 0) + (nearest != null ? nearest.local : 0);
+                    qInfo = `<span class="label">Global Q:</span> <span class="value">${globalStr}</span> · <span class="label">Local Q:</span> <span class="value">${localStr}</span> · <span class="label">Est. Total:</span> <span class="value">${totalEst}</span>`;
+
+                    let taskCountInfo = "";
+                    if (activeTaskSamples.length > 0) {
+                        let taskCount = 0;
+                        for (const s of activeTaskSamples) {
+                            if (s.t > ns) break;
+                            taskCount = s.count;
+                        }
+                        taskCountInfo = `<br><span class="label">Active Tasks:</span> <span class="value">${taskCount}</span>`;
+                    }
+
+                    tooltip.innerHTML =
+                        `<span class="label">Worker</span> <span class="value">${w}</span> · <span class="label">Time</span> <span class="value">${fmtTs(ns)}</span><br>` +
+                        `<span class="label">State:</span> ${state}${stateDetail}<br>` +
+                        schedInfo +
+                        pollInfo +
+                        qInfo +
+                        taskCountInfo;
+                    tooltip.style.display = "block";
+                    tooltip.style.left =
+                        Math.min(e.clientX + 12, window.innerWidth - 340) +
+                        "px";
+                    tooltip.style.top = e.clientY + 130 + "px";
+                });
+            document
+                .getElementById("main-area")
+                .addEventListener("mouseleave", () => {
+                    tooltip.style.display = "none";
+                    mouseNs = null;
+                    renderCrosshair();
+                });
+
+            // ── Resize ──
+            // Task detail hover: highlight waker task polls on worker lanes + section tooltips
+            document.getElementById("task-detail").addEventListener("mousemove", (e) => {
+                const c = document.getElementById("task-detail-canvas");
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+                let found = null;
+                for (const r of taskDetailWakeRegions) {
+                    if (mx >= r.x1 && mx <= r.x2 && my >= r.y1 && my <= r.y2) {
+                        found = r.wakerTaskId;
+                        break;
+                    }
+                }
+                if (found !== hoveredWakerTaskId) {
+                    hoveredWakerTaskId = found;
+                    document.getElementById("task-detail").style.cursor = found ? "pointer" : "";
+                    renderAll();
+                }
+
+                // Show status for polling/scheduled/idle sections
+                const statusEl = document.getElementById("task-detail-status");
+                let hit = null;
+                for (const r of taskDetailHitRegions) {
+                    if (mx >= r.x1 && mx <= r.x2 && my >= r.y1 && my <= r.y2) {
+                        hit = r;
+                        break;
+                    }
+                }
+                const icon = hit ? (hit.type === "polling" ? "⚡" : hit.type === "scheduled" ? "⏳" : "💤") : "";
+                statusEl.textContent = hit ? `${icon} ${hit.detail}` : "";
+            });
+            document.getElementById("task-detail").addEventListener("mouseleave", () => {
+                document.getElementById("task-detail-status").textContent = "";
+                if (hoveredWakerTaskId) {
+                    hoveredWakerTaskId = null;
+                    renderAll();
+                }
+            });
+
+            window.addEventListener("resize", () => {
+                if (trace) renderAll();
+            });
+
+            // ── Legend (inline in toolbar area) ──
+            (function addLegend() {
+                const tb = document.getElementById("toolbar");
+                const leg = document.createElement("span");
+                leg.style.cssText =
+                    "font-size:0.8em;display:flex;gap:12px;align-items:center;";
+                leg.innerHTML = `
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a5a7a;display:inline-block;border-radius:2px"></span>Poll ≤10µs</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#4fc3f7;display:inline-block;border-radius:2px"></span>&gt;10µs</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff8a65;display:inline-block;border-radius:2px"></span>&gt;100µs</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff4444;display:inline-block;border-radius:2px"></span>&gt;1ms</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a1520;border-top:3px solid #cc5533;display:inline-block;border-radius:2px"></span>Parked</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff0000;display:inline-block;border-radius:2px"></span>Kernel Sched Delay</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:4px;background:#ce93d8;display:inline-block"></span>CPU Sampled</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="color:#ff2222;font-size:10px">▲</span>Sched (blocking)</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="color:#66bb6a;font-size:10px">▼</span>Wake</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#81c784;display:inline-block"></span>Active Tasks</span>
+    <button id="btn-info" aria-label="Help" style="margin-left:8px;background:none;border:1px solid #555;border-radius:4px;color:#aaa;cursor:pointer;font-size:1.4em;padding:4px 8px;line-height:1;display:flex;flex-direction:column;align-items:center;gap:1px"><span>ℹ️</span><span style="font-size:0.55em;color:#888">Help</span></button>
+  `;
+                tb.insertBefore(leg, document.getElementById("btn-zoom-in"));
+            })();
+
+            // ── Help overlay toggle ──
+            (function initHelp() {
+                const overlay = document.getElementById("help-overlay");
+                document.getElementById("btn-info").addEventListener("click", () => {
+                    overlay.classList.toggle("visible");
+                });
+                overlay.addEventListener("click", (e) => {
+                    if (e.target === overlay) overlay.classList.remove("visible");
+                });
+            })();
+
+            // ── Flamegraph ──
+            let fgWorkerData = null;    // {nodes, maxDepth, totalSamples}
+            let fgOffworkerData = null; // same shape, for worker 255
+            const FG_ROW_H = 18;
+            // Per-canvas hit regions
+            let fgHitRegions = { worker: [], offworker: [] };
+            // Raw samples for current flamegraph (for re-filtering)
+            let fgAllSamples = [];
+
+            // buildFlamegraphTree, flattenFlamegraph, buildFgData imported from TraceParser
+
+            // Selection picker: shown after shift+drag when both flamegraph and sched data exist
+            function showSelectionPicker(selStart, selEnd) {
+                const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
+                const schedCount = collectSchedSamples({ start: selStart, end: selEnd }).length;
+                const popup = document.getElementById("stack-popup");
+                const title = document.getElementById("stack-popup-title");
+                const body = document.getElementById("stack-popup-body");
+                title.textContent = `${durMs}ms selected`;
+                body.innerHTML = `
+                    <div style="display:flex;flex-direction:column;gap:8px;min-width:250px">
+                        <div style="padding:8px 12px;background:#2a2a4a;border:1px solid #444;border-radius:6px;cursor:pointer;transition:background 0.15s"
+                             onmouseover="this.style.background='#3a3a5a'" onmouseout="this.style.background='#2a2a4a'"
+                             id="pick-flamegraph" tabindex="0" role="button">
+                            <div style="color:#ff8c00;font-weight:600">🔥 CPU Flamegraph</div>
+                            <div style="color:#888;font-size:0.9em">Profile where CPU time is spent</div>
+                        </div>
+                        <div style="padding:8px 12px;background:#2a2a4a;border:1px solid #444;border-radius:6px;cursor:pointer;transition:background 0.15s"
+                             onmouseover="this.style.background='#3a3a5a'" onmouseout="this.style.background='#2a2a4a'"
+                             id="pick-sched" tabindex="0" role="button">
+                            <div style="color:#ff4444;font-weight:600">⚠ Blocking Calls <span style="color:#888;font-weight:400">(${schedCount})</span></div>
+                            <div style="color:#888;font-size:0.9em">Analyze what's blocking the runtime</div>
+                        </div>
+                    </div>`;
+                popup.style.display = "block";
+                // Center it roughly
+                popup.style.left = (window.innerWidth / 2 - 150) + "px";
+                popup.style.top = (window.innerHeight / 2 - 80) + "px";
+                document.getElementById("pick-flamegraph").onclick = () => { hideStackPopup(); showFlamegraph(selStart, selEnd); };
+                document.getElementById("pick-sched").onclick = () => { hideStackPopup(); showSchedPanel(selStart, selEnd); };
+                document.getElementById("pick-flamegraph").focus();
+            }
+
+            function showFlamegraph(selStart, selEnd) {
+                const allSamples = trace.cpuSamples.filter(s =>
+                    s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
+                );
+                if (!allSamples.length) {
+                    showToast("no-cpu-samples-region", "No CPU samples in selected region", "error", 4000);
+                    return;
+                }
+
+                fgAllSamples = allSamples;
+                const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
+                document.getElementById("fg-title").textContent = "Flamegraph";
+                document.getElementById("fg-stats").textContent =
+                    `${allSamples.length} samples · ${durMs}ms selected`;
+
+                // Build spawn location dropdown
+                const locCounts = new Map(); // spawnLoc → count
+                for (const s of allSamples) {
+                    const loc = s.spawnLoc || "(unknown)";
+                    locCounts.set(loc, (locCounts.get(loc) || 0) + 1);
+                }
+                const sel = document.getElementById("fg-spawn-filter");
+                sel.innerHTML = `<option value="">All tasks (${allSamples.length} samples)</option>`;
+                // Sort by count descending
+                const sorted = [...locCounts.entries()].sort((a, b) => b[1] - a[1]);
+                for (const [loc, count] of sorted) {
+                    const short = loc.replace(/.*\//, '');
+                    const opt = document.createElement("option");
+                    opt.value = loc;
+                    opt.textContent = `${short} (${count})`;
+                    opt.title = loc;
+                    sel.appendChild(opt);
+                }
+
+                clearToasts();
+                document.getElementById("flamegraph-panel").style.display = "flex";
+                document.getElementById("fg-close").focus();
+                applyFgFilter();
+            }
+
+            function applyFgFilter() {
+                const filterVal = document.getElementById("fg-spawn-filter").value;
+                const samples = filterVal
+                    ? fgAllSamples.filter(s => (s.spawnLoc || "(unknown)") === filterVal)
+                    : fgAllSamples;
+
+                const workerSamples = samples.filter(s => s.workerId !== 255);
+                const offworkerSamples = samples.filter(s => s.workerId === 255);
+
+                fgWorkerData = buildFgData(workerSamples, trace.callframeSymbols);
+                fgOffworkerData = buildFgData(offworkerSamples, trace.callframeSymbols);
+
+                document.getElementById("fg-worker-label").textContent =
+                    `Worker threads — ${workerSamples.length} samples`;
+                document.getElementById("fg-worker-label").style.display = fgWorkerData ? "" : "none";
+                document.getElementById("fg-canvas-worker").style.display = fgWorkerData ? "" : "none";
+
+                const offLabel = document.getElementById("fg-offworker-label");
+                offLabel.textContent =
+                    `Off-worker (sampler thread) — ${offworkerSamples.length} samples`;
+                offLabel.style.display = fgOffworkerData ? "" : "none";
+                document.getElementById("fg-canvas-offworker").style.display = fgOffworkerData ? "" : "none";
+
+                renderFlamegraph();
+            }
+
+            document.getElementById("fg-spawn-filter").addEventListener("change", applyFgFilter);
+
+            function flamegraphColor(name) {
+                let h = 0;
+                for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+                const hue = 10 + (Math.abs(h) % 40);
+                const sat = 60 + (Math.abs(h >> 8) % 30);
+                const lit = 40 + (Math.abs(h >> 16) % 15);
+                return `hsl(${hue},${sat}%,${lit}%)`;
+            }
+
+            function renderFgCanvas(canvasId, data, hitKey) {
+                const c = document.getElementById(canvasId);
+                if (!data) { c.width = 0; c.height = 0; fgHitRegions[hitKey] = []; return; }
+                const dpr = devicePixelRatio || 1;
+                const pw = c.parentElement.clientWidth;
+                const ph = (data.maxDepth + 2) * FG_ROW_H + 8;
+                c.width = pw * dpr;
+                c.height = ph * dpr;
+                c.style.width = pw + "px";
+                c.style.height = ph + "px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+                ctx.fillStyle = "#1a1a2e";
+                ctx.fillRect(0, 0, pw, ph);
+
+                const regions = [];
+                const padL = 4, padR = 4, drawW = pw - padL - padR;
+                const baseY = ph - 4;
+                ctx.font = "11px monospace";
+                ctx.textBaseline = "middle";
+                for (const node of data.nodes) {
+                    const x = padL + node.x * drawW;
+                    const w = node.w * drawW;
+                    const y = baseY - (node.depth + 1) * FG_ROW_H;
+                    if (w < 0.5) continue;
+                    ctx.fillStyle = flamegraphColor(node.name);
+                    ctx.fillRect(x, y, Math.max(w - 0.5, 0.5), FG_ROW_H - 1);
+                    regions.push({ x1: x, x2: x + w, y, node, totalSamples: data.totalSamples });
+                    if (w > 30) {
+                        ctx.fillStyle = "#fff";
+                        const label = node.name.length * 7 > w - 4
+                            ? node.name.slice(0, Math.floor((w - 10) / 7)) + "…"
+                            : node.name;
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.rect(x + 2, y, w - 4, FG_ROW_H);
+                        ctx.clip();
+                        ctx.fillText(label, x + 3, y + FG_ROW_H / 2);
+                        ctx.restore();
+                    }
+                }
+                fgHitRegions[hitKey] = regions;
+            }
+
+            function renderFlamegraph() {
+                renderFgCanvas("fg-canvas-worker", fgWorkerData, "worker");
+                renderFgCanvas("fg-canvas-offworker", fgOffworkerData, "offworker");
+            }
+
+            // Flamegraph tooltip — shared handler for both canvases
+            function fgCanvasMouseMove(e, hitKey) {
+                const c = e.target;
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+                const tip = document.getElementById("fg-tooltip");
+                const regions = fgHitRegions[hitKey] || [];
+                let hit = null;
+                for (let i = regions.length - 1; i >= 0; i--) {
+                    const r = regions[i];
+                    if (mx >= r.x1 && mx <= r.x2 && my >= r.y && my < r.y + FG_ROW_H) {
+                        hit = r;
+                        break;
+                    }
+                }
+                if (hit) {
+                    const total = hit.totalSamples;
+                    const pct = ((hit.node.count / total) * 100).toFixed(1);
+                    const selfPct = ((hit.node.self / total) * 100).toFixed(1);
+                    const nameElt = document.createElement('b');
+                    nameElt.innerText = hit.node.name;
+                    tip.innerHTML = `${nameElt.outerHTML}<br>${hit.node.count} samples (${pct}%) · ${hit.node.self} self (${selfPct}%)`;
+                    tip.style.display = "block";
+                    tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 620) + "px";
+                    tip.style.top = (e.clientY - 50) + "px";
+                    c.style.cursor = "pointer";
+                } else {
+                    tip.style.display = "none";
+                    c.style.cursor = "";
+                }
+            }
+
+            document.getElementById("fg-canvas-worker").addEventListener("mousemove", (e) => fgCanvasMouseMove(e, "worker"));
+            document.getElementById("fg-canvas-offworker").addEventListener("mousemove", (e) => fgCanvasMouseMove(e, "offworker"));
+            document.getElementById("fg-canvas-worker").addEventListener("mouseleave", () => {
+                document.getElementById("fg-tooltip").style.display = "none";
+            });
+            document.getElementById("fg-canvas-offworker").addEventListener("mouseleave", () => {
+                document.getElementById("fg-tooltip").style.display = "none";
+            });
+
+            document.getElementById("fg-close").addEventListener("click", () => {
+                document.getElementById("flamegraph-panel").style.display = "none";
+                document.getElementById("fg-tooltip").style.display = "none";
+            });
+
+            // ── Queue chart drag-select: show tasks spawned in time range ──
+            let qcDragging = false, qcDragStartX = 0, qcDragStartNs = 0, qcDragEndNs = 0, qcDragMoved = false;
+
+            document.getElementById("queue-chart").addEventListener("mousedown", (e) => {
+                if (!trace || !activeTaskSamples.length) return;
+                qcDragging = true;
+                qcDragMoved = false;
+                qcDragStartX = e.clientX;
+                const rect = queueCanvas.getBoundingClientRect();
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const chartW = rect.width - LABEL_W - scrollbarW;
+                const mx = e.clientX - rect.left - LABEL_W;
+                qcDragStartNs = viewStart + (Math.max(0, mx) / chartW) * (viewEnd - viewStart);
+                qcDragEndNs = qcDragStartNs;
+                // Show selection overlay on main area
+                const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                selOverlay.style.top = "0px";
+                selOverlay.style.height = mainRect.height + "px";
+                selOverlay.style.display = "block";
+                updateSelOverlay(e.clientX);
+                document.body.style.cursor = "crosshair";
+                e.stopPropagation();
+            });
+
+            window.addEventListener("mousemove", (e) => {
+                if (!qcDragging) return;
+                if (Math.abs(e.clientX - qcDragStartX) > 3) qcDragMoved = true;
+                const rect = queueCanvas.getBoundingClientRect();
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const chartW = rect.width - LABEL_W - scrollbarW;
+                const mx = e.clientX - rect.left - LABEL_W;
+                qcDragEndNs = viewStart + (Math.max(0, Math.min(chartW, mx)) / chartW) * (viewEnd - viewStart);
+                // Update main-area selection overlay
+                regionStartNs = qcDragStartNs;
+                regionEndNs = qcDragEndNs;
+                updateSelOverlay(e.clientX);
+                // Draw selection highlight on queue chart
+                renderQueueChart(rect.width - LABEL_W, scrollbarW);
+                const c = queueCanvas;
+                const ctx = c.getContext("2d");
+                const dpr = devicePixelRatio || 1;
+                ctx.save();
+                ctx.scale(dpr, dpr);
+                const selStart = Math.min(qcDragStartNs, qcDragEndNs);
+                const selEnd = Math.max(qcDragStartNs, qcDragEndNs);
+                const x1 = LABEL_W + nsToX(selStart, chartW);
+                const x2 = LABEL_W + nsToX(selEnd, chartW);
+                ctx.fillStyle = "rgba(129,199,132,0.2)";
+                ctx.fillRect(x1, 0, x2 - x1, c.height / dpr);
+                ctx.strokeStyle = "rgba(129,199,132,0.6)";
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x1, 0, x2 - x1, c.height / dpr);
+                ctx.restore();
+            });
+
+            window.addEventListener("mouseup", (e) => {
+                if (!qcDragging) return;
+                qcDragging = false;
+                selOverlay.style.display = "none";
+                document.body.style.cursor = "";
+                if (qcDragMoved) {
+                    clearToasts();
+                    const selStart = Math.min(qcDragStartNs, qcDragEndNs);
+                    const selEnd = Math.max(qcDragStartNs, qcDragEndNs);
+                    showSpawnedTasks(selStart, selEnd);
+                }
+                renderAll();
+            });
+
+            function showSpawnedTasks(selStart, selEnd) {
+                // Find tasks whose first poll falls in [selStart, selEnd]
+                const tasks = [];
+                for (const [taskId, t] of taskFirstPoll) {
+                    if (t >= selStart && t <= selEnd) {
+                        const locId = trace.taskSpawnLocs.get(taskId);
+                        const loc = locId != null ? (trace.spawnLocations.get(locId) || null) : null;
+                        tasks.push({ taskId, firstPoll: t, loc });
+                    }
+                }
+                if (!tasks.length) return;
+
+                // Group by spawn location
+                const groups = new Map();
+                for (const t of tasks) {
+                    const key = t.loc || "(unknown)";
+                    if (!groups.has(key)) groups.set(key, []);
+                    groups.get(key).push(t);
+                }
+                const sorted = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+
+                const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
+                const popup = document.getElementById("stack-popup");
+                const title = document.getElementById("stack-popup-title");
+                const body = document.getElementById("stack-popup-body");
+                title.textContent = `${tasks.length} tasks spawned in ${durMs}ms`;
+
+                let html = "";
+                for (const [loc, taskList] of sorted) {
+                    const short = loc.replace(/.*\//, '');
+                    html += `<div style="margin-bottom:10px;border-left:3px solid #81c784;padding-left:8px">`;
+                    html += `<div style="color:#81c784;font-weight:600">${taskList.length}× <span style="color:#fff">${esc(short)}</span></div>`;
+                    if (short !== loc) html += `<div style="color:#666;font-size:0.85em">${esc(loc)}</div>`;
+                    // Show first few tasks as clickable links
+                    const show = taskList.slice(0, 5);
+                    for (const t of show) {
+                        html += `<div style="margin-left:8px"><span class="spawned-task-link" style="color:#6c63ff;cursor:pointer;text-decoration:underline" data-task-id="${t.taskId}">0x${t.taskId.toString(16)}</span> <span style="color:#888">@ ${fmtTs(t.firstPoll)}</span></div>`;
+                    }
+                    if (taskList.length > 5) html += `<div style="color:#888;margin-left:8px;font-size:0.9em">… ${taskList.length - 5} more</div>`;
+                    html += `</div>`;
+                }
+                body.innerHTML = html;
+                popup.style.display = "block";
+                popup.style.left = (window.innerWidth / 2 - 200) + "px";
+                popup.style.top = (window.innerHeight / 2 - 150) + "px";
+
+                // Wire up task links to select and focus
+                body.querySelectorAll('.spawned-task-link').forEach(el => {
+                    el.addEventListener('click', () => {
+                        const tid = parseInt(el.dataset.taskId);
+                        selectedTaskId = tid;
+                        hideStackPopup();
+                        renderAll();
+                    });
+                });
+            }
+
+            // Re-render flamegraph on resize
+            window.addEventListener("resize", () => {
+                if (document.getElementById("flamegraph-panel").style.display === "flex") {
+                    renderFlamegraph();
+                }
+            });
+        </script>
+    </body>
+</html>

@@ -66,7 +66,7 @@ async fn serves_static_files() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("{base}/browser.html"))
+        .get(format!("{base}/index.html"))
         .send()
         .await
         .unwrap();
@@ -75,7 +75,7 @@ async fn serves_static_files() {
     check!(body.contains("dial9"));
 
     let resp = client
-        .get(format!("{base}/index.html"))
+        .get(format!("{base}/viewer.html"))
         .send()
         .await
         .unwrap();
@@ -425,4 +425,27 @@ async fn e2e_search_then_view() {
     let has_seg2 = body_slice.windows(seg2.len()).any(|w| w == seg2.as_slice());
     check!(has_seg1);
     check!(has_seg2);
+}
+
+/// Regression test: a compressed segment that decompresses to >50MB must be
+/// served successfully. Previously, the server truncated at 50MB during
+/// decompression (overshooting by up to 8KB) and then rejected the result
+/// with HTTP 413 because it exceeded the same 50MB limit.
+#[tokio::test]
+async fn trace_serves_large_decompressed_segment() {
+    let (s3, base, _dir) = setup_s3_test("big-bucket", Some("big-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    // 60MB of data — compresses well, decompresses to >50MB
+    let big_data = vec![0xABu8; 60 * 1024 * 1024];
+    put_object(&s3, "big-bucket", "big.bin.gz", &gzip_bytes(&big_data)).await;
+
+    let resp = client
+        .get(format!("{base}/api/trace?keys=big.bin.gz"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body = resp.bytes().await.unwrap();
+    check!(body.len() == big_data.len());
 }

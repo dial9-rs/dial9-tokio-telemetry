@@ -10,7 +10,6 @@ use std::io::Read;
 
 use crate::server::AppState;
 
-const MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024; // 50 MB
 const MAX_KEYS: usize = 100;
 
 #[derive(Deserialize)]
@@ -55,14 +54,6 @@ pub async fn get_trace(
     for result in results {
         let data = result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let raw = maybe_gunzip(&data);
-
-        if combined.len() + raw.len() > MAX_RESPONSE_BYTES {
-            return Err((
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("combined trace exceeds {MAX_RESPONSE_BYTES} bytes"),
-            ));
-        }
-
         combined.extend_from_slice(&raw);
     }
 
@@ -78,29 +69,17 @@ fn maybe_gunzip(data: &[u8]) -> Vec<u8> {
     if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
         let mut decoder = GzDecoder::new(data);
         let mut decompressed = Vec::new();
-        let mut buf = [0u8; 8192];
-        loop {
-            match decoder.read(&mut buf) {
-                Ok(0) => return decompressed,
-                Ok(n) => {
-                    decompressed.extend_from_slice(&buf[..n]);
-                    if decompressed.len() > MAX_RESPONSE_BYTES {
-                        tracing::warn!(
-                            size = decompressed.len(),
-                            "decompressed data exceeds limit, truncating"
-                        );
-                        return decompressed;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "gzip header detected but decompression failed, returning raw bytes"
-                    );
-                    return data.to_vec();
-                }
+        match decoder.read_to_end(&mut decompressed) {
+            Ok(_) => decompressed,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "gzip header detected but decompression failed, returning raw bytes"
+                );
+                data.to_vec()
             }
         }
+    } else {
+        data.to_vec()
     }
-    data.to_vec()
 }

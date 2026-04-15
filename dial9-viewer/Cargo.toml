@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "CLI trace viewer and S3 browser for dial9-tokio-telemetry"
+default-run = "dial9-viewer"
 
 [features]
 dev-server = ["dep:s3s", "dep:s3s-fs", "dep:s3s-aws", "dep:tempfile"]

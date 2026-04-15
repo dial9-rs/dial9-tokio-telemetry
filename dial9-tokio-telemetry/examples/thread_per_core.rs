@@ -2,8 +2,8 @@
 //!
 //! Some applications pin one single-threaded tokio runtime per CPU core for
 //! cache locality and predictable latency. This example shows how to trace
-//! that pattern: one primary runtime owns the telemetry session, and each
-//! per-core runtime attaches via `build_with_reuse`.
+//! that pattern: the telemetry session is created first via `TelemetryCore`,
+//! then each runtime (coordinator + per-core) is attached via `trace_runtime`.
 //!
 //! After the workload completes, the trace file is read back and all
 //! PollStart/PollEnd worker IDs are printed alongside the runtime→worker
@@ -16,7 +16,7 @@
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/thread_per_core/trace.0.bin
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryEvent, TracedRuntime, WorkerId};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryCore, TelemetryEvent, WorkerId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -41,15 +41,12 @@ fn main() -> std::io::Result<()> {
         .max_total_size(5 * 1024 * 1024)
         .build()?;
 
-    // A small multi-thread runtime to own the telemetry session (flush thread,
-    // writer, etc.). In a real app this might be your main runtime.
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-
-    let (coordinator_rt, guard) = TracedRuntime::builder()
-        .with_runtime_name("coordinator")
-        .with_trace_path(format!("{trace_dir}/trace.bin"))
-        .build_and_start(builder, writer)?;
+    // Create the telemetry session first — no runtime needed yet.
+    let guard = TelemetryCore::builder()
+        .writer(writer)
+        .trace_path(format!("{trace_dir}/trace.bin"))
+        .build()?;
+    guard.enable();
 
     // Spawn one current-thread runtime per core.
     let num_cores = std::thread::available_parallelism()
@@ -63,16 +60,17 @@ fn main() -> std::io::Result<()> {
             let mut core_builder = tokio::runtime::Builder::new_current_thread();
             core_builder.enable_all();
 
-            let core_rt = TracedRuntime::builder()
-                .with_runtime_name(format!("core-{core_id}"))
-                .build_with_reuse(core_builder, &guard)
+            let (core_rt, handle) = guard
+                .trace_runtime(format!("core-{core_id}"))
+                .build(core_builder)
                 .unwrap();
 
             std::thread::Builder::new()
                 .name(format!("core-{core_id}"))
                 .spawn(move || {
                     core_rt
-                        .block_on(core_rt.spawn(async move {
+                        // spawning into the traced handle allows for more tracking
+                        .block_on(handle.spawn(async move {
                             for i in 0..20 {
                                 tokio::task::yield_now().await;
                                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -87,18 +85,11 @@ fn main() -> std::io::Result<()> {
         })
         .collect();
 
-    // Let the coordinator do some light work too.
-    coordinator_rt.block_on(async {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        println!("  [coordinator] health check done");
-    });
-
     for t in threads {
         t.join().unwrap();
     }
     println!("All cores finished.\n");
 
-    drop(coordinator_rt);
     let _ = guard.graceful_shutdown(Duration::from_secs(5));
 
     // ── Read back the trace and verify ──────────────────────────────────

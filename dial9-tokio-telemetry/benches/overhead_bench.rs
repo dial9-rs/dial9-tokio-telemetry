@@ -30,7 +30,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 const NUM_CLIENTS: usize = 50;
-const DEFAULT_DURATION_SECS: u64 = 30;
+const DEFAULT_DURATION_SECS: u64 = 60;
 const WARMUP_SECS: u64 = 3;
 
 // ── Echo server (runs on the traced runtime) ─────────────────────────────────
@@ -252,6 +252,10 @@ fn main() {
 
     if is_bmf {
         let mut report = bmf::Report::new();
+        let mut results = std::collections::HashMap::new();
+        // Discarded warmup run so the first measured mode doesn't pay
+        // cold-process costs (CPU freq ramp, allocator/page faults).
+        let _ = run_bench("baseline", WARMUP_SECS);
         for mode in ["baseline", "telemetry", "noop"] {
             let r = run_bench(mode, duration_secs);
             let rps = r.hist.len() as f64 / r.wall.as_secs_f64();
@@ -269,7 +273,14 @@ fn main() {
                 format!("{p}::p99_9_lat_ns"),
                 bmf::Metric::latency(r.hist.value_at_percentile(99.9) as f64),
             );
+            results.insert(mode, r);
         }
+        let baseline_p90 = results["baseline"].hist.value_at_percentile(90.0);
+        let telemetry_p90 = results["telemetry"].hist.value_at_percentile(90.0);
+        report.insert(
+            "overhead::telemetry_p90_added_latency_ns".to_string(),
+            bmf::Metric::latency((telemetry_p90 as i64 - baseline_p90 as i64) as f64),
+        );
         println!("{}", serde_json::to_string_pretty(&report).unwrap());
         return;
     }

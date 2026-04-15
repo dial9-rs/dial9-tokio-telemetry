@@ -7,6 +7,7 @@ pub mod s3;
 pub(crate) mod sealed;
 
 use crate::metrics::{Operation, SegmentProcessMetrics, SegmentProcessMetricsGuard};
+use crate::rate_limit::rate_limited;
 use metrique::timers::Timer;
 use metrique_writer::BoxEntrySink;
 use pipeline_metrics::{MetriqueResult, PipelineMetrics, StageMetrics};
@@ -80,11 +81,13 @@ impl BackgroundTaskConfig {
         match stem {
             Some(s) if !s.is_empty() => s,
             _ => {
-                tracing::error!(
-                    target: "dial9_worker",
-                    path = %self.trace_path.display(),
-                    "trace_path has no file stem — pass a path like /tmp/traces/trace.bin, not a directory"
-                );
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::error!(
+                        target: "dial9_worker",
+                        path = %self.trace_path.display(),
+                        "trace_path has no file stem — pass a path like /tmp/traces/trace.bin, not a directory"
+                    );
+                });
                 "trace"
             }
         }
@@ -378,7 +381,9 @@ impl SegmentProcessor for SymbolizeProcessor {
                     Ok(data)
                 }
                 Ok(Err(e)) => {
-                    tracing::warn!(target: "dial9_worker", error = %e, "symbolization failed, preserving original bytes");
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!(target: "dial9_worker", error = %e, "symbolization failed, preserving original bytes");
+                    });
                     Err(ProcessError {
                         data,
                         kind: ProcessErrorKind::Io(e),
@@ -434,10 +439,12 @@ impl SegmentProcessor for WriteBackProcessor {
                                 let _ = std::fs::remove_file(&dest_path);
                             }
                             Err(e) => {
-                                tracing::warn!(
-                                    "failed to remove original segment {}: {e}",
-                                    original_path.display()
-                                );
+                                rate_limited!(Duration::from_secs(60), {
+                                    tracing::warn!(
+                                        "failed to remove original segment {}: {e}",
+                                        original_path.display()
+                                    );
+                                });
                             }
                         }
                     }
@@ -512,7 +519,9 @@ impl WorkerLoop {
         let segments = match sealed::find_sealed_segments(&self.dir, &self.stem) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(target: "dial9_worker", "failed to scan for sealed segments: {e}");
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(target: "dial9_worker", "failed to scan for sealed segments: {e}");
+                });
                 return false;
             }
         };
@@ -540,7 +549,9 @@ impl WorkerLoop {
                     continue;
                 }
                 Err(e) => {
-                    tracing::warn!(target: "dial9_worker", error = %e, "failed to read segment");
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!(target: "dial9_worker", error = %e, "failed to read segment");
+                    });
                     continue;
                 }
             };
@@ -592,9 +603,13 @@ impl WorkerLoop {
                             tracing::debug!(target: "dial9_worker", path = %segment.path.display(), "segment evicted during processing, skipping");
                         } else {
                             if let Err(remove_err) = std::fs::remove_file(&segment.path) {
-                                tracing::warn!(target: "dial9_worker", error = %remove_err, path = %segment.path.display(), "failed to remove corrupted segment");
+                                rate_limited!(Duration::from_secs(60), {
+                                    tracing::warn!(target: "dial9_worker", error = %remove_err, path = %segment.path.display(), "failed to remove corrupted segment");
+                                });
                             }
-                            tracing::warn!(target: "dial9_worker", error = %e.kind, cause = ?e.kind, path = %segment.path.display(), "processor failed, removing segment");
+                            rate_limited!(Duration::from_secs(60), {
+                                tracing::warn!(target: "dial9_worker", error = %e.kind, cause = ?e.kind, path = %segment.path.display(), "processor failed, removing segment");
+                            });
                         }
                         continue 'next_segment;
                     }
@@ -684,7 +699,9 @@ impl SegmentProcessor for S3PipelineUploader {
             {
                 Ok(key) => {
                     self.circuit_breaker.on_success();
-                    tracing::info!(target: "dial9_worker", "uploaded {key}");
+                    rate_limited!(Duration::from_secs(10), {
+                        tracing::info!(target: "dial9_worker", "uploaded {key}");
+                    });
                     Ok(data)
                 }
                 Err(kind) => {
@@ -693,7 +710,9 @@ impl SegmentProcessor for S3PipelineUploader {
                         tracing::debug!(target: "dial9_worker", path = %data.segment.path.display(), "segment already evicted, skipping");
                     } else {
                         self.circuit_breaker.on_failure();
-                        tracing::warn!(target: "dial9_worker", error = %kind, "upload failed");
+                        rate_limited!(Duration::from_secs(60), {
+                            tracing::warn!(target: "dial9_worker", error = %kind, "upload failed");
+                        });
                     }
                     Err(ProcessError { data, kind })
                 }

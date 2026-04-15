@@ -27,6 +27,10 @@
    *   workerSpans: Object<number, { polls: Array<{start: number, end: number, taskId?: number, spawnLocId?: string|null, spawnLoc?: string|null}>, parks: Array<{start: number, end: number, schedWait: number}>, actives: Array<{start: number, end: number, ratio: number}>, cpuSampleTimes: number[] }>,
    *   perWorker: Object<number, import('./trace_parser.js').TraceEvent[]>,
    *   queueSamples: Array<{t: number, global: number}>,
+   *   workerQueueSamples: Object<number, Array<{t: number, local: number}>>,
+   *   maxLocalQueue: number,
+   *   wakesByTask: Object<number, Array<{timestamp: number, wakerTaskId: number, targetWorker: number}>>,
+   *   wakesByWorker: Object<number, Array<{timestamp: number, wakerTaskId: number, wokenTaskId: number}>>,
    * }}
    */
   function buildWorkerSpans(events, workerIds, maxTs) {
@@ -35,6 +39,10 @@
       openPark = {},
       openUnpark = {};
     const openPollMeta = {};
+    const workerQueueSamples = {};
+    let maxLocalQueue = 1;
+    const wakesByTask = {};
+    const wakesByWorker = {};
     for (const w of workerIds) {
       workerSpans[w] = {
         polls: [],
@@ -42,24 +50,50 @@
         actives: [],
         cpuSampleTimes: [],
       };
+      workerQueueSamples[w] = [];
     }
 
     // Group events by worker and sort per-worker by timestamp
+    // Also index wake events in the same pass
     const perWorker = {};
     for (const e of events) {
-      if (
-        e.eventType !== EVENT_TYPES.QueueSample &&
-        e.eventType !== EVENT_TYPES.WakeEvent
-      ) {
+      if (e.eventType === EVENT_TYPES.WakeEvent) {
+        (wakesByTask[e.wokenTaskId] ??= []).push({
+          timestamp: e.timestamp,
+          wakerTaskId: e.wakerTaskId,
+          targetWorker: e.targetWorker,
+        });
+        (wakesByWorker[e.targetWorker] ??= []).push({
+          timestamp: e.timestamp,
+          wakerTaskId: e.wakerTaskId,
+          wokenTaskId: e.wokenTaskId,
+        });
+      } else if (e.eventType !== EVENT_TYPES.QueueSample) {
         (perWorker[e.workerId] ??= []).push(e);
       }
     }
     for (const wEvents of Object.values(perWorker)) {
       wEvents.sort((a, b) => a.timestamp - b.timestamp);
     }
+    for (const arr of Object.values(wakesByTask)) {
+      arr.sort((a, b) => a.timestamp - b.timestamp);
+    }
+    for (const arr of Object.values(wakesByWorker)) {
+      arr.sort((a, b) => a.timestamp - b.timestamp);
+    }
 
     for (const [w, wEvents] of Object.entries(perWorker)) {
       for (const e of wEvents) {
+        // Extract local queue samples inline
+        if (
+          e.eventType === EVENT_TYPES.PollStart ||
+          e.eventType === EVENT_TYPES.WorkerPark ||
+          e.eventType === EVENT_TYPES.WorkerUnpark
+        ) {
+          workerQueueSamples[w].push({ t: e.timestamp, local: e.localQueue });
+          if (e.localQueue > maxLocalQueue) maxLocalQueue = e.localQueue;
+        }
+
         if (e.eventType === EVENT_TYPES.PollStart) {
           openPoll[w] = e.timestamp;
           openPollMeta[w] = {
@@ -111,10 +145,10 @@
       }
     }
 
-    // Close any open spans at trace end
+    // Close any open park spans at trace end.
+    // Open polls are discarded: a PollStart without a matching PollEnd
+    // means the segment rotated mid-poll, not that the poll was long (#194).
     for (const w of workerIds) {
-      if (openPoll[w] != null)
-        workerSpans[w].polls.push({ start: openPoll[w], end: maxTs });
       if (openPark[w] != null)
         workerSpans[w].parks.push({ start: openPark[w], end: maxTs });
     }
@@ -124,7 +158,7 @@
       .filter((e) => e.eventType === EVENT_TYPES.QueueSample)
       .map((e) => ({ t: e.timestamp, global: e.globalQueue }));
 
-    return { workerSpans, perWorker, queueSamples };
+    return { workerSpans, perWorker, queueSamples, workerQueueSamples, maxLocalQueue, wakesByTask, wakesByWorker };
   }
 
   /**
@@ -181,34 +215,6 @@
   }
 
   /**
-   * Extract per-worker local queue depth samples from sorted per-worker events.
-   * @param {Object<number, import('./trace_parser.js').TraceEvent[]>} perWorker
-   * @param {number[]} workerIds
-   * @returns {{ workerQueueSamples: Object<number, Array<{t: number, local: number}>>, maxLocalQueue: number }}
-   */
-  function extractLocalQueueSamples(perWorker, workerIds) {
-    const workerQueueSamples = {};
-    let maxLocalQueue = 1;
-    for (const w of workerIds) {
-      workerQueueSamples[w] = [];
-    }
-    for (const [w, wEvents] of Object.entries(perWorker)) {
-      for (const e of wEvents) {
-        if (
-          e.eventType === EVENT_TYPES.PollStart ||
-          e.eventType === EVENT_TYPES.WorkerPark ||
-          e.eventType === EVENT_TYPES.WorkerUnpark
-        ) {
-          workerQueueSamples[w] ??= [];
-          workerQueueSamples[w].push({ t: e.timestamp, local: e.localQueue });
-          if (e.localQueue > maxLocalQueue) maxLocalQueue = e.localQueue;
-        }
-      }
-    }
-    return { workerQueueSamples, maxLocalQueue };
-  }
-
-  /**
    * Build active task count timeline from spawn/terminate timestamps.
    * @param {Map<number, number>} taskSpawnTimes
    * @param {Map<number, number>} taskTerminateTimes
@@ -237,45 +243,11 @@
   }
 
   /**
-   * Index wake events by woken task ID and by target worker.
-   * @param {import('./trace_parser.js').TraceEvent[]} events
-   * @returns {{
-   *   wakesByTask: Object<number, Array<{timestamp: number, wakerTaskId: number, targetWorker: number}>>,
-   *   wakesByWorker: Object<number, Array<{timestamp: number, wakerTaskId: number, wokenTaskId: number}>>,
-   * }}
-   */
-  function indexWakeEvents(events) {
-    const wakesByTask = {};
-    const wakesByWorker = {};
-    for (const e of events) {
-      if (e.eventType === EVENT_TYPES.WakeEvent) {
-        (wakesByTask[e.wokenTaskId] ??= []).push({
-          timestamp: e.timestamp,
-          wakerTaskId: e.wakerTaskId,
-          targetWorker: e.targetWorker,
-        });
-        (wakesByWorker[e.targetWorker] ??= []).push({
-          timestamp: e.timestamp,
-          wakerTaskId: e.wakerTaskId,
-          wokenTaskId: e.wokenTaskId,
-        });
-      }
-    }
-    for (const arr of Object.values(wakesByTask)) {
-      arr.sort((a, b) => a.timestamp - b.timestamp);
-    }
-    for (const arr of Object.values(wakesByWorker)) {
-      arr.sort((a, b) => a.timestamp - b.timestamp);
-    }
-    return { wakesByTask, wakesByWorker };
-  }
-
-  /**
    * Compute scheduling delays: for each poll, find the most recent wake before it.
    * Adjusts for mid-poll wake arrivals.
    * @param {Object} workerSpans - as returned by buildWorkerSpans
    * @param {number[]} workerIds
-   * @param {Object} wakesByTask - as returned by indexWakeEvents
+   * @param {Object} wakesByTask - as returned by buildWorkerSpans
    * @returns {Array<{wakeTime: number, pollTime: number, delay: number, taskId: number, wakerTaskId: number, worker: number, poll: Object}>}
    */
   function computeSchedulingDelays(workerSpans, workerIds, wakesByTask) {
@@ -522,9 +494,7 @@
   const analysisExports = {
     buildWorkerSpans,
     attachCpuSamples,
-    extractLocalQueueSamples,
     buildActiveTaskTimeline,
-    indexWakeEvents,
     computeSchedulingDelays,
     filterPointsOfInterest,
     buildFlamegraphTree,

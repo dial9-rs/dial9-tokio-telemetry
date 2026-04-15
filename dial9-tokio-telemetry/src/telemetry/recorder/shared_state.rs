@@ -40,7 +40,7 @@ pub(crate) struct SharedState {
     /// uses these to intrusively drain idle/silent buffers.
     tl_buffers: Mutex<Vec<TlBufferHandle>>,
     /// All registered `RuntimeContext`s. The flush thread clones this vec each
-    /// cycle for queue sampling and metadata generation. `build_with_reuse`
+    /// cycle for queue sampling and metadata generation. `build_and_attach_to_telemetry`
     /// pushes new contexts here so the flush thread picks them up.
     pub(crate) contexts: Mutex<Vec<Arc<RuntimeContext>>>,
     /// Maps OS tid → thread role so that CPU samples returned from perf can be

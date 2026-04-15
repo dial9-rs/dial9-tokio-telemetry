@@ -22,7 +22,7 @@ macro_rules! rate_limited {
         if next <= time.as_secs() {
             let new_next = time
                 .checked_add(interval)
-                .unwrap_or(Duration::MAX)
+                .unwrap_or(std::time::Duration::MAX)
                 .as_secs();
             if NEXT_CALL
                 .compare_exchange(next, new_next, Ordering::Relaxed, Ordering::Relaxed)

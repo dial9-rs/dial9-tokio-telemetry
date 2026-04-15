@@ -241,10 +241,12 @@ impl Drop for ThreadLocalBuffer {
             if let Some(collector) = self.collector.take() {
                 collector.accept_flush(self.flush());
             } else {
-                tracing::warn!(
-                    "dial9-tokio-telemetry: dropping {} unflushed events (no collector registered on this thread)",
-                    self.event_count
-                );
+                crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(
+                        "dial9-tokio-telemetry: dropping {} unflushed events (no collector registered on this thread)",
+                        self.event_count
+                    );
+                });
             }
         }
     }

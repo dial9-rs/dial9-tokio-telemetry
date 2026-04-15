@@ -2,9 +2,9 @@
 #
 # PREREQUISITES:
 #   1. Create a project at https://bencher.dev and note its slug.
-#   2. Add the following secrets in GitHub → Settings → Secrets and variables → Actions:
-#      - BENCHER_API_TOKEN: API token from bencher.dev
-#      - BENCHER_PROJECT:   your project slug
+#   2. Add the following in GitHub → Settings → Secrets and variables → Actions:
+#      - Secret  BENCHER_API_TOKEN: API token from bencher.dev
+#      - Variable BENCHER_PROJECT:  your project slug
 #   3. GITHUB_TOKEN is provided automatically — no setup needed.
 #
 # overhead_bench uses a custom harness (not Criterion). Its --bmf flag
@@ -48,7 +48,7 @@ jobs:
             command: cargo bench --bench e2e_workload -- --bmf 10
     env:
       RUST_BACKTRACE: 1
-      BENCHER_PROJECT: ${{ secrets.BENCHER_PROJECT }}
+      BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -95,7 +95,7 @@ jobs:
             command: cargo bench --bench e2e_workload -- --bmf 10
     env:
       RUST_BACKTRACE: 1
-      BENCHER_PROJECT: ${{ secrets.BENCHER_PROJECT }}
+      BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
