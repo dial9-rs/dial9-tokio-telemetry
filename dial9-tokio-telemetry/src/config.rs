@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::telemetry::recorder::{HasTracePath, TelemetryGuard, TracedRuntime, TracedRuntimeBuilder};
+use crate::telemetry::recorder::{
+    HasTracePath, TelemetryGuard, TracedRuntime, TracedRuntimeBuilder,
+};
 use crate::telemetry::writer::RotatingWriter;
 
 /// Unified configuration produced by a user-supplied config function and
@@ -37,11 +39,7 @@ impl Dial9Config {
     /// * `base_path` — trace file path
     /// * `max_file_size` — per-file rotation threshold in bytes
     /// * `max_total_size` — total disk budget in bytes
-    pub fn new(
-        base_path: impl Into<PathBuf>,
-        max_file_size: u64,
-        max_total_size: u64,
-    ) -> Self {
+    pub fn new(base_path: impl Into<PathBuf>, max_file_size: u64, max_total_size: u64) -> Self {
         let base_path = base_path.into();
         let mut tokio_builder = tokio::runtime::Builder::new_multi_thread();
         tokio_builder.enable_all();
@@ -141,8 +139,8 @@ mod tests {
 
     #[test]
     fn with_runtime_install_false() {
-        let config = Dial9Config::new(tmp_base_path(), 1024, 4096)
-            .with_runtime(|r| r.install(false));
+        let config =
+            Dial9Config::new(tmp_base_path(), 1024, 4096).with_runtime(|r| r.install(false));
         let (runtime, guard) = config.build().expect("build failed");
         let handle = guard.handle();
         let result = runtime.block_on(async { handle.spawn(async { 7 }).await.unwrap() });
