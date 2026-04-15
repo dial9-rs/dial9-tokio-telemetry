@@ -18,3 +18,5 @@ pub(crate) mod rate_limit;
 /// Core telemetry types, recording, and trace I/O.
 pub mod telemetry;
 pub(crate) mod traced;
+
+pub use traced::enable_task_dumps;

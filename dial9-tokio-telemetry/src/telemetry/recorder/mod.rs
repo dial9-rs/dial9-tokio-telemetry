@@ -102,6 +102,19 @@ fn flush_once(
     }
 }
 
+/// Apply a `TaskDumpConfig` to the shared state atomics.
+fn apply_task_dump_config(
+    shared: &SharedState,
+    config: &crate::telemetry::task_dump_config::TaskDumpConfig,
+) {
+    shared
+        .task_dumps_enabled
+        .store(config.is_enabled(), Ordering::Relaxed);
+    shared
+        .task_dump_idle_threshold_ns
+        .store(config.idle_threshold().as_nanos() as u64, Ordering::Relaxed);
+}
+
 /// Register telemetry callbacks on a runtime builder.
 /// Closures capture `Arc<RuntimeContext>` (runtime-specific) and `Arc<SharedState>` (recording core).
 ///
@@ -265,6 +278,27 @@ impl TelemetryHandle {
     /// Disable telemetry recording.
     pub fn disable(&self) {
         self.shared.enabled.store(false, Ordering::Relaxed);
+    }
+
+    /// Enable task dump capture at runtime.
+    pub fn enable_task_dumps(&self) {
+        self.shared
+            .task_dumps_enabled
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// Disable task dump capture at runtime.
+    pub fn disable_task_dumps(&self) {
+        self.shared
+            .task_dumps_enabled
+            .store(false, Ordering::Relaxed);
+    }
+
+    /// Set the idle threshold for task dump emission.
+    pub fn set_task_dump_threshold(&self, threshold: Duration) {
+        self.shared
+            .task_dump_idle_threshold_ns
+            .store(threshold.as_nanos() as u64, Ordering::Relaxed);
     }
 
     /// Get a [`TracedHandle`](crate::traced::TracedHandle) for wrapping futures with wake tracking.
@@ -484,6 +518,7 @@ pub struct HasTracePath;
 pub struct TracedRuntimeBuilder<P = NoTracePath> {
     enabled: bool,
     task_tracking_enabled: bool,
+    task_dump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
     trace_path: Option<PathBuf>,
     runtime_name: Option<String>,
     #[cfg(feature = "cpu-profiling")]
@@ -522,6 +557,15 @@ impl<P> TracedRuntimeBuilder<P> {
     /// Enable or disable task spawn/terminate tracking.
     pub fn with_task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking_enabled = enabled;
+        self
+    }
+
+    /// Configure task dump capture.
+    pub fn with_task_dumps(
+        mut self,
+        config: crate::telemetry::task_dump_config::TaskDumpConfig,
+    ) -> Self {
+        self.task_dump_config = Some(config);
         self
     }
 
@@ -601,6 +645,7 @@ impl<P> TracedRuntimeBuilder<P> {
         TracedRuntimeBuilder {
             enabled: self.enabled,
             task_tracking_enabled: self.task_tracking_enabled,
+            task_dump_config: self.task_dump_config,
             trace_path: self.trace_path,
             runtime_name: self.runtime_name,
             #[cfg(feature = "cpu-profiling")]
@@ -736,6 +781,7 @@ impl TracedRuntimeBuilder<HasTracePath> {
         let core_builder = TelemetryCore::builder()
             .writer(writer)
             .maybe_trace_path(self.trace_path)
+            .maybe_task_dump_config(self.task_dump_config)
             .maybe_worker_poll_interval(self.worker_poll_interval)
             .maybe_worker_metrics_sink(self.worker_metrics_sink);
 
@@ -750,6 +796,7 @@ impl TracedRuntimeBuilder<HasTracePath> {
             .maybe_s3_client(self.s3_client);
 
         let guard = core_builder.build()?;
+
         let runtime = attach_runtime(
             guard.shared(),
             builder,
@@ -837,6 +884,8 @@ impl TelemetryCore {
         /// cpu-profiling or S3 is configured.
         #[builder(into)]
         trace_path: Option<PathBuf>,
+        /// Task dump configuration.
+        task_dump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
         /// Enable CPU profiling (Linux only).
         #[cfg(feature = "cpu-profiling")]
         cpu_profiling: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
@@ -856,6 +905,12 @@ impl TelemetryCore {
     ) -> std::io::Result<TelemetryGuard> {
         let start_mono_ns = crate::telemetry::events::clock_monotonic_ns();
         let shared = Arc::new(SharedState::new(start_mono_ns));
+
+        // Apply task dump config to shared state
+        if let Some(ref config) = task_dump_config {
+            apply_task_dump_config(&shared, config);
+        }
+
         #[allow(unused_mut)]
         let mut event_writer = EventWriter::new(Box::new(writer));
 
@@ -1108,6 +1163,7 @@ impl TracedRuntime {
         TracedRuntimeBuilder {
             enabled: true,
             task_tracking_enabled: false,
+            task_dump_config: None,
             trace_path: None,
             runtime_name: None,
             #[cfg(feature = "cpu-profiling")]
@@ -2065,5 +2121,225 @@ mod tests {
         drop(rt_a);
         drop(rt_b);
         let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
+    }
+
+    /// Task dumps should NOT be captured when disabled (the default).
+    #[test]
+    fn task_dumps_disabled_by_default() {
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let (runtime, guard) = TracedRuntime::build_and_start(builder, NullWriter).unwrap();
+
+        let handle = guard.handle();
+        // task_dumps_enabled should be false by default
+        assert!(
+            !handle
+                .traced_handle()
+                .shared
+                .task_dumps_enabled
+                .load(Ordering::Relaxed),
+            "task dumps should be disabled by default"
+        );
+
+        runtime.block_on(async {
+            let join = handle.spawn(async {
+                tokio::task::yield_now().await;
+                42
+            });
+            assert_eq!(join.await.unwrap(), 42);
+        });
+
+        drop(runtime);
+        drop(guard);
+    }
+
+    /// Task dumps should be enabled when configured via builder.
+    #[test]
+    fn task_dumps_enabled_via_builder_config() {
+        use crate::telemetry::task_dump_config::TaskDumpConfig;
+
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let (runtime, guard) = TracedRuntime::builder()
+            .with_task_dumps(TaskDumpConfig::enabled())
+            .build_and_start_with_writer(builder, NullWriter)
+            .unwrap();
+
+        let handle = guard.handle();
+        assert!(
+            handle
+                .traced_handle()
+                .shared
+                .task_dumps_enabled
+                .load(Ordering::Relaxed),
+            "task dumps should be enabled via builder config"
+        );
+
+        runtime.block_on(async {
+            let join = handle.spawn(async {
+                tokio::task::yield_now().await;
+                42
+            });
+            assert_eq!(join.await.unwrap(), 42);
+        });
+
+        drop(runtime);
+        drop(guard);
+    }
+
+    /// Task dumps should be enabled via builder with custom threshold.
+    #[test]
+    fn task_dumps_builder_custom_threshold() {
+        use crate::telemetry::task_dump_config::TaskDumpConfig;
+
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let (runtime, guard) = TracedRuntime::builder()
+            .with_task_dumps(
+                TaskDumpConfig::builder()
+                    .idle_threshold(Duration::from_millis(50))
+                    .build(),
+            )
+            .build_and_start_with_writer(builder, NullWriter)
+            .unwrap();
+
+        let shared = &guard.handle().traced_handle().shared;
+        assert!(shared.task_dumps_enabled.load(Ordering::Relaxed));
+        assert_eq!(
+            shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed),
+            50_000_000, // 50ms in nanos
+        );
+
+        drop(runtime);
+        drop(guard);
+    }
+
+    /// Per-task opt-in should enable task dumps even when globally disabled.
+    #[test]
+    fn per_task_enable_overrides_global_disabled() {
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let (runtime, guard) = TracedRuntime::build_and_start(builder, NullWriter).unwrap();
+
+        let handle = guard.handle();
+        // Globally disabled
+        assert!(
+            !handle
+                .traced_handle()
+                .shared
+                .task_dumps_enabled
+                .load(Ordering::Relaxed)
+        );
+
+        runtime.block_on(async {
+            let join = handle.spawn(async {
+                // Enable per-task override
+                crate::traced::enable_task_dumps();
+                assert!(crate::traced::task_dump_override_enabled());
+                tokio::task::yield_now().await;
+                42
+            });
+            assert_eq!(join.await.unwrap(), 42);
+        });
+
+        drop(runtime);
+        drop(guard);
+    }
+
+    /// handle.set_task_dump_threshold() should update the shared state.
+    #[test]
+    fn handle_set_task_dump_threshold() {
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let (runtime, guard) = TracedRuntime::build_and_start(builder, NullWriter).unwrap();
+
+        let handle = guard.handle();
+
+        // Default is 10ms
+        assert_eq!(
+            handle
+                .traced_handle()
+                .shared
+                .task_dump_idle_threshold_ns
+                .load(Ordering::Relaxed),
+            10_000_000,
+        );
+
+        handle.set_task_dump_threshold(Duration::from_millis(100));
+        assert_eq!(
+            handle
+                .traced_handle()
+                .shared
+                .task_dump_idle_threshold_ns
+                .load(Ordering::Relaxed),
+            100_000_000,
+        );
+
+        drop(runtime);
+        drop(guard);
+    }
+
+    /// handle.enable_task_dumps() / disable_task_dumps() should toggle the flag.
+    #[test]
+    fn handle_enable_disable_task_dumps() {
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let (runtime, guard) = TracedRuntime::build_and_start(builder, NullWriter).unwrap();
+
+        let handle = guard.handle();
+        assert!(
+            !handle
+                .traced_handle()
+                .shared
+                .task_dumps_enabled
+                .load(Ordering::Relaxed)
+        );
+
+        handle.enable_task_dumps();
+        assert!(
+            handle
+                .traced_handle()
+                .shared
+                .task_dumps_enabled
+                .load(Ordering::Relaxed)
+        );
+
+        handle.disable_task_dumps();
+        assert!(
+            !handle
+                .traced_handle()
+                .shared
+                .task_dumps_enabled
+                .load(Ordering::Relaxed)
+        );
+
+        drop(runtime);
+        drop(guard);
+    }
+
+    /// TaskDumpConfig wired through TelemetryCore::builder().
+    #[test]
+    fn task_dumps_via_telemetry_core() {
+        use crate::telemetry::task_dump_config::TaskDumpConfig;
+
+        let guard = TelemetryCore::builder()
+            .writer(NullWriter)
+            .task_dump_config(
+                TaskDumpConfig::builder()
+                    .idle_threshold(Duration::from_millis(25))
+                    .build(),
+            )
+            .build()
+            .unwrap();
+        guard.enable();
+
+        let shared = guard.shared();
+        assert!(shared.task_dumps_enabled.load(Ordering::Relaxed));
+        assert_eq!(
+            shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed),
+            25_000_000,
+        );
+
+        let _ = guard.graceful_shutdown(Duration::from_secs(1));
     }
 }

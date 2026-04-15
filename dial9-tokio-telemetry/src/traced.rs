@@ -4,11 +4,37 @@ use crate::telemetry::recorder::SharedState;
 use crate::telemetry::task_metadata::TaskId;
 use futures_util::task::{ArcWake, AtomicWaker, waker as arc_waker};
 use pin_project_lite::pin_project;
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Waker};
+
+thread_local! {
+    /// Per-task opt-in override for task dump capture.
+    /// When set to `true`, task dumps are captured for futures on this thread
+    /// even if global task dumps are disabled.
+    static TASK_DUMP_OVERRIDE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Enable task dump capture for the current task.
+///
+/// Call this inside a future to opt in to task dump capture even when
+/// global task dumps are disabled. This sets a thread-local flag that
+/// `Traced<F>` checks on each poll.
+///
+/// ```rust,no_run
+/// dial9_tokio_telemetry::enable_task_dumps();
+/// ```
+pub fn enable_task_dumps() {
+    TASK_DUMP_OVERRIDE.with(|c| c.set(true));
+}
+
+/// Check whether the per-task override is set.
+pub(crate) fn task_dump_override_enabled() -> bool {
+    TASK_DUMP_OVERRIDE.with(|c| c.get())
+}
 
 /// Handle used by `Traced<F>` to emit events into the telemetry system.
 /// Obtained via `TelemetryHandle::traced_handle()`.
@@ -145,7 +171,8 @@ impl<F: Future> Future for Traced<F> {
                     .handle
                     .shared
                     .task_dumps_enabled
-                    .load(Ordering::Relaxed);
+                    .load(Ordering::Relaxed)
+                    || task_dump_override_enabled();
                 if dumps_enabled {
                     capture_task_dump(this.inner, this.pending_frames);
                     *this.pending_capture_ts = crate::telemetry::events::clock_monotonic_ns();
