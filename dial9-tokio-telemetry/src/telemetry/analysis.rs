@@ -88,6 +88,7 @@ impl TraceReader {
                     TelemetryEvent::TaskSpawn { .. }
                         | TelemetryEvent::ThreadNameDef { .. }
                         | TelemetryEvent::SegmentMetadata { .. }
+                        | TelemetryEvent::ClockSync { .. }
                 )
             })
             .cloned()
@@ -297,7 +298,8 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
             | TelemetryEvent::CpuSample { .. }
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. }
-            | TelemetryEvent::SegmentMetadata { .. } => {}
+            | TelemetryEvent::SegmentMetadata { .. }
+            | TelemetryEvent::ClockSync { .. } => {}
         }
     }
 

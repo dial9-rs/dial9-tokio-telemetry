@@ -2,7 +2,8 @@ use dial9_trace_format::encoder::{Encoder, RawEncoder};
 
 use crate::rate_limit::rate_limited;
 use crate::telemetry::collector::Batch;
-use crate::telemetry::format::SegmentMetadataEvent;
+use crate::telemetry::events::clock_pair;
+use crate::telemetry::format::{ClockSyncEvent, SegmentMetadataEvent};
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::BufWriter;
@@ -267,43 +268,43 @@ impl RotatingWriter {
         &self.active_path
     }
 
-    /// Create an encoder, write the file header and segment metadata, then
-    /// convert to a [`RawEncoder`] for the remainder of the file's lifetime.
+    /// Create an encoder, write the file header, segment metadata, and a
+    /// clock-sync anchor, then convert to a [`RawEncoder`] for the
+    /// remainder of the file's lifetime.
     fn write_header_and_metadata(
         writer: BufWriter<File>,
         segment_metadata: &[(String, String)],
     ) -> std::io::Result<RawEncoder<BufWriter<File>>> {
         let mut encoder = Encoder::new_to(writer)?;
         let entries = segment_metadata.to_vec();
-        let timestamp_ns = time_source()
-            .system_time()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
+        let (mono, real) = clock_pair();
         encoder.write(&SegmentMetadataEvent {
-            timestamp_ns,
+            timestamp_ns: mono,
             entries,
+        })?;
+        encoder.write(&ClockSyncEvent {
+            timestamp_ns: mono,
+            realtime_ns: real,
         })?;
         Ok(encoder.into_raw_encoder())
     }
 
-    /// Write a `SegmentMetadataEvent` into the current active segment.
-    /// Used by `write_current_segment_metadata` to flush runtime metadata
-    /// before finalize.
+    /// Write a `SegmentMetadataEvent` and a fresh `ClockSyncEvent` into
+    /// the current active segment.
     fn write_segment_metadata(&mut self) -> std::io::Result<()> {
         let WriterState::Active(raw) = &mut self.state else {
             return Ok(());
         };
         let entries = self.segment_metadata.clone();
-        let timestamp_ns = time_source()
-            .system_time()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
         let mut enc = Encoder::new();
+        let (mono, real) = clock_pair();
         enc.write(&SegmentMetadataEvent {
-            timestamp_ns,
+            timestamp_ns: mono,
             entries,
+        })?;
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: mono,
+            realtime_ns: real,
         })?;
         raw.write_raw(&enc.finish())?;
         Ok(())
@@ -591,7 +592,12 @@ mod tests {
         format::decode_events(&data)
             .unwrap()
             .into_iter()
-            .filter(|e| !matches!(e, TelemetryEvent::SegmentMetadata { .. }))
+            .filter(|e| {
+                !matches!(
+                    e,
+                    TelemetryEvent::SegmentMetadata { .. } | TelemetryEvent::ClockSync { .. }
+                )
+            })
             .collect()
     }
 
@@ -1562,5 +1568,222 @@ mod tests {
 
         let events = read_trace_events(&rotating_file(&base, 0));
         assert_eq!(events.len(), 2, "both events should be in segment 0");
+    }
+
+    #[test]
+    fn test_clock_sync_precedes_first_data_event() {
+        use crate::background_task::sealed::LEGACY_EPOCH_NS_FLOOR;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let mut writer = RotatingWriter::builder()
+            .base_path(&base)
+            .max_file_size(100_000)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let data = std::fs::read(rotating_file(&base, 0)).unwrap();
+        let all = format::decode_events(&data).unwrap();
+
+        // ClockSync must precede the first data event so a streaming
+        // decoder never sees a data timestamp without an anchor.
+        let first_data_idx = all
+            .iter()
+            .position(|e| {
+                !matches!(
+                    e,
+                    TelemetryEvent::SegmentMetadata { .. } | TelemetryEvent::ClockSync { .. }
+                )
+            })
+            .expect("expected at least one data event");
+        let first_clock_sync_idx = all
+            .iter()
+            .position(|e| matches!(e, TelemetryEvent::ClockSync { .. }))
+            .expect("expected a ClockSyncEvent in the file");
+        assert!(first_clock_sync_idx < first_data_idx);
+
+        match &all[first_clock_sync_idx] {
+            TelemetryEvent::ClockSync { realtime_nanos, .. } => {
+                assert!(*realtime_nanos >= LEGACY_EPOCH_NS_FLOOR);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_segment_metadata_timestamp_is_monotonic_scale() {
+        use crate::background_task::sealed::LEGACY_EPOCH_NS_FLOOR;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let mut writer = RotatingWriter::builder()
+            .base_path(&base)
+            .max_file_size(100_000)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let data = std::fs::read(rotating_file(&base, 0)).unwrap();
+        let all = format::decode_events(&data).unwrap();
+
+        // SegmentMetadata.timestamp_ns should remain monotonic-scale,
+        // not epoch wall-clock.
+        let seg_ts = all
+            .iter()
+            .find_map(|e| match e {
+                TelemetryEvent::SegmentMetadata {
+                    timestamp_nanos, ..
+                } => Some(*timestamp_nanos),
+                _ => None,
+            })
+            .expect("SegmentMetadata");
+        assert!(
+            seg_ts < LEGACY_EPOCH_NS_FLOOR,
+            "SegmentMetadata.timestamp_nanos ({seg_ts}) should be monotonic-scale"
+        );
+    }
+
+    #[test]
+    fn test_clock_sync_written_in_every_rotated_file() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let one_event = single_event_file_size();
+        let mut writer = RotatingWriter::builder()
+            .base_path(&base)
+            .max_file_size(one_event)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
+
+        for _ in 0..5 {
+            writer.write_encoded_batch(&test_batch()).unwrap();
+        }
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let mut files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
+            .collect();
+        files.sort();
+        assert!(files.len() >= 2, "expected at least 2 files from rotation");
+
+        for file in &files {
+            let all = format::decode_events(&std::fs::read(file).unwrap()).unwrap();
+            let has_clock_sync = all
+                .iter()
+                .any(|e| matches!(e, TelemetryEvent::ClockSync { .. }));
+            assert!(
+                has_clock_sync,
+                "{}: expected ClockSyncEvent",
+                file.display()
+            );
+        }
+    }
+
+    /// A hand-built legacy-shaped buffer (SegmentMetadata + WorkerPark,
+    /// no ClockSyncEvent) must still round-trip through the decoder.
+    #[test]
+    fn test_legacy_trace_without_clock_sync_still_decodes() {
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write(&SegmentMetadataEvent {
+            timestamp_ns: 1,
+            entries: vec![("k".into(), "v".into())],
+        })
+        .unwrap();
+        enc.write_infallible(&WorkerParkEvent {
+            timestamp_ns: 1000,
+            worker_id: crate::telemetry::format::WorkerId::from(0usize),
+            local_queue: 0,
+            cpu_time_ns: 0,
+        });
+        let buf = enc.into_inner();
+
+        let all = format::decode_events(&buf).unwrap();
+        assert!(
+            all.iter()
+                .any(|e| matches!(e, TelemetryEvent::WorkerPark { .. })),
+            "expected WorkerPark to decode"
+        );
+        assert!(
+            !all.iter()
+                .any(|e| matches!(e, TelemetryEvent::ClockSync { .. })),
+            "legacy trace must not contain ClockSync"
+        );
+    }
+
+    #[test]
+    fn test_clock_sync_offset_recovers_wall_clock_for_recent_event() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let mut writer = RotatingWriter::builder()
+            .base_path(&base)
+            .max_file_size(100_000)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
+
+        // Use a real monotonic reading so reconstruction lands near now.
+        let park_ts = crate::telemetry::events::clock_monotonic_ns();
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write_infallible(&WorkerParkEvent {
+            timestamp_ns: park_ts,
+            worker_id: crate::telemetry::format::WorkerId::from(0usize),
+            local_queue: 0,
+            cpu_time_ns: 0,
+        });
+        writer
+            .write_encoded_batch(&Batch {
+                encoded_bytes: enc.into_inner(),
+                event_count: 1,
+            })
+            .unwrap();
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let all = format::decode_events(&std::fs::read(rotating_file(&base, 0)).unwrap()).unwrap();
+
+        let (sync_mono, sync_real) = all
+            .iter()
+            .find_map(|e| match e {
+                TelemetryEvent::ClockSync {
+                    timestamp_nanos,
+                    realtime_nanos,
+                } => Some((*timestamp_nanos, *realtime_nanos)),
+                _ => None,
+            })
+            .expect("ClockSync");
+        let park_from_file = all
+            .iter()
+            .find_map(|e| match e {
+                TelemetryEvent::WorkerPark {
+                    timestamp_nanos, ..
+                } => Some(*timestamp_nanos),
+                _ => None,
+            })
+            .expect("WorkerPark");
+
+        let offset = sync_real as i128 - sync_mono as i128;
+        let reconstructed_wall_ns = park_from_file as i128 + offset;
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i128;
+        let diff = (reconstructed_wall_ns - now_ns).abs();
+        assert!(
+            diff < 5_000_000_000,
+            "reconstructed wall clock {reconstructed_wall_ns} diverges from now {now_ns} by {diff}ns"
+        );
     }
 }

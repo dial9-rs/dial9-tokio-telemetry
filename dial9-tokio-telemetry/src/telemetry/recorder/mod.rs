@@ -330,6 +330,11 @@ impl TelemetryHandle {
         }
     }
 
+    /// Record a user-defined [`Encodable`](crate::telemetry::buffer::Encodable) event.
+    pub(crate) fn record_encodable_event(&self, event: &dyn crate::telemetry::buffer::Encodable) {
+        self.shared.record_encodable_event(event);
+    }
+
     /// Spawn a future wrapped with wake-event tracking.
     #[track_caller]
     pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>

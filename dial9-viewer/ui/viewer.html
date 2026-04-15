@@ -627,8 +627,47 @@
                 return prefix + v.toFixed(0) + "ns";
             }
 
+            function clockOffsetForTimestamp(ns) {
+                if (!trace) return null;
+                const anchors = trace.clockSyncAnchors || [];
+                if (anchors.length === 0) return trace.clockOffsetNs ?? null;
+                if (anchors.length === 1) {
+                    const a = anchors[0];
+                    return a.realtimeNs - a.monotonicNs;
+                }
+
+                // Nearest-anchor lookup on sorted monotonic timestamps.
+                let lo = 0, hi = anchors.length;
+                while (lo < hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (anchors[mid].monotonicNs < ns) lo = mid + 1;
+                    else hi = mid;
+                }
+                if (lo === 0) {
+                    const a = anchors[0];
+                    return a.realtimeNs - a.monotonicNs;
+                }
+                if (lo >= anchors.length) {
+                    const a = anchors[anchors.length - 1];
+                    return a.realtimeNs - a.monotonicNs;
+                }
+                const prev = anchors[lo - 1];
+                const next = anchors[lo];
+                const pick = Math.abs(ns - prev.monotonicNs) <= Math.abs(next.monotonicNs - ns)
+                    ? prev
+                    : next;
+                return pick.realtimeNs - pick.monotonicNs;
+            }
+
             function fmtWallClock(ns) {
-                const ms = ns / 1e6;
+                // Apply the nearest clock-sync anchor to render wall clock.
+                // Fall back to relative time if the trace has no anchors.
+                const offsetNs = clockOffsetForTimestamp(ns);
+                if (offsetNs == null) {
+                    return fmtDuration(ns - minTs);
+                }
+                const wallNs = ns + offsetNs;
+                const ms = wallNs / 1e6;
                 const d = new Date(ms);
                 const pad2 = n => String(n).padStart(2, "0");
                 if (useLocalTz) {

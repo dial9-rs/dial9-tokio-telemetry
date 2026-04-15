@@ -188,6 +188,16 @@ pub enum TelemetryEvent {
         /// Key-value metadata pairs.
         entries: Vec<(String, String)>,
     },
+    /// Clock-correlation anchor pairing a monotonic timestamp with the
+    /// wall-clock value captured at the same instant.
+    ClockSync {
+        /// Monotonic nanoseconds.
+        #[serde(rename = "timestamp_ns")]
+        timestamp_nanos: u64,
+        /// Nanoseconds since the Unix epoch.
+        #[serde(rename = "realtime_ns")]
+        realtime_nanos: u64,
+    },
 }
 
 impl TelemetryEvent {
@@ -224,6 +234,9 @@ impl TelemetryEvent {
             TelemetryEvent::ThreadNameDef { .. } => None,
             TelemetryEvent::SegmentMetadata {
                 timestamp_nanos, ..
+            }
+            | TelemetryEvent::ClockSync {
+                timestamp_nanos, ..
             } => Some(*timestamp_nanos),
         }
     }
@@ -241,7 +254,8 @@ impl TelemetryEvent {
             | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. }
-            | TelemetryEvent::SegmentMetadata { .. } => None,
+            | TelemetryEvent::SegmentMetadata { .. }
+            | TelemetryEvent::ClockSync { .. } => None,
         }
     }
 
@@ -367,13 +381,47 @@ pub fn clock_monotonic_ns() -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
+/// `CLOCK_MONOTONIC` in nanoseconds. Non-Linux fallback: elapsed time
+/// since the first call on this process via `Instant`.
 #[cfg(not(target_os = "linux"))]
 pub fn clock_monotonic_ns() -> u64 {
-    // Fallback: use Instant. This is fine for non-Linux where perf isn't available.
     use std::sync::OnceLock;
     use std::time::Instant;
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
+
+/// `CLOCK_REALTIME` in nanoseconds since the Unix epoch.
+#[cfg(target_os = "linux")]
+pub(crate) fn clock_realtime_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
+    }
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn clock_realtime_ns() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should not be before the unix epoch")
+        .as_nanos() as u64
+}
+
+/// Snapshot `(monotonic_ns, realtime_ns)` as close together as possible.
+/// Reads M₁ -> R -> M₂ and pairs `R` with the midpoint of M₁ and M₂ so
+/// the correlation error is half the `clock_gettime` interval.
+pub(crate) fn clock_pair() -> (u64, u64) {
+    let m1 = clock_monotonic_ns();
+    let r = clock_realtime_ns();
+    let m2 = clock_monotonic_ns();
+    let mono = m1 + m2.saturating_sub(m1) / 2;
+    (mono, r)
 }
 
 /// Per-thread scheduler stats from `/proc/<pid>/task/<tid>/schedstat`.

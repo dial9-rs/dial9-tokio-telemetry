@@ -215,6 +215,19 @@ pub(crate) struct SegmentMetadataEvent {
     pub entries: Vec<(String, String)>,
 }
 
+/// Clock-correlation anchor. `timestamp_ns` (monotonic) and `realtime_ns`
+/// (nanoseconds since Unix epoch) are captured at the same instant via
+/// [`clock_pair`], so offline consumers can recover wall clock from the
+/// monotonic event stream.
+///
+/// [`clock_pair`]: crate::telemetry::events::clock_pair
+#[derive(TraceEvent)]
+pub(crate) struct ClockSyncEvent {
+    #[traceevent(timestamp)]
+    pub timestamp_ns: u64,
+    pub realtime_ns: u64,
+}
+
 // ── dial9-trace-format: decode ──────────────────────────────────────────────
 
 /// Decode all events from a `dial9-trace-format` byte slice into `TelemetryEvent`s.
@@ -254,6 +267,7 @@ pub(crate) enum TelemetryEventRef<'a> {
     CpuSample(CpuSampleEventRef<'a>),
     WakeEvent(WakeEventEventRef<'a>),
     SegmentMetadata(SegmentMetadataEventRef<'a>),
+    ClockSync(ClockSyncEventRef<'a>),
 }
 
 #[cfg(any(feature = "analysis", test))]
@@ -272,6 +286,7 @@ impl<'a> TelemetryEventRef<'a> {
             Self::CpuSample(e) => Some(e.timestamp_ns),
             Self::WakeEvent(e) => Some(e.timestamp_ns),
             Self::SegmentMetadata(e) => Some(e.timestamp_ns),
+            Self::ClockSync(e) => Some(e.timestamp_ns),
         }
     }
 }
@@ -313,6 +328,9 @@ pub(crate) fn decode_ref<'a>(
         }
         "SegmentMetadataEvent" => {
             TelemetryEventRef::SegmentMetadata(SegmentMetadataEvent::decode(timestamp_ns, fields)?)
+        }
+        "ClockSyncEvent" => {
+            TelemetryEventRef::ClockSync(ClockSyncEvent::decode(timestamp_ns, fields)?)
         }
         _ => return None,
     })
@@ -391,6 +409,10 @@ pub(crate) fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> Tel
                 .iter()
                 .map(|(k, v)| (k.to_owned(), v.to_owned()))
                 .collect(),
+        },
+        TelemetryEventRef::ClockSync(e) => TelemetryEvent::ClockSync {
+            timestamp_nanos: e.timestamp_ns,
+            realtime_nanos: e.realtime_ns,
         },
     }
 }

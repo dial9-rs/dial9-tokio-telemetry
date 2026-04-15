@@ -296,6 +296,39 @@ async function main() {
     pass("WakeEvent targetWorker within valid range");
   }
 
+  function testClockSyncRecoversWallClock() {
+    if (trace.clockSyncAnchors.length === 0) {
+      fail("No clock-sync anchors (real or legacy-synthesized)");
+    }
+    if (trace.clockOffsetNs == null) {
+      fail("clockOffsetNs not derived from anchors");
+    }
+  
+    const a0 = trace.clockSyncAnchors[0];
+    const reconstructedAnchorWall = a0.monotonicNs + trace.clockOffsetNs;
+  
+    if (!(a0.realtimeNs > a0.monotonicNs)) {
+      fail(
+        `anchor values look wrong: realtimeNs=${a0.realtimeNs} monotonicNs=${a0.monotonicNs}`
+      );
+    }
+
+    // Offset must map anchor mono -> anchor wall.
+    if (Math.abs(reconstructedAnchorWall - a0.realtimeNs) > 1_000_000) {
+      fail("clockOffsetNs does not match first anchor");
+    }
+  
+    // epoch-scale vs monotonic-scale sanity check
+    const MIN_PLAUSIBLE_WALL_CLOCK_MS = 1_577_836_800_000; // 2020-01-01
+    if (reconstructedAnchorWall / 1e6 < MIN_PLAUSIBLE_WALL_CLOCK_MS) {
+      fail(
+        `reconstructed wall clock ${reconstructedAnchorWall} is implausibly old`
+      );
+    }
+  
+    pass(`Clock offset reconstructs plausible wall clock`);
+  }
+
   function testAllPollStartsHaveTaskId() {
     const pollStarts = trace.events.filter(
       (e) => e.eventType === EVENT_TYPES.PollStart
@@ -341,6 +374,9 @@ async function main() {
   testWakeEventReferencesKnownTasks();
   testWakeEventTargetWorkerInRange();
   testAllPollStartsHaveTaskId();
+
+  console.log("\nClock-sync:");
+  testClockSyncRecoversWallClock();
 
   console.log("\n✓ All checks passed!");
 }
