@@ -497,7 +497,7 @@
         <script src="trace_analysis.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData, attachTaskDumps } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -641,6 +641,8 @@
             let wakesByWorker = {}; // workerId → [{timestamp, wakerTaskId, wokenTaskId}]
             // Scheduling delays: wake → next poll for same task
             let schedDelays = []; // [{wakeTime, pollTime, delay, taskId, wakerTaskId, worker}]
+            // Task dumps by task: taskId → [{start, end, dumps}]
+            let taskDumpsByTask = new Map();
             // Lane canvases per worker (populated by buildLanes)
             let laneCanvases = {};
 
@@ -857,6 +859,14 @@
                 // Per-worker local queue samples (already extracted by buildWorkerSpans)
                 workerQueueSamples = spanResult.workerQueueSamples;
                 maxLocalQueue = spanResult.maxLocalQueue;
+
+                // Attach task dumps to idle periods between polls
+                taskDumpsByTask = attachTaskDumps(trace, workerSpans);
+                if (taskDumpsByTask.size > 0) {
+                    let totalDumps = 0;
+                    for (const idles of taskDumpsByTask.values()) for (const idle of idles) totalDumps += idle.dumps.length;
+                    console.log(`Task dumps: ${totalDumps} dumps across ${taskDumpsByTask.size} tasks`);
+                }
 
                 // Build active task count timeline from TaskSpawn/TaskTerminate
                 const atResult = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
@@ -1662,6 +1672,7 @@
                 }
 
                 // Draw idle gaps between consecutive polls (where no wake→poll delay is shown)
+                const taskIdles = taskDumpsByTask.get(selectedTaskId) || [];
                 for (let i = 0; i < polls.length - 1; i++) {
                     const gapStart = polls[i].end;
                     const gapEnd = polls[i + 1].start;
@@ -1675,6 +1686,15 @@
                     const x2 = Math.min(wakeX, LABEL_W + Math.min(drawW, nsToX(gapEnd, drawW)));
                     const w = Math.max(x2 - x1, 0);
                     if (w < 1) continue;
+                    // Find dumps for this idle period
+                    const idleEnd = nextWakeTs !== null ? nextWakeTs : gapEnd;
+                    let idleDumps = [];
+                    for (const idle of taskIdles) {
+                        if (idle.dumps.length > 0 && idle.start <= idleEnd && idle.end >= gapStart) {
+                            idleDumps = idle.dumps;
+                            break;
+                        }
+                    }
                     ctx.fillStyle = "#2a2a4a";
                     ctx.fillRect(x1, bandTop, w, bandH);
                     ctx.strokeStyle = "#444";
@@ -1687,11 +1707,29 @@
                     if (w > 35) {
                         ctx.fillText(fmtDur(dur), x1 + w / 2, bandTop - 6);
                     }
+                    // Draw task dump indicator
+                    if (idleDumps.length > 0) {
+                        const dotX = x1 + w / 2;
+                        ctx.fillStyle = "#7e57c2";
+                        ctx.beginPath();
+                        ctx.arc(dotX, bandTop + bandH - 5, 3, 0, Math.PI * 2);
+                        ctx.fill();
+                        if (w > 20) {
+                            ctx.fillStyle = "#9575cd";
+                            ctx.font = "7px monospace";
+                            ctx.textAlign = "center";
+                            ctx.fillText("dump", dotX, bandTop + bandH + 10);
+                            ctx.font = "9px monospace";
+                        }
+                    }
                     // Hit region for idle section
                     taskDetailHitRegions.push({
                         x1, x2, y1: bandTop, y2: bandTop + bandH,
-                        type: "idle",
-                        detail: `Idle — waiting ${fmtDur(dur)} for waker (no wake received yet)`,
+                        type: idleDumps.length > 0 ? "idle-dump" : "idle",
+                        detail: idleDumps.length > 0
+                            ? `Idle — ${fmtDur(dur)} · ${idleDumps.length} task dump${idleDumps.length > 1 ? "s" : ""} (click to view)`
+                            : `Idle — waiting ${fmtDur(dur)} for waker (no wake received yet)`,
+                        dumps: idleDumps.length > 0 ? idleDumps : undefined,
                     });
                 }
 
@@ -2382,7 +2420,7 @@
             document.addEventListener("click", (e) => {
                 const popup = document.getElementById("stack-popup");
                 if (popup.style.display !== "none" && !popup.contains(e.target) &&
-                    !e.target.closest("#main-area")) {
+                    !e.target.closest("#main-area") && !e.target.closest("#task-detail")) {
                     hideStackPopup();
                 }
             });
@@ -2824,7 +2862,6 @@
                 }
                 if (found !== hoveredWakerTaskId) {
                     hoveredWakerTaskId = found;
-                    document.getElementById("task-detail").style.cursor = found ? "pointer" : "";
                     renderAll();
                 }
 
@@ -2837,8 +2874,9 @@
                         break;
                     }
                 }
-                const icon = hit ? (hit.type === "polling" ? "⚡" : hit.type === "scheduled" ? "⏳" : "💤") : "";
+                const icon = hit ? (hit.type === "polling" ? "⚡" : hit.type === "scheduled" ? "⏳" : hit.type === "idle-dump" ? "📋" : "💤") : "";
                 statusEl.textContent = hit ? `${icon} ${hit.detail}` : "";
+                document.getElementById("task-detail").style.cursor = (found || (hit && hit.type === "idle-dump")) ? "pointer" : "";
             });
             document.getElementById("task-detail").addEventListener("mouseleave", () => {
                 document.getElementById("task-detail-status").textContent = "";
@@ -2847,6 +2885,56 @@
                     renderAll();
                 }
             });
+
+            // Task detail click: show task dump stack traces
+            document.getElementById("task-detail").addEventListener("click", (e) => {
+                const c = document.getElementById("task-detail-canvas");
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+                for (const r of taskDetailHitRegions) {
+                    if (r.type === "idle-dump" && r.dumps && mx >= r.x1 && mx <= r.x2 && my >= r.y1 && my <= r.y2) {
+                        showTaskDumpPopup(r.dumps, e.clientX, e.clientY);
+                        return;
+                    }
+                }
+            });
+
+            function showTaskDumpPopup(dumps, x, y) {
+                const popup = document.getElementById("stack-popup");
+                const title = document.getElementById("stack-popup-title");
+                const body = document.getElementById("stack-popup-body");
+
+                // Group dumps by timestamp
+                const byTs = new Map();
+                for (const d of dumps) {
+                    let arr = byTs.get(d.timestamp);
+                    if (!arr) { arr = []; byTs.set(d.timestamp, arr); }
+                    arr.push(d);
+                }
+
+                title.textContent = `Task Dump · ${dumps.length} capture${dumps.length > 1 ? "s" : ""}`;
+                let html = "";
+                let groupIdx = 0;
+                for (const [ts, group] of byTs) {
+                    if (byTs.size > 1) {
+                        const relMs = ((ts - viewStart) / 1e6).toFixed(3);
+                        html += `<div style="color:#9575cd;font-weight:600;margin:${groupIdx > 0 ? '12px' : '0'} 0 6px">Capture @ ${relMs}ms</div>`;
+                    }
+                    for (const dump of group) {
+                        const frames = symbolizeChain(dump.callchain, trace.callframeSymbols);
+                        for (const frame of frames) {
+                            html += `<div style="color:#ccc;padding-left:8px;font-size:0.9em">${renderFrame(frame)}</div>`;
+                        }
+                        if (group.length > 1) html += `<div style="height:6px"></div>`;
+                    }
+                    groupIdx++;
+                }
+                body.innerHTML = html;
+                popup.style.display = "block";
+                popup.style.left = Math.min(x + 12, window.innerWidth - 820) + "px";
+                popup.style.top = Math.min(y - 20, window.innerHeight - 620) + "px";
+            }
 
             window.addEventListener("resize", () => {
                 if (trace) renderAll();
