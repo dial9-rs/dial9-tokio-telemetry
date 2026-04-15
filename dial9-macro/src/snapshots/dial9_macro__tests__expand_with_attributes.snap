@@ -1,6 +1,5 @@
 ---
 source: dial9-macro/src/lib.rs
-assertion_line: 155
 expression: output
 ---
 #[allow(unused)]
@@ -10,12 +9,10 @@ fn main() {
         .build()
         .expect("failed to initialize dial9 runtime");
     let __dial9_handle = __dial9_guard.handle();
-    let __dial9_body_handle = __dial9_handle.clone();
     __dial9_runtime
         .block_on(async move {
             __dial9_handle
                 .spawn(async move {
-                    let handle = __dial9_body_handle;
                     let _ = 42;
                 })
                 .await

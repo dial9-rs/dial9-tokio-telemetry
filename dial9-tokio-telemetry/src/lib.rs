@@ -26,9 +26,9 @@ pub mod config;
 ///
 /// This macro wraps your function body in a spawned task so that poll events
 /// are recorded. Without it, code running directly in `runtime.block_on(...)`
-/// is invisible to the telemetry hooks. A `handle` binding of type
-/// [`telemetry::TelemetryHandle`] is automatically available inside the
-/// function body for spawning sub-tasks with wake-event tracking.
+/// is invisible to the telemetry hooks. To spawn instrumented sub-tasks from
+/// inside the body, call [`telemetry::TelemetryHandle::current`] — the handle
+/// is installed on every runtime-owned thread by `on_thread_start`.
 ///
 /// See [`config::Dial9Config`] for configuration options and the
 /// [crate-level docs](crate) for a full example.
@@ -36,20 +36,20 @@ pub mod config;
 /// # Usage
 ///
 /// ```rust,ignore
-/// use dial9_tokio_telemetry::{main, config::Dial9Config};
+/// use dial9_tokio_telemetry::{main, config::Dial9Config, telemetry::TelemetryHandle};
 ///
 /// fn my_config() -> Dial9Config {
-///     Dial9Config::builder()
-///         .base_path("/tmp/trace.bin")
-///         .max_file_size(1024 * 1024)
-///         .max_total_size(16 * 1024 * 1024)
+///     Dial9Config::builder("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024)
 ///         .build()
 /// }
 ///
 /// #[dial9_tokio_telemetry::main(config = my_config)]
 /// async fn main() {
-///     // `handle` is automatically available
-///     handle.spawn(async { /* instrumented */ }).await.unwrap();
+///     let handle = TelemetryHandle::current();
+///     handle
+///         .spawn(async { /* instrumented */ })
+///         .await
+///         .unwrap();
 /// }
 /// ```
 pub use dial9_macro::main;

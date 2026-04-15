@@ -24,31 +24,39 @@ Without this flag, compilation will fail with errors about missing methods on `t
 
 ## Quick start
 
-There are two ways to set up dial9: the `#[main]` macro (recommended for most apps) or manual `TracedRuntime` setup. The macro handles the boilerplate of building the runtime, spawning your code as an instrumented task, and providing a `handle` for wake-event tracking. Use manual setup when you need control over the runtime builder (e.g. custom thread counts, `current_thread` runtime) or need to integrate into an existing runtime setup.
+There are two ways to set up dial9: the `#[main]` macro (recommended for most apps) or manual `TracedRuntime` setup. The macro handles the boilerplate of building the runtime and spawning your code as an instrumented task. Inside the body, call `TelemetryHandle::current()`to reach a handle for wake-event tracking. Use manual setup when you need control over the runtime builder (e.g. custom thread counts, `current_thread` runtime) or need to integrate into an existing runtime setup.
 
 ### Using the `#[main]` macro
 
 ```rust,no_run
-use dial9_tokio_telemetry::{main, config::Dial9Config};
+use dial9_tokio_telemetry::{main, config::Dial9Config, telemetry::TelemetryHandle};
 
 fn my_config() -> Dial9Config {
-    Dial9Config::builder()
-        .base_path("/tmp/my_traces/trace.bin")
-        .max_file_size(1024 * 1024)      // rotate after 1 MiB per file
-        .max_total_size(5 * 1024 * 1024) // keep at most 5 MiB on disk
-        // .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
-        .build()
+    Dial9Config::builder(
+        "/tmp/my_traces/trace.bin",
+        1024 * 1024,      // rotate after 1 MiB per file
+        5 * 1024 * 1024,  // keep at most 5 MiB on disk
+    )
+    .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
+    .with_runtime(|r| r.with_runtime_name("main").with_task_tracking(true))  // TracedRuntime knobs
+    .with_tokio(|t| { t.worker_threads(4); }) // tokio knobs
+    .build()
 }
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
     // your async code here
-    // `handle` is automatically available for spawning instrumented sub-tasks:
-    handle.spawn(async { /* wake events tracked */ }).await.unwrap();
+    // `TelemetryHandle::current()` reaches the per-thread handle for
+    // spawning instrumented sub-tasks:
+    let handle = TelemetryHandle::current();
+    handle
+        .spawn(async { /* wake events tracked */ })
+        .await
+        .unwrap();
 }
 ```
 
-The macro automatically spawns your function body as a task, so top-level code is visible in traces (unlike plain `#[tokio::main]` where `block_on` work is invisible — see [below](#the-root-future-is-not-instrumented)). It also injects a `handle` binding ([`TelemetryHandle`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/telemetry/struct.TelemetryHandle.html)) that you can use to spawn sub-tasks with wake-event tracking.
+The macro automatically spawns your function body as a task, so top-level code is visible in traces (unlike plain `#[tokio::main]` where `block_on` work is invisible — see [below](#the-root-future-is-not-instrumented)). On every runtime-owned thread, dial9 installs a [`TelemetryHandle`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/telemetry/struct.TelemetryHandle.html) via `on_thread_start` — `TelemetryHandle::current()` returns it for spawning sub-tasks with wake-event tracking.
 
 ### Manual setup
 

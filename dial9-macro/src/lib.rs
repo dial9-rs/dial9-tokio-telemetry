@@ -43,11 +43,9 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
                 .build()
                 .expect("failed to initialize dial9 runtime");
             let __dial9_handle = __dial9_guard.handle();
-            let __dial9_body_handle = __dial9_handle.clone();
             __dial9_runtime.block_on(async move {
                 __dial9_handle
                     .spawn(async move {
-                        let handle = __dial9_body_handle;
                         #(#body_stmts)*
                     })
                     .await
@@ -63,8 +61,9 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// are recorded by dial9. Without this, code running directly in
 /// `runtime.block_on(...)` is invisible to the telemetry hooks.
 ///
-/// A `handle` binding of type [`TelemetryHandle`] is available inside the
-/// function body for spawning sub-tasks with wake-event tracking.
+/// To spawn sub-tasks with wake-event tracking from anywhere inside the
+/// body, call `TelemetryHandle::current()` — the handle is installed on
+/// every runtime-owned thread by `on_thread_start`.
 ///
 /// # Arguments
 ///
@@ -74,20 +73,20 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// # Example
 ///
 /// ```rust,ignore
-/// use dial9_tokio_telemetry::{main, config::Dial9Config};
+/// use dial9_tokio_telemetry::{main, config::Dial9Config, telemetry::TelemetryHandle};
 ///
 /// fn my_config() -> Dial9Config {
-///     Dial9Config::builder()
-///         .base_path("/tmp/trace.bin")
-///         .max_file_size(1024 * 1024)
-///         .max_total_size(16 * 1024 * 1024)
+///     Dial9Config::builder("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024)
 ///         .build()
 /// }
 ///
 /// #[dial9_tokio_telemetry::main(config = my_config)]
 /// async fn main() {
-///     // `handle` is automatically available for spawning sub-tasks.
-///     handle.spawn(async { /* instrumented sub-task */ }).await.unwrap();
+///     let handle = TelemetryHandle::current();
+///     handle
+///         .spawn(async { /* instrumented sub-task */ })
+///         .await
+///         .unwrap();
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -165,9 +164,6 @@ mod tests {
         .expect("failed to parse fn");
         let err = expand_main(args, input).expect_err("expected error for non-async fn");
         let msg = err.to_string();
-        assert!(
-            msg.contains("async"),
-            "error should mention async: {msg}"
-        );
+        assert!(msg.contains("async"), "error should mention async: {msg}");
     }
 }

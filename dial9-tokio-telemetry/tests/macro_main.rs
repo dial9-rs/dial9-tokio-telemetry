@@ -10,11 +10,7 @@ fn tmp_base_path() -> PathBuf {
 }
 
 fn test_config() -> Dial9Config {
-    Dial9Config::builder()
-        .base_path(tmp_base_path())
-        .max_file_size(1024 * 1024)
-        .max_total_size(4 * 1024 * 1024)
-        .build()
+    Dial9Config::builder(tmp_base_path(), 1024 * 1024, 4 * 1024 * 1024).build()
 }
 
 #[dial9_tokio_telemetry::main(config = test_config)]
@@ -41,8 +37,9 @@ fn macro_preserves_return_type() {
 
 #[dial9_tokio_telemetry::main(config = test_config)]
 async fn with_nested_spawn() -> i32 {
-    // `handle` is injected by the macro — use it to spawn a sub-task
-    // with wake-event tracking.
+    // `TelemetryHandle::current()` is populated by `on_thread_start` on
+    // every runtime-owned thread — use it to spawn instrumented sub-tasks.
+    let handle = dial9_tokio_telemetry::telemetry::TelemetryHandle::current();
     let sub = handle.spawn(async { 7 + 3 });
     sub.await.unwrap()
 }
