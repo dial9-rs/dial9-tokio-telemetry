@@ -1386,9 +1386,10 @@ mod tests {
                 .iter()
                 .filter_map(|ev| {
                     if let TelemetryEvent::Custom { fields, .. } = ev
-                        && let FieldValue::String(s) = &fields[0].1 {
-                            return Some(s.clone());
-                        }
+                        && let FieldValue::String(s) = &fields[0].1
+                    {
+                        return Some(s.clone());
+                    }
                     None
                 })
                 .collect()
