@@ -5,7 +5,7 @@
 //! contain events from a contiguous time window. Adjacent segments may overlap
 //! by at most a small tolerance (e.g. 2 seconds) due to in-flight batches.
 //!
-//! This test uses a short rotation period (3s) and generates continuous events
+//! This test uses a short rotation period (2s) and generates continuous events
 //! across multiple workers to exercise the rotation/flush coordination path.
 //!
 //! The test is built on `TelemetryCore` so we can attach a metrics sink to the
@@ -23,7 +23,7 @@ fn rotated_segments_have_bounded_time_overlap() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let rotation_period = Duration::from_secs(3);
+    let rotation_period = Duration::from_secs(2);
     let num_workers = 4;
 
     let writer = RotatingWriter::builder()
@@ -53,12 +53,11 @@ fn rotated_segments_have_bounded_time_overlap() {
     let (runtime, _handle) = guard.trace_runtime("main").build(builder).unwrap();
 
     // Generate continuous events across multiple rotation boundaries.
-    // With a 3s rotation period, we need to run for at least 9s to guarantee
-    // 3 rotations. Use wall-clock time to ensure we cross enough boundaries
-    // regardless of task scheduling.
+    // With a 2s rotation period and 15s runtime, we should get 5+ segments
+    // even if the runtime takes a few seconds to start producing events.
     runtime.block_on(async {
         let start = tokio::time::Instant::now();
-        let target_duration = Duration::from_secs(10);
+        let target_duration = Duration::from_secs(15);
 
         let mut handles = Vec::new();
         for _ in 0..num_workers {

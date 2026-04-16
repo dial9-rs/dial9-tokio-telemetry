@@ -579,7 +579,6 @@ impl TraceWriter for RotatingWriter {
             return Ok(());
         };
         if batch.event_count > 0 {
-            let now = time_source().system_time();
             // Note: we do NOT advance next_rotation_time or next_drain_time
             // when the first event arrives in an empty segment, even if the
             // timers are stale. The drain state machine (Idle → EpochBumped →
