@@ -581,15 +581,19 @@ impl TraceWriter for RotatingWriter {
         if batch.event_count > 0 {
             let now = time_source().system_time();
             // If the time boundary expired while the segment was empty,
-            // advance it so the incoming event starts a fresh window rather
-            // than being immediately rotated out as a single-event segment.
+            // give this segment a full window from now rather than
+            // immediately rotating a single-event segment.
+            //
+            // Use `now + period` instead of `next_boundary(now)` so we
+            // don't skip a window when the writer was created just before
+            // a wall-clock boundary (next_boundary would jump to the
+            // *following* boundary, effectively doubling the first window).
             if !self.has_real_events {
                 if now >= self.next_rotation_time {
-                    self.next_rotation_time =
-                        Self::next_boundary(now.as_std(), self.rotation_period);
+                    self.next_rotation_time = now.as_std() + self.rotation_period;
                 }
                 if now >= self.next_drain_time {
-                    self.next_drain_time = Self::next_boundary(now.as_std(), self.drain_interval);
+                    self.next_drain_time = now.as_std() + self.drain_interval;
                 }
             }
             // Raw-copy the thread-local batch. Each batch is self-contained
