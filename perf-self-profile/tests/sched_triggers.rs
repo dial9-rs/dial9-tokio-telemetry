@@ -160,11 +160,8 @@ fn sampling_period_controls_ratio() {
 
     let n_all = run(1);
     let n_sampled = run(10);
-    let ratio = n_all as f64 / n_sampled.max(1) as f64;
-    assert!(
-        ratio == 10.0,
-        "expected 10x ratio, got {ratio:.1}x (n_all={n_all}, n_sampled={n_sampled})"
-    );
+    let ratio = n_all / n_sampled.max(1);
+    assert_eq!(ratio, 10, "n_all={n_all}, n_sampled={n_sampled}");
 }
 
 #[test]
