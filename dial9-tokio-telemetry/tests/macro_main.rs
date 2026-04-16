@@ -88,7 +88,9 @@ async fn body_panics_with_str() {
 fn macro_propagates_panic_payload() {
     let result = catch_unwind(AssertUnwindSafe(|| body_panics_with_str()));
     let payload = result.expect_err("should have panicked");
-    let msg = payload.downcast_ref::<&str>().expect("payload should be &str");
+    let msg = payload
+        .downcast_ref::<&str>()
+        .expect("payload should be &str");
     assert_eq!(*msg, "boom");
 }
 
@@ -107,8 +109,5 @@ fn macro_propagates_unwrap_panic() {
         .map(|s| s.to_string())
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .expect("payload should be &str or String");
-    assert!(
-        msg.contains("None"),
-        "expected unwrap message, got: {msg}"
-    );
+    assert!(msg.contains("None"), "expected unwrap message, got: {msg}");
 }

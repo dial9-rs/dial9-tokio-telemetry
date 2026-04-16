@@ -16,11 +16,15 @@ use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 /// Configuration function passed to the macro via `config = ...`.
 /// Must be a zero-argument function returning [`Dial9Config`].
 fn my_config() -> Dial9Config {
-    Dial9Config::new("macro_workload_trace.bin", 64 * 1024 * 1024, 256 * 1024 * 1024)
-        .with_tokio(|t| {
-            t.worker_threads(4);
-        })
-        .with_runtime(|r| r.with_task_tracking(true))
+    Dial9Config::new(
+        "macro_workload_trace.bin",
+        64 * 1024 * 1024,
+        256 * 1024 * 1024,
+    )
+    .with_tokio(|t| {
+        t.worker_threads(4);
+    })
+    .with_runtime(|r| r.with_task_tracking(true))
 }
 
 async fn cpu_work(iterations: u64) -> u64 {
@@ -51,9 +55,7 @@ async fn main() {
     // so you can grab it anywhere to spawn instrumented sub-tasks.
     let handle = TelemetryHandle::current();
 
-    let tasks: Vec<_> = (0..50)
-        .map(|i| handle.spawn(mixed_task(i)))
-        .collect();
+    let tasks: Vec<_> = (0..50).map(|i| handle.spawn(mixed_task(i))).collect();
 
     for task in tasks {
         let _ = task.await;
