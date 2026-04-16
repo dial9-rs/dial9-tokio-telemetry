@@ -1532,10 +1532,10 @@ mod tests {
                 crate::telemetry::events::TelemetryEvent::PollStart { worker_id, .. }
                 | crate::telemetry::events::TelemetryEvent::PollEnd { worker_id, .. }
                 | crate::telemetry::events::TelemetryEvent::WorkerPark { worker_id, .. }
-                | crate::telemetry::events::TelemetryEvent::WorkerUnpark { worker_id, .. } => {
-                    if *worker_id != WorkerId::UNKNOWN {
-                        worker_ids.insert(worker_id.as_u64());
-                    }
+                | crate::telemetry::events::TelemetryEvent::WorkerUnpark { worker_id, .. }
+                    if *worker_id != WorkerId::UNKNOWN =>
+                {
+                    worker_ids.insert(worker_id.as_u64());
                 }
                 _ => {}
             }
