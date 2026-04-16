@@ -5,6 +5,7 @@
 
 use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 use dial9_tokio_telemetry::telemetry::TelemetryEvent;
+use dial9_trace_format::FieldValue;
 use serde::Serialize;
 use std::io::{BufWriter, Write};
 
@@ -50,6 +51,12 @@ enum FatEvent {
         waker_task_id: u64,
         woken_task_id: u64,
         target_worker: u8,
+    },
+    Custom {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timestamp_ns: Option<u64>,
+        name: String,
+        fields: Vec<(String, FieldValue)>,
     },
 }
 
@@ -161,6 +168,15 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             waker_task_id: waker_task_id.to_u64(),
             woken_task_id: woken_task_id.to_u64(),
             target_worker: *target_worker,
+        }),
+        TelemetryEvent::Custom {
+            timestamp_nanos,
+            name,
+            fields,
+        } => Some(FatEvent::Custom {
+            timestamp_ns: *timestamp_nanos,
+            name: name.clone(),
+            fields: fields.clone(),
         }),
         TelemetryEvent::TaskSpawn { .. }
         | TelemetryEvent::TaskTerminate { .. }

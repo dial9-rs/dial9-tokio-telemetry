@@ -17,6 +17,14 @@ impl StorageBackend for FakeBackend {
         Box::pin(async { Ok(vec![]) })
     }
 
+    fn list_prefixes(
+        &self,
+        _bucket: &str,
+        _prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
     fn get_object(
         &self,
         _bucket: &str,
@@ -209,6 +217,26 @@ async fn setup_s3_test(
     let state = AppState::new(Arc::new(backend), default_bucket, default_prefix);
     let base = start_server(state).await;
     (upload_client, base, s3_root)
+}
+
+#[tokio::test]
+async fn prefixes_discovers_top_level_prefixes() {
+    let (s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    put_object(&s3, "test-bucket", "traces/2026-04-09/file.bin", b"data").await;
+    put_object(&s3, "test-bucket", "logs/other.bin", b"data").await;
+
+    let resp: Vec<String> = client
+        .get(format!("{base}/api/prefixes"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp.contains(&"traces/".to_string()));
+    check!(resp.contains(&"logs/".to_string()));
 }
 
 #[tokio::test]

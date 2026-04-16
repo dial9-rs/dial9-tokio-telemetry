@@ -59,6 +59,7 @@ pub struct RawEvent<'a, 'f> {
     pub name: &'f str,
     pub timestamp_ns: Option<u64>,
     pub fields: &'f [FieldValueRef<'a>],
+    pub field_names: &'f [String],
     pub string_pool: &'f StringPool,
 }
 
@@ -124,6 +125,7 @@ pub enum DecodedFrameRef<'a> {
 
 struct SchemaCache {
     name: String,
+    field_names: Vec<String>,
     field_types: Vec<FieldType>,
     has_timestamp: bool,
 }
@@ -224,6 +226,7 @@ impl<'a> Decoder<'a> {
         }
         self.schema_cache[idx] = Some(SchemaCache {
             name: entry.name.clone(),
+            field_names: entry.fields.iter().map(|f| f.name.clone()).collect(),
             field_types: entry.fields.iter().map(|f| f.field_type).collect(),
             has_timestamp: entry.has_timestamp,
         });
@@ -467,6 +470,7 @@ impl<'a> Decoder<'a> {
                         name: &cache.name,
                         timestamp_ns,
                         fields: &values_buf,
+                        field_names: &cache.field_names,
                         string_pool: &self.string_pool,
                     })
                     .map_err(TryForEachError::User)?;

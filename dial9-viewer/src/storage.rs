@@ -18,6 +18,13 @@ pub trait StorageBackend: Send + Sync {
         prefix: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>>;
 
+    /// List immediate child prefixes under `prefix` using delimiter-based listing.
+    fn list_prefixes(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>>;
+
     fn get_object(
         &self,
         bucket: &str,
@@ -112,6 +119,35 @@ impl StorageBackend for S3Backend {
             }
 
             Ok(objects)
+        })
+    }
+
+    fn list_prefixes(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        let bucket = bucket.to_string();
+        let prefix = prefix.to_string();
+        Box::pin(async move {
+            let resp = self
+                .client
+                .list_objects_v2()
+                .bucket(&bucket)
+                .prefix(&prefix)
+                .delimiter("/")
+                .send()
+                .await
+                .map_err(|e| {
+                    use aws_sdk_s3::error::DisplayErrorContext;
+                    StorageError::Other(format!("{}", DisplayErrorContext(&e)))
+                })?;
+
+            Ok(resp
+                .common_prefixes()
+                .iter()
+                .filter_map(|cp| cp.prefix().map(|s| s.to_string()))
+                .collect())
         })
     }
 

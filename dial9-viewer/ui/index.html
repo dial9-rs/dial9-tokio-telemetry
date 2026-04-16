@@ -124,6 +124,9 @@
     <div class="controls">
         <label>Bucket:</label>
         <input type="text" id="bucket-input" placeholder="my-trace-bucket" style="width:180px" />
+        <label>Prefix:</label>
+        <input type="text" id="prefix-input" placeholder="detecting…" style="width:120px" />
+        <span id="prefix-suggestions" style="display:inline-flex;gap:4px"></span>
         <span style="color:#444">|</span>
         <div class="quick-btns">
             <button onclick="setQuickRange(1)">Last 1hr</button>
@@ -240,12 +243,57 @@
     const params = new URLSearchParams(window.location.search);
     if (params.get('bucket')) bucketInput.value = params.get('bucket');
 
+    const prefixInput = document.getElementById('prefix-input');
+    let serverHasPrefix = false;
     fetch('/api/config').then(r => r.json()).then(config => {
         if (!bucketInput.value && config.default_bucket) bucketInput.value = config.default_bucket;
-    }).catch(() => {});
+        if (config.default_prefix) {
+            prefixInput.value = config.default_prefix;
+            serverHasPrefix = true;
+        }
+        discoverPrefixes();
+    }).catch(() => { discoverPrefixes(); });
 
     // Default to last 1 hour
     setQuickRange(1);
+
+    // ── Auto-discover prefixes ──
+    async function discoverPrefixes() {
+        const bucket = bucketInput.value.trim();
+        if (!bucket) { prefixInput.placeholder = 'e.g. traces'; return; }
+        try {
+            const resp = await fetch(`/api/prefixes?bucket=${encodeURIComponent(bucket)}`);
+            if (!resp.ok) return;
+            const prefixes = await resp.json();
+            const suggestions = document.getElementById('prefix-suggestions');
+            suggestions.innerHTML = '';
+            if (prefixes.length === 0) {
+                prefixInput.placeholder = '(none found)';
+                return;
+            }
+            // If there's exactly one prefix and the input is empty, auto-select it
+            if (prefixes.length === 1 && !prefixInput.value) {
+                prefixInput.value = prefixes[0].replace(/\/$/, '');
+            }
+            prefixInput.placeholder = 'e.g. traces';
+            for (const p of prefixes) {
+                const label = p.replace(/\/$/, '');
+                const btn = document.createElement('button');
+                btn.textContent = label;
+                btn.style.cssText = 'font-size:0.75em;padding:2px 8px';
+                btn.addEventListener('click', () => {
+                    prefixInput.value = label;
+                    suggestions.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                });
+                if (prefixInput.value === label) btn.classList.add('active');
+                suggestions.appendChild(btn);
+            }
+        } catch { prefixInput.placeholder = 'e.g. traces'; }
+    }
+
+    // Re-discover when bucket changes
+    bucketInput.addEventListener('change', discoverPrefixes);
 
     // ── Timezone toggle ──
     document.getElementById('tz-btn').addEventListener('click', () => {
@@ -404,7 +452,10 @@
 
         const from = pickerToDate(fromStr);
         const to = pickerToDate(toStr);
-        const prefixes = hourPrefixes(from, to);
+        const keyPrefix = !serverHasPrefix ? prefixInput.value.trim() : '';
+        const prefixes = hourPrefixes(from, to).map(
+            p => keyPrefix ? keyPrefix + '/' + p : p
+        );
 
         browseStatus.textContent = `Searching ${prefixes.length} hour(s)…`;
         browseStatus.className = 'status';
@@ -437,8 +488,21 @@
             });
 
             if (allObjects.length === 0) {
-                browseStatus.textContent = 'No traces found in this time range.';
+                browseStatus.className = 'status';
                 hostGroups = {};
+                // Show sample keys to help the user understand the bucket layout
+                try {
+                    const sampleResp = await fetch(`/api/search?bucket=${encodeURIComponent(bucket)}&q=`);
+                    const samples = sampleResp.ok ? await sampleResp.json() : [];
+                    if (samples.length > 0) {
+                        browseStatus.innerHTML = 'No traces found in this time range. Sample keys in this bucket:<br>' +
+                            samples.slice(0, 5).map(o => `<code style="color:#7ec8e3;font-size:0.85em">${esc(o.key)}</code>`).join('<br>');
+                    } else {
+                        browseStatus.textContent = 'No traces found in this time range. Bucket appears empty.';
+                    }
+                } catch {
+                    browseStatus.textContent = 'No traces found in this time range.';
+                }
                 return;
             }
 
@@ -595,16 +659,28 @@
         if (e.key === 'Enter') doRawSearch();
     });
 
-    function renderRawTable(objects) {
+    async function renderRawTable(objects) {
         const rawStatus = document.getElementById('raw-status');
         const rawTable = document.getElementById('raw-table');
         const rawBody = document.getElementById('raw-body');
         rawBody.innerHTML = '';
 
         if (objects.length === 0) {
-            rawStatus.textContent = 'No results found.';
             rawStatus.style.display = '';
             rawTable.style.display = 'none';
+            try {
+                const bucket = bucketInput.value.trim();
+                const sampleResp = await fetch(`/api/search?bucket=${encodeURIComponent(bucket)}&q=`);
+                const samples = sampleResp.ok ? await sampleResp.json() : [];
+                if (samples.length > 0) {
+                    rawStatus.innerHTML = 'No results found. Sample keys in this bucket:<br>' +
+                        samples.slice(0, 5).map(o => `<code style="color:#7ec8e3;font-size:0.85em">${esc(o.key)}</code>`).join('<br>');
+                } else {
+                    rawStatus.textContent = 'No results found. Bucket appears empty.';
+                }
+            } catch {
+                rawStatus.textContent = 'No results found.';
+            }
             return;
         }
 
