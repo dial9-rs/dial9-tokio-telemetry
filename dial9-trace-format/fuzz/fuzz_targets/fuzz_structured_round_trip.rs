@@ -104,6 +104,8 @@ struct FuzzInput {
 #[derive(Arbitrary, Debug)]
 struct FuzzSchema {
     fields: Vec<FuzzFieldType>,
+    /// Which fields are optional (parallel to `fields`).
+    optional: Vec<bool>,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -156,7 +158,7 @@ fuzz_target!(|data: &[u8]| {
             .map(|(j, ft)| FieldDef {
                 name: format!("f{j}"),
                 field_type: ft.to_field_type(),
-                    optional: false,
+                optional: fuzz_schema.optional.get(j).copied().unwrap_or(false),
             })
             .collect();
         schemas.push(enc.register_schema(names[i], fields).unwrap());
@@ -172,7 +174,15 @@ fuzz_target!(|data: &[u8]| {
                 let values: Vec<FieldValue> = match fuzz_schema
                     .fields
                     .iter()
-                    .map(|ft| gen_value(*ft, &mut u))
+                    .enumerate()
+                    .map(|(j, ft)| {
+                        let is_optional = fuzz_schema.optional.get(j).copied().unwrap_or(false);
+                        if is_optional && u.ratio(1, 3).unwrap_or(false) {
+                            Ok(FieldValue::None)
+                        } else {
+                            gen_value(*ft, &mut u)
+                        }
+                    })
                     .collect::<arbitrary::Result<Vec<_>>>()
                 {
                     Ok(v) => v,
@@ -194,7 +204,6 @@ fuzz_target!(|data: &[u8]| {
                 let len = (ps.len % 8) as usize;
                 let s = String::from_utf8_lossy(&ps.data[..len]);
                 enc.intern_string(&s).unwrap();
-            }
             }
         }
     }
