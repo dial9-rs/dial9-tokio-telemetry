@@ -1,12 +1,14 @@
 //! Unified configuration for the `#[dial9_tokio_telemetry::main]` macro.
 //!
-//! [`Dial9Config`] bundles writer, tokio, and telemetry settings so that the
-//! macro can construct everything from one configuration function.
+//! Use [`Dial9ConfigBuilder`] to construct a [`Dial9Config`] that the macro
+//! consumes. The builder stages a `tokio::runtime::Builder` and a
+//! `TracedRuntimeBuilder` eagerly; use [`Dial9ConfigBuilder::with_tokio`] and
+//! [`Dial9ConfigBuilder::with_runtime`] to reach any knob those builders
+//! expose.
 //!
-//! The config stages a `tokio::runtime::Builder` and a `TracedRuntimeBuilder`
-//! eagerly; use [`Dial9Config::with_tokio`] and [`Dial9Config::with_runtime`]
-//! to reach any knob those builders expose — including knobs that are not
-//! mirrored directly on this type.
+//! To run without telemetry while preserving tokio knobs, use
+//! [`Dial9ConfigBuilder::disabled`] which returns a
+//! [`DisabledDial9ConfigBuilder`] — only `.with_tokio()` is available.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -16,15 +18,74 @@ use crate::telemetry::recorder::{
 };
 use crate::telemetry::writer::RotatingWriter;
 
-/// Unified configuration produced by a user-supplied config function and
-/// consumed by the `#[main]` macro to build the traced runtime.
+// ---------------------------------------------------------------------------
+// Dial9Config — opaque value the macro consumes
+// ---------------------------------------------------------------------------
+
+/// Finalized configuration consumed by the `#[main]` macro.
 ///
-/// Stages a `tokio::runtime::Builder` and a [`TracedRuntimeBuilder`]
-/// internally. Reach any of their knobs via [`Self::with_tokio`] and
-/// [`Self::with_runtime`] — nothing is lost relative to constructing the
-/// sub-builders by hand.
+/// Constructed via [`Dial9ConfigBuilder::build`] or
+/// [`DisabledDial9ConfigBuilder::build`].
+#[allow(missing_debug_implementations)]
+pub struct Dial9Config(Inner);
+
+#[allow(clippy::large_enum_variant)]
+enum Inner {
+    Enabled {
+        base_path: PathBuf,
+        max_file_size: u64,
+        max_total_size: u64,
+        rotation_period: Option<Duration>,
+        tokio_builder: tokio::runtime::Builder,
+        runtime_builder: TracedRuntimeBuilder<HasTracePath>,
+    },
+    Disabled {
+        tokio_builder: tokio::runtime::Builder,
+    },
+}
+
+impl Dial9Config {
+    /// Build the tokio runtime, optionally with dial9 telemetry installed.
+    ///
+    /// Returns `Some(guard)` when telemetry is enabled, `None` when built
+    /// from [`DisabledDial9ConfigBuilder`].
+    pub fn build(self) -> std::io::Result<(tokio::runtime::Runtime, Option<TelemetryGuard>)> {
+        match self.0 {
+            Inner::Enabled {
+                base_path,
+                max_file_size,
+                max_total_size,
+                rotation_period,
+                tokio_builder,
+                runtime_builder,
+            } => {
+                let writer = RotatingWriter::builder()
+                    .base_path(base_path)
+                    .max_file_size(max_file_size)
+                    .max_total_size(max_total_size)
+                    .maybe_rotation_period(rotation_period)
+                    .build()?;
+                let (runtime, guard) = runtime_builder.build_and_start(tokio_builder, writer)?;
+                Ok((runtime, Some(guard)))
+            }
+            Inner::Disabled { mut tokio_builder } => {
+                let runtime = tokio_builder.build()?;
+                Ok((runtime, None))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dial9ConfigBuilder — enabled path
+// ---------------------------------------------------------------------------
+
+/// Builder for a [`Dial9Config`] with telemetry enabled.
+///
+/// Created via [`Dial9ConfigBuilder::new`]. Exposes both tokio and dial9
+/// runtime knobs. Call [`.build()`](Self::build) to produce a [`Dial9Config`].
 #[derive(Debug)]
-pub struct Dial9Config {
+pub struct Dial9ConfigBuilder {
     base_path: PathBuf,
     max_file_size: u64,
     max_total_size: u64,
@@ -33,7 +94,7 @@ pub struct Dial9Config {
     runtime_builder: TracedRuntimeBuilder<HasTracePath>,
 }
 
-impl Dial9Config {
+impl Dial9ConfigBuilder {
     /// Start a new configuration with the three required writer fields.
     ///
     /// * `base_path` — trace file path
@@ -52,6 +113,12 @@ impl Dial9Config {
             tokio_builder,
             runtime_builder,
         }
+    }
+
+    /// Create a [`DisabledDial9ConfigBuilder`] that builds a plain tokio
+    /// runtime with no telemetry. Only `.with_tokio()` is available.
+    pub fn disabled() -> DisabledDial9ConfigBuilder {
+        DisabledDial9ConfigBuilder::new()
     }
 
     /// Set the time-based rotation period for the writer.
@@ -94,17 +161,55 @@ impl Dial9Config {
         self
     }
 
-    /// Build the tokio runtime with dial9 telemetry installed and recording
-    /// enabled.
-    pub fn build(self) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        let writer = RotatingWriter::builder()
-            .base_path(self.base_path)
-            .max_file_size(self.max_file_size)
-            .max_total_size(self.max_total_size)
-            .maybe_rotation_period(self.rotation_period)
-            .build()?;
-        self.runtime_builder
-            .build_and_start(self.tokio_builder, writer)
+    /// Finalize into a [`Dial9Config`] ready for the macro.
+    pub fn build(self) -> Dial9Config {
+        Dial9Config(Inner::Enabled {
+            base_path: self.base_path,
+            max_file_size: self.max_file_size,
+            max_total_size: self.max_total_size,
+            rotation_period: self.rotation_period,
+            tokio_builder: self.tokio_builder,
+            runtime_builder: self.runtime_builder,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DisabledDial9ConfigBuilder — disabled path (tokio-only)
+// ---------------------------------------------------------------------------
+
+/// Builder for a [`Dial9Config`] with telemetry disabled.
+///
+/// Created via [`Dial9ConfigBuilder::disabled()`]. Only exposes tokio
+/// runtime knobs — telemetry methods like `with_runtime` are not available.
+#[derive(Debug)]
+pub struct DisabledDial9ConfigBuilder {
+    tokio_builder: tokio::runtime::Builder,
+}
+
+impl DisabledDial9ConfigBuilder {
+    fn new() -> Self {
+        let mut tokio_builder = tokio::runtime::Builder::new_multi_thread();
+        tokio_builder.enable_all();
+        Self { tokio_builder }
+    }
+
+    /// Customize the underlying [`tokio::runtime::Builder`].
+    ///
+    /// See [`Dial9ConfigBuilder::with_tokio`] for details.
+    pub fn with_tokio<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut tokio::runtime::Builder),
+    {
+        f(&mut self.tokio_builder);
+        self
+    }
+
+    /// Finalize into a [`Dial9Config`] ready for the macro.
+    pub fn build(self) -> Dial9Config {
+        Dial9Config(Inner::Disabled {
+            tokio_builder: self.tokio_builder,
+        })
     }
 }
 
@@ -122,14 +227,14 @@ mod tests {
 
     #[test]
     fn new_all_required_fields() {
-        // Should not panic — required args are positional.
-        let _ = Dial9Config::new(tmp_base_path(), 1024, 4096);
+        let _ = Dial9ConfigBuilder::new(tmp_base_path(), 1024, 4096);
     }
 
     #[test]
     fn build_creates_working_runtime() {
-        let config = Dial9Config::new(tmp_base_path(), 1024 * 1024, 4 * 1024 * 1024);
+        let config = Dial9ConfigBuilder::new(tmp_base_path(), 1024 * 1024, 4 * 1024 * 1024).build();
         let (runtime, guard) = config.build().expect("build failed");
+        let guard = guard.expect("guard should be Some for enabled config");
         let handle = guard.handle();
         let result = runtime.block_on(async { handle.spawn(async { 42 }).await.unwrap() });
         assert_eq!(result, 42);
@@ -137,9 +242,11 @@ mod tests {
 
     #[test]
     fn with_runtime_install_false() {
-        let config =
-            Dial9Config::new(tmp_base_path(), 1024, 4096).with_runtime(|r| r.install(false));
+        let config = Dial9ConfigBuilder::new(tmp_base_path(), 1024, 4096)
+            .with_runtime(|r| r.install(false))
+            .build();
         let (runtime, guard) = config.build().expect("build failed");
+        let guard = guard.expect("guard should be Some");
         let handle = guard.handle();
         let result = runtime.block_on(async { handle.spawn(async { 7 }).await.unwrap() });
         assert_eq!(result, 7);
@@ -147,11 +254,14 @@ mod tests {
 
     #[test]
     fn with_tokio_current_thread() {
-        let config = Dial9Config::new(tmp_base_path(), 1024, 4096).with_tokio(|t| {
-            *t = tokio::runtime::Builder::new_current_thread();
-            t.enable_all();
-        });
+        let config = Dial9ConfigBuilder::new(tmp_base_path(), 1024, 4096)
+            .with_tokio(|t| {
+                *t = tokio::runtime::Builder::new_current_thread();
+                t.enable_all();
+            })
+            .build();
         let (runtime, guard) = config.build().expect("build failed");
+        let guard = guard.expect("guard should be Some");
         let handle = guard.handle();
         let result = runtime.block_on(async { handle.spawn(async { 99 }).await.unwrap() });
         assert_eq!(result, 99);
@@ -159,10 +269,13 @@ mod tests {
 
     #[test]
     fn with_tokio_worker_threads() {
-        let config = Dial9Config::new(tmp_base_path(), 1024, 4096).with_tokio(|t| {
-            t.worker_threads(2);
-        });
+        let config = Dial9ConfigBuilder::new(tmp_base_path(), 1024, 4096)
+            .with_tokio(|t| {
+                t.worker_threads(2);
+            })
+            .build();
         let (runtime, guard) = config.build().expect("build failed");
+        let guard = guard.expect("guard should be Some");
         let handle = guard.handle();
         let result = runtime.block_on(async { handle.spawn(async { 3 }).await.unwrap() });
         assert_eq!(result, 3);
@@ -170,11 +283,35 @@ mod tests {
 
     #[test]
     fn with_runtime_chained_knobs() {
-        let config = Dial9Config::new(tmp_base_path(), 1024, 4096)
-            .with_runtime(|r| r.with_runtime_name("test-rt").with_task_tracking(true));
+        let config = Dial9ConfigBuilder::new(tmp_base_path(), 1024, 4096)
+            .with_runtime(|r| r.with_runtime_name("test-rt").with_task_tracking(true))
+            .build();
         let (runtime, guard) = config.build().expect("build failed");
+        let guard = guard.expect("guard should be Some");
         let handle = guard.handle();
         let result = runtime.block_on(async { handle.spawn(async { 1 }).await.unwrap() });
         assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn disabled_builds_plain_runtime() {
+        let config = Dial9ConfigBuilder::disabled()
+            .with_tokio(|t| {
+                t.worker_threads(2);
+            })
+            .build();
+        let (runtime, guard) = config.build().expect("build failed");
+        assert!(guard.is_none(), "guard should be None for disabled config");
+        let result = runtime.block_on(async { tokio::spawn(async { 55 }).await.unwrap() });
+        assert_eq!(result, 55);
+    }
+
+    #[test]
+    fn disabled_default() {
+        let config = Dial9ConfigBuilder::disabled().build();
+        let (runtime, guard) = config.build().expect("build failed");
+        assert!(guard.is_none());
+        let result = runtime.block_on(async { tokio::spawn(async { 77 }).await.unwrap() });
+        assert_eq!(result, 77);
     }
 }

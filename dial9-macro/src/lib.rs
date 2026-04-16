@@ -70,20 +70,23 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     Ok(quote! {
         #(#attrs)*
         #vis fn #name() #ret {
-            let __dial9_config = #config_fn();
-            let (__dial9_runtime, __dial9_guard) = __dial9_config
+            let (__tokio_runtime, __maybe_guard) = #config_fn()
                 .build()
-                .expect("failed to initialize dial9 runtime");
-            let __dial9_handle = __dial9_guard.handle();
-            __dial9_runtime.block_on(async move {
-                match __dial9_handle.spawn(async move { #(#body_stmts)* }).await {
-                    Ok(output) => output,
-                    Err(err) if err.is_panic() => {
-                        ::std::panic::resume_unwind(err.into_panic())
+                .expect("failed to initialize runtime");
+            if let Some(__dial9_guard) = __maybe_guard {
+                let __dial9_handle = __dial9_guard.handle();
+                __tokio_runtime.block_on(async move {
+                    match __dial9_handle.spawn(async move { #(#body_stmts)* }).await {
+                        Ok(output) => output,
+                        Err(err) if err.is_panic() => {
+                            ::std::panic::resume_unwind(err.into_panic())
+                        }
+                        Err(_) => unreachable!("task cannot be cancelled inside block_on"),
                     }
-                    Err(_) => unreachable!("task cannot be cancelled inside block_on"),
-                }
-            })
+                })
+            } else {
+                __tokio_runtime.block_on(async move { #(#body_stmts)* })
+            }
         }
     })
 }
@@ -102,16 +105,18 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// # Arguments
 ///
-/// * `config` — path to a function returning [`Dial9Config`]. The function
-///   is called at startup to obtain the runtime and writer configuration.
+/// * `config` — path to a zero-argument function returning [`Dial9Config`].
+///   Build one with [`Dial9ConfigBuilder::new`] (telemetry enabled) or
+///   [`Dial9ConfigBuilder::disabled`] (plain tokio, no telemetry).
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use dial9_tokio_telemetry::{main, config::Dial9Config, telemetry::TelemetryHandle};
+/// use dial9_tokio_telemetry::{main, config::{Dial9Config, Dial9ConfigBuilder}, telemetry::TelemetryHandle};
 ///
 /// fn my_config() -> Dial9Config {
-///     Dial9Config::new("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024)
+///     Dial9ConfigBuilder::new("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024)
+///         .build()
 /// }
 ///
 /// #[dial9_tokio_telemetry::main(config = my_config)]

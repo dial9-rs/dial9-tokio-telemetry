@@ -1,7 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
-use dial9_tokio_telemetry::config::Dial9Config;
+use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
 
 fn tmp_base_path() -> PathBuf {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -11,7 +11,15 @@ fn tmp_base_path() -> PathBuf {
 }
 
 fn test_config() -> Dial9Config {
-    Dial9Config::new(tmp_base_path(), 1024 * 1024, 4 * 1024 * 1024)
+    Dial9ConfigBuilder::new(tmp_base_path(), 1024 * 1024, 4 * 1024 * 1024).build()
+}
+
+fn disabled_config() -> Dial9Config {
+    Dial9ConfigBuilder::disabled()
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
+        .build()
 }
 
 #[dial9_tokio_telemetry::main(config = test_config)]
@@ -111,4 +119,74 @@ fn macro_propagates_unwrap_panic() {
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .expect("payload should be &str or String");
     assert!(msg.contains("None"), "expected unwrap message, got: {msg}");
+}
+
+// --- Disabled telemetry ---
+
+fn disabled_config_default() -> Dial9Config {
+    Dial9ConfigBuilder::disabled().build()
+}
+
+#[dial9_tokio_telemetry::main(config = disabled_config)]
+async fn runs_without_telemetry() -> i32 {
+    tokio::spawn(async { 123 }).await.unwrap()
+}
+
+#[test]
+fn macro_runs_with_disabled_config() {
+    let result = runs_without_telemetry();
+    assert_eq!(result, 123);
+}
+
+#[dial9_tokio_telemetry::main(config = disabled_config_default)]
+async fn disabled_default_runs() -> i32 {
+    tokio::spawn(async { 99 }).await.unwrap()
+}
+
+#[test]
+fn macro_runs_with_disabled_default() {
+    assert_eq!(disabled_default_runs(), 99);
+}
+
+#[dial9_tokio_telemetry::main(config = disabled_config)]
+async fn disabled_with_return_type() -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
+    let val = tokio::spawn(async { 42 }).await?;
+    Ok(val)
+}
+
+#[test]
+fn macro_disabled_preserves_return_type() {
+    assert_eq!(disabled_with_return_type().unwrap(), 42);
+}
+
+#[dial9_tokio_telemetry::main(config = disabled_config)]
+async fn disabled_no_telemetry_handle() -> bool {
+    // TelemetryHandle should not be available when disabled.
+    dial9_tokio_telemetry::telemetry::TelemetryHandle::try_current().is_none()
+}
+
+#[test]
+fn macro_disabled_has_no_telemetry_handle() {
+    assert!(disabled_no_telemetry_handle());
+}
+
+#[dial9_tokio_telemetry::main(config = disabled_config)]
+async fn disabled_timers_work() {
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+}
+
+#[test]
+fn macro_disabled_timers_work() {
+    disabled_timers_work();
+}
+
+#[dial9_tokio_telemetry::main(config = disabled_config)]
+async fn disabled_nested_spawn() -> i32 {
+    let inner = tokio::spawn(async { tokio::spawn(async { 7 + 3 }).await.unwrap() });
+    inner.await.unwrap()
+}
+
+#[test]
+fn macro_disabled_nested_spawn() {
+    assert_eq!(disabled_nested_spawn(), 10);
 }

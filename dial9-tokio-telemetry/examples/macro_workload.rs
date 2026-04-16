@@ -3,20 +3,35 @@
 //! The macro replaces `#[tokio::main]` and sets up the traced runtime
 //! automatically from a config function — no manual `TracedRuntime` wiring.
 //!
-//! Run with:
+//! Run with telemetry enabled:
+//! ```sh
+//! ENABLE_DIAL9=1 cargo run --example macro_workload
+//! ```
+//!
+//! Run with telemetry disabled (plain tokio runtime):
 //! ```sh
 //! cargo run --example macro_workload
 //! ```
 
 use std::time::Duration;
 
-use dial9_tokio_telemetry::config::Dial9Config;
+use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
 /// Configuration function passed to the macro via `config = ...`.
-/// Must be a zero-argument function returning [`Dial9Config`].
+///
+/// Returns a [`Dial9Config`] built from either an enabled or disabled builder
+/// depending on the `ENABLE_DIAL9` environment variable.
 fn my_config() -> Dial9Config {
-    Dial9Config::new(
+    if std::env::var("ENABLE_DIAL9").is_err() {
+        return Dial9ConfigBuilder::disabled()
+            .with_tokio(|t| {
+                t.worker_threads(4);
+            })
+            .build();
+    }
+
+    Dial9ConfigBuilder::new(
         "macro_workload_trace.bin",
         64 * 1024 * 1024,
         256 * 1024 * 1024,
@@ -25,6 +40,7 @@ fn my_config() -> Dial9Config {
         t.worker_threads(4);
     })
     .with_runtime(|r| r.with_task_tracking(true))
+    .build()
 }
 
 async fn cpu_work(iterations: u64) -> u64 {
@@ -49,17 +65,32 @@ async fn mixed_task(id: usize) {
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
-    println!("Running macro workload...");
+    let telemetry_enabled = TelemetryHandle::try_current().is_some();
+    println!(
+        "Running macro workload (telemetry {})...",
+        if telemetry_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
 
-    // The macro installs `TelemetryHandle::current()` on every runtime thread,
-    // so you can grab it anywhere to spawn instrumented sub-tasks.
-    let handle = TelemetryHandle::current();
-
-    let tasks: Vec<_> = (0..50).map(|i| handle.spawn(mixed_task(i))).collect();
+    // When telemetry is enabled, use handle.spawn() for wake-event tracking.
+    // When disabled, fall back to plain tokio::spawn().
+    let tasks: Vec<_> = (0..50)
+        .map(|i| match TelemetryHandle::try_current() {
+            Some(handle) => handle.spawn(mixed_task(i)),
+            None => tokio::spawn(mixed_task(i)),
+        })
+        .collect();
 
     for task in tasks {
         let _ = task.await;
     }
 
-    println!("All tasks completed — trace written to macro_workload_trace.*.bin");
+    if telemetry_enabled {
+        println!("All tasks completed — trace written to macro_workload_trace.*.bin");
+    } else {
+        println!("All tasks completed — set ENABLE_DIAL9=1 to enable tracing");
+    }
 }
