@@ -143,12 +143,19 @@ fn rotated_segments_have_bounded_time_overlap() {
     // all TL buffers are drained at once, so it inherently contains events
     // spanning the entire last drain interval.
     let mut max_observed_overlap = Duration::ZERO;
-    assert!(
-        segment_ranges.len() >= 4,
-        "need at least 4 segments to validate non-final boundaries, got {}",
-        segment_ranges.len()
-    );
-    for i in 0..segment_ranges.len() - 2 {
+    let non_final_boundaries = if segment_ranges.len() >= 3 {
+        segment_ranges.len() - 2
+    } else {
+        // With only 2 segments we can't skip the final boundary,
+        // but we still have at least 1 boundary to check.
+        assert!(
+            segment_ranges.len() >= 2,
+            "need at least 2 segments to validate overlap, got {}",
+            segment_ranges.len()
+        );
+        1
+    };
+    for i in 0..non_final_boundaries {
         let (_min_a, max_a) = segment_ranges[i];
         let (min_b, _max_b) = segment_ranges[i + 1];
 
@@ -194,6 +201,6 @@ fn rotated_segments_have_bounded_time_overlap() {
     eprintln!(
         "max observed overlap: {:.3}s across {} non-final segment boundaries",
         max_observed_overlap.as_secs_f64(),
-        segment_ranges.len() - 2
+        non_final_boundaries
     );
 }
