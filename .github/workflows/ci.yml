@@ -4,6 +4,9 @@ on: [pull_request, merge_group]
 permissions:
   contents: read
 
+env:
+  STABLE_TOOLCHAIN: "1.94.1"
+
 jobs:
   fmt:
     name: Cargo fmt
@@ -21,7 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Run clippy check
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -34,7 +40,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        toolchain: [stable, nightly]
+        toolchain: ["1.94.1", nightly]
     env:
       RUST_BACKTRACE: 1
     steps:
@@ -67,7 +73,9 @@ jobs:
           - 8000:8000
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
