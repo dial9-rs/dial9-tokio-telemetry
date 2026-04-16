@@ -583,8 +583,14 @@ impl TraceWriter for RotatingWriter {
             // If the time boundary expired while the segment was empty,
             // advance it so the incoming event starts a fresh window rather
             // than being immediately rotated out as a single-event segment.
-            if !self.has_real_events && now >= self.next_rotation_time {
-                self.next_rotation_time = Self::next_boundary(now.as_std(), self.rotation_period);
+            if !self.has_real_events {
+                if now >= self.next_rotation_time {
+                    self.next_rotation_time =
+                        Self::next_boundary(now.as_std(), self.rotation_period);
+                }
+                if now >= self.next_drain_time {
+                    self.next_drain_time = Self::next_boundary(now.as_std(), self.drain_interval);
+                }
             }
             // Raw-copy the thread-local batch. Each batch is self-contained
             // (starts with its own header), so the next batch's header acts as
