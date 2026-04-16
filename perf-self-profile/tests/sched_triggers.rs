@@ -136,7 +136,7 @@ fn captures_sleep_stack() {
 }
 
 #[test]
-fn sampling_period_controls_ratio() {
+fn sampling_interval_controls_ratio() {
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
 
     let run = |period: u64| -> usize {

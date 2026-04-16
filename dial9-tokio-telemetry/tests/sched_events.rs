@@ -73,18 +73,20 @@ fn sched_events_sampling_reduces_count() {
     use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
     use std::time::Duration;
 
-    let count_sched_samples = |sampling_period: Option<u64>| -> usize {
+    let count_sched_samples = |interval: Option<u64>| -> usize {
         let (writer, events) = common::CapturingWriter::new();
 
         let num_workers = 2;
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.worker_threads(num_workers).enable_all();
 
+        let mut config = SchedEventConfig::default();
+        if let Some(n) = interval {
+            config = config.sampling_interval(n);
+        }
+
         let (runtime, guard) = TracedRuntime::builder()
-            .with_sched_events(SchedEventConfig {
-                sampling_period,
-                include_kernel: false,
-            })
+            .with_sched_events(config)
             .build_and_start(builder, writer)
             .unwrap();
 

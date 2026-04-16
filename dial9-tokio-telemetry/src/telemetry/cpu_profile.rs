@@ -45,10 +45,22 @@ impl Default for CpuProfilingConfig {
 /// so each worker thread gets its own perf fd via `on_thread_start`.
 #[derive(Debug, Clone, Default)]
 pub struct SchedEventConfig {
-    /// Record every Nth context switch. `None` records every event.
-    pub sampling_period: Option<u64>,
-    /// Whether to include kernel stack frames.
-    pub include_kernel: bool,
+    sampling_interval: Option<u64>,
+    include_kernel: bool,
+}
+
+impl SchedEventConfig {
+    /// Record every Nth context switch. Default records every event.
+    pub fn sampling_interval(mut self, n: u64) -> Self {
+        self.sampling_interval = Some(n);
+        self
+    }
+
+    /// Include kernel stack frames in callchains.
+    pub fn include_kernel(mut self, yes: bool) -> Self {
+        self.include_kernel = yes;
+        self
+    }
 }
 
 /// A raw CPU sample before worker-id resolution.
@@ -120,7 +132,7 @@ impl SchedProfiler {
     pub(crate) fn new(config: SchedEventConfig) -> io::Result<Self> {
         let sampler = PerfSampler::new_per_thread(SamplerConfig {
             event_source: EventSource::SwContextSwitches,
-            sampling: SamplingMode::Period(config.sampling_period.unwrap_or(1)),
+            sampling: SamplingMode::Period(config.sampling_interval.unwrap_or(1)),
             include_kernel: config.include_kernel,
         })?;
         Ok(Self { sampler })

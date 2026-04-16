@@ -68,10 +68,11 @@ fn main() {
     let writer = RotatingWriter::single_file(&trace_base).unwrap();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .with_sched_events(SchedEventConfig {
-            include_kernel: true,
-            ..Default::default()
-        })
+        .with_sched_events(
+            SchedEventConfig::default()
+                .sampling_interval(5)
+                .include_kernel(true),
+        )
         .build_and_start(builder, writer)
         .unwrap();
 
