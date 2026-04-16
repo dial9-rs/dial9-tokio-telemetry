@@ -11,11 +11,17 @@ fn main() {
     let __dial9_handle = __dial9_guard.handle();
     __dial9_runtime
         .block_on(async move {
-            __dial9_handle
+            match __dial9_handle
                 .spawn(async move {
                     let _ = 42;
                 })
                 .await
-                .expect("dial9 root task panicked")
+            {
+                Ok(output) => output,
+                Err(err) if err.is_panic() => {
+                    ::std::panic::resume_unwind(err.into_panic())
+                }
+                Err(_) => unreachable!("task cannot be cancelled inside block_on"),
+            }
         })
 }

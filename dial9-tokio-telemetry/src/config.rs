@@ -63,11 +63,9 @@ impl Dial9Config {
     /// Customize the dial9 [`TracedRuntimeBuilder`].
     ///
     /// The closure receives the staged builder by value and must return it.
-    /// Use this to reach every knob on `TracedRuntimeBuilder` —
-    /// `with_runtime_name`, `with_task_tracking`, `install`,
-    /// `with_worker_poll_interval`, `with_worker_metrics_sink`, and
-    /// (feature-gated) `with_cpu_profiling`, `with_sched_events`,
-    /// `with_s3_uploader`, `with_s3_client`.
+    /// Use this to access runtime configuration methods like
+    /// `with_runtime_name` and `with_task_tracking`; see
+    /// [`TracedRuntimeBuilder`] for the full list.
     ///
     /// Can be called multiple times; each call composes onto the prior state.
     pub fn with_runtime<F>(mut self, f: F) -> Self

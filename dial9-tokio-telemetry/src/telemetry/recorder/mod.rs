@@ -297,6 +297,10 @@ impl TelemetryHandle {
     /// (workers and blocking threads) via the runtime's `on_thread_start`
     /// hook, and cleared on `on_thread_stop`.
     ///
+    /// This is always safe to call inside a
+    /// `#[dial9_tokio_telemetry::main]` body, since the macro runs your code
+    /// on a runtime-owned thread.
+    ///
     /// Panics if called from a thread that is not owned by a dial9 runtime
     /// (e.g. the thread that called `runtime.block_on(...)` on a
     /// `current_thread` runtime, or any non-runtime thread). Use

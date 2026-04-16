@@ -8,14 +8,25 @@ struct MainArgs {
     config: Path,
 }
 
+const MISSING_CONFIG_HELP: &str = "missing required `config = <fn>` argument, \
+                           e.g. #[dial9_tokio_telemetry::main(config = my_config)]";
+
+const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a path to a zero-argument function, \
+                           e.g. #[dial9_tokio_telemetry::main(config = my_config)]";
 impl Parse for MainArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.is_empty() {
+            return Err(input.error(MISSING_CONFIG_HELP));
+        }
         let ident: syn::Ident = input.parse()?;
         if ident != "config" {
-            return Err(syn::Error::new(ident.span(), "expected `config`"));
+            return Err(syn::Error::new(ident.span(), MISSING_CONFIG_HELP));
         }
         input.parse::<Token![=]>()?;
         let config: Path = input.parse()?;
+        if !input.is_empty() {
+            return Err(input.error(CONFIG_MUST_BE_ZERO_ARG_HELP));
+        }
         Ok(MainArgs { config })
     }
 }
@@ -25,6 +36,27 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
         return Err(syn::Error::new_spanned(
             input.sig.fn_token,
             "the `async` keyword is missing from the function declaration",
+        ));
+    }
+
+    if !input.sig.inputs.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.sig.inputs,
+            "#[dial9_tokio_telemetry::main] does not support function arguments",
+        ));
+    }
+
+    if !input.sig.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.sig.generics,
+            "#[dial9_tokio_telemetry::main] does not support generics",
+        ));
+    }
+
+    if input.sig.generics.where_clause.is_some() {
+        return Err(syn::Error::new_spanned(
+            &input.sig.generics.where_clause,
+            "#[dial9_tokio_telemetry::main] does not support where clauses",
         ));
     }
 
@@ -44,12 +76,13 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
                 .expect("failed to initialize dial9 runtime");
             let __dial9_handle = __dial9_guard.handle();
             __dial9_runtime.block_on(async move {
-                __dial9_handle
-                    .spawn(async move {
-                        #(#body_stmts)*
-                    })
-                    .await
-                    .expect("dial9 root task panicked")
+                match __dial9_handle.spawn(async move { #(#body_stmts)* }).await {
+                    Ok(output) => output,
+                    Err(err) if err.is_panic() => {
+                        ::std::panic::resume_unwind(err.into_panic())
+                    }
+                    Err(_) => unreachable!("task cannot be cancelled inside block_on"),
+                }
             })
         }
     })
@@ -57,8 +90,10 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 
 /// Instrument an async main function with dial9 telemetry.
 ///
-/// The macro wraps the function body in a spawned task so that poll events
-/// are recorded by dial9. Without this, code running directly in
+/// This macro is a **replacement** for `#[tokio::main]`, not a complement —
+/// do not use both attributes on the same function. It builds the Tokio
+/// runtime internally and wraps the function body in a spawned task so that
+/// poll events are recorded by dial9. Without this, code running directly in
 /// `runtime.block_on(...)` is invisible to the telemetry hooks.
 ///
 /// To spawn sub-tasks with wake-event tracking from anywhere inside the
@@ -151,6 +186,75 @@ mod tests {
             },
         );
         insta::assert_snapshot!(output);
+    }
+
+    fn expand_err(attr: TokenStream2, item: TokenStream2) -> String {
+        let args: MainArgs = syn::parse2(attr).expect("failed to parse args");
+        let input: ItemFn = syn::parse2(item).expect("failed to parse fn");
+        expand_main(args, input)
+            .expect_err("expected error")
+            .to_string()
+    }
+
+    #[test]
+    fn error_with_arguments() {
+        let msg = expand_err(
+            quote! { config = my_config },
+            quote! { async fn main(port: u16) {} },
+        );
+        assert!(
+            msg.contains("does not support function arguments"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_with_generics() {
+        let msg = expand_err(
+            quote! { config = my_config },
+            quote! { async fn main<T>() {} },
+        );
+        assert!(
+            msg.contains("does not support generics"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    fn parse_args_err(attr: TokenStream2) -> String {
+        match syn::parse2::<MainArgs>(attr) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected parse error"),
+        }
+    }
+
+    #[test]
+    fn error_empty_args() {
+        let msg = parse_args_err(quote! {});
+        assert!(msg.contains("config = <fn>"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn error_wrong_arg_name() {
+        let msg = parse_args_err(quote! { foo = bar });
+        assert!(msg.contains("config = <fn>"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn error_config_with_args() {
+        let msg = parse_args_err(quote! { config = my_config(arg) });
+        assert!(
+            msg.contains("zero-argument function"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_config_trailing_tokens() {
+        let msg = parse_args_err(quote! { config = my_config, extra = stuff });
+        assert!(
+            msg.contains("zero-argument function"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]

@@ -24,9 +24,11 @@ Without this flag, compilation will fail with errors about missing methods on `t
 
 ## Quick start
 
-There are two ways to set up dial9: the `#[main]` macro (recommended for most apps) or manual `TracedRuntime` setup. The macro handles the boilerplate of building the runtime and spawning your code as an instrumented task. Inside the body, call `TelemetryHandle::current()`to reach a handle for wake-event tracking. Use manual setup when you need control over the runtime builder (e.g. custom thread counts, `current_thread` runtime) or need to integrate into an existing runtime setup.
+There are two ways to set up dial9: the `#[main]` macro (recommended for most apps) or manual `TracedRuntime` setup. The macro handles the boilerplate of building the runtime and spawning your code as an instrumented task. Inside the body, call `TelemetryHandle::current()` to reach a handle for wake-event tracking. Use manual setup when you have multiple tokio runtimes, don't own main (e.g. library code, embedded services), or need to integrate into existing runtime-building code.
 
 ### Using the `#[main]` macro
+
+> **Note:** `#[dial9_tokio_telemetry::main]` is a **replacement** for `#[tokio::main]`, not a complement — do not use both on the same function. The macro builds and configures the Tokio runtime internally.
 
 ```rust,no_run
 use dial9_tokio_telemetry::{main, config::Dial9Config, telemetry::TelemetryHandle};
