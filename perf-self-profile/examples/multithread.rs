@@ -69,7 +69,7 @@ fn main() {
         *by_tid.entry(s.tid).or_default() += 1;
     }
     let mut tids: Vec<_> = by_tid.into_iter().collect();
-    tids.sort_by(|a, b| b.1.cmp(&a.1));
+    tids.sort_by_key(|b| std::cmp::Reverse(b.1));
     for (tid, count) in &tids {
         eprintln!("  tid={tid}: {count} samples");
     }
