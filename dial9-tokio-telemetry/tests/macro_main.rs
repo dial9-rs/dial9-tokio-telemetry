@@ -86,7 +86,7 @@ async fn body_panics_with_str() {
 
 #[test]
 fn macro_propagates_panic_payload() {
-    let result = catch_unwind(AssertUnwindSafe(|| body_panics_with_str()));
+    let result = catch_unwind(AssertUnwindSafe(body_panics_with_str));
     let payload = result.expect_err("should have panicked");
     let msg = payload
         .downcast_ref::<&str>()
@@ -95,6 +95,7 @@ fn macro_propagates_panic_payload() {
 }
 
 #[dial9_tokio_telemetry::main(config = test_config)]
+#[allow(clippy::unnecessary_literal_unwrap)]
 async fn body_panics_with_format() {
     let x: Option<i32> = None;
     x.unwrap();
@@ -102,7 +103,7 @@ async fn body_panics_with_format() {
 
 #[test]
 fn macro_propagates_unwrap_panic() {
-    let result = catch_unwind(AssertUnwindSafe(|| body_panics_with_format()));
+    let result = catch_unwind(AssertUnwindSafe(body_panics_with_format));
     let payload = result.expect_err("should have panicked");
     let msg = payload
         .downcast_ref::<&str>()
