@@ -580,22 +580,13 @@ impl TraceWriter for RotatingWriter {
         };
         if batch.event_count > 0 {
             let now = time_source().system_time();
-            // If the time boundary expired while the segment was empty,
-            // give this segment a full window from now rather than
-            // immediately rotating a single-event segment.
-            //
-            // Use `now + period` instead of `next_boundary(now)` so we
-            // don't skip a window when the writer was created just before
-            // a wall-clock boundary (next_boundary would jump to the
-            // *following* boundary, effectively doubling the first window).
-            if !self.has_real_events {
-                if now >= self.next_rotation_time {
-                    self.next_rotation_time = now.as_std() + self.rotation_period;
-                }
-                if now >= self.next_drain_time {
-                    self.next_drain_time = now.as_std() + self.drain_interval;
-                }
-            }
+            // Note: we do NOT advance next_rotation_time or next_drain_time
+            // when the first event arrives in an empty segment, even if the
+            // timers are stale. The drain state machine (Idle → EpochBumped →
+            // drain) takes 3 flush cycles (~15ms) to complete, so by the time
+            // drained() is called there will be multiple batches in the segment,
+            // not a single event. Advancing the timers here would skip rotation
+            // windows and produce fewer segments than expected.
             // Raw-copy the thread-local batch. Each batch is self-contained
             // (starts with its own header), so the next batch's header acts as
             // the reset frame for decoders.
