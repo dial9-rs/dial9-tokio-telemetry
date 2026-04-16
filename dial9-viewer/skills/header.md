@@ -18,7 +18,7 @@ dial9 traces capture the internal behavior of a Tokio async runtime: task pollin
 Get the analysis toolkit:
 
 ```bash
-dial9-viewer agents toolkit --path /tmp/d9-toolkit
+dial9-viewer agents toolkit /tmp/d9-toolkit
 node /tmp/d9-toolkit/analyze.js <trace.bin>
 ```
 
@@ -73,7 +73,7 @@ Run `dial9-viewer agents <segment>` for detailed information:
 
 | Command / Segment | Description |
 |-------------------|-------------|
-| `agents toolkit --path DIR` | **Start here.** Copies the analysis toolkit to a directory |
+| `agents toolkit DIR` | **Start here.** Copies the analysis toolkit to a directory |
 | `agents skill runtime` | Tokio runtime internals: execution model, scheduling, wake/poll lifecycle, and how to fix common problems |
 | `agents skill loading` | Trace format details, parsing options, time range filtering |
 | `agents skill analysis` | Full analysis pipeline API reference |

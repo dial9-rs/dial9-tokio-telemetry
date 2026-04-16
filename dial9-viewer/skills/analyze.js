@@ -296,8 +296,8 @@ async function main() {
     const waits = parks.map(p => p.schedWait).sort((a, b) => b - a);
     const max = waits[0];
     const p50 = waits[Math.floor(waits.length * 0.5)];
-    // schedWait is in µs
-    console.log(`  Worker ${w}: max=${(max/1000).toFixed(1)}ms, p50=${(p50/1000).toFixed(2)}ms, ${waits.filter(w => w > 1000).length} events > 1ms`);
+    // schedWait is in ns
+    console.log(`  Worker ${w}: max=${(max/1e6).toFixed(1)}ms, p50=${(p50/1e6).toFixed(2)}ms, ${waits.filter(w => w > 1e6).length} events > 1ms`);
   }
 
   console.log(`\n${'='.repeat(60)}`);

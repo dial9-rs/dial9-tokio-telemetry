@@ -111,6 +111,18 @@ const groups = deduplicateSamples(trace.cpuSamples, trace.callframeSymbols);
 // [{count: 8932, leaf: "__schedule", frames: [...]}, ...]
 ```
 
+## Merging multiple trace files
+
+Trace files can be concatenated back-to-back to form a single combined trace. Decompress any gzipped segments first, then concatenate the raw `.bin` files:
+
+```bash
+# Decompress and concatenate multiple segments
+gunzip -k segment-001.bin.gz segment-002.bin.gz segment-003.bin.gz
+cat segment-001.bin segment-002.bin segment-003.bin > combined.bin
+```
+
+Pass the combined file to `parseTrace` as usual. The parser handles multiple concatenated segments transparently — headers, string pools, and schemas are re-read at each segment boundary.
+
 ## Handling gzip
 
 `parseTrace` automatically decompresses gzip input. You can pass `.bin.gz` files directly.

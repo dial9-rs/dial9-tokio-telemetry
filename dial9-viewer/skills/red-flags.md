@@ -129,13 +129,13 @@ async function redFlagScan(tracePath) {
 
   // 8. Kernel scheduling wait on unpark
   for (const w of workerIds) {
-    const highSchedWait = spans.workerSpans[w].parks.filter(p => p.schedWait > 1000); // >1ms in µs
+    const highSchedWait = spans.workerSpans[w].parks.filter(p => p.schedWait > 1e6); // >1ms in ns
     if (highSchedWait.length > 0) {
       const worst = Math.max(...highSchedWait.map(p => p.schedWait));
       findings.push({
-        severity: worst > 10000 ? 'warning' : 'info',
+        severity: worst > 10e6 ? 'warning' : 'info',
         check: 'kernel-sched-wait',
-        message: `Worker ${w}: ${highSchedWait.length} unparks with kernel sched wait > 1ms (worst: ${(worst / 1000).toFixed(1)}ms)`,
+        message: `Worker ${w}: ${highSchedWait.length} unparks with kernel sched wait > 1ms (worst: ${(worst / 1e6).toFixed(1)}ms)`,
       });
     }
   }
