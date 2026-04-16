@@ -3,6 +3,7 @@ use crate::telemetry::format::{self, TelemetryEventRef, WorkerId};
 use crate::telemetry::task_metadata::TaskId;
 use dial9_trace_format::InternedString;
 use dial9_trace_format::decoder::{Decoder, StringPool};
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::io::{Read as _, Result};
 
@@ -460,7 +461,7 @@ pub fn print_analysis(analysis: &TraceAnalysis, spawn_locations: &HashMap<Intern
     if !analysis.spawn_location_stats.is_empty() {
         println!("\n=== Spawn Locations (by poll count) ===");
         let mut locs: Vec<_> = analysis.spawn_location_stats.iter().collect();
-        locs.sort_by(|a, b| b.1.poll_count.cmp(&a.1.poll_count));
+        locs.sort_by_key(|b| Reverse(b.1.poll_count));
         for (id, stats) in locs {
             let name = spawn_locations
                 .get(id)
