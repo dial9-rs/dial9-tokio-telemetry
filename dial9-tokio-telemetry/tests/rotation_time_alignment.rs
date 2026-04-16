@@ -59,7 +59,7 @@ fn rotated_segments_have_bounded_time_overlap() {
     runtime.block_on(async {
         let start = tokio::time::Instant::now();
         let target_duration = Duration::from_secs(10);
-        
+
         let mut handles = Vec::new();
         for _ in 0..num_workers {
             handles.push(tokio::spawn(async move {
@@ -73,7 +73,7 @@ fn rotated_segments_have_bounded_time_overlap() {
         for h in handles {
             h.await.unwrap();
         }
-        
+
         // Ensure we've actually waited the full duration
         let elapsed = start.elapsed();
         if elapsed < target_duration {
