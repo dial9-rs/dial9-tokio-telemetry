@@ -33,47 +33,38 @@ fn js_decodes_all_field_types() {
                 FieldDef {
                     name: "a_u64".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 },
                 FieldDef {
                     name: "b_i64".into(),
                     field_type: FieldType::I64,
-                    optional: false,
                 },
                 FieldDef {
                     name: "c_f64".into(),
                     field_type: FieldType::F64,
-                    optional: false,
                 },
                 FieldDef {
                     name: "d_bool".into(),
                     field_type: FieldType::Bool,
-                    optional: false,
                 },
                 FieldDef {
                     name: "e_string".into(),
                     field_type: FieldType::String,
-                    optional: false,
                 },
                 FieldDef {
                     name: "f_bytes".into(),
                     field_type: FieldType::Bytes,
-                    optional: false,
                 },
                 FieldDef {
                     name: "h_pooled".into(),
                     field_type: FieldType::PooledString,
-                    optional: false,
                 },
                 FieldDef {
                     name: "i_stack".into(),
                     field_type: FieldType::StackFrames,
-                    optional: false,
                 },
                 FieldDef {
                     name: "j_varint".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 },
             ],
         )
@@ -113,17 +104,14 @@ fn js_decodes_all_field_types() {
                     FieldDef {
                         name: "base_addr".into(),
                         field_type: FieldType::Varint,
-                        optional: false,
                     },
                     FieldDef {
                         name: "size".into(),
                         field_type: FieldType::Varint,
-                        optional: false,
                     },
                     FieldDef {
                         name: "symbol_name".into(),
                         field_type: FieldType::PooledString,
-                        optional: false,
                     },
                 ],
             )
@@ -188,7 +176,6 @@ fn js_decodes_truncated_trace_gracefully() {
             vec![FieldDef {
                 name: "seq".into(),
                 field_type: FieldType::Varint,
-                optional: false,
             }],
         )
         .unwrap();
@@ -230,7 +217,6 @@ fn js_decodes_multiple_events() {
             vec![FieldDef {
                 name: "ts".into(),
                 field_type: FieldType::Varint,
-                optional: false,
             }],
         )
         .unwrap();
@@ -264,12 +250,10 @@ fn js_decodes_optional_pooled_string() {
                 FieldDef {
                     name: "required_id".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 },
                 FieldDef {
                     name: "opt_name".into(),
-                    field_type: FieldType::PooledString,
-                    optional: true,
+                    field_type: FieldType::OptionalPooledString,
                 },
             ],
         )

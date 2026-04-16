@@ -1,5 +1,6 @@
 ---
 source: dial9-trace-format-derive/src/lib.rs
+assertion_line: 205
 expression: "expand_to_string(quote!\n{\n    struct AllFieldTypes\n    {\n        #[traceevent(timestamp)] timestamp_ns: u64, a_u8: u8, b_u16: u16,\n        c_u32: u32, d_u64: u64, e_i64: i64, f_f64: f64, g_bool: bool,\n        h_string: String, i_bytes: Vec<u8>, j_interned: InternedString,\n        k_frames: StackFrames, l_map: Vec<(String, String)>,\n    }\n})"
 ---
 #[derive(Debug, Clone)]
@@ -26,43 +27,31 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
     fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
         vec![
             ::dial9_trace_format::schema::FieldDef { name : "a_u8".to_string(),
-            field_type : < u8 as ::dial9_trace_format::TraceField > ::field_type(),
-            optional : < u8 as ::dial9_trace_format::TraceField > ::is_optional(), },
+            field_type : < u8 as ::dial9_trace_format::TraceField > ::field_type(), },
             ::dial9_trace_format::schema::FieldDef { name : "b_u16".to_string(),
-            field_type : < u16 as ::dial9_trace_format::TraceField > ::field_type(),
-            optional : < u16 as ::dial9_trace_format::TraceField > ::is_optional(), },
+            field_type : < u16 as ::dial9_trace_format::TraceField > ::field_type(), },
             ::dial9_trace_format::schema::FieldDef { name : "c_u32".to_string(),
-            field_type : < u32 as ::dial9_trace_format::TraceField > ::field_type(),
-            optional : < u32 as ::dial9_trace_format::TraceField > ::is_optional(), },
+            field_type : < u32 as ::dial9_trace_format::TraceField > ::field_type(), },
             ::dial9_trace_format::schema::FieldDef { name : "d_u64".to_string(),
-            field_type : < u64 as ::dial9_trace_format::TraceField > ::field_type(),
-            optional : < u64 as ::dial9_trace_format::TraceField > ::is_optional(), },
+            field_type : < u64 as ::dial9_trace_format::TraceField > ::field_type(), },
             ::dial9_trace_format::schema::FieldDef { name : "e_i64".to_string(),
-            field_type : < i64 as ::dial9_trace_format::TraceField > ::field_type(),
-            optional : < i64 as ::dial9_trace_format::TraceField > ::is_optional(), },
+            field_type : < i64 as ::dial9_trace_format::TraceField > ::field_type(), },
             ::dial9_trace_format::schema::FieldDef { name : "f_f64".to_string(),
-            field_type : < f64 as ::dial9_trace_format::TraceField > ::field_type(),
-            optional : < f64 as ::dial9_trace_format::TraceField > ::is_optional(), },
+            field_type : < f64 as ::dial9_trace_format::TraceField > ::field_type(), },
             ::dial9_trace_format::schema::FieldDef { name : "g_bool".to_string(),
-            field_type : < bool as ::dial9_trace_format::TraceField > ::field_type(),
-            optional : < bool as ::dial9_trace_format::TraceField > ::is_optional(), },
+            field_type : < bool as ::dial9_trace_format::TraceField > ::field_type(), },
             ::dial9_trace_format::schema::FieldDef { name : "h_string".to_string(),
             field_type : < String as ::dial9_trace_format::TraceField > ::field_type(),
-            optional : < String as ::dial9_trace_format::TraceField > ::is_optional(), },
-            ::dial9_trace_format::schema::FieldDef { name : "i_bytes".to_string(),
+            }, ::dial9_trace_format::schema::FieldDef { name : "i_bytes".to_string(),
             field_type : < Vec < u8 > as ::dial9_trace_format::TraceField >
-            ::field_type(), optional : < Vec < u8 > as ::dial9_trace_format::TraceField >
-            ::is_optional(), }, ::dial9_trace_format::schema::FieldDef { name :
+            ::field_type(), }, ::dial9_trace_format::schema::FieldDef { name :
             "j_interned".to_string(), field_type : < InternedString as
-            ::dial9_trace_format::TraceField > ::field_type(), optional : <
-            InternedString as ::dial9_trace_format::TraceField > ::is_optional(), },
+            ::dial9_trace_format::TraceField > ::field_type(), },
             ::dial9_trace_format::schema::FieldDef { name : "k_frames".to_string(),
             field_type : < StackFrames as ::dial9_trace_format::TraceField >
-            ::field_type(), optional : < StackFrames as ::dial9_trace_format::TraceField
-            > ::is_optional(), }, ::dial9_trace_format::schema::FieldDef { name : "l_map"
+            ::field_type(), }, ::dial9_trace_format::schema::FieldDef { name : "l_map"
             .to_string(), field_type : < Vec < (String, String) > as
-            ::dial9_trace_format::TraceField > ::field_type(), optional : < Vec <
-            (String, String) > as ::dial9_trace_format::TraceField > ::is_optional(), }
+            ::dial9_trace_format::TraceField > ::field_type(), }
         ]
     }
     fn timestamp(&self) -> u64 {

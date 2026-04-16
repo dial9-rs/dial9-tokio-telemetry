@@ -1,5 +1,6 @@
 ---
 source: dial9-trace-format-derive/src/lib.rs
+assertion_line: 227
 expression: "expand_to_string(quote!\n{\n    #[doc = r\" Root documentation\"] struct DocEvent\n    {\n        #[traceevent(timestamp)] #[doc = r\" Event timestamp in nanoseconds.\"]\n        timestamp_ns: u64, #[doc = r\" The worker thread ID.\"] worker_id: u64,\n        #[doc = r\" Number of items in the local queue.\"] local_queue: u8,\n    }\n})"
 ---
 /// Root documentation
@@ -20,11 +21,9 @@ impl ::dial9_trace_format::TraceEvent for DocEvent {
     fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
         vec![
             ::dial9_trace_format::schema::FieldDef { name : "worker_id".to_string(),
-            field_type : < u64 as ::dial9_trace_format::TraceField > ::field_type(),
-            optional : < u64 as ::dial9_trace_format::TraceField > ::is_optional(), },
+            field_type : < u64 as ::dial9_trace_format::TraceField > ::field_type(), },
             ::dial9_trace_format::schema::FieldDef { name : "local_queue".to_string(),
-            field_type : < u8 as ::dial9_trace_format::TraceField > ::field_type(),
-            optional : < u8 as ::dial9_trace_format::TraceField > ::is_optional(), }
+            field_type : < u8 as ::dial9_trace_format::TraceField > ::field_type(), }
         ]
     }
     fn timestamp(&self) -> u64 {

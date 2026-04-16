@@ -21,12 +21,10 @@ fuzz_target!(|data: &[u8]| {
                 FieldDef {
                     name: "a".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 },
                 FieldDef {
                     name: "b".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 },
             ],
         )

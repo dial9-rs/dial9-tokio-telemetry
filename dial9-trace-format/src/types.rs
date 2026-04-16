@@ -30,6 +30,20 @@ pub enum FieldType {
     U8 = 11,
     U16 = 12,
     U32 = 13,
+    // Optional variants (inner tag | 0x80).
+    OptionalI64 = 0x81,
+    OptionalF64 = 0x82,
+    OptionalBool = 0x83,
+    OptionalString = 0x84,
+    OptionalBytes = 0x85,
+    // Tag 6 was legacy Timestamp (removed).
+    OptionalPooledString = 0x87,
+    OptionalStackFrames = 0x88,
+    OptionalVarint = 0x89,
+    OptionalStringMap = 0x8A,
+    OptionalU8 = 0x8B,
+    OptionalU16 = 0x8C,
+    OptionalU32 = 0x8D,
 }
 
 /// Newtype for stack frame addresses (leaf-first).
@@ -110,6 +124,7 @@ impl serde::Serialize for FieldValue {
                 }
                 map.end()
             }
+            FieldValue::None => serializer.serialize_none(),
         }
     }
 }
@@ -125,8 +140,7 @@ impl FieldType {
     pub const OPTIONAL_BIT: u8 = 0x80;
 
     pub fn from_tag(tag: u8) -> Option<FieldType> {
-        // Strip the optional bit to get the inner type.
-        match tag & 0x7F {
+        match tag {
             1 => Some(FieldType::I64),
             2 => Some(FieldType::F64),
             3 => Some(FieldType::Bool),
@@ -139,18 +153,30 @@ impl FieldType {
             11 => Some(FieldType::U8),
             12 => Some(FieldType::U16),
             13 => Some(FieldType::U32),
+            0x81 => Some(FieldType::OptionalI64),
+            0x82 => Some(FieldType::OptionalF64),
+            0x83 => Some(FieldType::OptionalBool),
+            0x84 => Some(FieldType::OptionalString),
+            0x85 => Some(FieldType::OptionalBytes),
+            0x87 => Some(FieldType::OptionalPooledString),
+            0x88 => Some(FieldType::OptionalStackFrames),
+            0x89 => Some(FieldType::OptionalVarint),
+            0x8A => Some(FieldType::OptionalStringMap),
+            0x8B => Some(FieldType::OptionalU8),
+            0x8C => Some(FieldType::OptionalU16),
+            0x8D => Some(FieldType::OptionalU32),
             _ => None,
         }
     }
 
-    /// Returns true if the wire tag has the optional modifier set.
-    pub fn is_optional(tag: u8) -> bool {
-        tag & Self::OPTIONAL_BIT != 0
+    /// Returns true if this is an optional field type.
+    pub fn is_optional(self) -> bool {
+        self as u8 & Self::OPTIONAL_BIT != 0
     }
 
-    /// Returns the wire tag with the optional modifier set.
-    pub fn optional_tag(self) -> u8 {
-        self as u8 | Self::OPTIONAL_BIT
+    /// Returns the inner (non-optional) field type.
+    pub fn inner(self) -> FieldType {
+        FieldType::from_tag(self as u8 & 0x7F).unwrap_or(self)
     }
 }
 
@@ -272,6 +298,8 @@ impl FieldValue {
                 }
                 Some((FieldValue::StringMap(pairs), &data[pos..]))
             }
+            // Optional variants: decode using the inner type.
+            _ => Self::decode(field_type.inner(), data),
         }
     }
 }
@@ -426,6 +454,8 @@ impl<'a> FieldValueRef<'a> {
                     pos,
                 ))
             }
+            // Optional variants: decode using the inner type.
+            _ => Self::decode(field_type.inner(), data, offset),
         }
     }
 
@@ -445,6 +475,7 @@ impl<'a> FieldValueRef<'a> {
                     .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
                     .collect(),
             ),
+            FieldValueRef::None => FieldValue::None,
         }
     }
 }
@@ -940,7 +971,10 @@ macro_rules! impl_optional_trace_field {
             type Ref<'a> = Option<<$inner as TraceField>::Ref<'a>>;
 
             fn field_type() -> FieldType {
-                <$inner as TraceField>::field_type()
+                FieldType::from_tag(
+                    <$inner as TraceField>::field_type() as u8 | FieldType::OPTIONAL_BIT,
+                )
+                .expect("no optional variant for inner type")
             }
 
             fn is_optional() -> bool {

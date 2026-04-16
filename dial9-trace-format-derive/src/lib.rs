@@ -62,7 +62,6 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
             ::dial9_trace_format::schema::FieldDef {
                 name: #field_name_str.to_string(),
                 field_type: <#ty as ::dial9_trace_format::TraceField>::field_type(),
-                optional: <#ty as ::dial9_trace_format::TraceField>::is_optional(),
             }
         });
         encode_tokens.push(quote! {

@@ -14,12 +14,10 @@ fn full_round_trip() {
                 FieldDef {
                     name: "worker".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 },
                 FieldDef {
                     name: "task_id".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 },
             ],
         )
@@ -31,12 +29,10 @@ fn full_round_trip() {
                 FieldDef {
                     name: "thread_name".into(),
                     field_type: FieldType::PooledString,
-                    optional: false,
                 },
                 FieldDef {
                     name: "frames".into(),
                     field_type: FieldType::StackFrames,
-                    optional: false,
                 },
             ],
         )
@@ -75,17 +71,14 @@ fn full_round_trip() {
                 FieldDef {
                     name: "base_addr".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 },
                 FieldDef {
                     name: "size".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 },
                 FieldDef {
                     name: "symbol_name".into(),
                     field_type: FieldType::PooledString,
-                    optional: false,
                 },
             ],
         )
@@ -154,42 +147,34 @@ fn round_trip_all_field_types() {
                 FieldDef {
                     name: "a".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 },
                 FieldDef {
                     name: "b".into(),
                     field_type: FieldType::I64,
-                    optional: false,
                 },
                 FieldDef {
                     name: "c".into(),
                     field_type: FieldType::F64,
-                    optional: false,
                 },
                 FieldDef {
                     name: "d".into(),
                     field_type: FieldType::Bool,
-                    optional: false,
                 },
                 FieldDef {
                     name: "e".into(),
                     field_type: FieldType::String,
-                    optional: false,
                 },
                 FieldDef {
                     name: "f".into(),
                     field_type: FieldType::Bytes,
-                    optional: false,
                 },
                 FieldDef {
                     name: "h".into(),
                     field_type: FieldType::PooledString,
-                    optional: false,
                 },
                 FieldDef {
                     name: "i".into(),
                     field_type: FieldType::StackFrames,
-                    optional: false,
                 },
             ],
         )

@@ -125,12 +125,7 @@ pub(crate) fn encode_schema(
         let fname = f.name.as_bytes();
         w.write_all(&(fname.len() as u16).to_le_bytes())?;
         w.write_all(fname)?;
-        let tag = if f.optional {
-            f.field_type as u8 | FieldType::OPTIONAL_BIT
-        } else {
-            f.field_type as u8
-        };
-        w.write_all(&[tag])?;
+        w.write_all(&[f.field_type as u8])?;
     }
     Ok(())
 }
@@ -215,12 +210,10 @@ fn decode_schema_frame(data: &[u8]) -> Option<(Frame, usize)> {
         pos += fname_len;
         let raw_tag = *data.get(pos)?;
         let ft = FieldType::from_tag(raw_tag)?;
-        let optional = FieldType::is_optional(raw_tag);
         pos += 1;
         fields.push(FieldDef {
             name: fname,
             field_type: ft,
-            optional,
         });
     }
     Some((
@@ -257,19 +250,19 @@ fn decode_event_frame<'s>(
     let mut values = Vec::with_capacity(info.field_tags.len());
     let mut remaining = &data[pos..];
     for &tag in info.field_tags {
-        let inner_type = FieldType::from_tag(tag)?;
-        if FieldType::is_optional(tag) {
+        let ft = FieldType::from_tag(tag)?;
+        if ft.is_optional() {
             let prefix = *remaining.first()?;
             remaining = &remaining[1..];
             if prefix == 0x00 {
                 values.push(FieldValue::None);
             } else {
-                let (val, rest) = FieldValue::decode(inner_type, remaining)?;
+                let (val, rest) = FieldValue::decode(ft.inner(), remaining)?;
                 values.push(val);
                 remaining = rest;
             }
         } else {
-            let (val, rest) = FieldValue::decode(inner_type, remaining)?;
+            let (val, rest) = FieldValue::decode(ft, remaining)?;
             values.push(val);
             remaining = rest;
         }
@@ -351,19 +344,19 @@ fn decode_event_frame_ref<'a, 's>(
 
     let mut values = Vec::with_capacity(info.field_tags.len());
     for &tag in info.field_tags {
-        let inner_type = FieldType::from_tag(tag)?;
-        if FieldType::is_optional(tag) {
+        let ft = FieldType::from_tag(tag)?;
+        if ft.is_optional() {
             let prefix = *data.get(pos)?;
             pos += 1;
             if prefix == 0x00 {
                 values.push(FieldValueRef::None);
             } else {
-                let (val, consumed) = FieldValueRef::decode(inner_type, data, pos)?;
+                let (val, consumed) = FieldValueRef::decode(ft.inner(), data, pos)?;
                 values.push(val);
                 pos += consumed;
             }
         } else {
-            let (val, consumed) = FieldValueRef::decode(inner_type, data, pos)?;
+            let (val, consumed) = FieldValueRef::decode(ft, data, pos)?;
             values.push(val);
             pos += consumed;
         }
@@ -430,7 +423,6 @@ mod tests {
             fields: vec![FieldDef {
                 name: "worker".into(),
                 field_type: FieldType::Varint,
-                optional: false,
             }],
         };
         let mut buf = Vec::new();

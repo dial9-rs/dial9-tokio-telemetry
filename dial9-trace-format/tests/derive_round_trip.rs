@@ -1126,9 +1126,15 @@ struct WithoutOptional {
 #[test]
 fn optional_field_schema_has_optional_flag() {
     let defs = WithOptionalString::field_defs();
-    assert!(!defs[0].optional, "required_id should not be optional");
-    assert!(defs[1].optional, "optional_name should be optional");
-    assert_eq!(defs[1].field_type, FieldType::PooledString);
+    assert!(
+        !defs[0].field_type.is_optional(),
+        "required_id should not be optional"
+    );
+    assert!(
+        defs[1].field_type.is_optional(),
+        "optional_name should be optional"
+    );
+    assert_eq!(defs[1].field_type, FieldType::OptionalPooledString);
 }
 
 #[test]

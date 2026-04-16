@@ -473,7 +473,7 @@ impl<'a> Decoder<'a> {
                                 }));
                             }
                         };
-                        if FieldType::is_optional(ftag) {
+                        if inner_type.is_optional() {
                             match remaining.get(pos) {
                                 Some(0x00) => {
                                     values_buf.push(FieldValueRef::None);
@@ -481,7 +481,8 @@ impl<'a> Decoder<'a> {
                                 }
                                 Some(_) => {
                                     pos += 1;
-                                    match FieldValueRef::decode(inner_type, remaining, pos) {
+                                    match FieldValueRef::decode(inner_type.inner(), remaining, pos)
+                                    {
                                         Some((val, consumed)) => {
                                             values_buf.push(val);
                                             pos += consumed;
@@ -625,7 +626,6 @@ mod tests {
             vec![FieldDef {
                 name: "v".into(),
                 field_type: FieldType::Varint,
-                optional: false,
             }],
         )
         .unwrap();
@@ -644,7 +644,6 @@ mod tests {
                 vec![FieldDef {
                     name: "v".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 }],
             )
             .unwrap();
@@ -685,7 +684,6 @@ mod tests {
                 vec![FieldDef {
                     name: "v".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 }],
             )
             .unwrap();
@@ -717,7 +715,6 @@ mod tests {
                 vec![FieldDef {
                     name: "v".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 }],
             )
             .unwrap();
@@ -747,7 +744,6 @@ mod tests {
                 vec![FieldDef {
                     name: "v".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 }],
             )
             .unwrap();
@@ -778,7 +774,6 @@ mod tests {
                 vec![FieldDef {
                     name: "v".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 }],
             )
             .unwrap();
@@ -812,7 +807,6 @@ mod tests {
                 vec![FieldDef {
                     name: "v".into(),
                     field_type: FieldType::Varint,
-                    optional: false,
                 }],
             )
             .unwrap();
