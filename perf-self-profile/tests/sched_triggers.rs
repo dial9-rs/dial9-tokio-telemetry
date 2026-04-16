@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 
-use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
+use dial9_perf_self_profile::{
+    EventSource, PerfSampler, SamplerConfig, SamplingMode, resolve_symbol,
+};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -19,8 +21,8 @@ fn captures_lock_acquisition_stack() {
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
     let sampler = Arc::new(Mutex::new(
         PerfSampler::new_per_thread(SamplerConfig {
-            frequency_hz: 1,
             event_source: EventSource::SwContextSwitches,
+            sampling: SamplingMode::Period(1),
             include_kernel: false,
         })
         .expect("failed to create sampler"),
@@ -81,8 +83,8 @@ fn captures_sleep_stack() {
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
     let sampler = Arc::new(Mutex::new(
         PerfSampler::new_per_thread(SamplerConfig {
-            frequency_hz: 1,
             event_source: EventSource::SwContextSwitches,
+            sampling: SamplingMode::Period(1),
             include_kernel: false,
         })
         .expect("failed to create sampler"),
@@ -131,4 +133,49 @@ fn captures_sleep_stack() {
          Got {} samples with 0 resolved names.",
         samples.len(),
     );
+}
+
+#[test]
+fn sampling_period_controls_ratio() {
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
+
+    let run = |period: u64| -> usize {
+        let sampler = Arc::new(Mutex::new(
+            PerfSampler::new_per_thread(SamplerConfig {
+                event_source: EventSource::SwContextSwitches,
+                sampling: SamplingMode::Period(period),
+                include_kernel: false,
+            })
+            .expect("failed to create sampler"),
+        ));
+        sampler.lock().unwrap().track_current_thread().unwrap();
+
+        for _ in 0..200 {
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let mut s = sampler.lock().unwrap();
+        s.drain_samples().len()
+    };
+
+    let n_all = run(1);
+    let n_sampled = run(10);
+    let ratio = n_all as f64 / n_sampled.max(1) as f64;
+    assert!(
+        ratio == 10.0,
+        "expected 10x ratio, got {ratio:.1}x (n_all={n_all}, n_sampled={n_sampled})"
+    );
+}
+
+#[test]
+fn rejects_zero_period() {
+    let err = match PerfSampler::new_per_thread(SamplerConfig {
+        event_source: EventSource::SwContextSwitches,
+        sampling: SamplingMode::Period(0),
+        include_kernel: false,
+    }) {
+        Err(e) => e,
+        Ok(_) => panic!("Period(0) must be rejected"),
+    };
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 }

@@ -169,7 +169,10 @@ use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEve
 let (runtime, guard) = TracedRuntime::builder()
     .with_task_tracking(true)
     .with_cpu_profiling(CpuProfilingConfig::default())
-    .with_sched_events(SchedEventConfig { include_kernel: true })
+    .with_sched_events(SchedEventConfig {
+        include_kernel: true,
+        ..Default::default()
+    })
     .with_trace_path("/tmp/t.bin")
     .build_and_start(builder, writer)?;
 # Ok(())

@@ -3,7 +3,9 @@
 //! Build with frame pointers:
 //!   RUSTFLAGS="-C force-frame-pointers=yes" cargo run --release --example multithread
 
-use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
+use dial9_perf_self_profile::{
+    EventSource, PerfSampler, SamplerConfig, SamplingMode, resolve_symbol,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +13,7 @@ use std::thread;
 
 fn main() {
     let mut sampler = match PerfSampler::start(SamplerConfig {
-        frequency_hz: 999,
+        sampling: SamplingMode::FrequencyHz(999),
         event_source: EventSource::SwCpuClock,
         include_kernel: false,
     }) {

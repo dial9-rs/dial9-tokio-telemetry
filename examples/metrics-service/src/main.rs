@@ -158,6 +158,7 @@ fn main() -> std::io::Result<()> {
             .with_cpu_profiling(CpuProfilingConfig::default())
             .with_sched_events(SchedEventConfig {
                 include_kernel: true,
+                ..Default::default()
             });
     }
     if let Some(bucket) = &args.s3_bucket {

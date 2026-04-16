@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use dial9_perf_self_profile::tracepoint::TracepointDef;
-use dial9_perf_self_profile::{PerfSampler, SamplerConfig};
+use dial9_perf_self_profile::{PerfSampler, SamplerConfig, SamplingMode};
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::types::FieldValue;
@@ -27,7 +27,7 @@ fn tracepoint_sched_switch_e2e() {
 
     // 2. Open perf event using the TracepointDef's event source
     let mut sampler = match PerfSampler::start(SamplerConfig {
-        frequency_hz: 1,
+        sampling: SamplingMode::Period(1),
         event_source: tp.event_source(),
         include_kernel: false,
     }) {

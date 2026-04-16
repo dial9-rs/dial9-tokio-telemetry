@@ -21,11 +21,11 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! use dial9_perf_self_profile::{PerfSampler, SamplerConfig, EventSource, Sample};
+//! use dial9_perf_self_profile::{PerfSampler, SamplerConfig, SamplingMode, EventSource, Sample};
 //!
 //! let mut sampler = PerfSampler::start(SamplerConfig {
-//!     frequency_hz: 999,
 //!     event_source: EventSource::SwCpuClock,
+//!     sampling: SamplingMode::FrequencyHz(999),
 //!     include_kernel: false,
 //! }).expect("failed to start sampler");
 //!
@@ -44,7 +44,7 @@ mod sys;
 pub mod tracepoint;
 
 pub use offline_symbolize::SymbolTableEntry;
-pub use sampler::{EventSource, Sample, SamplerConfig};
+pub use sampler::{EventSource, Sample, SamplerConfig, SamplingMode};
 pub use symbolize::{CodeInfo, MapsEntry, SymbolInfo};
 pub use symbolize::{parse_proc_maps, read_proc_maps};
 

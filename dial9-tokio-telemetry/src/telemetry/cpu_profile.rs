@@ -5,7 +5,7 @@
 //! (EventWriter) maps OS thread IDs to worker IDs via SharedState.thread_roles.
 
 use crate::telemetry::events::{CpuSampleSource, ThreadName};
-use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
+use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, SamplingMode};
 use std::collections::HashMap;
 use std::io;
 
@@ -45,6 +45,8 @@ impl Default for CpuProfilingConfig {
 /// so each worker thread gets its own perf fd via `on_thread_start`.
 #[derive(Debug, Clone, Default)]
 pub struct SchedEventConfig {
+    /// Record every Nth context switch. `None` records every event.
+    pub sampling_period: Option<u64>,
     /// Whether to include kernel stack frames.
     pub include_kernel: bool,
 }
@@ -69,8 +71,8 @@ pub(crate) struct CpuProfiler {
 impl CpuProfiler {
     pub(crate) fn start(config: CpuProfilingConfig) -> io::Result<Self> {
         let sampler = PerfSampler::start(SamplerConfig {
-            frequency_hz: config.frequency_hz,
             event_source: config.event_source,
+            sampling: SamplingMode::FrequencyHz(config.frequency_hz),
             include_kernel: config.include_kernel,
         })?;
         Ok(Self {
@@ -117,8 +119,8 @@ pub(crate) struct SchedProfiler {
 impl SchedProfiler {
     pub(crate) fn new(config: SchedEventConfig) -> io::Result<Self> {
         let sampler = PerfSampler::new_per_thread(SamplerConfig {
-            frequency_hz: 1,
             event_source: EventSource::SwContextSwitches,
+            sampling: SamplingMode::Period(config.sampling_period.unwrap_or(1)),
             include_kernel: config.include_kernel,
         })?;
         Ok(Self { sampler })
