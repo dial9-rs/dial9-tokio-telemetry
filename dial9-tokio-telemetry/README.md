@@ -107,6 +107,39 @@ runtime.block_on(async {
 
 For frameworks like Axum where you don't control the spawn call, you need to wrap the accept loop. See [`examples/metrics-service/src/axum_traced.rs`](/examples/metrics-service/src/axum_traced.rs) for a working example that wraps both the accept loop and per-connection futures.
 
+## Custom events
+
+You can emit your own application-level events into the trace alongside the built-in runtime events. Define a struct with `#[derive(TraceEvent)]` and call `record_event`:
+
+```rust,no_run
+# fn main() {
+use dial9_trace_format::TraceEvent;
+use dial9_tokio_telemetry::telemetry::{record_event, clock_monotonic_ns, TelemetryHandle};
+
+#[derive(TraceEvent)]
+struct RequestCompleted {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
+    status_code: u32,
+    latency_us: u64,
+}
+
+# let handle: TelemetryHandle = todo!();
+record_event(
+    RequestCompleted {
+        timestamp_ns: clock_monotonic_ns(),
+        status_code: 200,
+        latency_us: 1500,
+    },
+    &handle,
+);
+# }
+```
+
+For events with repeated string values (HTTP methods, endpoint paths, etc.), implement `Encodable` manually to use string interning — see [`examples/custom_events.rs`](/dial9-tokio-telemetry/examples/custom_events.rs) for a complete example showing both patterns.
+
+Custom events are encoded into the same thread-local buffer as built-in events (~100–200 ns per call) and appear in the trace viewer alongside poll/park/wake events.
+
 ## Platform support
 
 Core telemetry (poll timing, park/unpark, queue depth, wake events) works on all platforms.

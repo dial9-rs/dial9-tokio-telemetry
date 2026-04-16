@@ -12,9 +12,9 @@ pub(crate) struct SealedSegment {
     pub(crate) index: u32,
 }
 
-/// Segment creation time as epoch seconds, parsed from SegmentMetadata header.
-/// Returns `(epoch_secs, true)` if the header was valid, or falls back to
-/// file mtime / current time with `(epoch_secs, false)`.
+/// Segment creation time as epoch seconds, parsed from the first clock
+/// anchor in the trace. Returns `(secs, true)` on a successful parse, or
+/// falls back to file mtime / current time with `(secs, false)`.
 pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
     match parse_segment_timestamp(data) {
         Ok(ts) => return (ts / 1_000_000_000, true),
@@ -42,17 +42,32 @@ pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
     (secs, false)
 }
 
-/// Parse the timestamp (nanos) from the first SegmentMetadata event in a trace segment.
+/// Legacy epoch-vs-monotonic discriminator for ambiguous
+/// `SegmentMetadataEvent.timestamp_ns` values.
+///
+/// Pre-clock-sync traces may store epoch nanoseconds there, while new traces
+/// use monotonic nanoseconds. Epoch timestamps are ~1e18, while monotonic uptime is much smaller.
+/// So we use `2020-01-01` ns as a floor, monotonic would need decades
+/// of continuous runtime to reach that range.
+///
+/// Keep in sync with `LEGACY_EPOCH_NS_FLOOR` in `dial9-viewer/ui/trace_parser.js`.
+pub(crate) const LEGACY_EPOCH_NS_FLOOR: u64 = 1_577_836_800_000_000_000;
+
+/// Parse wall-clock creation time from the first `ClockSyncEvent`,
+/// or from a legacy `SegmentMetadataEvent.timestamp_ns` that predates clock-sync support.
 fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
     use dial9_trace_format::decoder::{DecodedFrameRef, Decoder};
+    use dial9_trace_format::types::FieldValueRef;
 
     let mut dec = Decoder::new(data).ok_or(ParseTimestampError::InvalidHeader)?;
     let mut events_seen = 0;
+    let mut legacy_fallback: Option<u64> = None;
     loop {
         match dec.next_frame_ref() {
             Ok(Some(DecodedFrameRef::Event {
                 type_id,
                 timestamp_ns,
+                values,
                 ..
             })) => {
                 events_seen += 1;
@@ -61,16 +76,25 @@ fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
                     .get(type_id)
                     .map(|s| s.name.as_str())
                     .ok_or(ParseTimestampError::UnknownTypeId(type_id.0))?;
-                if name == "SegmentMetadataEvent" {
-                    return timestamp_ns.ok_or(ParseTimestampError::MissingTimestamp);
+                if name == "ClockSyncEvent" {
+                    return match values.first() {
+                        Some(FieldValueRef::Varint(v)) => Ok(*v),
+                        _ => Err(ParseTimestampError::MissingRealtimeField),
+                    };
+                }
+                if name == "SegmentMetadataEvent"
+                    && let Some(ts) = timestamp_ns
+                    && ts >= LEGACY_EPOCH_NS_FLOOR
+                {
+                    legacy_fallback = Some(ts);
                 }
                 if events_seen >= 10 {
-                    return Err(ParseTimestampError::NotFoundInFirst10Events);
+                    return legacy_fallback.ok_or(ParseTimestampError::NoAnchorInFirst10Events);
                 }
             }
             Ok(Some(_)) => {} // schema/pool frame, keep going
             Ok(None) => {
-                return Err(ParseTimestampError::EndOfStream { events_seen });
+                return legacy_fallback.ok_or(ParseTimestampError::EndOfStream { events_seen });
             }
             Err(e) => {
                 return Err(ParseTimestampError::DecodeError(e.to_string()));
@@ -83,8 +107,8 @@ fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
 enum ParseTimestampError {
     InvalidHeader,
     UnknownTypeId(u16),
-    MissingTimestamp,
-    NotFoundInFirst10Events,
+    MissingRealtimeField,
+    NoAnchorInFirst10Events,
     EndOfStream { events_seen: u32 },
     DecodeError(String),
 }
@@ -94,13 +118,14 @@ impl std::fmt::Display for ParseTimestampError {
         match self {
             Self::InvalidHeader => write!(f, "invalid trace header"),
             Self::UnknownTypeId(id) => write!(f, "unknown type_id {id} not in registry"),
-            Self::MissingTimestamp => write!(f, "SegmentMetadataEvent had no timestamp"),
-            Self::NotFoundInFirst10Events => {
-                write!(f, "SegmentMetadataEvent not found in first 10 events")
-            }
+            Self::MissingRealtimeField => write!(f, "ClockSyncEvent had no realtime_ns field"),
+            Self::NoAnchorInFirst10Events => write!(
+                f,
+                "no ClockSyncEvent or legacy wall-clock SegmentMetadataEvent in first 10 events"
+            ),
             Self::EndOfStream { events_seen } => write!(
                 f,
-                "end of stream after {events_seen} events without SegmentMetadataEvent"
+                "end of stream after {events_seen} events without a clock anchor"
             ),
             Self::DecodeError(e) => write!(f, "decode error: {e}"),
         }
@@ -328,6 +353,63 @@ mod tests {
             .unwrap()
             .as_nanos() as u64;
         check!(now_nanos.abs_diff(ts) < 60_000_000_000);
+    }
+
+    fn legacy_segment_metadata_trace(timestamp_ns: u64) -> Vec<u8> {
+        use crate::telemetry::format::{SegmentMetadataEvent, WorkerParkEvent};
+        use dial9_trace_format::encoder::Encoder;
+
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write(&SegmentMetadataEvent {
+            timestamp_ns,
+            entries: vec![("k".into(), "v".into())],
+        })
+        .unwrap();
+        enc.write_infallible(&WorkerParkEvent {
+            timestamp_ns: 1_000_000_000,
+            worker_id: crate::telemetry::format::WorkerId::from(0usize),
+            local_queue: 0,
+            cpu_time_ns: 0,
+        });
+        enc.into_inner()
+    }
+
+    /// Legacy pre-clock-sync files stored wall clock in `SegmentMetadataEvent.timestamp_ns`,
+    /// parser fallback should recover it.
+    #[test]
+    fn test_parse_segment_timestamp_legacy_segment_metadata_fallback() {
+        // 2024-06-01T00:00:00Z: comfortably epoch-scale.
+        const LEGACY_WALL_NS: u64 = 1_717_200_000_000_000_000;
+        let data = legacy_segment_metadata_trace(LEGACY_WALL_NS);
+
+        let parsed = parse_segment_timestamp(&data).unwrap();
+        check!(parsed == LEGACY_WALL_NS);
+    }
+
+    #[test]
+    fn test_creation_epoch_secs_uses_legacy_segment_metadata_fallback() {
+        const LEGACY_WALL_NS: u64 = 1_717_200_000_000_000_000;
+        let data = legacy_segment_metadata_trace(LEGACY_WALL_NS);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy.0.bin");
+        std::fs::write(&path, &data).unwrap();
+        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &path);
+        check!(header_valid);
+        check!(epoch_secs == LEGACY_WALL_NS / 1_000_000_000);
+    }
+
+    /// A small (monotonic-looking) SegmentMeta.timestamp_ns must NOT be
+    /// mistaken for a legacy wall-clock value.
+    #[test]
+    fn test_parse_segment_timestamp_monotonic_segment_metadata_is_not_legacy() {
+        let data = legacy_segment_metadata_trace(12_345);
+
+        let result = parse_segment_timestamp(&data);
+        check!(matches!(
+            result,
+            Err(ParseTimestampError::EndOfStream { .. })
+                | Err(ParseTimestampError::NoAnchorInFirst10Events)
+        ));
     }
 
     #[test]

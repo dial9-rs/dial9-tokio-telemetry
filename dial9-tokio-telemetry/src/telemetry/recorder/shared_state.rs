@@ -92,10 +92,17 @@ impl SharedState {
     }
 
     pub(crate) fn record_event(&self, event: RawEvent) {
+        self.record_encodable_event(&event);
+    }
+
+    /// Record a user-defined [`Encodable`](crate::telemetry::buffer::Encodable) event.
+    pub(crate) fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
-        if let Some(handle) = buffer::record_event(event, &self.collector, &self.drain_epoch) {
+        if let Some(handle) =
+            buffer::record_encodable_event(event, &self.collector, &self.drain_epoch)
+        {
             self.tl_buffers.lock().unwrap().push(handle);
         }
     }
