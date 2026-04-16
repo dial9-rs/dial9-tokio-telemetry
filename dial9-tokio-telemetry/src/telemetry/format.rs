@@ -190,7 +190,7 @@ pub(crate) struct CpuSampleEvent {
     pub worker_id: WorkerId,
     pub tid: u32,
     pub source: CpuSampleSource,
-    pub thread_name: InternedString,
+    pub thread_name: Option<InternedString>,
     pub callchain: StackFrames,
 }
 
@@ -349,15 +349,6 @@ pub(crate) fn decode_ref<'a>(
     })
 }
 
-/// Resolve an interned thread name from the string pool, filtering out the
-/// sentinel `"<no thread name>"` placeholder.
-#[cfg(any(feature = "analysis", test))]
-fn resolve_thread_name(pool: &StringPool, interned: InternedString) -> Option<String> {
-    pool.get(interned)
-        .filter(|n| *n != "<no thread name>")
-        .map(|n| n.to_string())
-}
-
 /// Convert a zero-copy `TelemetryEventRef` into an owned `TelemetryEvent`,
 /// resolving any `InternedString` fields (e.g. `thread_name`) via the
 /// string pool that was active when the event was decoded.
@@ -405,7 +396,9 @@ pub(crate) fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> Tel
             timestamp_nanos: e.timestamp_ns,
             worker_id: e.worker_id,
             tid: e.tid,
-            thread_name: resolve_thread_name(pool, e.thread_name),
+            thread_name: e
+                .thread_name
+                .and_then(|s| pool.get(s).map(|n| n.to_string())),
             source: e.source,
             callchain: e.callchain.iter().collect(),
         },

@@ -216,10 +216,10 @@ impl Encodable for RawEvent {
                 target_worker: *target_worker,
             }),
             RawEvent::CpuSample(data) => {
-                let thread_name = match &data.thread_name {
-                    Some(name) => enc.intern_string(name.as_str()),
-                    None => enc.intern_string("<no thread name>"),
-                };
+                let thread_name = data
+                    .thread_name
+                    .as_ref()
+                    .map(|n| enc.intern_string(n.as_str()));
                 enc.encode(&CpuSampleEvent {
                     timestamp_ns: data.timestamp_nanos,
                     worker_id: data.worker_id,

@@ -312,7 +312,7 @@
             callchain: chain,
           });
           const tn = v.thread_name;
-          if (tn && tn !== "<no thread name>") {
+          if (tn) {
             threadNames.set(num(v.tid), tn);
           }
           break;

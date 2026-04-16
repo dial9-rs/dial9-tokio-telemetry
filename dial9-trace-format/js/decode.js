@@ -26,7 +26,16 @@ function decodeULEB128(view, offset) {
   }
 }
 
+const OPTIONAL_BIT = 0x80;
+
 function decodeFieldValue(view, offset, fieldType) {
+  // Handle optional modifier: high bit set means 1-byte presence prefix.
+  if (fieldType & OPTIONAL_BIT) {
+    const prefix = view.getUint8(offset);
+    if (prefix === 0x00) return [null, 1];
+    const [val, size] = decodeFieldValue(view, offset + 1, fieldType & 0x7F);
+    return [val, 1 + size];
+  }
   switch (fieldType) {
     case FieldType.I64: return [view.getBigInt64(offset, true), 8];
     case FieldType.F64: return [view.getFloat64(offset, true), 8];
@@ -191,7 +200,8 @@ class TraceDecoder {
     const values = {};
     for (const field of schema.fields) {
       const [val, consumed] = decodeFieldValue(this._view, this._pos, field.fieldType);
-      if (field.fieldType === FieldType.PooledString) {
+      const innerType = field.fieldType & 0x7F;
+      if (innerType === FieldType.PooledString && val !== null) {
         values[field.name] = this.stringPool.get(val) ?? `<unresolved pool#${val}>`;
       } else {
         values[field.name] = val;
