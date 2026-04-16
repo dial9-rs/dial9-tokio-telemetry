@@ -41,18 +41,18 @@ pub trait TraceWriter: Send {
     fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
         Ok(())
     }
-    /// Rotate the current segment if a time-based rotation boundary has been
-    /// crossed. Returns `true` if rotation occurred. The flush loop calls this
-    /// after draining all pending batches so that rotation happens at a clean
-    /// boundary. Default is a no-op.
-    fn rotate_if_due(&mut self) -> std::io::Result<bool> {
-        Ok(false)
-    }
-    /// Returns `true` if a time-based rotation boundary has been crossed and
-    /// the writer would rotate on the next `rotate_if_due` call. Used by the
-    /// flush loop to drain TL buffers before rotation.
-    fn rotation_due(&self) -> bool {
+    /// Returns `true` when the flush loop should drain all thread-local
+    /// buffers before the next step. For `RotatingWriter` this fires when a
+    /// rotation boundary is crossed *or* when a periodic drain interval
+    /// elapses (whichever comes first). Default returns `false`.
+    fn should_drain(&self) -> bool {
         false
+    }
+    /// Called by the flush loop after thread-local buffers have been drained
+    /// and flushed. The writer may rotate the segment, advance a drain timer,
+    /// or do nothing. Returns `true` if a segment rotation occurred.
+    fn drained(&mut self) -> std::io::Result<bool> {
+        Ok(false)
     }
 }
 
@@ -78,11 +78,11 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
         (**self).write_current_segment_metadata()
     }
-    fn rotate_if_due(&mut self) -> std::io::Result<bool> {
-        (**self).rotate_if_due()
+    fn should_drain(&self) -> bool {
+        (**self).should_drain()
     }
-    fn rotation_due(&self) -> bool {
-        (**self).rotation_due()
+    fn drained(&mut self) -> std::io::Result<bool> {
+        (**self).drained()
     }
 }
 
@@ -102,6 +102,9 @@ impl TraceWriter for NullWriter {
 
 /// Default rotation period: 1 minute.
 const DEFAULT_ROTATION_PERIOD: Duration = Duration::from_secs(60);
+
+/// Default maximum interval between thread-local buffer drains.
+const DEFAULT_DRAIN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// A writer that rotates trace files to bound disk usage and time.
 ///
@@ -150,6 +153,11 @@ pub struct RotatingWriter {
     /// Whether any real (non-metadata) events have been written to the current segment.
     /// Reset on rotation; used by `finalize()` to avoid sealing empty segments.
     has_real_events: bool,
+    /// How often the flush loop should drain thread-local buffers, independent
+    /// of rotation. Defaults to `min(rotation_period, 30s)`.
+    drain_interval: Duration,
+    /// Next wall-clock instant at which `should_drain()` returns true.
+    next_drain_time: SystemTime,
 }
 
 impl std::fmt::Debug for RotatingWriter {
@@ -228,16 +236,15 @@ impl RotatingWriter {
         let file = File::create(&first_path)?;
         let writer = BufWriter::new(file);
         let raw = Self::write_header_and_metadata(writer, &segment_metadata)?;
+        let now = time_source().system_time().as_std();
+        let drain_interval = rotation_period.min(DEFAULT_DRAIN_INTERVAL);
 
         Ok(Self {
             base_path,
             max_file_size,
             max_total_size,
             rotation_period,
-            next_rotation_time: Self::next_boundary(
-                time_source().system_time().as_std(),
-                rotation_period,
-            ),
+            next_rotation_time: Self::next_boundary(now, rotation_period),
             closed_files: VecDeque::new(),
             active_path: first_path,
             state: WriterState::Active(raw),
@@ -246,6 +253,8 @@ impl RotatingWriter {
             segment_metadata,
             dropped_events: 0,
             has_real_events: false,
+            drain_interval,
+            next_drain_time: Self::next_boundary(now, drain_interval),
         })
     }
 
@@ -265,16 +274,14 @@ impl RotatingWriter {
         let file = File::create(&active_path)?;
         let writer = BufWriter::new(file);
         let raw = Self::write_header_and_metadata(writer, &Vec::new())?;
+        let now = time_source().system_time().as_std();
 
         Ok(Self {
             base_path: path,
             max_file_size: u64::MAX,
             max_total_size: u64::MAX,
             rotation_period: Duration::MAX,
-            next_rotation_time: Self::next_boundary(
-                time_source().system_time().as_std(),
-                Duration::MAX,
-            ),
+            next_rotation_time: Self::next_boundary(now, Duration::MAX),
             closed_files: VecDeque::new(),
             active_path,
             state: WriterState::Active(raw),
@@ -283,6 +290,8 @@ impl RotatingWriter {
             segment_metadata: Vec::new(),
             dropped_events: 0,
             has_real_events: false,
+            drain_interval: DEFAULT_DRAIN_INTERVAL,
+            next_drain_time: Self::next_boundary(now, DEFAULT_DRAIN_INTERVAL),
         })
     }
 
@@ -397,6 +406,8 @@ impl RotatingWriter {
         self.has_real_events = false;
         self.next_rotation_time =
             Self::next_boundary(time_source().system_time().as_std(), self.rotation_period);
+        self.next_drain_time =
+            Self::next_boundary(time_source().system_time().as_std(), self.drain_interval);
 
         tracing::debug!(
             segment_index = self.next_index - 1,
@@ -509,16 +520,22 @@ impl TraceWriter for RotatingWriter {
         self.write_segment_metadata()
     }
 
-    fn rotate_if_due(&mut self) -> std::io::Result<bool> {
-        if self.has_real_events && time_source().system_time() >= self.next_rotation_time {
+    fn should_drain(&self) -> bool {
+        self.has_real_events && time_source().system_time() >= self.next_drain_time
+    }
+
+    fn drained(&mut self) -> std::io::Result<bool> {
+        if !self.has_real_events {
+            return Ok(false);
+        }
+        let now = time_source().system_time();
+        if now >= self.next_rotation_time {
             self.rotate()?;
             return Ok(true);
         }
+        // Periodic drain without rotation — just advance the drain timer.
+        self.next_drain_time = Self::next_boundary(now.as_std(), self.drain_interval);
         Ok(false)
-    }
-
-    fn rotation_due(&self) -> bool {
-        self.has_real_events && time_source().system_time() >= self.next_rotation_time
     }
 
     fn finalize(&mut self) -> std::io::Result<()> {
@@ -1401,10 +1418,10 @@ mod tests {
         // Advance past the 60s boundary
         tokio::time::advance(Duration::from_secs(61)).await;
 
-        // Time-based rotation is now driven by rotate_if_due, not write_encoded_batch.
+        // Time-based rotation is now driven by drained(), not write_encoded_batch.
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
-        writer.rotate_if_due().unwrap();
+        writer.drained().unwrap();
 
         assert!(
             writer.next_index > initial_index,
@@ -1507,7 +1524,7 @@ mod tests {
         for _ in 0..5 {
             tokio::time::advance(Duration::from_secs(61)).await;
             writer.write_encoded_batch(&test_batch()).unwrap();
-            writer.rotate_if_due().unwrap();
+            writer.drained().unwrap();
         }
         writer.finalize().unwrap();
 
@@ -1556,7 +1573,7 @@ mod tests {
         writer.write_encoded_batch(&test_batch()).unwrap();
         tokio::time::advance(Duration::from_secs(61)).await;
         writer.write_encoded_batch(&test_batch()).unwrap();
-        writer.rotate_if_due().unwrap();
+        writer.drained().unwrap();
         writer.finalize().unwrap();
 
         let total: usize = (0..10)
