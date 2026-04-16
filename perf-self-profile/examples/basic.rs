@@ -68,7 +68,7 @@ fn main() {
     }
 
     let mut sorted: Vec<_> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let total = samples.len() as f64;
     for (name, count) in sorted.iter().take(15) {
@@ -92,7 +92,7 @@ fn main() {
     }
 
     let mut sorted: Vec<_> = inclusive.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     for (name, count) in sorted.iter().take(15) {
         let pct = (*count as f64 / total) * 100.0;

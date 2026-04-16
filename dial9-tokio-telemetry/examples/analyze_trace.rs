@@ -101,7 +101,7 @@ fn main() {
             }
         }
         let mut top_unresolved: Vec<_> = unresolved_ids.into_iter().collect();
-        top_unresolved.sort_by(|a, b| b.1.cmp(&a.1));
+        top_unresolved.sort_by_key(|b| std::cmp::Reverse(b.1));
         println!("  Top unresolved waker IDs:");
         for (id, count) in top_unresolved.iter().take(5) {
             let raw = id.to_u64();
@@ -136,7 +136,7 @@ fn main() {
             );
         }
         let mut by_count: Vec<_> = wakes_by_loc.into_iter().collect();
-        by_count.sort_by(|a, b| b.1.cmp(&a.1));
+        by_count.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (loc, count) in &by_count {
             let name = loc.unwrap_or("<unknown>");
             println!("  {:>8} wakes from {}", count, name);
