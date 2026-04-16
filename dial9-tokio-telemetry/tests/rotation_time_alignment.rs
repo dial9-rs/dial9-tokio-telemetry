@@ -53,12 +53,18 @@ fn rotated_segments_have_bounded_time_overlap() {
     let (runtime, _handle) = guard.trace_runtime("main").build(builder).unwrap();
 
     // Generate continuous events across multiple rotation boundaries.
-    // With a 3s rotation period, running for ~10s should produce 3+ segments.
+    // With a 3s rotation period, we need to run for at least 9s to guarantee
+    // 3 rotations. Use wall-clock time to ensure we cross enough boundaries
+    // regardless of task scheduling.
     runtime.block_on(async {
+        let start = tokio::time::Instant::now();
+        let target_duration = Duration::from_secs(10);
+        
         let mut handles = Vec::new();
         for _ in 0..num_workers {
-            handles.push(tokio::spawn(async {
-                for _ in 0..500 {
+            handles.push(tokio::spawn(async move {
+                let start = tokio::time::Instant::now();
+                while start.elapsed() < target_duration {
                     tokio::task::yield_now().await;
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
@@ -66,6 +72,12 @@ fn rotated_segments_have_bounded_time_overlap() {
         }
         for h in handles {
             h.await.unwrap();
+        }
+        
+        // Ensure we've actually waited the full duration
+        let elapsed = start.elapsed();
+        if elapsed < target_duration {
+            tokio::time::sleep(target_duration - elapsed).await;
         }
     });
 
