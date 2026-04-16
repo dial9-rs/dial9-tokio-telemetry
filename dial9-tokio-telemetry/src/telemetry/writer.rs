@@ -109,6 +109,15 @@ const DEFAULT_ROTATION_PERIOD: Duration = Duration::from_secs(60);
 /// - `rotation_period`: a wall-clock-aligned time boundary is crossed
 ///   (default: 1 minute, aligned to round minute boundaries)
 ///
+/// **Prefer time-based rotation.** Time-based rotation is coordinated with the
+/// flush loop: thread-local buffers are drained before the segment is sealed,
+/// so each segment contains events from a clean, non-overlapping time window.
+/// Size-based rotation fires immediately when the threshold is crossed and does
+/// not drain thread-local buffers, so segments may contain events that overlap
+/// in time. Set `max_file_size` large enough that time-based rotation fires
+/// first under normal conditions (e.g. 100 MB or more). Size-based rotation
+/// then acts as a safety valve for unexpected data bursts.
+///
 /// `max_total_size` controls eviction: oldest files are deleted when total
 /// size across all files exceeds this budget.
 ///

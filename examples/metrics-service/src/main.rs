@@ -60,6 +60,9 @@ struct Args {
     #[arg(long, default_value = "4", help = "Number of worker threads")]
     worker_threads: usize,
 
+    #[arg(long, help = "Rotation period in seconds (default: 60)")]
+    rotation_period: Option<u64>,
+
     #[arg(long, help = "Demo mode: shorter run with smaller trace (<2MB)")]
     demo: bool,
 
@@ -137,6 +140,7 @@ fn main() -> std::io::Result<()> {
         .base_path(&args.trace_path)
         .max_file_size(args.trace_max_file_size)
         .max_total_size(args.trace_max_total_size)
+        .maybe_rotation_period(args.rotation_period.map(Duration::from_secs))
         .segment_metadata(vec![
             ("service".into(), "metrics-service".into()),
             ("worker_threads".into(), args.worker_threads.to_string()),

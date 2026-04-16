@@ -7,8 +7,12 @@
 //!
 //! This test uses a short rotation period (3s) and generates continuous events
 //! across multiple workers to exercise the rotation/flush coordination path.
+//!
+//! The test is built on `TelemetryCore` so we can attach a metrics sink to the
+//! flush thread and inspect its metrics when the test fails.
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryEvent, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryCore, TelemetryEvent};
+use metrique::local::{LocalFormat, OutputStyle};
 use std::time::Duration;
 
 /// Maximum allowed overlap between adjacent segments in seconds.
@@ -30,10 +34,23 @@ fn rotated_segments_have_bounded_time_overlap() {
         .build()
         .unwrap();
 
+    // Set up a metrics sink so we can capture flush-thread metrics for debugging.
+    let (render_queue, metrics_sink) =
+        metrique_writer::test_util::render_entry_sink(LocalFormat::new(OutputStyle::Pretty));
+
+    // Build the telemetry session via TelemetryCore so we get flush-thread
+    // metrics through the worker_metrics_sink.
+    let guard = TelemetryCore::builder()
+        .writer(writer)
+        .worker_metrics_sink(metrics_sink)
+        .build()
+        .unwrap();
+    guard.enable();
+
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(num_workers).enable_all();
 
-    let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
+    let (runtime, _handle) = guard.trace_runtime("main").build(builder).unwrap();
 
     // Generate continuous events across multiple rotation boundaries.
     // With a 3s rotation period, running for ~10s should produce 3+ segments.
@@ -53,7 +70,16 @@ fn rotated_segments_have_bounded_time_overlap() {
     });
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(Duration::from_secs(5))
+        .expect("graceful shutdown");
+
+    // Dump flush-thread metrics so they appear in test output on failure.
+    let flush_metrics = render_queue.entries();
+    eprintln!("flush-thread metrics ({} entries):", flush_metrics.len());
+    for entry in &flush_metrics {
+        eprintln!("{entry}");
+    }
 
     // Collect all sealed segment files, sorted by index.
     let mut segment_files: Vec<_> = std::fs::read_dir(dir.path())
@@ -142,12 +168,15 @@ fn rotated_segments_have_bounded_time_overlap() {
         assert!(
             overlap_secs <= MAX_OVERLAP_SECS,
             "segment {i} → {} overlap is {:.3}s, exceeds {MAX_OVERLAP_SECS}s tolerance. \
-             Segment {i} max={}, segment {} min={}",
+             Segment {i} max={}, segment {} min={}\n\
+             Flush-thread metrics ({} entries):\n{}",
             i + 1,
             overlap_secs,
             max_a,
             i + 1,
             min_b,
+            flush_metrics.len(),
+            flush_metrics.join("\n"),
         );
     }
 
