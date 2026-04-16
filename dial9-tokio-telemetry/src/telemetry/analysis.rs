@@ -1,6 +1,7 @@
 use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
 use crate::telemetry::format::{self, TelemetryEventRef, WorkerId};
 use crate::telemetry::task_metadata::TaskId;
+use dial9_trace_format::FieldValue;
 use dial9_trace_format::InternedString;
 use dial9_trace_format::decoder::{Decoder, StringPool};
 use std::cmp::Reverse;
@@ -75,6 +76,33 @@ impl TraceReader {
                     thread_names.insert(tid, name.clone());
                 }
                 events.push(owned);
+            } else {
+                // Unknown event name: capture as Custom, resolving any
+                // PooledString fields to String while the pool is available.
+                let fields = ev
+                    .field_names
+                    .iter()
+                    .zip(ev.fields.iter())
+                    .map(|(name, val)| {
+                        let owned = match val {
+                            dial9_trace_format::types::FieldValueRef::PooledString(id) => {
+                                let s = ev
+                                    .string_pool
+                                    .get(*id)
+                                    .unwrap_or("<unresolved>")
+                                    .to_string();
+                                FieldValue::String(s)
+                            }
+                            other => other.to_owned(),
+                        };
+                        (name.clone(), owned)
+                    })
+                    .collect();
+                events.push(TelemetryEvent::Custom {
+                    timestamp_nanos: ev.timestamp_ns,
+                    name: ev.name.to_string(),
+                    fields,
+                });
             }
         })
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
@@ -300,7 +328,8 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. }
             | TelemetryEvent::SegmentMetadata { .. }
-            | TelemetryEvent::ClockSync { .. } => {}
+            | TelemetryEvent::ClockSync { .. }
+            | TelemetryEvent::Custom { .. } => {}
         }
     }
 
@@ -816,7 +845,8 @@ mod tests {
     use super::*;
     use crate::telemetry::format::WorkerId;
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
-    use dial9_trace_format::InternedString;
+    use dial9_trace_format::encoder::Encoder;
+    use dial9_trace_format::{FieldValue, InternedString};
     const UNKNOWN_SPAWN_LOC: InternedString = InternedString::from_raw(0);
 
     #[test]
@@ -1323,5 +1353,250 @@ mod tests {
         ];
         let idle = detect_idle_workers(&events);
         assert!(idle.is_empty()); // no idle periods flagged because global queue was empty
+    }
+
+    #[test]
+    fn trace_reader_custom_events_resolve_interned_at_parse_time() {
+        // A custom event type with an interned string field.
+        #[derive(dial9_trace_format::TraceEvent)]
+        struct MyEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            label: InternedString,
+            count: u32,
+        }
+
+        // Helper: build a batch with one event whose label is an interned string.
+        fn make_batch(ts: u64, label: &str, count: u32) -> Vec<u8> {
+            let mut enc = Encoder::new();
+            let s = enc.intern_string_infallible(label);
+            enc.write(&MyEvent {
+                timestamp_ns: ts,
+                label: s,
+                count,
+            })
+            .unwrap();
+            enc.reset_to_infallible(Vec::new())
+        }
+
+        // Helper: extract resolved label strings from Custom events.
+        fn custom_labels(reader: &TraceReader) -> Vec<String> {
+            reader
+                .all_events
+                .iter()
+                .filter_map(|ev| {
+                    if let TelemetryEvent::Custom { fields, .. } = ev {
+                        if let FieldValue::String(s) = &fields[0].1 {
+                            return Some(s.clone());
+                        }
+                    }
+                    None
+                })
+                .collect()
+        }
+
+        // Three segments with different strings, same pool size (1 entry each).
+        // All three get raw ID 0 since each encoder starts fresh, but
+        // PooledString is resolved to String at parse time.
+        let mut output = Encoder::new().finish();
+        output.extend_from_slice(&make_batch(1_000, "alpha", 1));
+        output.extend_from_slice(&make_batch(2_000, "beta", 2));
+        output.extend_from_slice(&make_batch(3_000, "gamma", 3));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.bin");
+        std::fs::write(&path, &output).unwrap();
+
+        let reader = TraceReader::new(path.to_str().unwrap()).unwrap();
+        let labels = custom_labels(&reader);
+        assert_eq!(labels, vec!["alpha", "beta", "gamma"]);
+
+        // Colliding first value: two segments both intern "shared" as their
+        // first string (same raw ID), plus a second string that differs.
+        let mut output2 = Encoder::new().finish();
+        {
+            let mut enc = Encoder::new();
+            let shared = enc.intern_string_infallible("shared");
+            let unique = enc.intern_string_infallible("seg1_only");
+            enc.write(&MyEvent {
+                timestamp_ns: 10_000,
+                label: shared,
+                count: 1,
+            })
+            .unwrap();
+            enc.write(&MyEvent {
+                timestamp_ns: 11_000,
+                label: unique,
+                count: 2,
+            })
+            .unwrap();
+            output2.extend_from_slice(&enc.reset_to_infallible(Vec::new()));
+        }
+        {
+            let mut enc = Encoder::new();
+            let shared = enc.intern_string_infallible("shared");
+            let unique = enc.intern_string_infallible("seg2_only");
+            enc.write(&MyEvent {
+                timestamp_ns: 20_000,
+                label: shared,
+                count: 3,
+            })
+            .unwrap();
+            enc.write(&MyEvent {
+                timestamp_ns: 21_000,
+                label: unique,
+                count: 4,
+            })
+            .unwrap();
+            output2.extend_from_slice(&enc.reset_to_infallible(Vec::new()));
+        }
+
+        let path2 = dir.path().join("trace2.bin");
+        std::fs::write(&path2, &output2).unwrap();
+        let reader2 = TraceReader::new(path2.to_str().unwrap()).unwrap();
+        let labels2 = custom_labels(&reader2);
+        assert_eq!(labels2, vec!["shared", "seg1_only", "shared", "seg2_only"]);
+    }
+
+    #[test]
+    fn trace_reader_custom_event_primitive_fields_only() {
+        #[derive(dial9_trace_format::TraceEvent)]
+        struct CounterEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            count: u32,
+            rate: u64,
+        }
+
+        let mut enc = Encoder::new();
+        enc.write(&CounterEvent {
+            timestamp_ns: 5_000,
+            count: 42,
+            rate: 1_000_000,
+        })
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.bin");
+        std::fs::write(&path, enc.finish()).unwrap();
+
+        let reader = TraceReader::new(path.to_str().unwrap()).unwrap();
+        let custom: Vec<&TelemetryEvent> = reader
+            .all_events
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::Custom { .. }))
+            .collect();
+        assert_eq!(custom.len(), 1);
+
+        if let TelemetryEvent::Custom {
+            name,
+            timestamp_nanos,
+            fields,
+        } = &custom[0]
+        {
+            assert_eq!(name, "CounterEvent");
+            assert_eq!(*timestamp_nanos, Some(5_000));
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0], ("count".to_string(), FieldValue::Varint(42)));
+            assert_eq!(
+                fields[1],
+                ("rate".to_string(), FieldValue::Varint(1_000_000))
+            );
+        } else {
+            panic!("expected Custom");
+        }
+    }
+
+    #[test]
+    fn trace_reader_custom_event_inline_string_fields() {
+        #[derive(dial9_trace_format::TraceEvent)]
+        struct LogEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            message: String,
+            level: u32,
+        }
+
+        let mut enc = Encoder::new();
+        enc.write(&LogEvent {
+            timestamp_ns: 7_000,
+            message: "request handled".to_string(),
+            level: 2,
+        })
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.bin");
+        std::fs::write(&path, enc.finish()).unwrap();
+
+        let reader = TraceReader::new(path.to_str().unwrap()).unwrap();
+        let custom: Vec<&TelemetryEvent> = reader
+            .all_events
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::Custom { .. }))
+            .collect();
+        assert_eq!(custom.len(), 1);
+
+        if let TelemetryEvent::Custom {
+            name,
+            timestamp_nanos,
+            fields,
+        } = &custom[0]
+        {
+            assert_eq!(name, "LogEvent");
+            assert_eq!(*timestamp_nanos, Some(7_000));
+            assert_eq!(fields.len(), 2);
+            assert_eq!(
+                fields[0],
+                (
+                    "message".to_string(),
+                    FieldValue::String("request handled".to_string())
+                )
+            );
+            assert_eq!(fields[1], ("level".to_string(), FieldValue::Varint(2)));
+        } else {
+            panic!("expected Custom");
+        }
+    }
+
+    #[test]
+    fn trace_reader_custom_event_interned_string_resolved_eagerly() {
+        #[derive(dial9_trace_format::TraceEvent)]
+        struct MixedEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            tag: InternedString,
+            count: u32,
+        }
+
+        let mut enc = Encoder::new();
+        let tag = enc.intern_string_infallible("important");
+        enc.write(&MixedEvent {
+            timestamp_ns: 1_000,
+            tag,
+            count: 7,
+        })
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.bin");
+        std::fs::write(&path, enc.finish()).unwrap();
+
+        let reader = TraceReader::new(path.to_str().unwrap()).unwrap();
+        let event = reader
+            .all_events
+            .iter()
+            .find(|e| matches!(e, TelemetryEvent::Custom { .. }))
+            .expect("should have a custom event");
+
+        if let TelemetryEvent::Custom { fields, .. } = event {
+            // PooledString resolved to String at parse time
+            assert_eq!(fields[0].0, "tag");
+            assert_eq!(fields[0].1, FieldValue::String("important".to_string()));
+            assert_eq!(fields[1].0, "count");
+            assert_eq!(fields[1].1, FieldValue::Varint(7));
+        } else {
+            panic!("expected Custom");
+        }
     }
 }

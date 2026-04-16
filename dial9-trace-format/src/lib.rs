@@ -25,6 +25,7 @@ pub mod types;
 
 pub use dial9_trace_format_derive::TraceEvent;
 pub use types::EventEncoder;
+pub use types::FieldValue;
 pub use types::InternedString;
 pub use types::StackFrames;
 pub use types::TraceField;

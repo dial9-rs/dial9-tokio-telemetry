@@ -4,9 +4,12 @@
 //! 1. **Simple** — `#[derive(TraceEvent)]` struct passed directly to `record_event`
 //! 2. **Advanced** — manual `Encodable` impl with string interning for repeated values
 //!
+//! With the `analysis` feature, also demonstrates reading custom events back
+//! through `TraceReader` and resolving interned strings.
+//!
 //! Run with:
 //! ```sh
-//! cargo run --example custom_events
+//! cargo run --example custom_events --features analysis
 //! ```
 
 use dial9_tokio_telemetry::telemetry::{
@@ -120,6 +123,38 @@ fn main() -> std::io::Result<()> {
     assert_eq!(request_completed, 10);
     assert_eq!(http_request, 10);
     println!("✓ All custom events recorded successfully");
+
+    // ── Read custom events through TraceReader (requires `analysis` feature) ──
+    #[cfg(feature = "analysis")]
+    {
+        use dial9_tokio_telemetry::analysis_unstable::TraceReader;
+        use dial9_tokio_telemetry::telemetry::TelemetryEvent;
+
+        let reader = TraceReader::new(sealed.to_str().unwrap())?;
+
+        let custom_events: Vec<&TelemetryEvent> = reader
+            .all_events
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::Custom { .. }))
+            .collect();
+
+        println!(
+            "\n=== TraceReader: {} custom events ===",
+            custom_events.len()
+        );
+        assert_eq!(custom_events.len(), 20); // 10 RequestCompleted + 10 HttpRequestWire
+
+        for event in &custom_events {
+            if let TelemetryEvent::Custom { name, fields, .. } = event {
+                print!("  {name}:");
+                for (fname, fval) in fields {
+                    print!(" {fname}={fval:?}");
+                }
+                println!();
+            }
+        }
+        println!("✓ TraceReader custom event round-trip verified");
+    }
 
     Ok(())
 }

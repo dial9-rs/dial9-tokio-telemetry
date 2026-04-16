@@ -1,5 +1,5 @@
 use crate::telemetry::{format::WorkerId, task_metadata::TaskId};
-use dial9_trace_format::InternedString;
+use dial9_trace_format::{FieldValue, InternedString};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -198,6 +198,18 @@ pub enum TelemetryEvent {
         #[serde(rename = "realtime_ns")]
         realtime_nanos: u64,
     },
+    /// An application-defined custom event not recognized as a built-in type.
+    /// Fields are stored as `FieldValue`s in schema order. Interned string
+    /// fields are resolved to `FieldValue::String` at parse time.
+    Custom {
+        /// Monotonic nanoseconds, if the event schema has a timestamp.
+        #[serde(rename = "timestamp_ns")]
+        timestamp_nanos: Option<u64>,
+        /// Event type name from the schema (e.g. `"RequestCompleted"`).
+        name: String,
+        /// Named field values in schema order.
+        fields: Vec<(String, FieldValue)>,
+    },
 }
 
 impl TelemetryEvent {
@@ -238,6 +250,9 @@ impl TelemetryEvent {
             | TelemetryEvent::ClockSync {
                 timestamp_nanos, ..
             } => Some(*timestamp_nanos),
+            TelemetryEvent::Custom {
+                timestamp_nanos, ..
+            } => *timestamp_nanos,
         }
     }
 
@@ -255,7 +270,8 @@ impl TelemetryEvent {
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. }
             | TelemetryEvent::SegmentMetadata { .. }
-            | TelemetryEvent::ClockSync { .. } => None,
+            | TelemetryEvent::ClockSync { .. }
+            | TelemetryEvent::Custom { .. } => None,
         }
     }
 

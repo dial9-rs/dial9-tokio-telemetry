@@ -80,6 +80,33 @@ pub enum FieldValue {
     StringMap(Vec<(Vec<u8>, Vec<u8>)>),
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for FieldValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            FieldValue::I64(v) => serializer.serialize_i64(*v),
+            FieldValue::F64(v) => serializer.serialize_f64(*v),
+            FieldValue::Bool(v) => serializer.serialize_bool(*v),
+            FieldValue::String(v) => serializer.serialize_str(v),
+            FieldValue::Bytes(v) => serializer.serialize_bytes(v),
+            FieldValue::PooledString(id) => id.serialize(serializer),
+            FieldValue::StackFrames(v) => v.serialize(serializer),
+            FieldValue::Varint(v) => serializer.serialize_u64(*v),
+            FieldValue::StringMap(pairs) => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(pairs.len()))?;
+                for (k, v) in pairs {
+                    map.serialize_entry(
+                        &std::string::String::from_utf8_lossy(k),
+                        &std::string::String::from_utf8_lossy(v),
+                    )?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
 impl FieldValue {
     pub fn string(s: &str) -> Self {
         FieldValue::String(s.to_string())
@@ -372,6 +399,25 @@ impl<'a> FieldValueRef<'a> {
                     pos,
                 ))
             }
+        }
+    }
+
+    /// Convert this zero-copy field value into an owned [`FieldValue`].
+    pub fn to_owned(&self) -> FieldValue {
+        match self {
+            FieldValueRef::I64(v) => FieldValue::I64(*v),
+            FieldValueRef::F64(v) => FieldValue::F64(*v),
+            FieldValueRef::Bool(v) => FieldValue::Bool(*v),
+            FieldValueRef::String(v) => FieldValue::String((*v).to_string()),
+            FieldValueRef::Bytes(v) => FieldValue::Bytes(v.to_vec()),
+            FieldValueRef::PooledString(id) => FieldValue::PooledString(*id),
+            FieldValueRef::StackFrames(sf) => FieldValue::StackFrames(sf.iter().collect()),
+            FieldValueRef::Varint(v) => FieldValue::Varint(*v),
+            FieldValueRef::StringMap(sm) => FieldValue::StringMap(
+                sm.iter()
+                    .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
+                    .collect(),
+            ),
         }
     }
 }
