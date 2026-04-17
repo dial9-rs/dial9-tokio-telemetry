@@ -436,6 +436,7 @@ pub(crate) fn record_encodable_event(
         if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
             buf.flush_epoch.store(current_epoch);
             collector.accept_flush(buf.flush());
+            buf.flush_epoch.store(current_epoch);
         }
         if first_call {
             Some(TlBufferHandle {
