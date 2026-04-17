@@ -1,6 +1,5 @@
 ---
 source: dial9-trace-format-derive/src/lib.rs
-assertion_line: 184
 expression: "expand_to_string(quote!\n{\n    struct SimpleEvent\n    { #[traceevent(timestamp)] timestamp_ns: u64, value: u32, }\n})"
 ---
 #[derive(Debug, Clone)]
@@ -32,15 +31,15 @@ impl ::dial9_trace_format::TraceEvent for SimpleEvent {
     fn decode<'a>(
         timestamp_ns: Option<u64>,
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
-        field_names: &[String],
+        field_defs: &[::dial9_trace_format::schema::FieldDef],
     ) -> Option<Self::Ref<'a>> {
         Some(SimpleEventRef {
             timestamp_ns: timestamp_ns?,
             value: {
-                let val = field_names
+                let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(n, _)| n.as_str() == "value")
+                    .find(|(f, _)| f.name == "value")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u32 as ::dial9_trace_format::TraceField>::decode_ref(v)?,

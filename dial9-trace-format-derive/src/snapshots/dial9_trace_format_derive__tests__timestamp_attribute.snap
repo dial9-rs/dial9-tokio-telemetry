@@ -1,6 +1,5 @@
 ---
 source: dial9-trace-format-derive/src/lib.rs
-assertion_line: 243
 expression: "expand_to_string(quote!\n{\n    struct PollStart\n    {\n        #[traceevent(timestamp)] timestamp_ns: u64, worker_id: u64, task_id:\n        u64,\n    }\n})"
 ---
 #[derive(Debug, Clone)]
@@ -36,15 +35,15 @@ impl ::dial9_trace_format::TraceEvent for PollStart {
     fn decode<'a>(
         timestamp_ns: Option<u64>,
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
-        field_names: &[String],
+        field_defs: &[::dial9_trace_format::schema::FieldDef],
     ) -> Option<Self::Ref<'a>> {
         Some(PollStartRef {
             timestamp_ns: timestamp_ns?,
             worker_id: {
-                let val = field_names
+                let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(n, _)| n.as_str() == "worker_id")
+                    .find(|(f, _)| f.name == "worker_id")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -52,10 +51,10 @@ impl ::dial9_trace_format::TraceEvent for PollStart {
                 }
             },
             task_id: {
-                let val = field_names
+                let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(n, _)| n.as_str() == "task_id")
+                    .find(|(f, _)| f.name == "task_id")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,

@@ -48,8 +48,7 @@ impl TraceReader {
         // After a mid-stream header the pool resets, so deferred resolution
         // would use the wrong pool for earlier batches.
         dec.for_each_event(|ev| {
-            if let Some(r) = format::decode_ref(ev.name, ev.timestamp_ns, ev.fields, ev.field_names)
-            {
+            if let Some(r) = format::decode_ref(ev.name, ev.timestamp_ns, ev.fields, ev.schema) {
                 match &r {
                     TelemetryEventRef::PollStart(e) => {
                         populate_spawn_loc(&mut spawn_locations, e.spawn_loc, ev.string_pool);
@@ -81,8 +80,7 @@ impl TraceReader {
                 // Unknown event name: capture as Custom, resolving any
                 // PooledString fields to String while the pool is available.
                 let fields = ev
-                    .field_names
-                    .iter()
+                    .field_names()
                     .zip(ev.fields.iter())
                     .map(|(name, val)| {
                         let owned = match val {
@@ -96,7 +94,7 @@ impl TraceReader {
                             }
                             other => other.to_owned(),
                         };
-                        (name.clone(), owned)
+                        (name.to_string(), owned)
                     })
                     .collect();
                 events.push(TelemetryEvent::Custom {

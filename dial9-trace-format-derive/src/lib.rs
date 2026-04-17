@@ -79,8 +79,8 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
         });
         decode_tokens.push(quote! {
             #field_name: {
-                let val = field_names.iter().zip(fields.iter())
-                    .find(|(n, _)| n.as_str() == #field_name_str)
+                let val = field_defs.iter().zip(fields.iter())
+                    .find(|(f, _)| f.name == #field_name_str)
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <#ty as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -148,7 +148,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
                 #(#encode_tokens)*
                 Ok(())
             }
-            fn decode<'a>(timestamp_ns: Option<u64>, fields: &[::dial9_trace_format::types::FieldValueRef<'a>], field_names: &[String]) -> Option<Self::Ref<'a>> {
+            fn decode<'a>(timestamp_ns: Option<u64>, fields: &[::dial9_trace_format::types::FieldValueRef<'a>], field_defs: &[::dial9_trace_format::schema::FieldDef]) -> Option<Self::Ref<'a>> {
                 Some(#ref_name {
                     #decode_timestamp_init
                     #(#decode_tokens,)*

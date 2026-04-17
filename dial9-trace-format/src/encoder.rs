@@ -333,17 +333,7 @@ impl<W: Write> Encoder<W> {
         codec::encode_u24_le(ts_delta, &mut self.state.writer)?;
         let mut enc = EventEncoder::new(&mut self.state);
         for (i, v) in field_values.iter().enumerate() {
-            if schema.entry.fields[i].field_type.is_optional() {
-                match v {
-                    FieldValue::None => enc.state.writer.write_all(&[0x00])?,
-                    other => {
-                        enc.state.writer.write_all(&[0x01])?;
-                        enc.write_field_value(other)?;
-                    }
-                }
-            } else {
-                enc.write_field_value(v)?;
-            }
+            enc.write_field_value(v, schema.entry.fields[i].field_type)?;
         }
         Ok(())
     }

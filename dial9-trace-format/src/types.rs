@@ -736,7 +736,22 @@ impl<'a, W: Write> EventEncoder<'a, W> {
     }
 
     /// Write a [`FieldValue`] with its associated [`FieldType`].
-    pub fn write_field_value(&mut self, value: &FieldValue) -> io::Result<()> {
+    /// For optional field types, writes the presence prefix byte (`0x00` for
+    /// `None`, `0x01` + inner encoding for present values).
+    pub fn write_field_value(
+        &mut self,
+        value: &FieldValue,
+        field_type: FieldType,
+    ) -> io::Result<()> {
+        if field_type.is_optional() {
+            match value {
+                FieldValue::None => return self.state.writer.write_all(&[0x00]),
+                other => {
+                    self.state.writer.write_all(&[0x01])?;
+                    return other.encode(&mut self.state.writer);
+                }
+            }
+        }
         value.encode(&mut self.state.writer)
     }
 }

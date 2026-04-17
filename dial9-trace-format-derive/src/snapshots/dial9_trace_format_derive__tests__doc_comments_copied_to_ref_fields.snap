@@ -1,6 +1,5 @@
 ---
 source: dial9-trace-format-derive/src/lib.rs
-assertion_line: 227
 expression: "expand_to_string(quote!\n{\n    #[doc = r\" Root documentation\"] struct DocEvent\n    {\n        #[traceevent(timestamp)] #[doc = r\" Event timestamp in nanoseconds.\"]\n        timestamp_ns: u64, #[doc = r\" The worker thread ID.\"] worker_id: u64,\n        #[doc = r\" Number of items in the local queue.\"] local_queue: u8,\n    }\n})"
 ---
 /// Root documentation
@@ -40,15 +39,15 @@ impl ::dial9_trace_format::TraceEvent for DocEvent {
     fn decode<'a>(
         timestamp_ns: Option<u64>,
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
-        field_names: &[String],
+        field_defs: &[::dial9_trace_format::schema::FieldDef],
     ) -> Option<Self::Ref<'a>> {
         Some(DocEventRef {
             timestamp_ns: timestamp_ns?,
             worker_id: {
-                let val = field_names
+                let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(n, _)| n.as_str() == "worker_id")
+                    .find(|(f, _)| f.name == "worker_id")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -56,10 +55,10 @@ impl ::dial9_trace_format::TraceEvent for DocEvent {
                 }
             },
             local_queue: {
-                let val = field_names
+                let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(n, _)| n.as_str() == "local_queue")
+                    .find(|(f, _)| f.name == "local_queue")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u8 as ::dial9_trace_format::TraceField>::decode_ref(v)?,

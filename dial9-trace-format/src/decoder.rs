@@ -59,8 +59,15 @@ pub struct RawEvent<'a, 'f> {
     pub name: &'f str,
     pub timestamp_ns: Option<u64>,
     pub fields: &'f [FieldValueRef<'a>],
-    pub field_names: &'f [String],
+    pub schema: &'f SchemaEntry,
     pub string_pool: &'f StringPool,
+}
+
+impl<'a, 'f> RawEvent<'a, 'f> {
+    /// Field names from the schema, parallel to `fields`.
+    pub fn field_names(&self) -> impl Iterator<Item = &'f str> {
+        self.schema.fields.iter().map(|f| f.name.as_str())
+    }
 }
 
 /// A map from interned string IDs to their resolved string values.
@@ -124,10 +131,9 @@ pub enum DecodedFrameRef<'a> {
 }
 
 struct SchemaCache {
-    name: String,
+    entry: SchemaEntry,
+    /// Raw field type tags for fast decode (avoids re-extracting from entry.fields).
     field_tags: Vec<u8>,
-    field_names: Vec<String>,
-    has_timestamp: bool,
 }
 
 /// Streaming trace file decoder.
@@ -215,7 +221,7 @@ impl<'a> Decoder<'a> {
             .and_then(|s| s.as_ref())
             .map(|c| SchemaInfo {
                 field_tags: &c.field_tags,
-                has_timestamp: c.has_timestamp,
+                has_timestamp: c.entry.has_timestamp,
             })
     }
 
@@ -225,10 +231,8 @@ impl<'a> Decoder<'a> {
             self.schema_cache.resize_with(idx + 1, || None);
         }
         self.schema_cache[idx] = Some(SchemaCache {
-            name: entry.name.clone(),
             field_tags: entry.fields.iter().map(|f| f.field_type as u8).collect(),
-            field_names: entry.fields.iter().map(|f| f.name.clone()).collect(),
-            has_timestamp: entry.has_timestamp,
+            entry: entry.clone(),
         });
         self.registry.register(type_id, entry)
     }
@@ -394,13 +398,6 @@ impl<'a> Decoder<'a> {
         mut f: impl for<'f> FnMut(RawEvent<'a, 'f>) -> Result<(), E>,
     ) -> Result<(), TryForEachError<E>> {
         let mut values_buf: Vec<FieldValueRef<'a>> = Vec::new();
-        // Cloned schema metadata, reused across iterations to avoid
-        // re-cloning when the same event type repeats (common case).
-        let mut cached_type_id = WireTypeId(u16::MAX);
-        let mut cached_name = String::new();
-        let mut cached_tags = Vec::<u8>::new();
-        let mut cached_names = Vec::<String>::new();
-        let mut cached_has_ts = false;
         while self.pos < self.data.len() {
             let remaining = &self.data[self.pos..];
             let tag = match remaining.first() {
@@ -422,30 +419,21 @@ impl<'a> Decoder<'a> {
                             }));
                         }
                     };
-                    // Clone schema metadata into locals so we release the
-                    // borrow on self.schema_cache before mutating self.pos.
-                    if type_id != cached_type_id {
-                        let cache = match self
-                            .schema_cache
-                            .get(type_id.0 as usize)
-                            .and_then(|s| s.as_ref())
-                        {
-                            Some(c) => c,
-                            None => {
-                                return Err(TryForEachError::Decode(DecodeError {
-                                    pos: self.pos,
-                                    message: format!("unknown type_id {type_id:?}"),
-                                }));
-                            }
-                        };
-                        cached_type_id = type_id;
-                        cached_name.clone_from(&cache.name);
-                        cached_tags.clone_from(&cache.field_tags);
-                        cached_names.clone_from(&cache.field_names);
-                        cached_has_ts = cache.has_timestamp;
-                    }
+                    let cache = match self
+                        .schema_cache
+                        .get(type_id.0 as usize)
+                        .and_then(|s| s.as_ref())
+                    {
+                        Some(c) => c,
+                        None => {
+                            return Err(TryForEachError::Decode(DecodeError {
+                                pos: self.pos,
+                                message: format!("unknown type_id {type_id:?}"),
+                            }));
+                        }
+                    };
 
-                    let timestamp_ns = if cached_has_ts {
+                    let timestamp_ns = if cache.entry.has_timestamp {
                         match codec::decode_u24_le(&remaining[pos..]) {
                             Some(delta) => {
                                 pos += 3;
@@ -463,7 +451,7 @@ impl<'a> Decoder<'a> {
                     };
 
                     values_buf.clear();
-                    for &ftag in &cached_tags {
+                    for &ftag in &cache.field_tags {
                         let inner_type = match FieldType::from_tag(ftag) {
                             Some(ft) => ft,
                             None => {
@@ -517,16 +505,28 @@ impl<'a> Decoder<'a> {
                             }
                         }
                     }
-                    self.pos += pos;
-                    if let Some(ts) = timestamp_ns {
-                        self.timestamp_base_ns = ts;
+                    // Update mutable state. The borrow checker allows this
+                    // because `cache` borrows `self.schema_cache` while we
+                    // mutate `self.pos` and `self.timestamp_base_ns`, which
+                    // are disjoint fields. We use a block with destructured
+                    // refs to make this explicit.
+                    {
+                        let Self {
+                            pos: self_pos,
+                            timestamp_base_ns,
+                            ..
+                        } = self;
+                        *self_pos += pos;
+                        if let Some(ts) = timestamp_ns {
+                            *timestamp_base_ns = ts;
+                        }
                     }
                     f(RawEvent {
                         type_id,
-                        name: &cached_name,
+                        name: &cache.entry.name,
                         timestamp_ns,
                         fields: &values_buf,
-                        field_names: &cached_names,
+                        schema: &cache.entry,
                         string_pool: &self.string_pool,
                     })
                     .map_err(TryForEachError::User)?;
@@ -547,7 +547,6 @@ impl<'a> Decoder<'a> {
                 _ => {
                     // Mid-stream header = reset frame (tag 0x54 = 'T' from TRC\0)
                     if tag == codec::MAGIC[0] && self.try_consume_reset_header() {
-                        cached_type_id = WireTypeId(u16::MAX);
                         continue;
                     }
                     match self.next_frame_ref() {
