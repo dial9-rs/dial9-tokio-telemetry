@@ -1033,6 +1033,13 @@ fn run_flush_loop(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
 
+        // When disabled, skip all recording work (queue sampling, metadata
+        // merging, drain coordination, flush). The loop still wakes every
+        // 5ms to check for control commands and the exit signal.
+        if !exit && !shared.enabled.load(Ordering::Relaxed) {
+            continue;
+        }
+
         let now = Instant::now();
         if now.duration_since(last_sample) >= sample_interval {
             last_sample = now;
