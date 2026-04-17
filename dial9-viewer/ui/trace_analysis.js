@@ -552,7 +552,26 @@
       spans.sort((a, b) => a.start - b.start);
     }
 
-    return { spansByWorker, spanMeta };
+    // Compute depth for each span by walking the parent chain
+    const depthCache = new Map(); // spanId → depth
+    function getDepth(spanId) {
+      if (spanId == null) return -1;
+      if (depthCache.has(spanId)) return depthCache.get(spanId);
+      const meta = spanMeta.get(spanId);
+      if (!meta) { depthCache.set(spanId, 0); return 0; }
+      const d = getDepth(meta.parentSpanId) + 1;
+      depthCache.set(spanId, d);
+      return d;
+    }
+    let maxDepth = 0;
+    for (const spans of Object.values(spansByWorker)) {
+      for (const s of spans) {
+        s.depth = getDepth(s.spanId);
+        if (s.depth > maxDepth) maxDepth = s.depth;
+      }
+    }
+
+    return { spansByWorker, spanMeta, maxDepth };
   }
 
   // Export for both browser and Node.js

@@ -467,6 +467,7 @@
                 <button id="btn-tz-mode" title="Toggle between UTC and local timezone for absolute timestamps" style="display:none">TZ: UTC</button>
                 <button id="btn-reset">New File</button>
             </div>
+            <div id="span-legend" style="display:none;padding:2px 12px;background:#1a1a2e;border-bottom:1px solid #333;font-size:0.78em;color:#aaa"></div>
             <div id="main-area" tabindex="0" role="application" aria-label="Trace timeline">
                 <div id="selection-overlay"></div>
                 <canvas id="crosshair-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10"></canvas>
@@ -557,7 +558,7 @@
         <script src="format.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData, buildSpanData } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -624,6 +625,22 @@
                 if (durUs > 100)  return "#ff8a65"; // >100µs: orange
                 if (durUs > 10)   return "#4fc3f7"; // >10µs: bright blue
                 return "#2a5a7a";                    // ≤10µs: dim blue
+            }
+
+            const SPAN_COLORS = [
+                "#7c4dff", "#00bfa5", "#ff6e40", "#448aff", "#c6ff00",
+                "#ea80fc", "#ff5252", "#64ffda", "#ffd740", "#b388ff",
+                "#69f0ae", "#ff80ab", "#40c4ff", "#ffab40", "#b2ff59",
+                "#8c9eff", "#f48fb1", "#80cbc4", "#ffe57f", "#ce93d8",
+            ];
+            const _spanColorMap = new Map();
+            function spanColor(name) {
+                let color = _spanColorMap.get(name);
+                if (!color) {
+                    color = SPAN_COLORS[_spanColorMap.size % SPAN_COLORS.length];
+                    _spanColorMap.set(name, color);
+                }
+                return color;
             }
 
             function pollColorDim(startNs, endNs) {
@@ -740,11 +757,15 @@
             let wakesByWorker = {}; // workerId → [{timestamp, wakerTaskId, wokenTaskId}]
             // Scheduling delays: wake → next poll for same task
             let schedDelays = []; // [{wakeTime, pollTime, delay, taskId, wakerTaskId, worker}]
+            // Span data from custom events (SpanEnterEvent/SpanExitEvent)
+            let spansByWorker = {}; // workerId → [{start, end, spanId, spanName, fields, parentSpanId, depth}]
+            let spanMeta = new Map(); // spanId → {spanName, fields, parentSpanId}
+            let spanMaxDepth = 0;
             // Lane canvases per worker (populated by buildLanes)
             let laneCanvases = {};
 
             const LABEL_W = 100;
-            const LANE_H = 60;
+            const LANE_H = 70;
 
             // ── DOM refs ──
             const dropZone = document.getElementById("drop-zone");
@@ -1046,6 +1067,16 @@
 
                 schedDelays = computeSchedulingDelays(workerSpans, workerIds, wakesByTask);
                 console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);
+
+                // Build span data from custom events
+                if (trace.customEvents && trace.customEvents.length > 0) {
+                    const spanResult2 = buildSpanData(trace.customEvents);
+                    spansByWorker = spanResult2.spansByWorker;
+                    spanMeta = spanResult2.spanMeta;
+                    spanMaxDepth = spanResult2.maxDepth;
+                    const totalSpans = Object.values(spansByWorker).reduce((s, a) => s + a.length, 0);
+                    console.log(`Span events: ${totalSpans} intervals across ${Object.keys(spansByWorker).length} workers, ${spanMeta.size} unique spans, maxDepth=${spanMaxDepth}`);
+                }
             }
 
             function showViewer(filename) {
@@ -1083,6 +1114,22 @@
 
                 buildLanes();
                 updatePointsOfInterest();
+
+                // Populate span legend
+                {
+                    const legend = document.getElementById("span-legend");
+                    const allNames = new Set();
+                    for (const spans of Object.values(spansByWorker)) {
+                        for (const s of spans) allNames.add(s.spanName);
+                    }
+                    if (allNames.size > 0) {
+                        const items = [...allNames].sort().map(name =>
+                            `<span style="display:inline-block;width:10px;height:10px;background:${spanColor(name)};border-radius:2px;margin-right:3px;vertical-align:middle"></span>${esc(name)}`
+                        ).join("&nbsp;&nbsp;");
+                        legend.innerHTML = `<span style="color:#666">Spans:</span> ${items}`;
+                        legend.style.display = "block";
+                    }
+                }
                 // Show/hide sched panel button based on whether sched events exist
                 let hasSchedEvents = false;
                 for (const w of workerIds) {
@@ -1543,6 +1590,79 @@
                         ctx.lineTo(x + 3, bandTop + bandH + 7);
                         ctx.closePath();
                         ctx.fill();
+                    }
+                }
+
+                // Draw span bars below the poll band
+                {
+                    const wSpans = spansByWorker[workerId];
+                    if (wSpans && wSpans.length > 0) {
+                        const spanTop = bandTop + bandH + 8;
+                        const spanH = 10;
+                        // Binary search for first visible span
+                        let lo = 0, hi = wSpans.length - 1;
+                        while (lo <= hi) {
+                            const mid = (lo + hi) >> 1;
+                            if (wSpans[mid].end < viewStart) lo = mid + 1;
+                            else hi = mid - 1;
+                        }
+                        // Count visible spans (cap scan at 3000 to avoid slow iteration)
+                        let visCount = 0;
+                        for (let i = lo; i < wSpans.length && wSpans[i].start <= viewEnd; i++) {
+                            if (++visCount > 3000) break;
+                        }
+                        if (visCount > 3000) {
+                            // Too many spans: sample every Nth span
+                            const step = Math.max(1, Math.ceil(wSpans.length / 1000));
+                            const spanTop2 = bandTop + bandH + 8;
+                            for (let i = lo; i < wSpans.length; i += step) {
+                                const s = wSpans[i];
+                                if (s.start > viewEnd) break;
+                                const x = Math.max(0, nsToX(s.start, pw)) | 0;
+                                ctx.fillStyle = spanColor(s.spanName);
+                                ctx.globalAlpha = 0.6;
+                                ctx.fillRect(x, spanTop2, 1, spanH);
+                            }
+                            ctx.globalAlpha = 1.0;
+                        } else if (nsPerPx > 5000) {
+                            // LOD: bucket by pixel
+                            let prevPx = -2, prevColor = null, runStart = -1;
+                            for (let i = lo; i < wSpans.length; i++) {
+                                const s = wSpans[i];
+                                if (s.start > viewEnd) break;
+                                const x1 = Math.max(0, nsToX(s.start, pw)) | 0;
+                                const x2 = Math.min(pw, nsToX(s.end, pw)) | 0;
+                                const color = spanColor(s.spanName);
+                                if (x1 <= prevPx + 1 && color === prevColor) {
+                                    prevPx = Math.max(prevPx, x2);
+                                } else {
+                                    if (prevColor) {
+                                        ctx.fillStyle = prevColor;
+                                        ctx.fillRect(runStart, spanTop, Math.max(prevPx - runStart, 1), spanH);
+                                    }
+                                    runStart = x1;
+                                    prevPx = Math.max(x1, x2);
+                                    prevColor = color;
+                                }
+                            }
+                            if (prevColor) {
+                                ctx.fillStyle = prevColor;
+                                ctx.fillRect(runStart, spanTop, Math.max(prevPx - runStart, 1), spanH);
+                            }
+                        } else {
+                            const rowH = 10;
+                            const maxRows = Math.floor((LANE_H - spanTop) / rowH);
+                            for (let i = lo; i < wSpans.length; i++) {
+                                const s = wSpans[i];
+                                if (s.start > viewEnd) break;
+                                const x1 = Math.max(0, nsToX(s.start, pw));
+                                const x2 = Math.min(pw, nsToX(s.end, pw));
+                                const d = Math.min(s.depth || 0, maxRows - 1);
+                                const y = spanTop + d * rowH;
+                                ctx.fillStyle = spanColor(s.spanName);
+                                ctx.fillRect(x1, y, Math.max(x2 - x1, 1), rowH - 1);
+                            }
+                        }
                     }
                 }
 
@@ -2953,6 +3073,31 @@
                             if (s.schedSamples && s.schedSamples.length > 0) {
                                 pollInfo += `<span class="label">Sched events:</span> <span class="value">⚠️ ${s.schedSamples.length} blocking</span> <span style="color:#666">(click to view)</span><br>`;
                             }
+                            // Count span events within this poll
+                            const wSpans = spansByWorker[w];
+                            if (wSpans && wSpans.length > 0) {
+                                let spanCount = 0;
+                                const spanNames = {};
+                                // Binary search for first span that could overlap this poll
+                                let sLo = 0, sHi = wSpans.length - 1;
+                                while (sLo <= sHi) {
+                                    const mid = (sLo + sHi) >> 1;
+                                    if (wSpans[mid].end < s.start) sLo = mid + 1;
+                                    else sHi = mid - 1;
+                                }
+                                for (let si = sLo; si < wSpans.length; si++) {
+                                    const sp = wSpans[si];
+                                    if (sp.start > s.end) break;
+                                    if (sp.start >= s.start && sp.end <= s.end) {
+                                        spanCount++;
+                                        spanNames[sp.spanName] = (spanNames[sp.spanName] || 0) + 1;
+                                    }
+                                }
+                                if (spanCount > 0) {
+                                    const summary = Object.entries(spanNames).map(([n, c]) => `${n}×${c}`).join(", ");
+                                    pollInfo += `<span class="label">Spans:</span> <span class="value">${spanCount}</span> <span style="color:#666">(${summary})</span><br>`;
+                                }
+                            }
                         }
                     }
 
@@ -2977,13 +3122,47 @@
                         taskCountInfo = `<br><span class="label">Active Tasks:</span> <span class="value">${taskCount}</span>`;
                     }
 
+                    // Span detail: if mouse is near the span sub-band, find the hovered span
+                    let spanInfo = "";
+                    {
+                        const wSpans = spansByWorker[w];
+                        if (wSpans && wSpans.length > 0) {
+                            // Find span at current timestamp using binary search
+                            let lo = 0, hi = wSpans.length - 1, hit = null;
+                            while (lo <= hi) {
+                                const mid = (lo + hi) >> 1;
+                                if (wSpans[mid].end < ns) lo = mid + 1;
+                                else if (wSpans[mid].start > ns) hi = mid - 1;
+                                else { hit = wSpans[mid]; break; }
+                            }
+                            if (hit) {
+                                const durNs = hit.end - hit.start;
+                                spanInfo = `<br><span class="label">Span:</span> <span class="value">${esc(hit.spanName)}</span> <span style="color:#888">${formatHumanDuration(durNs)}</span>`;
+                                const fields = hit.fields;
+                                if (fields && typeof fields === "object") {
+                                    const entries = Object.entries(fields);
+                                    if (entries.length > 0) {
+                                        spanInfo += `<br><span class="label">Fields:</span> <span class="value">${entries.map(([k, v]) => esc(k) + "=" + esc(v)).join(", ")}</span>`;
+                                    }
+                                }
+                                if (hit.parentSpanId != null) {
+                                    const parent = spanMeta.get(hit.parentSpanId);
+                                    if (parent) {
+                                        spanInfo += `<br><span class="label">Parent:</span> <span class="value">${esc(parent.spanName)}</span>`;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     tooltip.innerHTML =
                         `<span class="label">Worker</span> <span class="value">${w}</span> · <span class="label">Time</span> <span class="value">${fmtTs(ns)}</span><br>` +
                         `<span class="label">State:</span> ${state}${stateDetail}<br>` +
                         schedInfo +
                         pollInfo +
                         qInfo +
-                        taskCountInfo;
+                        taskCountInfo +
+                        spanInfo;
                     tooltip.style.display = "block";
                     tooltip.style.left =
                         Math.min(e.clientX + 12, window.innerWidth - 340) +
