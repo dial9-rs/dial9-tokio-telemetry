@@ -1052,7 +1052,7 @@
             function updatePointsOfInterest() {
                 const filterType = document.getElementById("poi-filter").value;
                 const sortByWorst = document.getElementById("sort-by-worst").checked;
-                pointsOfInterest = filterPointsOfInterest(filterType, workerSpans, workerIds, schedDelays, trace.hasSchedWait, { sortByWorst });
+                pointsOfInterest = filterPointsOfInterest(filterType, workerSpans, workerIds, schedDelays, { hasSchedWait: trace.hasSchedWait, sortByWorst });
                 currentPoiIndex = -1;
                 updatePoiCounter();
             }

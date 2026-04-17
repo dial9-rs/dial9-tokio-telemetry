@@ -69,8 +69,16 @@ if (samples.length > 0) {
   const last = samples[samples.length - 1].count;
   const peak = Math.max(...samples.map(s => s.count));
   console.log(`Active tasks: start=${first}, end=${last}, peak=${peak}`);
-  if (last > first * 2 && last === peak) {
+
+  // Check if active count is monotonically increasing (never decreases)
+  let monotonic = true;
+  for (let i = 1; i < samples.length; i++) {
+    if (samples[i].count < samples[i - 1].count) { monotonic = false; break; }
+  }
+  if (monotonic && last > first * 2) {
     console.log('⚠ Possible task leak: active count grew monotonically');
+  } else if (last > first * 2 && last === peak) {
+    console.log('⚠ Active count grew but is not strictly monotonic — may be ramp-up in a short trace');
   }
 
   // Find which spawn locations have the most unterminated tasks
@@ -137,16 +145,18 @@ for (const w of workerIds) {
 }
 
 // Check queue depth at that time
-const nearestQueue = spans.queueSamples.reduce((best, s) =>
-  Math.abs(s.t - targetNs) < Math.abs(best.t - targetNs) ? s : best
-);
-console.log(`Queue depth near target: global=${nearestQueue.global}`);
+if (spans.queueSamples.length > 0) {
+  const nearestQueue = spans.queueSamples.reduce((best, s) =>
+    Math.abs(s.t - targetNs) < Math.abs(best.t - targetNs) ? s : best
+  );
+  console.log(`Queue depth near target: global=${nearestQueue.global}`);
+}
 ```
 
 ## Are long poll times hurting my application?
 
 ```javascript
-const longPolls = filterPointsOfInterest('long-poll', spans.workerSpans, workerIds, schedDelays, true, { sortByWorst: true });
+const longPolls = filterPointsOfInterest('long-poll', spans.workerSpans, workerIds, schedDelays, { hasSchedWait: true, sortByWorst: true });
 console.log(`${longPolls.length} polls longer than 1ms`);
 
 // Summarize by spawn location
@@ -217,17 +227,18 @@ if (schedSamples.length > 0) {
 Trace the chain of wakes that led to a specific task being polled:
 
 ```javascript
-function traceWakeChain(taskId, wakesByTask, depth = 0, seen = new Set()) {
+function traceWakeChain(taskId, wakesByTask, taskSpawnLocs, depth = 0, seen = new Set()) {
   if (seen.has(taskId)) return;
   seen.add(taskId);
   const wakes = wakesByTask[taskId];
   if (!wakes || wakes.length === 0) return;
   const lastWake = wakes[wakes.length - 1];
-  const loc = trace.taskSpawnLocs.get(taskId) || '(unknown)';
+  const loc = taskSpawnLocs.get(taskId) || '(unknown)';
   console.log(`${'  '.repeat(depth)}Task ${taskId} (${loc}) woken by task ${lastWake.wakerTaskId}`);
-  if (depth < 5) traceWakeChain(lastWake.wakerTaskId, wakesByTask, depth + 1, seen);
+  if (depth < 5) traceWakeChain(lastWake.wakerTaskId, wakesByTask, taskSpawnLocs, depth + 1, seen);
 }
 
-// Example: trace wake chain for the task with the longest poll
-traceWakeChain(worst.poll.taskId, spans.wakesByTask);
+// Example: pick a task ID of interest and trace its wake chain
+const taskId = 42; // replace with a task ID from your trace
+traceWakeChain(taskId, spans.wakesByTask, trace.taskSpawnLocs);
 ```

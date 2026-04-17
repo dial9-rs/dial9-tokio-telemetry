@@ -4,33 +4,15 @@ After parsing, run the analysis pipeline to derive higher-level structures. All 
 
 ## Standard pipeline
 
-```javascript
-const { parseTrace, EVENT_TYPES } = require('./trace_parser.js');
-const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
-        computeSchedulingDelays, filterPointsOfInterest, buildFgData } = require('./trace_analysis.js');
+The `recipes` segment provides a ready-to-use `analyze(tracePath)` function that runs the full pipeline and returns `{ trace, workerIds, minTs, maxTs, spans, taskTimeline, schedDelays }`. Use it as-is or follow the steps below individually.
 
-const trace = await parseTrace(fs.readFileSync('trace.bin'));
-
-// 1. Extract worker IDs
-const workerIds = [...new Set(
-  trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent)
-    .map(e => e.workerId)
-)].sort((a, b) => a - b);
-
-const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
-
-// 2. Build worker spans — reconstructs poll/park/active periods from raw events
-const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
-
-// 3. Attach CPU samples to the poll spans they fall within
-attachCpuSamples(trace.cpuSamples, spans.workerSpans);
-
-// 4. Build active task count timeline
-const taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
-
-// 5. Compute scheduling delays (wake → poll latency)
-const schedDelays = computeSchedulingDelays(spans.workerSpans, workerIds, spans.wakesByTask);
-```
+Pipeline steps:
+1. Parse the trace: `parseTrace(buffer)` → `trace`
+2. Extract worker IDs from non-queue, non-wake events
+3. `buildWorkerSpans(events, workerIds, maxTs)` → reconstructs poll/park/active spans
+4. `attachCpuSamples(cpuSamples, workerSpans)` → attaches profiling data to poll spans
+5. `buildActiveTaskTimeline(taskSpawnTimes, taskTerminateTimes)` → task count over time
+6. `computeSchedulingDelays(workerSpans, workerIds, wakesByTask)` → wake-to-poll latencies
 
 ## buildWorkerSpans(events, workerIds, maxTs)
 
@@ -80,7 +62,7 @@ For each poll, finds the most recent wake event for that task before the poll st
 ```
 Sorted by wakeTime. Large delays mean a task was woken but had to wait before being polled (workers were busy).
 
-## filterPointsOfInterest(filterType, workerSpans, workerIds, schedDelays, hasSchedWait, opts)
+## filterPointsOfInterest(filterType, workerSpans, workerIds, schedDelays, opts)
 
 Filters for notable events. `filterType` is one of:
 - `"sched"` — Kernel scheduling delays >100µs on worker unpark
@@ -88,7 +70,9 @@ Filters for notable events. `filterType` is one of:
 - `"cpu-sampled"` — Polls that have CPU or scheduling samples attached
 - `"wake-delay"` — Wake-to-poll delays >100µs
 
-`opts.sortByWorst = true` sorts by severity instead of time.
+`opts`:
+- `hasSchedWait: true` — enables the `"sched"` filter (requires schedWait data in trace)
+- `sortByWorst: true` — sorts by severity instead of time
 
 Returns `[{time, worker, type, value, span, schedDelay?}]`.
 

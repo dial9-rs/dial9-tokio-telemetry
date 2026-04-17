@@ -22,7 +22,23 @@ mod skills {
 )]
 pub struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+
+    /// Port to listen on (when running without a subcommand)
+    #[arg(long, default_value = "3000", global = true)]
+    port: u16,
+
+    /// S3 bucket name (when running without a subcommand)
+    #[arg(long, global = true)]
+    bucket: Option<String>,
+
+    /// S3 key prefix (when running without a subcommand)
+    #[arg(long, global = true)]
+    prefix: Option<String>,
+
+    /// Directory containing UI static files (when running without a subcommand)
+    #[arg(long, default_value = "ui", global = true)]
+    ui_dir: PathBuf,
 }
 
 #[derive(Subcommand, Debug)]
@@ -71,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Agents { action } => match action {
+        Some(Commands::Agents { action }) => match action {
             None => print!("{}", skills::HEADER),
             Some(AgentsAction::Toolkit { path }) => {
                 std::fs::create_dir_all(&path)?;
@@ -94,12 +110,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             },
         },
-        Commands::Serve {
+        Some(Commands::Serve {
             port,
             bucket,
             prefix,
             ui_dir,
-        } => return serve(port, bucket, prefix, ui_dir).await,
+        }) => return serve(port, bucket, prefix, ui_dir).await,
+        None => return serve(cli.port, cli.bucket, cli.prefix, cli.ui_dir).await,
     }
     Ok(())
 }

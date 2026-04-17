@@ -262,8 +262,7 @@ async function main() {
       workerSpans,
       workerIds,
       schedDelays,
-      trace.hasSchedWait,
-      {}
+      { hasSchedWait: trace.hasSchedWait }
     );
     if (pois.length === 0) fail("No long-poll points of interest found");
     for (const p of pois) {
@@ -279,8 +278,7 @@ async function main() {
       workerSpans,
       workerIds,
       schedDelays,
-      trace.hasSchedWait,
-      {}
+      { hasSchedWait: trace.hasSchedWait }
     );
     if (pois.length === 0) fail("No cpu-sampled points of interest found");
     for (const p of pois) {
@@ -296,8 +294,7 @@ async function main() {
       workerSpans,
       workerIds,
       schedDelays,
-      trace.hasSchedWait,
-      {}
+      { hasSchedWait: trace.hasSchedWait }
     );
     if (pois.length === 0) fail("No wake-delay points of interest found");
     for (const p of pois) {

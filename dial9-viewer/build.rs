@@ -62,24 +62,30 @@ fn generate_skills(manifest_dir: &str, out_dir: &str) {
     let mut code = String::new();
     let mut segments: Vec<(String, String, String)> = Vec::new(); // (name, title, path)
 
-    for entry in fs::read_dir(&skills_dir).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.ends_with(".md") {
-            continue;
+    if skills_dir.is_dir() {
+        for entry in fs::read_dir(&skills_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".md") {
+                continue;
+            }
+            let canonical = resolve_path(&path);
+            if name == "header.md" {
+                code.push_str(&format!(
+                    "pub const HEADER: &str = include_str!({:?});\n",
+                    canonical
+                ));
+                continue;
+            }
+            let stem = name.trim_end_matches(".md").to_string();
+            let title = extract_title(&path).unwrap_or_else(|| stem.clone());
+            segments.push((stem, title, canonical));
         }
-        let canonical = resolve_path(&path);
-        if name == "header.md" {
-            code.push_str(&format!(
-                "pub const HEADER: &str = include_str!({:?});\n",
-                canonical
-            ));
-            continue;
-        }
-        let stem = name.trim_end_matches(".md").to_string();
-        let title = extract_title(&path).unwrap_or_else(|| stem.clone());
-        segments.push((stem, title, canonical));
+    }
+    // Fallback if header.md wasn't found
+    if !code.contains("HEADER") {
+        code.push_str("pub const HEADER: &str = \"\";\n");
     }
     segments.sort_by(|a, b| a.0.cmp(&b.0));
 
