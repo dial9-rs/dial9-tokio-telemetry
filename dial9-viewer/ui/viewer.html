@@ -1621,7 +1621,7 @@
                 if (hasTerminate && spawnTs != null) {
                     const dur = terminateTs - spawnTs;
                     const durMs = dur / 1e6;
-                    lifecycleStr = ` · lifetime ${durMs < 1 ? (durMs * 1000).toFixed(1) + "µs" : durMs.toFixed(2) + "ms"}`;
+                    lifecycleStr = ` · lifetime ${formatHumanDuration(dur)}`;
                 }
                 document.getElementById("task-detail-label").textContent =
                     `Task 0x${selectedTaskId.toString(16)}${loc ? " — " + loc : ""} · ${polls.length} polls · ${wakeCount} wakes${lifecycleStr}${hasTerminate ? " ✓" : ""}`;
@@ -1644,9 +1644,7 @@
                 if (drawW <= 0) return;
 
                 function fmtDur(ns) {
-                    if (ns >= 1e6) return (ns / 1e6).toFixed(2) + "ms";
-                    if (ns >= 1e3) return (ns / 1e3).toFixed(1) + "µs";
-                    return ns.toFixed(0) + "ns";
+                    return formatHumanDuration(ns);
                 }
 
                 const bandTop = 50, bandH = 30;
@@ -2441,10 +2439,10 @@
                 const popup = document.getElementById("stack-popup");
                 const title = document.getElementById("stack-popup-title");
                 const body = document.getElementById("stack-popup-body");
-                const durUs = ((poll.end - poll.start) / 1e3).toFixed(1);
+                const durStr = formatHumanDuration(poll.end - poll.start);
                 const cpuCount = poll.cpuSamples ? poll.cpuSamples.length : 0;
                 const schedCount = poll.schedSamples ? poll.schedSamples.length : 0;
-                title.textContent = `Poll ${durUs}µs` +
+                title.textContent = `Poll ${durStr}` +
                     (cpuCount ? ` · ${cpuCount} CPU sample${cpuCount > 1 ? "s" : ""}` : "") +
                     (schedCount ? ` · ${schedCount} sched event${schedCount > 1 ? "s" : ""}` : "");
 
@@ -2568,7 +2566,7 @@
                 const body = document.getElementById("sched-panel-body");
                 const total = allSched.length;
                 const rangeLabel = schedPanelTimeRange
-                    ? ` in ${((schedPanelTimeRange.end - schedPanelTimeRange.start) / 1e6).toFixed(2)}ms selection`
+                    ? ` in ${formatHumanDuration(schedPanelTimeRange.end - schedPanelTimeRange.start)} selection`
                     : " (full trace)";
                 document.getElementById("sched-panel-stats").textContent =
                     `${total} events across ${workerIds.length} workers${rangeLabel}`;
@@ -2661,8 +2659,8 @@
                     html += `Example polls: `;
                     for (let i = 0; i < examples.length; i++) {
                         const ex = examples[i];
-                        const durUs = ((ex.poll.end - ex.poll.start) / 1e3).toFixed(0);
-                        html += `<span class="sched-jump" style="cursor:pointer;text-decoration:underline;margin-right:8px" data-time="${ex.poll.start}" data-end="${ex.poll.end}" data-worker="${ex.worker}">W${ex.worker} @${fmtTs(ex.poll.start)} (${durUs}µs)</span>`;
+                        const durStr = formatHumanDuration(ex.poll.end - ex.poll.start);
+                        html += `<span class="sched-jump" style="cursor:pointer;text-decoration:underline;margin-right:8px" data-time="${ex.poll.start}" data-end="${ex.poll.end}" data-worker="${ex.worker}">W${ex.worker} @${fmtTs(ex.poll.start)} (${durStr})</span>`;
                     }
                     if (g.polls.length > 5) html += `<span style="color:#888">… ${g.polls.length - 5} more</span>`;
                     html += `</div>`;
@@ -2877,9 +2875,9 @@
                     {
                         const s = findSpanAt(spans.parks, ns);
                         if (s) {
-                            const durMs = (s.end - s.start) / 1e6;
+                            const parkNs = s.end - s.start;
                             state = "💤 Parked";
-                            stateDetail = ` for <span class="value">${durMs < 1 ? (durMs * 1000).toFixed(1) + "µs" : durMs.toFixed(2) + "ms"}</span>`;
+                            stateDetail = ` for <span class="value">${formatHumanDuration(parkNs)}</span>`;
                             schedInfo = "";
                             if (trace.hasSchedWait && s.schedWait != null) {
                                 const swUs = s.schedWait;
@@ -2893,9 +2891,9 @@
                     {
                         const s = findSpanAt(spans.polls, ns);
                         if (s) {
-                            const durUs = (s.end - s.start) / 1e3;
+                            const pollNs = s.end - s.start;
                             state = "⚡ Polling";
-                            pollInfo = `<span class="label">Poll duration:</span> <span class="value">${durUs.toFixed(1)}µs</span><br>`;
+                            pollInfo = `<span class="label">Poll duration:</span> <span class="value">${formatHumanDuration(pollNs)}</span><br>`;
                             if (trace.hasTaskTracking && s.taskId) {
                                 pollInfo += `<span class="label">Task ID:</span> <span class="value">0x${s.taskId.toString(16)}</span><br>`;
                                 if (s.spawnLoc) {
