@@ -119,6 +119,10 @@ Uncompressed trace files can be concatenated (`cat trace.0.bin trace.1.bin > com
 - Escape stack frame names in flamegraph tooltips ([#142](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/142))
 - Handle truncated frames without crashing ([#98](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/98))
 
+### Breaking changes
+
+- `SamplerConfig` and `CpuProfilingConfig` now use builders instead of struct-literal construction, consistent with `SchedEventConfig` ([#244](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/244))
+
 ### Internal
 
 - Removed recorder mutex; events encode directly into thread-local buffers ([#122](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/122), [#133](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/133), [#135](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/135))
