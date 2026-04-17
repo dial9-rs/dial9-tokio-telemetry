@@ -21,12 +21,9 @@ pub(crate) fn read_thread_name(tid: u32) -> Option<String> {
 /// Configuration for CPU profiling integration.
 #[derive(Debug, Clone)]
 pub struct CpuProfilingConfig {
-    /// Sampling frequency in Hz. Default: 99 (low overhead).
-    pub frequency_hz: u64,
-    /// Which perf event source to use.
-    pub event_source: EventSource,
-    /// Whether to include kernel stack frames.
-    pub include_kernel: bool,
+    frequency_hz: u64,
+    event_source: EventSource,
+    include_kernel: bool,
 }
 
 impl Default for CpuProfilingConfig {
@@ -36,6 +33,26 @@ impl Default for CpuProfilingConfig {
             event_source: EventSource::SwCpuClock,
             include_kernel: false,
         }
+    }
+}
+
+impl CpuProfilingConfig {
+    /// Sampling frequency in Hz. Default: 99 (low overhead).
+    pub fn frequency_hz(mut self, hz: u64) -> Self {
+        self.frequency_hz = hz;
+        self
+    }
+
+    /// Which perf event source to use.
+    pub fn event_source(mut self, source: EventSource) -> Self {
+        self.event_source = source;
+        self
+    }
+
+    /// Whether to include kernel stack frames.
+    pub fn include_kernel(mut self, yes: bool) -> Self {
+        self.include_kernel = yes;
+        self
     }
 }
 
@@ -82,11 +99,12 @@ pub(crate) struct CpuProfiler {
 
 impl CpuProfiler {
     pub(crate) fn start(config: CpuProfilingConfig) -> io::Result<Self> {
-        let sampler = PerfSampler::start(SamplerConfig {
-            event_source: config.event_source,
-            sampling: SamplingMode::FrequencyHz(config.frequency_hz),
-            include_kernel: config.include_kernel,
-        })?;
+        let sampler = PerfSampler::start(
+            SamplerConfig::default()
+                .event_source(config.event_source)
+                .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                .include_kernel(config.include_kernel),
+        )?;
         Ok(Self {
             sampler,
             pid: std::process::id(),
@@ -130,11 +148,12 @@ pub(crate) struct SchedProfiler {
 
 impl SchedProfiler {
     pub(crate) fn new(config: SchedEventConfig) -> io::Result<Self> {
-        let sampler = PerfSampler::new_per_thread(SamplerConfig {
-            event_source: EventSource::SwContextSwitches,
-            sampling: SamplingMode::Period(config.sampling_interval.unwrap_or(1)),
-            include_kernel: config.include_kernel,
-        })?;
+        let sampler = PerfSampler::new_per_thread(
+            SamplerConfig::default()
+                .event_source(EventSource::SwContextSwitches)
+                .sampling(SamplingMode::Period(config.sampling_interval.unwrap_or(1)))
+                .include_kernel(config.include_kernel),
+        )?;
         Ok(Self { sampler })
     }
 

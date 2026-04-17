@@ -20,11 +20,12 @@ fn do_sleep() {
 fn captures_lock_acquisition_stack() {
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
     let sampler = Arc::new(Mutex::new(
-        PerfSampler::new_per_thread(SamplerConfig {
-            event_source: EventSource::SwContextSwitches,
-            sampling: SamplingMode::Period(1),
-            include_kernel: false,
-        })
+        PerfSampler::new_per_thread(
+            SamplerConfig::default()
+                .event_source(EventSource::SwContextSwitches)
+                .sampling(SamplingMode::Period(1))
+                .include_kernel(false),
+        )
         .expect("failed to create sampler"),
     ));
 
@@ -82,11 +83,12 @@ fn captures_lock_acquisition_stack() {
 fn captures_sleep_stack() {
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
     let sampler = Arc::new(Mutex::new(
-        PerfSampler::new_per_thread(SamplerConfig {
-            event_source: EventSource::SwContextSwitches,
-            sampling: SamplingMode::Period(1),
-            include_kernel: false,
-        })
+        PerfSampler::new_per_thread(
+            SamplerConfig::default()
+                .event_source(EventSource::SwContextSwitches)
+                .include_kernel(false)
+                .sampling(SamplingMode::Period(1)),
+        )
         .expect("failed to create sampler"),
     ));
 
@@ -141,11 +143,12 @@ fn sampling_interval_controls_ratio() {
 
     let run = |period: u64| -> usize {
         let sampler = Arc::new(Mutex::new(
-            PerfSampler::new_per_thread(SamplerConfig {
-                event_source: EventSource::SwContextSwitches,
-                sampling: SamplingMode::Period(period),
-                include_kernel: false,
-            })
+            PerfSampler::new_per_thread(
+                SamplerConfig::default()
+                    .event_source(EventSource::SwContextSwitches)
+                    .include_kernel(false)
+                    .sampling(SamplingMode::Period(period)),
+            )
             .expect("failed to create sampler"),
         ));
         sampler.lock().unwrap().track_current_thread().unwrap();
@@ -166,11 +169,12 @@ fn sampling_interval_controls_ratio() {
 
 #[test]
 fn rejects_zero_period() {
-    let err = match PerfSampler::new_per_thread(SamplerConfig {
-        event_source: EventSource::SwContextSwitches,
-        sampling: SamplingMode::Period(0),
-        include_kernel: false,
-    }) {
+    let err = match PerfSampler::new_per_thread(
+        SamplerConfig::default()
+            .event_source(EventSource::SwContextSwitches)
+            .include_kernel(false)
+            .sampling(SamplingMode::Period(0)),
+    ) {
         Err(e) => e,
         Ok(_) => panic!("Period(0) must be rejected"),
     };

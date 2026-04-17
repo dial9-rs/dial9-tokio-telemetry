@@ -6,11 +6,12 @@ use std::thread;
 
 fn main() {
     let sampler = Arc::new(Mutex::new(
-        PerfSampler::new_per_thread(SamplerConfig {
-            sampling: SamplingMode::Period(1),
-            event_source: EventSource::SwContextSwitches,
-            include_kernel: false,
-        })
+        PerfSampler::new_per_thread(
+            SamplerConfig::default()
+                .event_source(EventSource::SwContextSwitches)
+                .sampling(SamplingMode::Period(1))
+                .include_kernel(false),
+        )
         .unwrap(),
     ));
     sampler.lock().unwrap().track_current_thread().unwrap();
