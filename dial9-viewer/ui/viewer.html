@@ -109,9 +109,30 @@
                 overflow-x: auto;
                 overflow-y: hidden;
             }
+            #toolbar .tb-info {
+                display: flex;
+                flex-direction: column;
+                flex-shrink: 1;
+                min-width: 240px;
+                max-width: 500px;
+                overflow: hidden;
+                line-height: 1.3;
+            }
+            #toolbar .tb-meta {
+                font-size: 0.8em;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            #toolbar .tb-meta .key { color: #888; }
+            #toolbar .tb-meta .val { color: #7ec8e3; }
             #toolbar .filename {
                 font-weight: 600;
                 color: #6c63ff;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                font-size: 0.85em;
             }
             #toolbar .filename::after {
                 content: " v15";
@@ -120,7 +141,8 @@
             }
             #toolbar .stats {
                 color: #888;
-                font-size: 0.85em;
+                font-size: 0.8em;
+                white-space: nowrap;
             }
             #toolbar button {
                 background: #2a2a4a;
@@ -416,8 +438,10 @@
 
         <div id="viewer">
             <div id="toolbar">
-                <span class="filename" id="tb-filename"></span>
-                <span class="stats" id="tb-stats"></span>
+                <div class="tb-info">
+                    <span class="filename" id="tb-filename"></span>
+                    <span class="stats" id="tb-stats"></span>
+                </div>
                 <span style="flex: 1"></span>
                 <select id="poi-filter">
                     <option value="sched">Kernel Scheduling Delays</option>
@@ -900,7 +924,7 @@
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const arrayBuffer = await response.arrayBuffer();
                     loadAbortController = null;
-                    const name = url.split('/').pop() || 'trace.bin';
+                    const name = urlParams.get('svc') || url.split('/').pop()?.split('?')[0] || 'trace.bin';
                     await parseAndShowTrace(arrayBuffer, name, getParseOptions());
                 } catch (err) {
                     if (err.name === 'AbortError') return;
@@ -1027,12 +1051,35 @@
             function showViewer(filename) {
                 dropZone.style.display = "none";
                 viewer.style.display = "flex";
-                document.getElementById("tb-filename").textContent = filename;
+
+                // Build the info block: structured metadata if available, else filename
+                const infoEl = document.querySelector('#toolbar .tb-info');
+                const svc = urlParams.get('svc');
+                const host = urlParams.get('host');
+                const fromTime = urlParams.get('from');
+                const toTime = urlParams.get('to');
+                const segs = urlParams.get('segs');
                 const durStr = formatHumanDuration(durationNs);
                 const truncNote = trace.truncated ? " (truncated)" : "";
                 const filterNote = trace.timeFiltered ? " (time-filtered)" : "";
-                document.getElementById("tb-stats").textContent =
-                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durStr}${truncNote}${filterNote}`;
+                const statsText = `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durStr}${truncNote}${filterNote}`;
+
+                if (svc) {
+                    // Structured metadata from browser
+                    let line1 = `<span class="key">svc:</span> <span class="val">${esc(svc)}</span>`;
+                    let lines = [line1];
+                    if (host) lines.push(`<span class="key">host:</span> <span class="val">${esc(host)}</span>`);
+                    if (fromTime) {
+                        let timeLine = `<span class="key">time:</span> <span class="val">${esc(fromTime)}`;
+                        if (toTime && toTime !== fromTime) timeLine += ` → ${esc(toTime)}`;
+                        timeLine += `</span>`;
+                        lines.push(timeLine);
+                    }
+                    lines.push(`<span class="key">${statsText}</span>`);
+                    infoEl.innerHTML = lines.map(l => `<div class="tb-meta">${l}</div>`).join('');
+                } else {
+                    infoEl.innerHTML = `<span class="filename">${esc(filename)}</span><span class="stats">${statsText}</span>`;
+                }
 
                 buildLanes();
                 updatePointsOfInterest();

@@ -84,7 +84,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
-    let app = dial9_viewer::server::router(state, &ui_dir);
+    let state = state.with_dev_ui_dir(ui_dir);
+    let app = dial9_viewer::server::router(state);
 
     let port: u16 = std::env::var("PORT")
         .ok()

@@ -56,7 +56,8 @@ fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
 
 async fn start_server(state: AppState) -> String {
     let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
-    let app = router(state, &ui_dir);
+    let state = state.with_dev_ui_dir(ui_dir);
+    let app = router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
