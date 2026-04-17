@@ -116,12 +116,20 @@ fn rotated_segments_have_bounded_time_overlap() {
         segment_files
     );
 
-    // For each segment, compute (min_timestamp, max_timestamp) from non-metadata events.
-    let segment_ranges: Vec<(u64, u64)> = segment_files
+    // For each segment, decode events and compute (min_timestamp, max_timestamp)
+    // from non-metadata events. Keep the events around for diagnostics on failure.
+    let segment_events: Vec<Vec<TelemetryEvent>> = segment_files
         .iter()
         .map(|path| {
             let data = std::fs::read(path).unwrap();
-            let events = dial9_tokio_telemetry::analysis_unstable::decode_events(&data).unwrap();
+            dial9_tokio_telemetry::analysis_unstable::decode_events(&data).unwrap()
+        })
+        .collect();
+
+    let segment_ranges: Vec<(u64, u64)> = segment_events
+        .iter()
+        .enumerate()
+        .map(|(i, events)| {
             let timestamps: Vec<u64> = events
                 .iter()
                 .filter(|e| !matches!(e, TelemetryEvent::SegmentMetadata { .. }))
@@ -130,7 +138,7 @@ fn rotated_segments_have_bounded_time_overlap() {
             assert!(
                 !timestamps.is_empty(),
                 "segment {} has no timestamped events",
-                path.display()
+                segment_files[i].display()
             );
             let min = *timestamps.iter().min().unwrap();
             let max = *timestamps.iter().max().unwrap();
@@ -183,19 +191,42 @@ fn rotated_segments_have_bounded_time_overlap() {
             segment_ranges[i + 1].1 as f64 / 1e9,
         );
 
-        assert!(
-            overlap_secs <= MAX_OVERLAP_SECS,
-            "segment {i} → {} overlap is {:.3}s, exceeds {MAX_OVERLAP_SECS}s tolerance. \
-             Segment {i} max={}, segment {} min={}\n\
-             Flush-thread metrics ({} entries):\n{}",
-            i + 1,
-            overlap_secs,
-            max_a,
-            i + 1,
-            min_b,
-            flush_metrics.len(),
-            flush_metrics.join("\n"),
-        );
+        if overlap_secs > MAX_OVERLAP_SECS {
+            // Collect event types from segment A that bleed past segment B's start
+            let late_in_a: Vec<_> = segment_events[i]
+                .iter()
+                .filter(|e| !matches!(e, TelemetryEvent::SegmentMetadata { .. }))
+                .filter(|e| e.timestamp_nanos().is_some_and(|t| t > min_b))
+                .map(|e| event_type_name(e))
+                .collect();
+            // Collect event types from segment B that precede segment A's end
+            let early_in_b: Vec<_> = segment_events[i + 1]
+                .iter()
+                .filter(|e| !matches!(e, TelemetryEvent::SegmentMetadata { .. }))
+                .filter(|e| e.timestamp_nanos().is_some_and(|t| t < max_a))
+                .map(|e| event_type_name(e))
+                .collect();
+            panic!(
+                "segment {i} → {} overlap is {:.3}s, exceeds {MAX_OVERLAP_SECS}s tolerance. \
+                 Segment {i} max={}, segment {} min={}\n\
+                 Events in segment {i} past segment {} start ({} events): {:?}\n\
+                 Events in segment {} before segment {i} end ({} events): {:?}\n\
+                 Flush-thread metrics ({} entries):\n{}",
+                i + 1,
+                overlap_secs,
+                max_a,
+                i + 1,
+                min_b,
+                i + 1,
+                late_in_a.len(),
+                late_in_a,
+                i + 1,
+                early_in_b.len(),
+                early_in_b,
+                flush_metrics.len(),
+                flush_metrics.join("\n"),
+            );
+        }
     }
 
     eprintln!(
@@ -203,4 +234,22 @@ fn rotated_segments_have_bounded_time_overlap() {
         max_observed_overlap.as_secs_f64(),
         non_final_boundaries
     );
+}
+
+fn event_type_name(event: &TelemetryEvent) -> &'static str {
+    match event {
+        TelemetryEvent::PollStart { .. } => "PollStart",
+        TelemetryEvent::PollEnd { .. } => "PollEnd",
+        TelemetryEvent::WorkerPark { .. } => "WorkerPark",
+        TelemetryEvent::WorkerUnpark { .. } => "WorkerUnpark",
+        TelemetryEvent::QueueSample { .. } => "QueueSample",
+        TelemetryEvent::TaskSpawn { .. } => "TaskSpawn",
+        TelemetryEvent::TaskTerminate { .. } => "TaskTerminate",
+        TelemetryEvent::CpuSample { .. } => "CpuSample",
+        TelemetryEvent::ThreadNameDef { .. } => "ThreadNameDef",
+        TelemetryEvent::WakeEvent { .. } => "WakeEvent",
+        TelemetryEvent::SegmentMetadata { .. } => "SegmentMetadata",
+        TelemetryEvent::ClockSync { .. } => "ClockSync",
+        TelemetryEvent::Custom { .. } => "Custom",
+    }
 }
