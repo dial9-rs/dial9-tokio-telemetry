@@ -404,10 +404,9 @@ impl RotatingWriter {
         self.active_path = new_path;
         self.did_rotate = true;
         self.has_real_events = false;
-        self.next_rotation_time =
-            Self::next_boundary(time_source().system_time().as_std(), self.rotation_period);
-        self.next_drain_time =
-            Self::next_boundary(time_source().system_time().as_std(), self.drain_interval);
+        let now = time_source().system_time().as_std();
+        self.next_rotation_time = Self::next_boundary(now, self.rotation_period);
+        self.next_drain_time = Self::next_boundary(now, self.drain_interval);
 
         tracing::debug!(
             segment_index = self.next_index - 1,
