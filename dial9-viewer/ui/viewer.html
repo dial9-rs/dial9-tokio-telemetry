@@ -530,6 +530,7 @@
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
         <script src="trace_analysis.js"></script>
+        <script src="format.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
             const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData } = TraceAnalysis;
@@ -1027,11 +1028,11 @@
                 dropZone.style.display = "none";
                 viewer.style.display = "flex";
                 document.getElementById("tb-filename").textContent = filename;
-                const durMs = durationNs / 1e6;
+                const durStr = formatHumanDuration(durationNs);
                 const truncNote = trace.truncated ? " (truncated)" : "";
                 const filterNote = trace.timeFiltered ? " (time-filtered)" : "";
                 document.getElementById("tb-stats").textContent =
-                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durMs.toFixed(1)}ms${truncNote}${filterNote}`;
+                    `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durStr}${truncNote}${filterNote}`;
 
                 buildLanes();
                 updatePointsOfInterest();
