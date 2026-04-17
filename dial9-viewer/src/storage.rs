@@ -200,7 +200,11 @@ pub struct LocalBackend {
 
 impl LocalBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        // Canonicalize root so that symlink resolution in child paths
+        // (e.g. macOS /tmp → /private/tmp) matches the root prefix.
+        let root = root.canonicalize().unwrap_or(root);
+        Self { root }
     }
 }
 
