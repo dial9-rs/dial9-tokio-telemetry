@@ -310,8 +310,7 @@ async function main() {
       workerSpans,
       workerIds,
       schedDelays,
-      trace.hasSchedWait,
-      { sortByWorst: true }
+      { hasSchedWait: trace.hasSchedWait, sortByWorst: true }
     );
     for (let i = 1; i < pois.length; i++) {
       if (pois[i].value > pois[i - 1].value) fail("sortByWorst not descending");
