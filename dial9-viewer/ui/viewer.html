@@ -468,7 +468,10 @@
                 <button id="btn-reset">New File</button>
             </div>
             <div id="span-legend" style="display:none;padding:2px 12px;background:#1a1a2e;border-bottom:1px solid #333;font-size:0.78em;color:#aaa">
-                <input id="span-filter" type="text" placeholder="Filter spans (name, key, or value)" style="background:#0f1629;border:1px solid #444;color:#ccc;padding:2px 6px;border-radius:3px;font-size:1em;width:220px;margin-right:8px">
+                <input id="span-filter" type="text" placeholder="Filter spans (name, key, or value)" style="background:#0f1629;border:1px solid #444;color:#ccc;padding:2px 6px;border-radius:3px;font-size:1em;width:220px;margin-right:4px">
+                <button id="btn-span-prev" style="font-size:0.9em" disabled>◀</button>
+                <button id="btn-span-next" style="font-size:0.9em" disabled>▶</button>
+                <span id="span-filter-count" style="margin:0 8px;color:#666"></span>
                 <span id="span-legend-items"></span>
             </div>
             <div id="main-area" tabindex="0" role="application" aria-label="Trace timeline">
@@ -777,6 +780,8 @@
             let spanMeta = new Map(); // spanId → {spanName, fields, parentSpanId}
             let spanMaxDepth = 0;
             let spanFilter = ""; // free-text filter for span rendering
+            let filteredSpans = []; // all spans matching current filter, sorted by time
+            let filteredSpanIndex = -1;
             // Lane canvases per worker (populated by buildLanes)
             let laneCanvases = {};
 
@@ -1146,7 +1151,46 @@
                         legend.style.display = "block";
                         document.getElementById("span-filter").addEventListener("input", (e) => {
                             spanFilter = e.target.value;
+                            // Build sorted list of matching spans across all workers
+                            filteredSpans = [];
+                            if (spanFilter) {
+                                for (const [w, spans] of Object.entries(spansByWorker)) {
+                                    for (const s of spans) {
+                                        if (spanMatchesFilter(s)) filteredSpans.push({ ...s, workerId: Number(w) });
+                                    }
+                                }
+                                filteredSpans.sort((a, b) => a.start - b.start);
+                            }
+                            filteredSpanIndex = -1;
+                            const countEl = document.getElementById("span-filter-count");
+                            const prevBtn = document.getElementById("btn-span-prev");
+                            const nextBtn = document.getElementById("btn-span-next");
+                            countEl.textContent = spanFilter ? `${filteredSpans.length} matches` : "";
+                            prevBtn.disabled = filteredSpans.length === 0;
+                            nextBtn.disabled = filteredSpans.length === 0;
                             renderAll();
+                        });
+
+                        function jumpToFilteredSpan(index) {
+                            if (filteredSpans.length === 0) return;
+                            filteredSpanIndex = ((index % filteredSpans.length) + filteredSpans.length) % filteredSpans.length;
+                            const s = filteredSpans[filteredSpanIndex];
+                            const spanDur = s.end - s.start;
+                            const viewDur = Math.max(spanDur * 10, 1e6); // 10x span duration, min 1ms
+                            viewStart = Math.max(minTs, s.start - viewDur * 0.3);
+                            viewEnd = Math.min(maxTs, viewStart + viewDur);
+                            const laneIdx = workerIds.indexOf(s.workerId);
+                            if (laneIdx >= 0) lanesContainer.scrollTop = laneIdx * LANE_H;
+                            document.getElementById("span-filter-count").textContent =
+                                `${filteredSpanIndex + 1}/${filteredSpans.length}`;
+                            renderAll();
+                        }
+
+                        document.getElementById("btn-span-prev").addEventListener("click", () => {
+                            jumpToFilteredSpan(filteredSpanIndex - 1);
+                        });
+                        document.getElementById("btn-span-next").addEventListener("click", () => {
+                            jumpToFilteredSpan(filteredSpanIndex + 1);
                         });
                     }
                 }
