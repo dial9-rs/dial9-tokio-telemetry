@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 /// Metadata about an object in storage.
@@ -187,4 +188,121 @@ impl StorageBackend for S3Backend {
             Ok(bytes.to_vec())
         })
     }
+}
+
+/// Local filesystem storage backend. Serves trace files from a directory.
+///
+/// The `bucket` parameter is ignored — all operations are relative to `root`.
+/// Keys are relative paths from `root`.
+pub struct LocalBackend {
+    root: PathBuf,
+}
+
+impl LocalBackend {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+}
+
+impl StorageBackend for LocalBackend {
+    fn list_objects(
+        &self,
+        _bucket: &str,
+        prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
+        let prefix = prefix.to_string();
+        Box::pin(async move {
+            let mut objects = Vec::new();
+            collect_files(&self.root, &self.root, &prefix, &mut objects)?;
+            objects.sort_by(|a, b| a.key.cmp(&b.key));
+            Ok(objects)
+        })
+    }
+
+    fn list_prefixes(
+        &self,
+        _bucket: &str,
+        prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        let prefix = prefix.to_string();
+        Box::pin(async move {
+            let dir = self.root.join(&prefix);
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+                Err(e) => return Err(StorageError::Other(e.to_string())),
+            };
+            let mut prefixes = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|e| StorageError::Other(e.to_string()))?;
+                if entry
+                    .file_type()
+                    .map_err(|e| StorageError::Other(e.to_string()))?
+                    .is_dir()
+                {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    prefixes.push(format!("{prefix}{name}/"));
+                }
+            }
+            prefixes.sort();
+            Ok(prefixes)
+        })
+    }
+
+    fn get_object(
+        &self,
+        _bucket: &str,
+        key: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
+        let path = self.root.join(key);
+        Box::pin(async move {
+            std::fs::read(&path).map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => StorageError::NotFound(path.display().to_string()),
+                _ => StorageError::Other(e.to_string()),
+            })
+        })
+    }
+}
+
+fn collect_files(
+    root: &Path,
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<ObjectInfo>,
+) -> Result<(), StorageError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(StorageError::Other(e.to_string())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| StorageError::Other(e.to_string()))?;
+        let path = entry.path();
+        let ft = entry
+            .file_type()
+            .map_err(|e| StorageError::Other(e.to_string()))?;
+        if ft.is_dir() {
+            collect_files(root, &path, prefix, out)?;
+        } else if ft.is_file() {
+            let key = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            if key.starts_with(prefix) {
+                let meta =
+                    std::fs::metadata(&path).map_err(|e| StorageError::Other(e.to_string()))?;
+                out.push(ObjectInfo {
+                    key,
+                    size: meta.len() as i64,
+                    last_modified: meta.modified().ok().and_then(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs().to_string())
+                    }),
+                });
+            }
+        }
+    }
+    Ok(())
 }
