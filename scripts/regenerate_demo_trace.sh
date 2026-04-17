@@ -43,7 +43,7 @@ if [ -z "$TRACE_FILE" ]; then
     exit 1
 fi
 
-gunzip -c "$TRACE_FILE" > "$DEMO_DEST"
+cp "$TRACE_FILE" "$DEMO_DEST"
 rm -f $TRACE_GZ_GLOB
 
 echo "Demo trace size:"
