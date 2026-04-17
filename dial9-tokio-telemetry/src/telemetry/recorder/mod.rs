@@ -75,7 +75,9 @@ fn flush_once(
     let cpu_events_time = Instant::now();
     #[cfg(feature = "cpu-profiling")]
     {
-        event_writer.flush_cpu(shared);
+        if shared.enabled.load(Ordering::Relaxed) {
+            event_writer.flush_cpu(shared);
+        }
     }
     let cpu_flush_duration = cpu_events_time.elapsed();
 
