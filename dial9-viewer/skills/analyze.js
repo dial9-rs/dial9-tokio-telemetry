@@ -14,13 +14,13 @@ if (!TRACE_PATH) { console.error('Usage: node analyze.js <trace.bin>'); process.
 
 // ── Helpers ──
 
-/** Classify a symbol as kernel, libc, tokio-runtime, or application code */
+/** Classify a symbol as kernel, libc, allocator, tokio-runtime, or application code */
 function frameKind(sym) {
   if (!sym || sym.startsWith('0x')) return 'unknown';
   // C symbols (no :: separator) — check libc first to avoid __GI_ matching kernel __
   if (!sym.includes('::')) {
     if (/^(__GI_|__libc_|__pthread_|__clone|start_thread|__poll|__epoll|__futex|malloc|free|mmap|munmap|brk|sbrk)/.test(sym)) return 'libc';
-    if (/^(je_|arena_|tcache_|extent_|large_|slab_|jemalloc)/.test(sym) || /^(mi_|_mi_|mi_heap_|mimalloc)/.test(sym)) return 'libc';
+    if (/^(je_|arena_|tcache_|extent_|large_|slab_|jemalloc)/.test(sym) || /^(mi_|_mi_|mi_heap_|mimalloc)/.test(sym)) return 'allocator';
     if (/^(__|do_|sys_|entry_|exit_to|irq_|page_|rcu_|synchronize_)/.test(sym)) return 'kernel';
     if (/^(schedule|expand_fd|expand_files|alloc_fd|ep_poll|ep_send|futex_|sock_|inet_|tcp_|vfs_|filp_|fd_install|ksys_|fput|fget)/.test(sym)) return 'kernel';
   }
