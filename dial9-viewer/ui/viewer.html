@@ -2884,7 +2884,7 @@
                             if (trace.hasSchedWait && s.schedWait != null) {
                                 const swUs = s.schedWait;
                                 const icon = swUs < 100 ? "🟢" : swUs < 1000 ? "🟡" : "🔴";
-                                stateDetail += `<br><span class="label">Kernel sched delay:</span> <span class="value">${icon} ${swUs.toFixed(0)}µs</span>`;
+                                stateDetail += `<br><span class="label">Kernel sched delay:</span> <span class="value">${icon} ${formatHumanDuration(swUs * 1000)}</span>`;
                             }
                         }
                     }
