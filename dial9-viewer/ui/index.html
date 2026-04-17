@@ -172,6 +172,7 @@
                             <th style="width:30px"><input type="checkbox" id="raw-select-all" /></th>
                             <th data-sort="service">Service</th>
                             <th data-sort="host">Host</th>
+                            <th data-sort="bootId">Boot</th>
                             <th data-sort="traceStart">Trace Start</th>
                             <th data-sort="segIndex">Seg #</th>
                             <th data-sort="size">Size</th>
@@ -349,23 +350,58 @@
     }
 
     function parseKey(key) {
+        // Default layout (as of issue #225):
+        //   {prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{boot_id}/{epoch}-{index}.bin[.gz]
+        // Legacy layout (pre-#225):
+        //   {prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{epoch}-{index}.bin[.gz]
+        // We find the date-shaped segment and count components between it
+        // and the filename to distinguish. Custom instance paths containing
+        // slashes will fall back to best-effort positional parsing.
         const parts = key.split('/');
-        if (parts.length >= 5) {
-            const file = parts[parts.length - 1];
-            const match = file.match(/^(\d+)-(\d+)\.bin/);
-            let epoch = 0, segIndex = '';
-            if (match) {
-                epoch = parseInt(match[1], 10);
-                segIndex = match[2];
+        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+        let dateIdx = -1;
+        for (let i = parts.length - 1; i >= 0; i--) {
+            if (dateRe.test(parts[i])) { dateIdx = i; break; }
+        }
+        const file = parts[parts.length - 1];
+        const match = file.match(/^(\d+)-(\d+)\.bin/);
+        let epoch = 0, segIndex = '';
+        if (match) {
+            epoch = parseInt(match[1], 10);
+            segIndex = match[2];
+        }
+        if (dateIdx >= 0) {
+            const below = parts.length - 1 - dateIdx; // count after date, not including date itself
+            if (below === 5) {
+                return {
+                    service: parts[dateIdx + 2],
+                    host: parts[dateIdx + 3],
+                    bootId: parts[dateIdx + 4],
+                    epoch, segIndex,
+                    get traceStart() { return formatEpoch(epoch); },
+                };
             }
+            if (below === 4) {
+                return {
+                    service: parts[dateIdx + 2],
+                    host: parts[dateIdx + 3],
+                    bootId: '',
+                    epoch, segIndex,
+                    get traceStart() { return formatEpoch(epoch); },
+                };
+            }
+        }
+        // Fallback — positional, best-effort.
+        if (parts.length >= 5) {
             return {
                 service: parts[parts.length - 3],
                 host: parts[parts.length - 2],
+                bootId: '',
                 epoch, segIndex,
                 get traceStart() { return formatEpoch(epoch); },
             };
         }
-        return { service: '', host: key, epoch: 0, segIndex: '', get traceStart() { return ''; } };
+        return { service: '', host: key, bootId: '', epoch: 0, segIndex: '', get traceStart() { return ''; } };
     }
 
     function toLocalDatetime(d) {
@@ -506,12 +542,16 @@
                 return;
             }
 
-            // Group by service/host
+            // Group by service/host[/boot]. A new boot_id indicates a
+            // separate process run — keeping runs distinct prevents
+            // segment-index duplicates when a service restarts.
             hostGroups = {};
             for (const obj of allObjects) {
                 const p = parseKey(obj.key);
-                const groupKey = p.service + '/' + p.host;
-                if (!hostGroups[groupKey]) hostGroups[groupKey] = { service: p.service, host: p.host, objects: [] };
+                const groupKey = p.bootId
+                    ? p.service + '/' + p.host + '/' + p.bootId
+                    : p.service + '/' + p.host;
+                if (!hostGroups[groupKey]) hostGroups[groupKey] = { service: p.service, host: p.host, bootId: p.bootId, objects: [] };
                 hostGroups[groupKey].objects.push(obj);
             }
 
@@ -531,7 +571,7 @@
         selectedHost = null;
 
         const groups = Object.values(hostGroups).sort((a, b) =>
-            (a.service + a.host).localeCompare(b.service + b.host));
+            ((a.service + a.host + (a.bootId || '')).localeCompare(b.service + b.host + (b.bootId || ''))));
 
         for (const g of groups) {
             const epochs = g.objects.map(o => parseKey(o.key).epoch).filter(e => e > 0);
@@ -540,17 +580,20 @@
             const maxEnd = endTimes.length ? Math.max(...endTimes) : 0;
             const totalSize = g.objects.reduce((s, o) => s + o.size, 0);
 
+            const bootLine = g.bootId ? `<div class="meta" style="font-size:0.75em;color:#7a7ab0">boot ${esc(g.bootId)}</div>` : '';
             const card = document.createElement('div');
             card.className = 'host-card';
             card.innerHTML = `
                 <div class="svc">${esc(g.service)}</div>
                 <div class="hostname">${esc(g.host)}</div>
+                ${bootLine}
                 <div class="meta">
                     ${g.objects.length} segment${g.objects.length !== 1 ? 's' : ''} · ${formatSize(totalSize)}<br>
                     ${formatEpoch(minEpoch)}${maxEnd ? ' → ' + formatEpoch(maxEnd) : ''}
                 </div>
             `;
-            card.addEventListener('click', () => showSegments(g.service + '/' + g.host));
+            const gk = g.bootId ? g.service + '/' + g.host + '/' + g.bootId : g.service + '/' + g.host;
+            card.addEventListener('click', () => showSegments(gk));
             hostGrid.appendChild(card);
         }
     }
@@ -569,7 +612,7 @@
 
         segmentPanel.innerHTML = `
             <span class="back-link" onclick="renderHostGrid()">← Back to hosts</span>
-            <h3>${esc(g.service)} / ${esc(g.host)}</h3>
+            <h3>${esc(g.service)} / ${esc(g.host)}${g.bootId ? ' <span style="color:#7a7ab0;font-weight:400;font-size:0.85em">(boot ' + esc(g.bootId) + ')</span>' : ''}</h3>
             <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center">
                 <button onclick="segSelectAll(true)">Select All</button>
                 <button onclick="segSelectAll(false)">Deselect All</button>
@@ -697,6 +740,7 @@
                 <td><input type="checkbox" class="raw-cb" data-key="${esc(row.key)}" /></td>
                 <td class="service">${esc(p.service)}</td>
                 <td class="host">${esc(p.host)}</td>
+                <td class="host">${esc(p.bootId || '')}</td>
                 <td>${esc(p.traceStart)}</td>
                 <td>${esc(p.segIndex)}</td>
                 <td class="size">${formatSize(row.size)}</td>

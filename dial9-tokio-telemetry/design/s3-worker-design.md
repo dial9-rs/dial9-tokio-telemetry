@@ -287,12 +287,13 @@ Pipeline stage metrics are prefixed with the processor name automatically.
 ## S3 Object Layout
 
 ```
-s3://{bucket}/{prefix}/{date-time}/{service}/{instance}/{epoch_secs}-{index}.bin.gz
+s3://{bucket}/{prefix}/{date-time}/{service}/{instance}/{boot_id}/{epoch_secs}-{index}.bin.gz
 ```
 
 - `{date-time}`: `2026-03-07/2030` — 1-minute bucket (enables time-range queries across all services)
 - `{service}`: user-provided service name
 - `{instance}`: `us-east-1/i-0abc123` or `dc-west/rack4-host7` (opaque string)
+- `{boot_id}`: 4 lowercase alpha chars generated per process start (disambiguates segment indices across restarts — see issue #225)
 - `{epoch_secs}`: Unix epoch seconds (parsed from `SegmentMetadata` header, falls back to file mtime)
 - `{index}`: segment index from RotatingWriter
 

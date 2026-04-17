@@ -47,12 +47,12 @@ async fn main() -> anyhow::Result<()> {
         client
             .put_object()
             .bucket(bucket)
-            .key("traces/2026-04-09/1900/demo-service/local/host-0/1744224000-0.bin.gz")
+            .key("traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224000-0.bin.gz")
             .body(full_compressed.into())
             .send()
             .await?;
         tracing::info!(
-            key = "traces/2026-04-09/1900/demo-service/local/host-0/1744224000-0.bin.gz",
+            key = "traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224000-0.bin.gz",
             size = demo_data.len(),
             "seeded full demo trace"
         );
@@ -61,8 +61,9 @@ async fn main() -> anyhow::Result<()> {
         for i in 0..5 {
             let data = format!("synthetic trace segment {i}");
             let compressed = gzip_bytes(data.as_bytes());
-            let key =
-                format!("traces/2026-04-09/191{i}/test-svc/us-east-1/host-1/1744224{i}00-0.bin.gz");
+            let key = format!(
+                "traces/2026-04-09/191{i}/test-svc/us-east-1/host-1/xyzw/1744224{i}00-0.bin.gz"
+            );
             client
                 .put_object()
                 .bucket(bucket)

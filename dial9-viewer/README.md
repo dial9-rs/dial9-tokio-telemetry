@@ -76,7 +76,7 @@ The trace endpoint returns raw binary data (`application/octet-stream`) suitable
 The viewer expects the [time-first key layout](../dial9-tokio-telemetry/design/s3-worker-design.md) used by `dial9-tokio-telemetry`'s S3 worker:
 
 ```
-{prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{epoch}-{index}.bin.gz
+{prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{boot_id}/{epoch}-{index}.bin.gz
 ```
 
 Search by entering prefixes that match this structure, e.g.:

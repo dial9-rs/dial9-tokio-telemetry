@@ -10,13 +10,23 @@ use aws_sdk_s3_transfer_manager::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Generate a per-process identifier from PID and current timestamp.
+/// Generate a short boot identifier (4 lowercase alpha chars).
+///
+/// Derived from the current system time nanoseconds. Different process
+/// restarts pick different values, letting you disambiguate segments
+/// from successive runs of the same service on the same host.
 fn default_boot_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{}-{}", std::process::id(), nanos)
+    let mut v = nanos as u64;
+    let mut s = String::with_capacity(4);
+    for _ in 0..4 {
+        s.push((b'a' + (v % 26) as u8) as char);
+        v /= 26;
+    }
+    s
 }
 
 /// Metadata about a sealed trace segment, passed to custom key functions.
@@ -27,6 +37,9 @@ pub struct SegmentInfo {
     pub index: u32,
     /// Segment creation time as seconds since the Unix epoch.
     pub epoch_secs: u64,
+    /// Identifier for this process lifetime. A new value each application
+    /// start, so segment indices from different runs do not collide.
+    pub boot_id: String,
 }
 
 /// Trait for custom S3 object key generation.
@@ -61,8 +74,12 @@ where
 /// # Default key layout
 ///
 /// ```text
-/// {prefix}/{YYYY-MM-DD}/{HHMM}/{service_name}/{instance_path}/{epoch_secs}-{index}.bin.gz
+/// {prefix}/{YYYY-MM-DD}/{HHMM}/{service_name}/{instance_path}/{boot_id}/{epoch_secs}-{index}.bin.gz
 /// ```
+///
+/// The `boot_id` segment disambiguates segment indices across process
+/// restarts — without it, a service that restarts will produce colliding
+/// `{epoch_secs}-{index}` names.
 ///
 /// Override with [`key_fn`](S3ConfigBuilder::key_fn) for a custom layout.
 #[derive(Clone, bon::Builder)]
@@ -73,11 +90,12 @@ pub struct S3Config {
     /// Instance identifier for S3 key paths. Defaults to the system hostname.
     #[builder(into, default = InstanceIdentity::from_hostname())]
     instance_path: InstanceIdentity,
-    /// Identifies this process lifetime. Stored as S3 object metadata to
-    /// correlate segments from the same application run. A new value each
-    /// time the application restarts lets you group or filter by run.
+    /// Identifies this process lifetime. Included as both S3 object
+    /// metadata and in the default key path. A new value each application
+    /// start disambiguates segments (and segment indices) from different
+    /// runs of the same service on the same host.
     ///
-    /// Defaults to `{pid}-{timestamp_nanos}`.
+    /// Defaults to 4 random lowercase alpha characters.
     #[builder(default = default_boot_id())]
     boot_id: String,
     /// Optional key prefix. When `None`, keys start at the time bucket.
@@ -115,7 +133,7 @@ impl S3Config {
     ///
     /// If a custom `key_fn` is set, delegates to it. Otherwise uses the
     /// default time-first layout:
-    /// `{prefix}/{date}/{HHMM}/{service}/{instance}/{epoch_secs}-{index}.bin.gz`
+    /// `{prefix}/{date}/{HHMM}/{service}/{instance}/{boot_id}/{epoch_secs}-{index}.bin.gz`
     pub(crate) fn object_key(
         &self,
         segment: &SealedSegment,
@@ -130,6 +148,7 @@ impl S3Config {
             let info = SegmentInfo {
                 index: segment.index,
                 epoch_secs,
+                boot_id: self.boot_id.clone(),
             };
             return key_fn.object_key(&info);
         }
@@ -146,10 +165,11 @@ impl S3Config {
         };
 
         let suffix = format!(
-            "{}/{}/{}/{}-{}{}",
+            "{}/{}/{}/{}/{}-{}{}",
             date_hour,
             self.service_name,
             self.instance_path.as_str(),
+            self.boot_id,
             ts,
             segment.index,
             extension,
@@ -363,7 +383,7 @@ mod tests {
         let metadata = make_metadata(1741209000);
         let key = config.object_key(&segment, &metadata);
         check!(
-            key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-3.bin.gz"
+            key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/test-boot-id/1741209000-3.bin.gz"
         );
     }
 
@@ -378,7 +398,9 @@ mod tests {
         let segment = make_segment("/tmp/trace.0.bin", 0);
         let metadata = make_metadata(1741209000);
         let key = config.object_key(&segment, &metadata);
-        check!(key == "2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz");
+        check!(
+            key == "2025-03-05/2110/checkout-api/us-east-1/i-0abc123/test-boot-id/1741209000-0.bin.gz"
+        );
     }
 
     #[test]
@@ -387,7 +409,16 @@ mod tests {
         let segment = make_segment("/tmp/trace.0.bin", 0);
         let metadata = HashMap::from([("epoch_secs".into(), "1741209000".into())]);
         let key = config.object_key(&segment, &metadata);
-        check!(key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin");
+        check!(
+            key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/test-boot-id/1741209000-0.bin"
+        );
+    }
+
+    #[test]
+    fn default_boot_id_is_four_lowercase_alpha_chars() {
+        let id = default_boot_id();
+        check!(id.len() == 4);
+        check!(id.chars().all(|c| c.is_ascii_lowercase()));
     }
 
     #[test]
@@ -497,7 +528,7 @@ mod tests {
             .unwrap();
 
         check!(
-            key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/1741209000-0.bin.gz"
+            key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/test-boot-id/1741209000-0.bin.gz"
         );
 
         // Local file should be deleted
