@@ -33,10 +33,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     builder.worker_threads(num_workers).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_cpu_profiling(CpuProfilingConfig {
-            frequency_hz: 999,
-            ..Default::default()
-        })
+        .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -274,10 +271,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_cpu_profiling(CpuProfilingConfig {
-            frequency_hz: 999,
-            ..Default::default()
-        })
+        .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .build_and_start(builder, writer)
         .unwrap();
 

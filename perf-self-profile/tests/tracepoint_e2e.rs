@@ -26,11 +26,12 @@ fn tracepoint_sched_switch_e2e() {
     );
 
     // 2. Open perf event using the TracepointDef's event source
-    let mut sampler = match PerfSampler::start(SamplerConfig {
-        sampling: SamplingMode::Period(1),
-        event_source: tp.event_source(),
-        include_kernel: false,
-    }) {
+    let mut sampler = match PerfSampler::start(
+        SamplerConfig::default()
+            .event_source(tp.event_source())
+            .sampling(SamplingMode::Period(1))
+            .include_kernel(false),
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("skipping: perf_event_open failed: {}", e);

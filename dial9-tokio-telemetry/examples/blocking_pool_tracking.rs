@@ -29,10 +29,7 @@ fn main() {
     let writer = RotatingWriter::single_file("blocking_pool_trace.bin").unwrap();
     let (runtime, _guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .with_cpu_profiling(CpuProfilingConfig {
-            frequency_hz: 999,
-            ..Default::default()
-        })
+        .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .build_and_start(builder, writer)
         .unwrap();
 

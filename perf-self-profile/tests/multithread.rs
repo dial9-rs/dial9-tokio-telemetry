@@ -19,11 +19,11 @@ fn burn_cpu(stop: &AtomicBool) {
 
 #[test]
 fn profiles_spawned_threads() {
-    let mut sampler = PerfSampler::start(SamplerConfig {
-        sampling: SamplingMode::FrequencyHz(999),
-        event_source: EventSource::SwCpuClock,
-        include_kernel: false,
-    })
+    let mut sampler = PerfSampler::start(
+        SamplerConfig::default()
+            .event_source(EventSource::SwCpuClock)
+            .sampling(SamplingMode::FrequencyHz(999)),
+    )
     .expect("failed to start sampler");
 
     let stop = Arc::new(AtomicBool::new(false));
