@@ -26,6 +26,7 @@ fn default_boot_id() -> String {
         s.push((b'a' + (v % 26) as u8) as char);
         v /= 26;
     }
+    s.push_str(&format!("-{}", std::process::id()));
     s
 }
 
@@ -415,10 +416,11 @@ mod tests {
     }
 
     #[test]
-    fn default_boot_id_is_four_lowercase_alpha_chars() {
+    fn default_boot_id_is_alpha_timestamp_and_pid() {
         let id = default_boot_id();
-        check!(id.len() == 4);
-        check!(id.chars().all(|c| c.is_ascii_lowercase()));
+        let (ts, pid) = id.split_once("-").unwrap();
+        assert_eq!(ts.len(), 4);
+        pid.parse::<u64>().unwrap();
     }
 
     #[test]
