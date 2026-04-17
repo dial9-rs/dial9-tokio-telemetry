@@ -82,7 +82,9 @@ fn flush_once(
     let cpu_events_time = Instant::now();
     #[cfg(feature = "cpu-profiling")]
     {
-        event_writer.flush_cpu(shared);
+        if shared.enabled.load(Ordering::Relaxed) {
+            event_writer.flush_cpu(shared);
+        }
     }
     let cpu_flush_duration = cpu_events_time.elapsed();
 
@@ -1093,6 +1095,13 @@ fn run_flush_loop(
                 exit = true;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        // When disabled, skip all recording work (queue sampling, metadata
+        // merging, drain coordination, flush). The loop still wakes every
+        // 5ms to check for control commands and the exit signal.
+        if !exit && !shared.enabled.load(Ordering::Relaxed) {
+            continue;
         }
 
         let now = Instant::now();

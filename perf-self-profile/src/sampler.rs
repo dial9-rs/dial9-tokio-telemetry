@@ -4,6 +4,7 @@
 // TODO: these variants are currently Linux-specific (perf_event_open constants),
 // consider cfg-gating individual variants when adding other platform backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EventSource {
     /// `PERF_COUNT_HW_CPU_CYCLES` — hardware CPU cycle counter.
     /// Most precise, but may fail in VMs or containers without PMU access.
@@ -26,6 +27,7 @@ pub enum EventSource {
 
 /// The sampling mode to use.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum SamplingMode {
     /// Sample at this frequency in Hz (e.g., 999 or 4000).
     FrequencyHz(u64),
@@ -36,13 +38,9 @@ pub enum SamplingMode {
 /// Configuration for the sampler.
 #[derive(Debug, Clone)]
 pub struct SamplerConfig {
-    /// Which event to sample on.
-    pub event_source: EventSource,
-    /// What type of sampling to use.
-    pub sampling: SamplingMode,
-    /// Whether to include kernel stack frames.
-    /// Requires `perf_event_paranoid` <= 1 (or CAP_PERFMON).
-    pub include_kernel: bool,
+    pub(crate) event_source: EventSource,
+    pub(crate) sampling: SamplingMode,
+    pub(crate) include_kernel: bool,
 }
 
 impl Default for SamplerConfig {
@@ -55,8 +53,30 @@ impl Default for SamplerConfig {
     }
 }
 
+impl SamplerConfig {
+    /// Set the event source to sample on.
+    pub fn event_source(mut self, source: EventSource) -> Self {
+        self.event_source = source;
+        self
+    }
+
+    /// Set the sampling mode (frequency or fixed period).
+    pub fn sampling(mut self, mode: SamplingMode) -> Self {
+        self.sampling = mode;
+        self
+    }
+
+    /// Whether to include kernel stack frames.
+    /// Requires `perf_event_paranoid` <= 1 (or CAP_PERFMON).
+    pub fn include_kernel(mut self, yes: bool) -> Self {
+        self.include_kernel = yes;
+        self
+    }
+}
+
 /// A single sample captured from perf events.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Sample {
     /// Instruction pointer at the time of the sample.
     pub ip: u64,

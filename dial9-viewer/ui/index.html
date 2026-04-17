@@ -137,7 +137,7 @@
         <input type="datetime-local" id="range-from" step="60" />
         <label>To:</label>
         <input type="datetime-local" id="range-to" step="60" />
-        <button class="primary" id="search-btn" onclick="doTimeRangeSearch()">Search</button>
+        <button class="primary" id="search-btn" onclick="doTimeRangeSearch()" disabled>Search</button>
     </div>
 
     <div class="tab-bar">
@@ -246,11 +246,25 @@
 
     const prefixInput = document.getElementById('prefix-input');
     let serverHasPrefix = false;
-    fetch('/api/config').then(r => r.json()).then(config => {
+
+    function updateSearchReady() {
+        const hasPrefix = serverHasPrefix || prefixInput.value.trim() !== '';
+        document.getElementById('search-btn').disabled = !hasPrefix;
+    }
+    prefixInput.addEventListener('input', updateSearchReady);
+
+    fetch('/api/config').then(async r => {
+        if (!r.ok) {
+            const body = await r.text().catch(() => '');
+            throw new Error(`HTTP ${r.status}${body ? ': ' + body : ''}`);
+        }
+        return r.json();
+    }).then(config => {
         if (!bucketInput.value && config.default_bucket) bucketInput.value = config.default_bucket;
         if (config.default_prefix) {
             prefixInput.value = config.default_prefix;
             serverHasPrefix = true;
+            updateSearchReady();
         }
         discoverPrefixes();
     }).catch(() => { discoverPrefixes(); });
@@ -261,15 +275,22 @@
     // ── Auto-discover prefixes ──
     async function discoverPrefixes() {
         const bucket = bucketInput.value.trim();
-        if (!bucket) { prefixInput.placeholder = 'e.g. traces'; return; }
+        if (!bucket) { prefixInput.placeholder = 'e.g. traces'; updateSearchReady(); return; }
         try {
             const resp = await fetch(`/api/prefixes?bucket=${encodeURIComponent(bucket)}`);
-            if (!resp.ok) return;
+            if (!resp.ok) {
+                const body = await resp.text().catch(() => '');
+                console.warn(`prefix discovery failed: HTTP ${resp.status}${body ? ': ' + body : ''}`);
+                prefixInput.placeholder = 'discovery failed — enter manually';
+                updateSearchReady();
+                return;
+            }
             const prefixes = await resp.json();
             const suggestions = document.getElementById('prefix-suggestions');
             suggestions.innerHTML = '';
             if (prefixes.length === 0) {
                 prefixInput.placeholder = '(none found)';
+                updateSearchReady();
                 return;
             }
             // If there's exactly one prefix and the input is empty, auto-select it
@@ -286,11 +307,16 @@
                     prefixInput.value = label;
                     suggestions.querySelectorAll('button').forEach(b => b.classList.remove('active'));
                     btn.classList.add('active');
+                    updateSearchReady();
                 });
                 if (prefixInput.value === label) btn.classList.add('active');
                 suggestions.appendChild(btn);
             }
-        } catch { prefixInput.placeholder = 'e.g. traces'; }
+            updateSearchReady();
+        } catch {
+            prefixInput.placeholder = 'discovery failed — enter manually';
+            updateSearchReady();
+        }
     }
 
     // Re-discover when bucket changes
@@ -504,8 +530,11 @@
             // Fire parallel queries for each hour prefix
             const fetches = prefixes.map(p => {
                 const url = `/api/search?bucket=${encodeURIComponent(bucket)}&q=${encodeURIComponent(p)}`;
-                return fetch(url).then(r => {
-                    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return fetch(url).then(async r => {
+                    if (!r.ok) {
+                        const body = await r.text().catch(() => '');
+                        throw new Error(`HTTP ${r.status}${body ? ': ' + body : ''}`);
+                    }
                     return r.json();
                 });
             });
@@ -786,7 +815,25 @@
         const bucket = bucketInput.value.trim();
         const keysParams = keys.map(k => `keys=${encodeURIComponent(k)}`).join('&');
         const traceUrl = `/api/trace?bucket=${encodeURIComponent(bucket)}&${keysParams}`;
-        window.open(`viewer.html?trace=${encodeURIComponent(traceUrl)}`, '_blank');
+
+        // Pass structured metadata for the viewer title
+        const parsed = keys.map(k => parseKey(k));
+        const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
+        const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
+        const epochs = parsed.map(p => p.epoch).filter(e => e > 0).sort((a, b) => a - b);
+        const titleParams = new URLSearchParams();
+        titleParams.set('trace', traceUrl);
+        if (services.length) titleParams.set('svc', services.join(', '));
+        if (hosts.length === 1) titleParams.set('host', hosts[0]);
+        if (epochs.length >= 2) {
+            titleParams.set('from', formatEpoch(epochs[0]));
+            titleParams.set('to', formatEpoch(epochs[epochs.length - 1]));
+        } else if (epochs.length === 1) {
+            titleParams.set('from', formatEpoch(epochs[0]));
+        }
+        titleParams.set('segs', String(keys.length));
+
+        window.open(`viewer.html?${titleParams.toString()}`, '_blank');
     }
     </script>
 </body>

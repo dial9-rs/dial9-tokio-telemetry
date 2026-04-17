@@ -13,11 +13,11 @@ use std::collections::HashMap;
 
 fn main() {
     // --- Start the sampler ---
-    let mut sampler = match PerfSampler::start(SamplerConfig {
-        sampling: SamplingMode::FrequencyHz(999),
-        event_source: EventSource::SwCpuClock,
-        include_kernel: false,
-    }) {
+    let mut sampler = match PerfSampler::start(
+        SamplerConfig::default()
+            .event_source(EventSource::SwCpuClock)
+            .sampling(SamplingMode::FrequencyHz(999)),
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to start sampler: {e}");

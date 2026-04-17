@@ -18,6 +18,7 @@ fn main() {
 
     println!("cargo::rerun-if-changed=toolkit");
     println!("cargo::rerun-if-changed=skills");
+    println!("cargo::rerun-if-changed=ui");
 
     generate_toolkit(&manifest_dir, &out_dir);
     generate_skills(&manifest_dir, &out_dir);

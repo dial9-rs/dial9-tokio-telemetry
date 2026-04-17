@@ -23,11 +23,11 @@
 //! ```no_run
 //! use dial9_perf_self_profile::{PerfSampler, SamplerConfig, SamplingMode, EventSource, Sample};
 //!
-//! let mut sampler = PerfSampler::start(SamplerConfig {
-//!     event_source: EventSource::SwCpuClock,
-//!     sampling: SamplingMode::FrequencyHz(999),
-//!     include_kernel: false,
-//! }).expect("failed to start sampler");
+//! let mut sampler = PerfSampler::start(
+//!     SamplerConfig::default()
+//!         .event_source(EventSource::SwCpuClock)
+//!         .sampling(SamplingMode::FrequencyHz(999)),
+//! ).expect("failed to start sampler");
 //!
 //! // ... do work ...
 //!
