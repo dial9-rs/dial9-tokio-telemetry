@@ -1,6 +1,6 @@
 # dial9-viewer
 
-CLI tool that serves a web UI for browsing and viewing [dial9-tokio-telemetry](../dial9-tokio-telemetry) trace files stored in S3.
+CLI tool that serves a web UI for browsing and viewing [dial9-tokio-telemetry](../dial9-tokio-telemetry) trace files stored in S3 or on the local filesystem.
 
 ## Quick start
 
@@ -8,7 +8,10 @@ CLI tool that serves a web UI for browsing and viewing [dial9-tokio-telemetry](.
 # Build
 cargo build -p dial9-viewer
 
-# Run with a default bucket
+# Serve traces from a local directory (no AWS credentials needed)
+cargo run -p dial9-viewer -- serve --local-dir /tmp/my_traces
+
+# Run with an S3 bucket
 AWS_PROFILE=my-profile cargo run -p dial9-viewer -- serve --bucket my-trace-bucket
 
 # Run with a bucket and prefix
@@ -33,6 +36,7 @@ Starts the web server.
 | `--port` | `3000` | Port to listen on |
 | `--bucket` | none | Default S3 bucket (can also be set per-request in the UI) |
 | `--prefix` | none | Default S3 key prefix prepended to searches |
+| `--local-dir` | none | Serve traces from a local directory instead of S3 |
 | `--ui-dir` | `ui` | Directory containing static UI files |
 
 ### `agents`
@@ -84,6 +88,16 @@ Search by entering prefixes that match this structure, e.g.:
 - `2026-04-09/1910/` — traces from the 19:10 minute bucket
 - `2026-04-09/1910/checkout-api/` — traces from checkout-api at 19:10
 
+## Local directory mode
+
+For local development, point the viewer at your dial9 traces directory instead of S3:
+
+```bash
+cargo run -p dial9-viewer -- serve --local-dir /tmp/my_traces
+```
+
+This recursively serves all files under the directory. The search, prefix browsing, and trace viewing APIs all work the same way — no AWS credentials needed.
+
 ## Development
 
 The UI is plain HTML/JS with no build step. Edit files in `ui/` and refresh the browser.
@@ -112,4 +126,4 @@ Integration tests use [s3s](https://docs.rs/s3s/) to run a fake S3 server in-pro
 - Bucket listing endpoint and dropdown
 - Rich result metadata (service, instance, timestamp columns)
 - Deep linking with time range parameters
-- Pluggable backends (local filesystem, GCS)
+- Pluggable backends (GCS)
