@@ -67,7 +67,7 @@ where
 /// sensible defaults:
 ///
 /// - `instance_path`: system hostname
-/// - `boot_id`: `{pid}-{timestamp_nanos}` (unique per process start)
+/// - `boot_id`: `{4 alpha derived from timestamp}-{pid}` (unique per process start)
 /// - `prefix`: none (keys start at the time bucket)
 /// - `region`: auto-detected via `HeadBucket`
 /// - `key_fn`: built-in time-first layout
