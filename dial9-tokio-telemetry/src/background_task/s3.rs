@@ -45,7 +45,7 @@ pub struct SegmentInfo {
 /// Trait for custom S3 object key generation.
 ///
 /// Implement this to control the S3 key layout. The default key layout is
-/// `{prefix}/{date}/{HHMM}/{service}/{instance}/{epoch}-{index}.bin.gz`.
+/// `{prefix}/{date}/{HHMM}/{service}/{instance}/{boot_id}/{epoch}-{index}.bin.gz`.
 pub trait S3KeyFn: Send + Sync {
     /// Generate the S3 object key for the given segment.
     fn object_key(&self, segment: &SegmentInfo) -> String;
