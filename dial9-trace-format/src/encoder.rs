@@ -332,8 +332,8 @@ impl<W: Write> Encoder<W> {
         self.state.writer.write_all(&type_id.0.to_le_bytes())?;
         codec::encode_u24_le(ts_delta, &mut self.state.writer)?;
         let mut enc = EventEncoder::new(&mut self.state);
-        for v in field_values {
-            enc.write_field_value(v)?;
+        for (i, v) in field_values.iter().enumerate() {
+            enc.write_field_value(v, schema.entry.fields[i].field_type)?;
         }
         Ok(())
     }

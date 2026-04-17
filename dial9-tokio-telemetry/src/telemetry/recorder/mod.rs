@@ -39,6 +39,27 @@ enum ControlCommand {
     FinalizeAndStop(std::sync::mpsc::SyncSender<()>),
 }
 
+/// Tracks the drain coordination state between the flush loop and the writer.
+///
+/// When the writer reports a drain is due (`should_drain()`), we can't act
+/// immediately because thread-local buffers may still hold events that belong
+/// in the current segment. Instead we bump the drain epoch (so threads
+/// self-flush on their next `record_event`), wait one cycle (~5 ms) for that
+/// to propagate, then perform the intrusive drain + flush + notify the writer
+/// via `drained()`.
+///
+/// Without a state machine, the naïve check `if should_drain { schedule drain }`
+/// fires every cycle (since we haven't drained yet), forever deferring the
+/// actual drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainState {
+    /// Normal operation — poll `should_drain()` each cycle.
+    Idle,
+    /// The writer reported drain due and we bumped the drain epoch.
+    /// Next cycle: intrusive drain + flush + `drained()`.
+    EpochBumped,
+}
+
 /// Stats returned by flush for metrics publishing.
 #[metrics(subfield, rename_all = "PascalCase")]
 #[derive(Debug)]
@@ -1049,15 +1070,14 @@ fn run_flush_loop(
     // are batched into reasonably-sized segments.
     let mut cycle_count: u64 = 0;
     const SELF_DRAIN_INTERVAL: u64 = 200;
-    // Drain all thread-local buffers every ~30s (6000 × 5ms).
-    // This ensures idle/silent threads don't hold events across
-    // trace file rotations.
-    const TL_DRAIN_INTERVAL: u64 = 6000;
+
     let sample_interval = Duration::from_millis(10);
     let mut last_sample = Instant::now();
     // Snapshot the user-provided segment metadata so we can
     // merge it with runtime→worker entries on each flush cycle.
     let static_metadata = event_writer.segment_metadata().to_vec();
+
+    let mut drain_state = DrainState::Idle;
 
     loop {
         let mut ack_tx = None;
@@ -1098,17 +1118,39 @@ fn run_flush_loop(
 
         cycle_count += 1;
         let drain_self = exit || cycle_count.is_multiple_of(SELF_DRAIN_INTERVAL);
-        // Periodically drain all thread-local buffers so idle/silent
-        // threads don't hold events across trace file rotations.
-        // We bump the epoch one tick early (~5 ms grace period) so
-        // busy threads self-flush on their next record_event,
-        // and the intrusive drain only locks truly idle buffers.
-        // On exit we bump + drain in the same tick since there is
-        // no next tick for the grace period.
-        if exit || (cycle_count + 1).is_multiple_of(TL_DRAIN_INTERVAL) {
+        // --- Drain coordination state machine ---
+        //
+        // When the writer reports a drain is due, we can't act immediately
+        // because thread-local buffers may still hold events that belong
+        // in the current segment.  The two-state machine ensures we:
+        //   Idle        → detect should_drain, bump epoch, transition
+        //   EpochBumped → intrusive drain + flush + drained(), back to Idle
+        //
+        // This avoids the bug where re-checking should_drain() every
+        // cycle (it stays true until we actually call drained()) would
+        // forever reschedule the drain and never reach the drained step.
+        let do_drain = match drain_state {
+            DrainState::Idle => {
+                if !exit && event_writer.should_drain() {
+                    shared.bump_drain_epoch();
+                    drain_state = DrainState::EpochBumped;
+                }
+                false
+            }
+            DrainState::EpochBumped => {
+                drain_state = DrainState::Idle;
+                true
+            }
+        };
+
+        // On exit, bump + drain in the same tick since there is no next
+        // tick for the grace period.
+        if exit {
             shared.bump_drain_epoch();
         }
-        if exit || cycle_count.is_multiple_of(TL_DRAIN_INTERVAL) {
+
+        // --- Execute intrusive drain when needed ---
+        if exit || do_drain {
             let mut tl_drain_timer = Timer::start_now();
             let stats = shared.drain_all_tl_buffers();
             tl_drain_timer.stop();
@@ -1123,6 +1165,17 @@ fn run_flush_loop(
         let mut flush_timer = Timer::start_now();
         let stats = flush_once(&mut event_writer, shared, drain_self);
         flush_timer.stop();
+
+        // Notify the writer that TL buffers have been drained and flushed.
+        // The writer may rotate the segment or just advance its drain timer.
+        // Skip on exit — finalize() below will seal the final segment.
+        if do_drain
+            && !exit
+            && let Err(e) = event_writer.drained()
+        {
+            tracing::warn!("failed to complete post-drain action: {e}");
+        }
+
         // Create the metrics guard up front; mutate on the exit path,
         // then let it drop (which emits the entry).
         let mut flush_guard =

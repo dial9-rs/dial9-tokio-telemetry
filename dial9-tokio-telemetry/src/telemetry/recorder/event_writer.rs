@@ -139,6 +139,14 @@ impl EventWriter {
         self.writer.flush()
     }
 
+    pub(crate) fn should_drain(&self) -> bool {
+        self.writer.should_drain()
+    }
+
+    pub(crate) fn drained(&mut self) -> std::io::Result<bool> {
+        self.writer.drained()
+    }
+
     pub(crate) fn finalize(&mut self) -> std::io::Result<()> {
         self.writer.finalize()
     }

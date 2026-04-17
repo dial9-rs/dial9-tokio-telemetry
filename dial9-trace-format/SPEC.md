@@ -146,6 +146,19 @@ After decoding this frame, the decoder sets `timestamp_base_ns = timestamp_ns`. 
 | 12 | U16 | 2-byte little-endian unsigned | 2 |
 | 13 | U32 | 4-byte little-endian unsigned | 4 |
 
+### Optional Field Modifier (`0x80`)
+
+The high bit of the field type tag is reserved as an "optional" modifier. When set, the field is preceded by a 1-byte presence prefix in the event data:
+
+- `0x00`: field is absent (no further bytes for this field)
+- `0x01`: field is present (followed by the inner type's normal encoding)
+
+The inner type tag is `tag & 0x7F`. For example, tag `0x87` is an optional `PooledString` (tag 7 | 0x80).
+
+In the schema frame, the `field_type` byte carries the optional bit. A decoder that does not recognize the modified tag (i.e., does not support optional fields) **must** reject the schema, since it cannot determine the field's wire size.
+
+Optional fields serve two purposes: they allow event schemas to evolve without breaking backwards compatibility (a reader compiled with knowledge of a field that the writer omitted can default it to "absent" by checking the schema's field names), and they reduce wire size for values that are frequently absent (1 byte instead of the full inner type encoding).
+
 ### Timestamp Encoding
 
 Events with timestamps use the packed header encoding:

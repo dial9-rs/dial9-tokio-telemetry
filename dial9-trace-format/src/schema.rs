@@ -12,7 +12,9 @@ use crate::types::FieldType;
 pub struct FieldDef {
     /// Field name (e.g. `"worker_id"`).
     pub name: String,
-    /// Wire type used to encode this field.
+    /// Wire type used to encode this field. Optional variants (e.g.
+    /// `FieldType::OptionalPooledString`) indicate the field uses the
+    /// high-bit optional encoding on the wire.
     pub field_type: FieldType,
 }
 

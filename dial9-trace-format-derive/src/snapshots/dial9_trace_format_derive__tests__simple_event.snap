@@ -31,12 +31,21 @@ impl ::dial9_trace_format::TraceEvent for SimpleEvent {
     fn decode<'a>(
         timestamp_ns: Option<u64>,
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
+        field_defs: &[::dial9_trace_format::schema::FieldDef],
     ) -> Option<Self::Ref<'a>> {
         Some(SimpleEventRef {
             timestamp_ns: timestamp_ns?,
-            value: <u32 as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(0usize)?,
-            )?,
+            value: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "value")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => <u32 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
+                    None => <u32 as ::dial9_trace_format::TraceField>::decode_missing()?,
+                }
+            },
         })
     }
 }

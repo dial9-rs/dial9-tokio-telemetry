@@ -202,19 +202,39 @@ impl PerfSampler {
     }
 
     fn build_attr(config: &SamplerConfig) -> io::Result<perf_event_attr> {
-        // Check max sample rate
-        if let Ok(contents) = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
-            && let Ok(max_rate) = contents.trim().parse::<u64>()
-            && config.frequency_hz > max_rate
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "requested frequency {} exceeds kernel max {} \
+        use crate::SamplingMode;
+
+        match config.sampling {
+            SamplingMode::FrequencyHz(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FrequencyHz(0) is invalid",
+                ));
+            }
+            SamplingMode::FrequencyHz(hz) => {
+                // Check max sample rate
+                if let Ok(contents) =
+                    std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
+                    && let Ok(max_rate) = contents.trim().parse::<u64>()
+                    && hz > max_rate
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "requested frequency {} exceeds kernel max {} \
                              (see /proc/sys/kernel/perf_event_max_sample_rate)",
-                    config.frequency_hz, max_rate
-                ),
-            ));
+                            hz, max_rate
+                        ),
+                    ));
+                }
+            }
+            SamplingMode::Period(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Period must be >= 1",
+                ));
+            }
+            SamplingMode::Period(_) => {}
         }
 
         let mut attr = perf_event_attr::default();
@@ -253,7 +273,14 @@ impl PerfSampler {
             | PERF_SAMPLE_TID as u64
             | PERF_SAMPLE_TIME as u64
             | PERF_SAMPLE_CPU as u64
-            | PERF_SAMPLE_PERIOD as u64
+            // Omit PERF_SAMPLE_PERIOD in Period mode. When set, perf_swevent_event()
+            // emits a sample on every SW event, skipping the countdown 
+            // that implements 1-in-N sampling.
+            | if matches!(config.sampling, SamplingMode::FrequencyHz(_)) {
+                PERF_SAMPLE_PERIOD as u64
+            } else {
+                0
+            }
             // PERF_SAMPLE_RAW includes the tracepoint's raw event data (field
             // values) in each sample. Only tracepoints produce meaningful raw
             // data; CPU and context-switch sources have nothing to attach.
@@ -270,21 +297,26 @@ impl PerfSampler {
         attr.clockid = libc::CLOCK_MONOTONIC;
 
         attr.set_disabled(1);
-        if is_event_based {
-            // Sample every context switch. exclude_kernel must remain 0 since
-            // context switches fire in kernel context; kernel callchain frames
-            // are filtered at parse time via USER_ADDR_LIMIT.
-            attr.sample_period = 1;
-            attr.wakeup_events = 1;
-            attr.set_sample_id_all(1);
-        } else {
-            attr.sample_freq = config.frequency_hz;
-            attr.set_freq(1);
-            attr.set_sample_id_all(1);
-            attr.set_inherit(1);
-            if !config.include_kernel {
-                attr.set_exclude_kernel(1);
-                attr.set_exclude_hv(1);
+        match config.sampling {
+            SamplingMode::Period(period) => {
+                // exclude_kernel must remain 0 since context switches fire in
+                // kernel context; kernel callchain frames are filtered at
+                // parse time via USER_ADDR_LIMIT.
+                attr.sample_period = period;
+                attr.wakeup_events = 1;
+                attr.set_sample_id_all(1);
+            }
+            SamplingMode::FrequencyHz(hz) => {
+                attr.sample_freq = hz;
+                attr.set_freq(1);
+                attr.set_sample_id_all(1);
+                if !is_event_based {
+                    attr.set_inherit(1);
+                    if !config.include_kernel {
+                        attr.set_exclude_kernel(1);
+                        attr.set_exclude_hv(1);
+                    }
+                }
             }
         }
 

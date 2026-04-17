@@ -324,9 +324,9 @@
     workerSpans,
     workerIds,
     schedDelays,
-    hasSchedWait,
     opts
   ) {
+    const hasSchedWait = opts && opts.hasSchedWait;
     const points = [];
 
     for (const w of workerIds) {

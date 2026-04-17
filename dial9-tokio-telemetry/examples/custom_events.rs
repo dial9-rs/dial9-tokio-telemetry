@@ -4,9 +4,12 @@
 //! 1. **Simple** — `#[derive(TraceEvent)]` struct passed directly to `record_event`
 //! 2. **Advanced** — manual `Encodable` impl with string interning for repeated values
 //!
+//! With the `analysis` feature, also demonstrates reading custom events back
+//! through `TraceReader` and resolving interned strings.
+//!
 //! Run with:
 //! ```sh
-//! cargo run --example custom_events
+//! cargo run --example custom_events --features analysis
 //! ```
 
 use dial9_tokio_telemetry::telemetry::{
@@ -17,14 +20,17 @@ use std::time::Duration;
 
 // ── Simple: derive-only, no interning ───────────────────────────────────────
 
-/// A custom event with only primitive fields. The blanket `Encodable` impl
+/// A custom event with primitive and optional fields. The blanket `Encodable` impl
 /// handles encoding automatically — just pass it to `record_event`.
+/// Optional fields use 1 byte on the wire when absent (None).
 #[derive(TraceEvent)]
 struct RequestCompleted {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     status_code: u32,
     latency_us: u64,
+    /// Only present for failed requests.
+    error_message: Option<String>,
 }
 
 // ── Advanced: manual Encodable with string interning ────────────────────────
@@ -68,13 +74,19 @@ fn main() -> std::io::Result<()> {
     let handle = guard.handle();
 
     runtime.block_on(async {
-        // Simple: derive-only events
+        // Simple: derive-only events (some with optional field present)
         for i in 0..10 {
+            let error_message = if i % 4 == 3 {
+                Some(format!("timeout after {}ms", 100 + i))
+            } else {
+                None
+            };
             record_event(
                 RequestCompleted {
                     timestamp_ns: clock_monotonic_ns(),
-                    status_code: 200,
+                    status_code: if error_message.is_some() { 500 } else { 200 },
                     latency_us: 100 + i,
+                    error_message,
                 },
                 &handle,
             );
@@ -120,6 +132,38 @@ fn main() -> std::io::Result<()> {
     assert_eq!(request_completed, 10);
     assert_eq!(http_request, 10);
     println!("✓ All custom events recorded successfully");
+
+    // ── Read custom events through TraceReader (requires `analysis` feature) ──
+    #[cfg(feature = "analysis")]
+    {
+        use dial9_tokio_telemetry::analysis_unstable::TraceReader;
+        use dial9_tokio_telemetry::telemetry::TelemetryEvent;
+
+        let reader = TraceReader::new(sealed.to_str().unwrap())?;
+
+        let custom_events: Vec<&TelemetryEvent> = reader
+            .all_events
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::Custom { .. }))
+            .collect();
+
+        println!(
+            "\n=== TraceReader: {} custom events ===",
+            custom_events.len()
+        );
+        assert_eq!(custom_events.len(), 20); // 10 RequestCompleted + 10 HttpRequestWire
+
+        for event in &custom_events {
+            if let TelemetryEvent::Custom { name, fields, .. } = event {
+                print!("  {name}:");
+                for (fname, fval) in fields {
+                    print!(" {fname}={fval:?}");
+                }
+                println!();
+            }
+        }
+        println!("✓ TraceReader custom event round-trip verified");
+    }
 
     Ok(())
 }

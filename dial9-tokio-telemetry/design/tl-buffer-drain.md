@@ -60,13 +60,39 @@ bail out. Because the mutex stays poisoned, the affected thread silently
 stops recording for the rest of its lifetime — clean degradation rather than
 corrupt output or cascading panics.
 
+### Drain scheduling
+
+The flush loop asks the `TraceWriter` when to drain via two trait methods:
+
+- **`should_drain(&self) -> bool`**: checked every flush cycle (~5 ms).
+  Returns `true` when the writer wants TL buffers drained.
+- **`drained(&mut self) -> io::Result<bool>`**: called after the drain +
+  flush completes. The writer may rotate the segment, advance a timer, or
+  do nothing. Returns `true` if a segment rotation occurred.
+
+`RotatingWriter` tracks a `next_drain_time` field set to
+`min(rotation_period, 30s)`. When the drain fires, `drained()` checks
+whether a rotation boundary has also been crossed:
+
+- **Rotation due**: rotates the segment (which resets both timers).
+- **Periodic drain only**: advances `next_drain_time` without rotating.
+
+This ensures idle/silent threads are drained at least every 30 s even when
+rotation is disabled (`single_file()`, `Duration::MAX`).
+
+The flush loop uses a two-state machine (`DrainState::Idle` →
+`DrainState::EpochBumped` → `Idle`) to avoid the bug where re-checking
+`should_drain()` every cycle (it stays true until `drained()` is called)
+would forever reschedule the drain without completing it.
+
 ### Performance characteristics
 
 - **Busy workers**: self-flush on epoch advance; never locked by the flush
   thread. The `FlushEpoch` check is a single relaxed atomic load — no
   cache-line contention.
-- **Idle workers**: locked briefly (~µs) every 30 s. The mutex is almost
-  always uncontended because the owning thread is idle.
+- **Idle workers**: locked briefly (~µs) at each drain interval
+  (≤ 30 s). The mutex is almost always uncontended because the owning
+  thread is idle.
 - **Silent workers**: same as idle — the flush thread locks and drains them.
 - **Memory**: one `Arc<AtomicU64>` per thread (the `FlushEpoch`), plus one
   `Weak` pointer per thread in the `SharedState` vec.

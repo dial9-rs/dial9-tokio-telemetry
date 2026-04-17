@@ -95,9 +95,10 @@ pub(crate) enum FrameRef<'a> {
     TimestampReset(u64),
 }
 
-/// Schema info needed by the decoder: field types + has_timestamp flag.
+/// Schema info needed by the decoder: raw field type tags + has_timestamp flag.
+/// Raw tags preserve the optional bit (0x80) for correct decode handling.
 pub(crate) struct SchemaInfo<'a> {
-    pub field_types: &'a [FieldType],
+    pub field_tags: &'a [u8],
     pub has_timestamp: bool,
 }
 
@@ -207,7 +208,8 @@ fn decode_schema_frame(data: &[u8]) -> Option<(Frame, usize)> {
         pos += 2;
         let fname = String::from_utf8(data.get(pos..pos + fname_len)?.to_vec()).ok()?;
         pos += fname_len;
-        let ft = FieldType::from_tag(*data.get(pos)?)?;
+        let raw_tag = *data.get(pos)?;
+        let ft = FieldType::from_tag(raw_tag)?;
         pos += 1;
         fields.push(FieldDef {
             name: fname,
@@ -245,12 +247,25 @@ fn decode_event_frame<'s>(
         None
     };
 
-    let mut values = Vec::with_capacity(info.field_types.len());
+    let mut values = Vec::with_capacity(info.field_tags.len());
     let mut remaining = &data[pos..];
-    for ft in info.field_types {
-        let (val, rest) = FieldValue::decode(*ft, remaining)?;
-        values.push(val);
-        remaining = rest;
+    for &tag in info.field_tags {
+        let ft = FieldType::from_tag(tag)?;
+        if ft.is_optional() {
+            let prefix = *remaining.first()?;
+            remaining = &remaining[1..];
+            if prefix == 0x00 {
+                values.push(FieldValue::None);
+            } else {
+                let (val, rest) = FieldValue::decode(ft.inner(), remaining)?;
+                values.push(val);
+                remaining = rest;
+            }
+        } else {
+            let (val, rest) = FieldValue::decode(ft, remaining)?;
+            values.push(val);
+            remaining = rest;
+        }
     }
     let consumed = data.len() - remaining.len();
     Some((
@@ -327,11 +342,24 @@ fn decode_event_frame_ref<'a, 's>(
         None
     };
 
-    let mut values = Vec::with_capacity(info.field_types.len());
-    for ft in info.field_types {
-        let (val, consumed) = FieldValueRef::decode(*ft, data, pos)?;
-        values.push(val);
-        pos += consumed;
+    let mut values = Vec::with_capacity(info.field_tags.len());
+    for &tag in info.field_tags {
+        let ft = FieldType::from_tag(tag)?;
+        if ft.is_optional() {
+            let prefix = *data.get(pos)?;
+            pos += 1;
+            if prefix == 0x00 {
+                values.push(FieldValueRef::None);
+            } else {
+                let (val, consumed) = FieldValueRef::decode(ft.inner(), data, pos)?;
+                values.push(val);
+                pos += consumed;
+            }
+        } else {
+            let (val, consumed) = FieldValueRef::decode(ft, data, pos)?;
+            values.push(val);
+            pos += consumed;
+        }
     }
     Some((
         FrameRef::Event {
@@ -432,11 +460,15 @@ mod tests {
         encode_event(WireTypeId(1), None, &values, &mut buf).unwrap();
         assert_eq!(buf[0], TAG_EVENT);
 
-        let types = vec![FieldType::Varint, FieldType::Bool, FieldType::String];
+        let tags: Vec<u8> = vec![
+            FieldType::Varint as u8,
+            FieldType::Bool as u8,
+            FieldType::String as u8,
+        ];
         let lookup = |id: WireTypeId| -> Option<SchemaInfo<'_>> {
             if id == WireTypeId(1) {
                 Some(SchemaInfo {
-                    field_types: &types,
+                    field_tags: &tags,
                     has_timestamp: false,
                 })
             } else {
@@ -461,11 +493,11 @@ mod tests {
         let mut buf = Vec::new();
         encode_event(WireTypeId(1), Some(1_000_000), &values, &mut buf).unwrap();
 
-        let types = vec![FieldType::Varint];
+        let tags: Vec<u8> = vec![FieldType::Varint as u8];
         let lookup = |id: WireTypeId| -> Option<SchemaInfo<'_>> {
             if id == WireTypeId(1) {
                 Some(SchemaInfo {
-                    field_types: &types,
+                    field_tags: &tags,
                     has_timestamp: true,
                 })
             } else {
@@ -502,11 +534,11 @@ mod tests {
             buf.len()
         );
 
-        let types = vec![FieldType::Varint, FieldType::Varint];
+        let tags: Vec<u8> = vec![FieldType::Varint as u8, FieldType::Varint as u8];
         let lookup = |id: WireTypeId| -> Option<SchemaInfo<'_>> {
             if id == WireTypeId(2) {
                 Some(SchemaInfo {
-                    field_types: &types,
+                    field_tags: &tags,
                     has_timestamp: false,
                 })
             } else {
@@ -562,13 +594,13 @@ mod tests {
 
     #[test]
     fn truncated_event_frame() {
-        let types = vec![FieldType::Varint];
+        let tags: Vec<u8> = vec![FieldType::Varint as u8];
         let data = [TAG_EVENT, 0x01];
         let result = decode_frame(
             &data,
             |_| {
                 Some(SchemaInfo {
-                    field_types: &types,
+                    field_tags: &tags,
                     has_timestamp: false,
                 })
             },

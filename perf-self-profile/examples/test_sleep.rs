@@ -1,4 +1,6 @@
-use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, resolve_symbol};
+use dial9_perf_self_profile::{
+    EventSource, PerfSampler, SamplerConfig, SamplingMode, resolve_symbol,
+};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -15,7 +17,7 @@ fn main() {
 
     let sampler = Arc::new(Mutex::new(
         PerfSampler::new_per_thread(SamplerConfig {
-            frequency_hz: 1,
+            sampling: SamplingMode::Period(1),
             event_source: EventSource::SwContextSwitches,
             include_kernel: false,
         })

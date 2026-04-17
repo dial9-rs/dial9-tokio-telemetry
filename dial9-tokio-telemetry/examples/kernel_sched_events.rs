@@ -59,17 +59,20 @@ async fn blocking_task(id: usize) {
 fn main() {
     let trace_dir = "example-traces";
     std::fs::create_dir_all(trace_dir).unwrap();
-    let trace_path = format!("{trace_dir}/kernel_sched_trace.bin");
+    let trace_base = format!("{trace_dir}/kernel_sched_trace.bin");
+    let trace_read_path = format!("{trace_dir}/kernel_sched_trace.0.bin");
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
-    let writer = RotatingWriter::single_file(&trace_path).unwrap();
+    let writer = RotatingWriter::single_file(&trace_base).unwrap();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .with_sched_events(SchedEventConfig {
-            include_kernel: true,
-        })
+        .with_sched_events(
+            SchedEventConfig::default()
+                .sampling_interval(5)
+                .include_kernel(true),
+        )
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -84,8 +87,8 @@ fn main() {
     drop(guard);
 
     // Read back and print callchains
-    eprintln!("\n=== Reading trace from {trace_path} ===");
-    let reader = TraceReader::new(&trace_path).unwrap();
+    eprintln!("\n=== Reading trace from {trace_read_path} ===");
+    let reader = TraceReader::new(&trace_read_path).unwrap();
     let events = &reader.runtime_events;
 
     let mut printed = 0;

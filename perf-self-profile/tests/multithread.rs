@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
+use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, SamplingMode};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +20,7 @@ fn burn_cpu(stop: &AtomicBool) {
 #[test]
 fn profiles_spawned_threads() {
     let mut sampler = PerfSampler::start(SamplerConfig {
-        frequency_hz: 999,
+        sampling: SamplingMode::FrequencyHz(999),
         event_source: EventSource::SwCpuClock,
         include_kernel: false,
     })

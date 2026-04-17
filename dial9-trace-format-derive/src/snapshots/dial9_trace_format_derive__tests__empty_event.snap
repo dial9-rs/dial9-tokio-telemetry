@@ -27,6 +27,7 @@ impl ::dial9_trace_format::TraceEvent for EmptyEvent {
     fn decode<'a>(
         timestamp_ns: Option<u64>,
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
+        field_defs: &[::dial9_trace_format::schema::FieldDef],
     ) -> Option<Self::Ref<'a>> {
         Some(EmptyEventRef {
             timestamp_ns: timestamp_ns?,

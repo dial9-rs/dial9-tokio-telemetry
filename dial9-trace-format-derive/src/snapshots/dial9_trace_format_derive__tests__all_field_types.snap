@@ -82,45 +82,168 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
     fn decode<'a>(
         timestamp_ns: Option<u64>,
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
+        field_defs: &[::dial9_trace_format::schema::FieldDef],
     ) -> Option<Self::Ref<'a>> {
         Some(AllFieldTypesRef {
             timestamp_ns: timestamp_ns?,
-            a_u8: <u8 as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(0usize)?,
-            )?,
-            b_u16: <u16 as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(1usize)?,
-            )?,
-            c_u32: <u32 as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(2usize)?,
-            )?,
-            d_u64: <u64 as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(3usize)?,
-            )?,
-            e_i64: <i64 as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(4usize)?,
-            )?,
-            f_f64: <f64 as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(5usize)?,
-            )?,
-            g_bool: <bool as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(6usize)?,
-            )?,
-            h_string: <String as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(7usize)?,
-            )?,
-            i_bytes: <Vec<
-                u8,
-            > as ::dial9_trace_format::TraceField>::decode_ref(fields.get(8usize)?)?,
-            j_interned: <InternedString as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(9usize)?,
-            )?,
-            k_frames: <StackFrames as ::dial9_trace_format::TraceField>::decode_ref(
-                fields.get(10usize)?,
-            )?,
-            l_map: <Vec<
-                (String, String),
-            > as ::dial9_trace_format::TraceField>::decode_ref(fields.get(11usize)?)?,
+            a_u8: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "a_u8")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => <u8 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
+                    None => <u8 as ::dial9_trace_format::TraceField>::decode_missing()?,
+                }
+            },
+            b_u16: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "b_u16")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => <u16 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
+                    None => <u16 as ::dial9_trace_format::TraceField>::decode_missing()?,
+                }
+            },
+            c_u32: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "c_u32")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => <u32 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
+                    None => <u32 as ::dial9_trace_format::TraceField>::decode_missing()?,
+                }
+            },
+            d_u64: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "d_u64")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => <u64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
+                    None => <u64 as ::dial9_trace_format::TraceField>::decode_missing()?,
+                }
+            },
+            e_i64: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "e_i64")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => <i64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
+                    None => <i64 as ::dial9_trace_format::TraceField>::decode_missing()?,
+                }
+            },
+            f_f64: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "f_f64")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => <f64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
+                    None => <f64 as ::dial9_trace_format::TraceField>::decode_missing()?,
+                }
+            },
+            g_bool: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "g_bool")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => <bool as ::dial9_trace_format::TraceField>::decode_ref(v)?,
+                    None => <bool as ::dial9_trace_format::TraceField>::decode_missing()?,
+                }
+            },
+            h_string: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "h_string")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => {
+                        <String as ::dial9_trace_format::TraceField>::decode_ref(v)?
+                    }
+                    None => {
+                        <String as ::dial9_trace_format::TraceField>::decode_missing()?
+                    }
+                }
+            },
+            i_bytes: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "i_bytes")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => {
+                        <Vec<u8> as ::dial9_trace_format::TraceField>::decode_ref(v)?
+                    }
+                    None => {
+                        <Vec<u8> as ::dial9_trace_format::TraceField>::decode_missing()?
+                    }
+                }
+            },
+            j_interned: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "j_interned")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => {
+                        <InternedString as ::dial9_trace_format::TraceField>::decode_ref(
+                            v,
+                        )?
+                    }
+                    None => {
+                        <InternedString as ::dial9_trace_format::TraceField>::decode_missing()?
+                    }
+                }
+            },
+            k_frames: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "k_frames")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => {
+                        <StackFrames as ::dial9_trace_format::TraceField>::decode_ref(v)?
+                    }
+                    None => {
+                        <StackFrames as ::dial9_trace_format::TraceField>::decode_missing()?
+                    }
+                }
+            },
+            l_map: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name == "l_map")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => {
+                        <Vec<
+                            (String, String),
+                        > as ::dial9_trace_format::TraceField>::decode_ref(v)?
+                    }
+                    None => {
+                        <Vec<
+                            (String, String),
+                        > as ::dial9_trace_format::TraceField>::decode_missing()?
+                    }
+                }
+            },
         })
     }
 }

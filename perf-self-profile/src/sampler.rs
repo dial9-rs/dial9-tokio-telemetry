@@ -24,13 +24,22 @@ pub enum EventSource {
     Tracepoint(u32),
 }
 
+/// The sampling mode to use.
+#[derive(Debug, Clone, Copy)]
+pub enum SamplingMode {
+    /// Sample at this frequency in Hz (e.g., 999 or 4000).
+    FrequencyHz(u64),
+    /// Record one sample per this many events. `1` = every event.
+    Period(u64),
+}
+
 /// Configuration for the sampler.
 #[derive(Debug, Clone)]
 pub struct SamplerConfig {
-    /// Sampling frequency in Hz (e.g., 999 or 4000).
-    pub frequency_hz: u64,
     /// Which event to sample on.
     pub event_source: EventSource,
+    /// What type of sampling to use.
+    pub sampling: SamplingMode,
     /// Whether to include kernel stack frames.
     /// Requires `perf_event_paranoid` <= 1 (or CAP_PERFMON).
     pub include_kernel: bool,
@@ -39,7 +48,7 @@ pub struct SamplerConfig {
 impl Default for SamplerConfig {
     fn default() -> Self {
         SamplerConfig {
-            frequency_hz: 999,
+            sampling: SamplingMode::FrequencyHz(999),
             event_source: EventSource::SwCpuClock,
             include_kernel: false,
         }

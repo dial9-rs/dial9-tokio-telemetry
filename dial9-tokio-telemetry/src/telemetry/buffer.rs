@@ -216,10 +216,10 @@ impl Encodable for RawEvent {
                 target_worker: *target_worker,
             }),
             RawEvent::CpuSample(data) => {
-                let thread_name = match &data.thread_name {
-                    Some(name) => enc.intern_string(name.as_str()),
-                    None => enc.intern_string("<no thread name>"),
-                };
+                let thread_name = data
+                    .thread_name
+                    .as_ref()
+                    .map(|n| enc.intern_string(n.as_str()));
                 enc.encode(&CpuSampleEvent {
                     timestamp_ns: data.timestamp_nanos,
                     worker_id: data.worker_id,
@@ -434,8 +434,8 @@ pub(crate) fn record_encodable_event(
         buf.record_encodable(event);
         let current_epoch = drain_epoch.load(Ordering::Relaxed);
         if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
-            buf.flush_epoch.store(current_epoch);
             collector.accept_flush(buf.flush());
+            buf.flush_epoch.store(current_epoch);
         }
         if first_call {
             Some(TlBufferHandle {

@@ -239,3 +239,60 @@ fn js_decodes_multiple_events() {
     assert_eq!(events[0]["values"]["ts"], "0");
     assert_eq!(events[4]["values"]["ts"], "4000");
 }
+
+#[test]
+fn js_decodes_optional_pooled_string() {
+    let mut enc = Encoder::new();
+    let tid = enc
+        .register_schema(
+            "OptionalStringEvent",
+            vec![
+                FieldDef {
+                    name: "required_id".into(),
+                    field_type: FieldType::Varint,
+                },
+                FieldDef {
+                    name: "opt_name".into(),
+                    field_type: FieldType::OptionalPooledString,
+                },
+            ],
+        )
+        .unwrap();
+
+    // Event with Some(interned string)
+    let name_id = enc.intern_string("hello").unwrap();
+    enc.write_event(
+        &tid,
+        &[
+            FieldValue::Varint(1_000_000),
+            FieldValue::Varint(42),
+            FieldValue::PooledString(name_id),
+        ],
+    )
+    .unwrap();
+
+    // Event with None
+    enc.write_event(
+        &tid,
+        &[
+            FieldValue::Varint(2_000_000),
+            FieldValue::Varint(99),
+            FieldValue::None,
+        ],
+    )
+    .unwrap();
+
+    let data = enc.finish();
+    let json = js_decode(&data);
+    let frames = json["frames"].as_array().unwrap();
+    let events: Vec<_> = frames.iter().filter(|f| f["type"] == "event").collect();
+    assert_eq!(events.len(), 2);
+
+    // First event: opt_name should be the resolved string, not a raw integer
+    assert_eq!(events[0]["values"]["opt_name"], "hello");
+    assert_eq!(events[0]["values"]["required_id"].as_str().unwrap(), "42");
+
+    // Second event: opt_name should be null
+    assert!(events[1]["values"]["opt_name"].is_null());
+    assert_eq!(events[1]["values"]["required_id"].as_str().unwrap(), "99");
+}

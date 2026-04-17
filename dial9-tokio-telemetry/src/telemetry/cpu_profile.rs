@@ -5,7 +5,7 @@
 //! (EventWriter) maps OS thread IDs to worker IDs via SharedState.thread_roles.
 
 use crate::telemetry::events::{CpuSampleSource, ThreadName};
-use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig};
+use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, SamplingMode};
 use std::collections::HashMap;
 use std::io;
 
@@ -45,8 +45,22 @@ impl Default for CpuProfilingConfig {
 /// so each worker thread gets its own perf fd via `on_thread_start`.
 #[derive(Debug, Clone, Default)]
 pub struct SchedEventConfig {
-    /// Whether to include kernel stack frames.
-    pub include_kernel: bool,
+    sampling_interval: Option<u64>,
+    include_kernel: bool,
+}
+
+impl SchedEventConfig {
+    /// Record every Nth context switch. Default records every event.
+    pub fn sampling_interval(mut self, n: u64) -> Self {
+        self.sampling_interval = Some(n);
+        self
+    }
+
+    /// Include kernel stack frames in callchains.
+    pub fn include_kernel(mut self, yes: bool) -> Self {
+        self.include_kernel = yes;
+        self
+    }
 }
 
 /// A raw CPU sample before worker-id resolution.
@@ -69,8 +83,8 @@ pub(crate) struct CpuProfiler {
 impl CpuProfiler {
     pub(crate) fn start(config: CpuProfilingConfig) -> io::Result<Self> {
         let sampler = PerfSampler::start(SamplerConfig {
-            frequency_hz: config.frequency_hz,
             event_source: config.event_source,
+            sampling: SamplingMode::FrequencyHz(config.frequency_hz),
             include_kernel: config.include_kernel,
         })?;
         Ok(Self {
@@ -117,8 +131,8 @@ pub(crate) struct SchedProfiler {
 impl SchedProfiler {
     pub(crate) fn new(config: SchedEventConfig) -> io::Result<Self> {
         let sampler = PerfSampler::new_per_thread(SamplerConfig {
-            frequency_hz: 1,
             event_source: EventSource::SwContextSwitches,
+            sampling: SamplingMode::Period(config.sampling_interval.unwrap_or(1)),
             include_kernel: config.include_kernel,
         })?;
         Ok(Self { sampler })

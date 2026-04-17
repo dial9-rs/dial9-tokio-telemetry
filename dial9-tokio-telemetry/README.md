@@ -68,8 +68,9 @@ use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 fn main() -> std::io::Result<()> {
     let writer = RotatingWriter::builder()
         .base_path("/tmp/my_traces/trace.bin")
-        .max_file_size(1024 * 1024)
-        .max_total_size(5 * 1024 * 1024)
+        .max_file_size(100 * 1024 * 1024) // safety valve at 100 MiB per file
+        .max_total_size(500 * 1024 * 1024) // keep at most 500 MiB on disk
+        // .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
         .build()?;
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -179,6 +180,8 @@ struct RequestCompleted {
     timestamp_ns: u64,
     status_code: u32,
     latency_us: u64,
+    /// Optional fields use 1 byte on the wire when absent.
+    error_message: Option<String>,
 }
 
 # let handle: TelemetryHandle = todo!();
@@ -187,6 +190,7 @@ record_event(
         timestamp_ns: clock_monotonic_ns(),
         status_code: 200,
         latency_us: 1500,
+        error_message: None,
     },
     &handle,
 );
@@ -228,7 +232,7 @@ use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEve
 let (runtime, guard) = TracedRuntime::builder()
     .with_task_tracking(true)
     .with_cpu_profiling(CpuProfilingConfig::default())
-    .with_sched_events(SchedEventConfig { include_kernel: true })
+    .with_sched_events(SchedEventConfig::default().include_kernel(true))
     .with_trace_path("/tmp/t.bin")
     .build_and_start(builder, writer)?;
 # Ok(())
@@ -331,7 +335,7 @@ See [`examples/thread_per_core.rs`](/dial9-tokio-telemetry/examples/thread_per_c
 
 ### Writers
 
-`RotatingWriter` rotates files based on size and time, and evicts old ones to stay within a total size budget. By default, segments rotate every 60 seconds (wall-clock-aligned) or when they exceed `max_file_size`, whichever comes first. For quick experiments, `RotatingWriter::single_file(path)` writes a single file with no rotation.
+`RotatingWriter` rotates files based on size and time, and evicts old ones to stay within a total size budget. By default, segments rotate every 60 seconds (wall-clock-aligned) or when they exceed `max_file_size`, whichever comes first. Time-based rotation produces clean segment boundaries (thread-local buffers are drained before sealing), so set `max_file_size` large enough that time-based rotation fires first under normal conditions (100 MiB is a good default). Size-based rotation then acts as a safety valve for unexpected data bursts. For quick experiments, `RotatingWriter::single_file(path)` writes a single file with no rotation.
 
 ### Analyzing traces
 
@@ -367,8 +371,8 @@ use dial9_tokio_telemetry::background_task::s3::S3Config;
 let trace_path = "/tmp/my_traces/trace.bin";
 let writer = RotatingWriter::builder()
     .base_path(trace_path)
-    .max_file_size(1024 * 1024)      // rotate after 1 MiB per file
-    .max_total_size(5 * 1024 * 1024) // keep at most 5 MiB on disk
+    .max_file_size(100 * 1024 * 1024)  // safety valve at 100 MiB per file
+    .max_total_size(500 * 1024 * 1024) // keep at most 500 MiB on disk
     .build()?;
 
 let s3_config = S3Config::builder()

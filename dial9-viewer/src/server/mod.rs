@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tower_http::services::ServeDir;
 
 mod config;
+mod prefixes;
 mod search;
 mod trace;
 
@@ -39,6 +40,7 @@ pub fn router(state: AppState, ui_dir: &Path) -> Router {
 fn api_router(state: AppState) -> Router {
     Router::new()
         .route("/config", axum::routing::get(config::get_config))
+        .route("/prefixes", axum::routing::get(prefixes::list_prefixes))
         .route("/search", axum::routing::get(search::search))
         .route("/trace", axum::routing::get(trace::get_trace))
         .with_state(state)

@@ -4,6 +4,7 @@ use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::TaskId;
 #[cfg(any(feature = "analysis", test))]
 use dial9_trace_format::decoder::StringPool;
+use dial9_trace_format::schema::SchemaEntry;
 use dial9_trace_format::types::{EventEncoder, FieldType, FieldValueRef};
 use dial9_trace_format::{InternedString, StackFrames, TraceEvent, TraceField};
 use serde::Serialize;
@@ -190,7 +191,7 @@ pub(crate) struct CpuSampleEvent {
     pub worker_id: WorkerId,
     pub tid: u32,
     pub source: CpuSampleSource,
-    pub thread_name: InternedString,
+    pub thread_name: Option<InternedString>,
     pub callchain: StackFrames,
 }
 
@@ -243,7 +244,7 @@ pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
     let mut events = Vec::new();
 
     dec.for_each_event(|ev| {
-        if let Some(r) = decode_ref(ev.name, ev.timestamp_ns, ev.fields) {
+        if let Some(r) = decode_ref(ev.name, ev.timestamp_ns, ev.fields, ev.schema) {
             events.push(to_owned_event(r, ev.string_pool));
         }
     })
@@ -298,51 +299,56 @@ pub(crate) fn decode_ref<'a>(
     name: &str,
     timestamp_ns: Option<u64>,
     fields: &[FieldValueRef<'a>],
+    schema: &SchemaEntry,
 ) -> Option<TelemetryEventRef<'a>> {
     use dial9_trace_format::TraceEvent as _;
+    let field_defs = &schema.fields;
     Some(match name {
         "PollStartEvent" => {
-            TelemetryEventRef::PollStart(PollStartEvent::decode(timestamp_ns, fields)?)
+            TelemetryEventRef::PollStart(PollStartEvent::decode(timestamp_ns, fields, field_defs)?)
         }
-        "PollEndEvent" => TelemetryEventRef::PollEnd(PollEndEvent::decode(timestamp_ns, fields)?),
-        "WorkerParkEvent" => {
-            TelemetryEventRef::WorkerPark(WorkerParkEvent::decode(timestamp_ns, fields)?)
+        "PollEndEvent" => {
+            TelemetryEventRef::PollEnd(PollEndEvent::decode(timestamp_ns, fields, field_defs)?)
         }
-        "WorkerUnparkEvent" => {
-            TelemetryEventRef::WorkerUnpark(WorkerUnparkEvent::decode(timestamp_ns, fields)?)
-        }
-        "QueueSampleEvent" => {
-            TelemetryEventRef::QueueSample(QueueSampleEvent::decode(timestamp_ns, fields)?)
-        }
+        "WorkerParkEvent" => TelemetryEventRef::WorkerPark(WorkerParkEvent::decode(
+            timestamp_ns,
+            fields,
+            field_defs,
+        )?),
+        "WorkerUnparkEvent" => TelemetryEventRef::WorkerUnpark(WorkerUnparkEvent::decode(
+            timestamp_ns,
+            fields,
+            field_defs,
+        )?),
+        "QueueSampleEvent" => TelemetryEventRef::QueueSample(QueueSampleEvent::decode(
+            timestamp_ns,
+            fields,
+            field_defs,
+        )?),
         "TaskSpawnEvent" => {
-            TelemetryEventRef::TaskSpawn(TaskSpawnEvent::decode(timestamp_ns, fields)?)
+            TelemetryEventRef::TaskSpawn(TaskSpawnEvent::decode(timestamp_ns, fields, field_defs)?)
         }
-        "TaskTerminateEvent" => {
-            TelemetryEventRef::TaskTerminate(TaskTerminateEvent::decode(timestamp_ns, fields)?)
-        }
+        "TaskTerminateEvent" => TelemetryEventRef::TaskTerminate(TaskTerminateEvent::decode(
+            timestamp_ns,
+            fields,
+            field_defs,
+        )?),
         "CpuSampleEvent" => {
-            TelemetryEventRef::CpuSample(CpuSampleEvent::decode(timestamp_ns, fields)?)
+            TelemetryEventRef::CpuSample(CpuSampleEvent::decode(timestamp_ns, fields, field_defs)?)
         }
         "WakeEventEvent" => {
-            TelemetryEventRef::WakeEvent(WakeEventEvent::decode(timestamp_ns, fields)?)
+            TelemetryEventRef::WakeEvent(WakeEventEvent::decode(timestamp_ns, fields, field_defs)?)
         }
-        "SegmentMetadataEvent" => {
-            TelemetryEventRef::SegmentMetadata(SegmentMetadataEvent::decode(timestamp_ns, fields)?)
-        }
+        "SegmentMetadataEvent" => TelemetryEventRef::SegmentMetadata(SegmentMetadataEvent::decode(
+            timestamp_ns,
+            fields,
+            field_defs,
+        )?),
         "ClockSyncEvent" => {
-            TelemetryEventRef::ClockSync(ClockSyncEvent::decode(timestamp_ns, fields)?)
+            TelemetryEventRef::ClockSync(ClockSyncEvent::decode(timestamp_ns, fields, field_defs)?)
         }
         _ => return None,
     })
-}
-
-/// Resolve an interned thread name from the string pool, filtering out the
-/// sentinel `"<no thread name>"` placeholder.
-#[cfg(any(feature = "analysis", test))]
-fn resolve_thread_name(pool: &StringPool, interned: InternedString) -> Option<String> {
-    pool.get(interned)
-        .filter(|n| *n != "<no thread name>")
-        .map(|n| n.to_string())
 }
 
 /// Convert a zero-copy `TelemetryEventRef` into an owned `TelemetryEvent`,
@@ -392,7 +398,9 @@ pub(crate) fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> Tel
             timestamp_nanos: e.timestamp_ns,
             worker_id: e.worker_id,
             tid: e.tid,
-            thread_name: resolve_thread_name(pool, e.thread_name),
+            thread_name: e
+                .thread_name
+                .and_then(|s| pool.get(s).map(|n| n.to_string())),
             source: e.source,
             callchain: e.callchain.iter().collect(),
         },

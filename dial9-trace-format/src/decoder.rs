@@ -59,7 +59,15 @@ pub struct RawEvent<'a, 'f> {
     pub name: &'f str,
     pub timestamp_ns: Option<u64>,
     pub fields: &'f [FieldValueRef<'a>],
+    pub schema: &'f SchemaEntry,
     pub string_pool: &'f StringPool,
+}
+
+impl<'a, 'f> RawEvent<'a, 'f> {
+    /// Field names from the schema, parallel to `fields`.
+    pub fn field_names(&self) -> impl Iterator<Item = &'f str> {
+        self.schema.fields.iter().map(|f| f.name.as_str())
+    }
 }
 
 /// A map from interned string IDs to their resolved string values.
@@ -123,9 +131,9 @@ pub enum DecodedFrameRef<'a> {
 }
 
 struct SchemaCache {
-    name: String,
-    field_types: Vec<FieldType>,
-    has_timestamp: bool,
+    entry: SchemaEntry,
+    /// Raw field type tags for fast decode (avoids re-extracting from entry.fields).
+    field_tags: Vec<u8>,
 }
 
 /// Streaming trace file decoder.
@@ -212,8 +220,8 @@ impl<'a> Decoder<'a> {
             .get(type_id.0 as usize)
             .and_then(|s| s.as_ref())
             .map(|c| SchemaInfo {
-                field_types: &c.field_types,
-                has_timestamp: c.has_timestamp,
+                field_tags: &c.field_tags,
+                has_timestamp: c.entry.has_timestamp,
             })
     }
 
@@ -223,9 +231,8 @@ impl<'a> Decoder<'a> {
             self.schema_cache.resize_with(idx + 1, || None);
         }
         self.schema_cache[idx] = Some(SchemaCache {
-            name: entry.name.clone(),
-            field_types: entry.fields.iter().map(|f| f.field_type).collect(),
-            has_timestamp: entry.has_timestamp,
+            field_tags: entry.fields.iter().map(|f| f.field_type as u8).collect(),
+            entry: entry.clone(),
         });
         self.registry.register(type_id, entry)
     }
@@ -426,7 +433,7 @@ impl<'a> Decoder<'a> {
                         }
                     };
 
-                    let timestamp_ns = if cache.has_timestamp {
+                    let timestamp_ns = if cache.entry.has_timestamp {
                         match codec::decode_u24_le(&remaining[pos..]) {
                             Some(delta) => {
                                 pos += 3;
@@ -444,29 +451,82 @@ impl<'a> Decoder<'a> {
                     };
 
                     values_buf.clear();
-                    for ft in &cache.field_types {
-                        match FieldValueRef::decode(*ft, remaining, pos) {
-                            Some((val, consumed)) => {
-                                values_buf.push(val);
-                                pos += consumed;
-                            }
+                    for &ftag in &cache.field_tags {
+                        let inner_type = match FieldType::from_tag(ftag) {
+                            Some(ft) => ft,
                             None => {
                                 return Err(TryForEachError::Decode(DecodeError {
                                     pos: self.pos + pos,
-                                    message: "truncated field value".into(),
+                                    message: format!("unknown field type tag {ftag:#x}"),
                                 }));
+                            }
+                        };
+                        if inner_type.is_optional() {
+                            match remaining.get(pos) {
+                                Some(0x00) => {
+                                    values_buf.push(FieldValueRef::None);
+                                    pos += 1;
+                                }
+                                Some(_) => {
+                                    pos += 1;
+                                    match FieldValueRef::decode(inner_type.inner(), remaining, pos)
+                                    {
+                                        Some((val, consumed)) => {
+                                            values_buf.push(val);
+                                            pos += consumed;
+                                        }
+                                        None => {
+                                            return Err(TryForEachError::Decode(DecodeError {
+                                                pos: self.pos + pos,
+                                                message: "truncated optional field value".into(),
+                                            }));
+                                        }
+                                    }
+                                }
+                                None => {
+                                    return Err(TryForEachError::Decode(DecodeError {
+                                        pos: self.pos + pos,
+                                        message: "truncated optional field prefix".into(),
+                                    }));
+                                }
+                            }
+                        } else {
+                            match FieldValueRef::decode(inner_type, remaining, pos) {
+                                Some((val, consumed)) => {
+                                    values_buf.push(val);
+                                    pos += consumed;
+                                }
+                                None => {
+                                    return Err(TryForEachError::Decode(DecodeError {
+                                        pos: self.pos + pos,
+                                        message: "truncated field value".into(),
+                                    }));
+                                }
                             }
                         }
                     }
-                    self.pos += pos;
-                    if let Some(ts) = timestamp_ns {
-                        self.timestamp_base_ns = ts;
+                    // Update mutable state. The borrow checker allows this
+                    // because `cache` borrows `self.schema_cache` while we
+                    // mutate `self.pos` and `self.timestamp_base_ns`, which
+                    // are disjoint fields. We use a block with destructured
+                    // refs to make this explicit.
+                    {
+                        let Self {
+                            pos: self_pos,
+                            timestamp_base_ns,
+                            ..
+                        } = self;
+                        *self_pos += pos;
+                        if let Some(ts) = timestamp_ns {
+                            *timestamp_base_ns = ts;
+                        }
                     }
                     f(RawEvent {
                         type_id,
-                        name: &cache.name,
+                        name: &cache.entry.name,
                         timestamp_ns,
                         fields: &values_buf,
+                        schema: &cache.entry,
                         string_pool: &self.string_pool,
                     })
                     .map_err(TryForEachError::User)?;

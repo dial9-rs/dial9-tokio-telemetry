@@ -88,6 +88,8 @@ The `#[traceevent(timestamp)]` attribute marks a `u64` field as the event's time
 
 Integer fields use fixed-width little-endian encoding (`u8`, `u16`, `u32`) or LEB128 (`u64`). The derive macro handles the mapping automatically.
 
+Fields of type `Option<T>` are encoded as optional: 1 byte (`0x00`) when `None`, or 1 byte (`0x01`) followed by the inner encoding when `Some`. On decode, missing fields (not present in the wire schema) default to `None`. This supports schema evolution across feature flags and reduces wire size for frequently-absent values.
+
 ### Manual schema registration
 
 For event types whose fields are determined at runtime (e.g., user-defined metrics, kernel tracepoints), register schemas by name:

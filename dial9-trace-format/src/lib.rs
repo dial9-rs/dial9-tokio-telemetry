@@ -25,6 +25,7 @@ pub mod types;
 
 pub use dial9_trace_format_derive::TraceEvent;
 pub use types::EventEncoder;
+pub use types::FieldValue;
 pub use types::InternedString;
 pub use types::StackFrames;
 pub use types::TraceField;
@@ -54,10 +55,13 @@ pub trait TraceEvent {
         &self,
         enc: &mut types::EventEncoder<'_, W>,
     ) -> std::io::Result<()>;
-    /// Decode from a slice of zero-copy field values.
+    /// Decode from field values using field definitions for name resolution.
     /// `timestamp_ns` is the absolute timestamp from the event header (if present).
-    fn decode<'a>(timestamp_ns: Option<u64>, fields: &[FieldValueRef<'a>])
-    -> Option<Self::Ref<'a>>;
+    fn decode<'a>(
+        timestamp_ns: Option<u64>,
+        fields: &[FieldValueRef<'a>],
+        field_defs: &[FieldDef],
+    ) -> Option<Self::Ref<'a>>;
 
     /// Build a SchemaEntry for this event type.
     fn schema_entry() -> SchemaEntry {
