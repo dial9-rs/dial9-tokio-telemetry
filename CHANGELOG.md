@@ -63,7 +63,7 @@ The trace viewer is its own crate now: `cargo install dial9-viewer`. It serves t
 
 ### Custom application events ([#196](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/196), [#216](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/216), [#218](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/218))
 
-You can emit your own events into the trace. Derive `TraceEvent`, call `record_event`, and they show up in the viewer alongside poll/park/wake events. Repeated string values (HTTP methods, paths, etc.) can be interned to save space on the wire.
+You can emit your own events into the trace. Derive `TraceEvent`, call `record_event`. They are not currently visible in the viewer although they can be loaded from the trace via the JS parser directly. Repeated string values (HTTP methods, paths, etc.) can be interned to save space on the wire.
 
 ```rust
 use dial9_trace_format::TraceEvent;
