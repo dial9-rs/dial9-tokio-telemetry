@@ -1486,6 +1486,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dial9-tracing"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "dial9-tokio-telemetry",
+ "dial9-trace-format",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dial9-viewer"
 version = "0.3.0"
 dependencies = [

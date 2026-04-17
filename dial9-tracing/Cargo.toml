@@ -1,0 +1,27 @@
+[package]
+name = "dial9-tracing"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+description = "Tracing subscriber layer that emits span events into dial9 traces"
+keywords = ["tokio", "telemetry", "tracing", "async", "profiling"]
+categories = ["asynchronous", "development-tools::profiling"]
+
+[dependencies]
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+dial9-tokio-telemetry = { workspace = true, optional = true }
+dial9-trace-format = { workspace = true }
+
+[features]
+default = ["tokio"]
+tokio = ["dep:dial9-tokio-telemetry"]
+
+[dev-dependencies]
+assert2 = { workspace = true }
+dial9-tokio-telemetry = { workspace = true }
+tokio = { version = "1.51.0", features = ["rt", "macros", "time", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"

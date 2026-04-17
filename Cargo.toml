@@ -4,6 +4,7 @@ members = [
     "dial9-tokio-telemetry",
     "dial9-trace-format",
     "dial9-trace-format-derive",
+    "dial9-tracing",
     "dial9-macro",
     "dial9-viewer",
     "perf-self-profile",
@@ -21,6 +22,7 @@ repository = "https://github.com/dial9-rs/dial9-tokio-telemetry"
 [workspace.dependencies]
 libc = "0.2"
 dial9-perf-self-profile = { version = "0.3.0", path = "perf-self-profile" }
+dial9-tokio-telemetry = { version = "0.3.0", path = "dial9-tokio-telemetry" }
 dial9-trace-format = { version = "0.3.0", path = "dial9-trace-format" }
 dial9-trace-format-derive = { version = "0.3.0", path = "dial9-trace-format-derive" }
 dial9-macro = { version = "0.3.0", path = "dial9-macro" }
