@@ -27,6 +27,11 @@ Avoid dropping an error without logging it. Use `tracing` for logging.
 let _ = ...
 ```
 
+All log lines (warnings, errors, etc.) emitted from hot paths or repeatable
+failure sites MUST be rate limited. Use the `rate_limited!` macro from
+`crate::rate_limit` (typical interval: `Duration::from_secs(60)`) so a
+misbehaving environment can't flood logs.
+
 ## Running tests
 
 - Always run `cargo nextest run` to run tests
