@@ -405,10 +405,12 @@ The worker uses a circuit breaker with exponential backoff if S3 is unreachable.
 ## Examples
 
 ```bash
-cargo run --example telemetry_rotating   # rotating writer demo
-cargo run --example simple_workload      # basic instrumented workload
-cargo run --example realistic_workload   # mixed CPU/IO workload
-cargo run --example long_workload        # longer run for trace analysis
+cargo run --example simple_workload        # macro-based setup (start here)
+cargo run --example conditionally_enable   # toggle telemetry via ENABLE_DIAL9 env var
+cargo run --example realistic_workload     # mixed CPU/IO workload
+cargo run --example long_workload          # longer run for trace analysis
+cargo run --example telemetry_rotating     # manual setup + rotating writer config
+cargo run --example multi_runtime          # multiple runtimes, manual TelemetryCore
 ```
 
 The [`examples/metrics-service`](/examples/metrics-service) directory has a full Axum service with DynamoDB persistence, a load-generating client, and telemetry wired up end-to-end.

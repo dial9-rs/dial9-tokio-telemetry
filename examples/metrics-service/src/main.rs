@@ -10,7 +10,7 @@ use aws_config::BehaviorVersion;
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryHandle, TracedRuntime};
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
@@ -183,78 +183,87 @@ fn main() -> std::io::Result<()> {
     guard.enable();
     let handle = guard.handle();
 
+    // Wrap the body in a spawned task so the root future is instrumented.
+    // Inside, TelemetryHandle::current() is available on every worker thread.
     runtime.block_on(async {
-        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
+        handle
+            .spawn(async move {
+                let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
 
-        let shutdown = CancellationToken::new();
+                let shutdown = CancellationToken::new();
 
-        let state = AppState {
-            buffer: Arc::new(MetricsBuffer::new()),
-            ddb: Arc::new(DdbClient::new(&config, &args.table_name)),
-            shutdown: shutdown.clone(),
-        };
+                let state = AppState {
+                    buffer: Arc::new(MetricsBuffer::new()),
+                    ddb: Arc::new(DdbClient::new(&config, &args.table_name)),
+                    shutdown: shutdown.clone(),
+                };
 
-        state
-            .ddb
-            .ensure_table()
-            .await
-            .expect("failed to ensure DynamoDB table");
+                state
+                    .ddb
+                    .ensure_table()
+                    .await
+                    .expect("failed to ensure DynamoDB table");
 
-        // background flush worker
-        let flush_state = state.clone();
-        let flush_interval = Duration::from_secs(args.flush_interval);
-        handle.spawn(async move {
-            let mut interval = tokio::time::interval(flush_interval);
-            loop {
-                interval.tick().await;
-                flush_state.buffer.flush_to_ddb(&flush_state.ddb).await;
-            }
-        });
+                let handle = TelemetryHandle::current();
 
-        let app = routes::router(state);
-        let listener = tokio::net::TcpListener::bind(&args.server_addr)
-            .await
-            .unwrap();
-        println!("Listening on http://{}", args.server_addr);
+                // background flush worker
+                let flush_state = state.clone();
+                let flush_interval = Duration::from_secs(args.flush_interval);
+                handle.spawn(async move {
+                    let mut interval = tokio::time::interval(flush_interval);
+                    loop {
+                        interval.tick().await;
+                        flush_state.buffer.flush_to_ddb(&flush_state.ddb).await;
+                    }
+                });
 
-        // Spawn the client as a separate process. It owns the run-duration
-        // timer and signals shutdown by calling `POST /terminate` when done.
-        let port = args.server_addr.split(':').nth(1).unwrap_or("3001");
-        let server_url = format!("http://127.0.0.1:{port}");
-        let client_exe = std::env::current_exe()
-            .expect("cannot determine current executable path")
-            .parent()
-            .expect("executable has no parent directory")
-            .join("client");
+                let app = routes::router(state);
+                let listener = tokio::net::TcpListener::bind(&args.server_addr)
+                    .await
+                    .unwrap();
+                println!("Listening on http://{}", args.server_addr);
 
-        let mut client_cmd = tokio::process::Command::new(&client_exe);
-        client_cmd
-            .arg("--server-url")
-            .arg(&server_url)
-            .arg("--run-duration")
-            .arg(args.run_duration.to_string());
+                // Spawn the client as a separate process. It owns the run-duration
+                // timer and signals shutdown by calling `POST /terminate` when done.
+                let port = args.server_addr.split(':').nth(1).unwrap_or("3001");
+                let server_url = format!("http://127.0.0.1:{port}");
+                let client_exe = std::env::current_exe()
+                    .expect("cannot determine current executable path")
+                    .parent()
+                    .expect("executable has no parent directory")
+                    .join("client");
 
-        if args.demo {
-            client_cmd.arg("--demo");
-        }
+                let mut client_cmd = tokio::process::Command::new(&client_exe);
+                client_cmd
+                    .arg("--server-url")
+                    .arg(&server_url)
+                    .arg("--run-duration")
+                    .arg(args.run_duration.to_string());
 
-        let mut client_child = client_cmd.spawn().unwrap_or_else(|e| {
-            panic!(
-                "failed to spawn client binary at {}: {e}",
-                client_exe.display()
-            )
-        });
+                if args.demo {
+                    client_cmd.arg("--demo");
+                }
 
-        // Reap the child when it exits so it doesn't become a zombie.
-        handle.spawn(async move {
-            match client_child.wait().await {
-                Ok(status) => println!("Client process exited: {status}"),
-                Err(e) => eprintln!("Error waiting for client process: {e}"),
-            }
-        });
+                let mut client_child = client_cmd.spawn().unwrap_or_else(|e| {
+                    panic!(
+                        "failed to spawn client binary at {}: {e}",
+                        client_exe.display()
+                    )
+                });
 
-        axum_traced::serve(listener, app.into_make_service(), handle.clone())
-            .with_graceful_shutdown(async move { shutdown.cancelled().await })
+                // Reap the child when it exits so it doesn't become a zombie.
+                handle.spawn(async move {
+                    match client_child.wait().await {
+                        Ok(status) => println!("Client process exited: {status}"),
+                        Err(e) => eprintln!("Error waiting for client process: {e}"),
+                    }
+                });
+
+                axum_traced::serve(listener, app.into_make_service())
+                    .with_graceful_shutdown(async move { shutdown.cancelled().await })
+                    .await
+                    .unwrap();
+            })
             .await
             .unwrap();
     });

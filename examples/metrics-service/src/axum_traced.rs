@@ -16,9 +16,7 @@ use tower_service::Service;
 /// A hyper executor that routes spawns through dial9's TelemetryHandle
 /// so HTTP/2 internal tasks get wake event tracking.
 #[derive(Clone)]
-struct TracedExecutor {
-    handle: TelemetryHandle,
-}
+struct TracedExecutor;
 
 impl<Fut> hyper::rt::Executor<Fut> for TracedExecutor
 where
@@ -26,7 +24,7 @@ where
     Fut::Output: Send + 'static,
 {
     fn execute(&self, fut: Fut) {
-        self.handle.spawn(fut);
+        spawn(fut);
     }
 }
 
@@ -40,7 +38,7 @@ pub struct IncomingStream<'a, L: Listener> {
     remote_addr: L::Addr,
 }
 
-pub fn serve<L, M, S>(listener: L, make_service: M, handle: TelemetryHandle) -> Serve<L, M, S>
+pub fn serve<L, M, S>(listener: L, make_service: M) -> Serve<L, M, S>
 where
     L: Listener,
     M: for<'a> Service<IncomingStream<'a, L>, Error = Infallible, Response = S>,
@@ -50,7 +48,6 @@ where
     Serve {
         listener,
         make_service,
-        handle,
         _marker: PhantomData,
     }
 }
@@ -58,7 +55,6 @@ where
 pub struct Serve<L, M, S> {
     listener: L,
     make_service: M,
-    handle: TelemetryHandle,
     _marker: PhantomData<fn() -> S>,
 }
 
@@ -73,7 +69,6 @@ where
         WithGracefulShutdown {
             listener: self.listener,
             make_service: self.make_service,
-            handle: self.handle,
             signal,
             _marker: PhantomData,
         }
@@ -83,7 +78,6 @@ where
 pub struct WithGracefulShutdown<L, M, S, F> {
     listener: L,
     make_service: M,
-    handle: TelemetryHandle,
     signal: F,
     _marker: PhantomData<fn() -> S>,
 }
@@ -105,14 +99,13 @@ where
         let Self {
             mut listener,
             mut make_service,
-            handle,
             signal,
             _marker,
         } = self;
 
         Box::pin(async move {
             let (signal_tx, signal_rx) = watch::channel(());
-            handle.spawn(async move {
+            spawn(async move {
                 signal.await;
                 drop(signal_rx);
             });
@@ -141,12 +134,8 @@ where
                 let signal_tx = signal_tx.clone();
                 let close_rx = close_rx.clone();
 
-                let traced_handle = handle.clone();
-
-                handle.spawn(async move {
-                    let builder = Builder::new(TracedExecutor {
-                        handle: traced_handle,
-                    });
+                spawn(async move {
+                    let builder = Builder::new(TracedExecutor);
                     let conn = builder.serve_connection_with_upgrades(io, hyper_service);
                     let mut conn = pin!(conn);
                     let mut signal_closed = pin!(signal_tx.closed().fuse());
@@ -173,5 +162,20 @@ where
             close_tx.closed().await;
             Ok(())
         })
+    }
+}
+
+fn spawn<F>(fut: F)
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match TelemetryHandle::try_current() {
+        Some(handle) => {
+            handle.spawn(fut);
+        }
+        None => {
+            tokio::spawn(fut);
+        }
     }
 }

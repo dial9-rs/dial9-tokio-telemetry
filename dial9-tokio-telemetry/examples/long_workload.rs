@@ -1,7 +1,18 @@
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::time::Duration;
+
+use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
+use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+fn my_config() -> Dial9Config {
+    Dial9ConfigBuilder::new("long_trace.bin", 64 * 1024 * 1024, 256 * 1024 * 1024)
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
+        .with_runtime(|r| r.with_task_tracking(true))
+        .build()
+}
 
 async fn cpu_work(iterations: u64) -> u64 {
     let mut result = 0u64;
@@ -12,9 +23,10 @@ async fn cpu_work(iterations: u64) -> u64 {
 }
 
 async fn echo_server(listener: TcpListener) {
+    let handle = TelemetryHandle::current();
     loop {
         let (mut socket, _) = listener.accept().await.unwrap();
-        tokio::spawn(async move {
+        handle.spawn(async move {
             let mut buf = [0u8; 1024];
             loop {
                 match socket.read(&mut buf).await {
@@ -57,9 +69,10 @@ async fn chatty_client(port: u16, id: usize) {
 }
 
 async fn background_cpu_bursts() {
+    let handle = TelemetryHandle::current();
     loop {
         for _ in 0..20 {
-            tokio::spawn(async { cpu_work(100_000).await });
+            handle.spawn(async { cpu_work(100_000).await });
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -74,45 +87,26 @@ async fn periodic_yielder() {
     }
 }
 
-fn main() {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
+#[dial9_tokio_telemetry::main(config = my_config)]
+async fn main() {
     let duration_secs = std::env::args()
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(30u64);
 
-    let writer = RotatingWriter::single_file("long_trace.bin").unwrap();
-    let (runtime, _guard) = TracedRuntime::builder()
-        .build_and_start(builder, writer)
-        .unwrap();
-
     println!("Running workload for {}s...", duration_secs);
 
-    runtime.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+    let handle = TelemetryHandle::current();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
 
-        tokio::spawn(echo_server(listener));
-        for i in 0..8 {
-            tokio::spawn(chatty_client(port, i));
-        }
-        tokio::spawn(background_cpu_bursts());
-        tokio::spawn(periodic_yielder());
+    handle.spawn(echo_server(listener));
+    for i in 0..8 {
+        handle.spawn(chatty_client(port, i));
+    }
+    handle.spawn(background_cpu_bursts());
+    handle.spawn(periodic_yielder());
 
-        tokio::time::sleep(Duration::from_secs(duration_secs)).await;
-        println!("Done.");
-    });
-
-    drop(_guard);
-
-    let size = std::fs::metadata("long_trace.bin")
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let events = size.saturating_sub(12) / 33;
-    println!(
-        "Trace written to long_trace.bin ({} bytes, {} events)",
-        size, events
-    );
+    tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+    println!("Done. Trace written to long_trace.*.bin");
 }

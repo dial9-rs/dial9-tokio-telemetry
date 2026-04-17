@@ -1,16 +1,18 @@
-//! Example: using the `#[dial9_tokio_telemetry::main]` macro.
+//! Example: conditionally enable dial9 telemetry via an environment variable.
 //!
-//! The macro replaces `#[tokio::main]` and sets up the traced runtime
-//! automatically from a config function — no manual `TracedRuntime` wiring.
+//! A common pattern is to run with telemetry in staging or on-demand in
+//! production, while keeping a plain tokio runtime in dev. The `config`
+//! function checks `ENABLE_DIAL9` and returns either an enabled or disabled
+//! [`Dial9Config`] — the macro handles both cases transparently.
 //!
 //! Run with telemetry enabled:
 //! ```sh
-//! ENABLE_DIAL9=1 cargo run --example macro_workload
+//! ENABLE_DIAL9=1 cargo run --example conditionally_enable
 //! ```
 //!
 //! Run with telemetry disabled (plain tokio runtime):
 //! ```sh
-//! cargo run --example macro_workload
+//! cargo run --example conditionally_enable
 //! ```
 
 use std::time::Duration;
@@ -18,10 +20,6 @@ use std::time::Duration;
 use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
-/// Configuration function passed to the macro via `config = ...`.
-///
-/// Returns a [`Dial9Config`] built from either an enabled or disabled builder
-/// depending on the `ENABLE_DIAL9` environment variable.
 fn my_config() -> Dial9Config {
     if std::env::var("ENABLE_DIAL9").is_err() {
         return Dial9ConfigBuilder::disabled()
@@ -32,7 +30,7 @@ fn my_config() -> Dial9Config {
     }
 
     Dial9ConfigBuilder::new(
-        "macro_workload_trace.bin",
+        "conditionally_enable_trace.bin",
         64 * 1024 * 1024,
         256 * 1024 * 1024,
     )
@@ -67,7 +65,7 @@ async fn mixed_task(id: usize) {
 async fn main() {
     let telemetry_enabled = TelemetryHandle::try_current().is_some();
     println!(
-        "Running macro workload (telemetry {})...",
+        "Running workload (telemetry {})...",
         if telemetry_enabled {
             "enabled"
         } else {
@@ -75,8 +73,6 @@ async fn main() {
         }
     );
 
-    // When telemetry is enabled, use handle.spawn() for wake-event tracking.
-    // When disabled, fall back to plain tokio::spawn().
     let tasks: Vec<_> = (0..50)
         .map(|i| match TelemetryHandle::try_current() {
             Some(handle) => handle.spawn(mixed_task(i)),
@@ -89,7 +85,7 @@ async fn main() {
     }
 
     if telemetry_enabled {
-        println!("All tasks completed — trace written to macro_workload_trace.*.bin");
+        println!("All tasks completed — trace written to conditionally_enable_trace.*.bin");
     } else {
         println!("All tasks completed — set ENABLE_DIAL9=1 to enable tracing");
     }
