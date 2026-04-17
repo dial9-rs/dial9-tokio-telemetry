@@ -691,3 +691,19 @@ async fn local_search_returns_file_sizes() {
     check!(resp[0].key == "test.bin");
     check!(resp[0].size == data.len() as i64);
 }
+
+#[tokio::test]
+async fn local_path_traversal_rejected() {
+    let dir = setup_local_dir();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    // Attempt to escape root via ../
+    let resp = client
+        .get(format!("{base}/api/trace?keys=../../../etc/passwd"))
+        .send()
+        .await
+        .unwrap();
+    // Should fail — either not found or error, but not 200
+    check!(resp.status().as_u16() != 200);
+}

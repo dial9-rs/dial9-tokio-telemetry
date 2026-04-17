@@ -212,10 +212,16 @@ impl StorageBackend for LocalBackend {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
         let prefix = prefix.to_string();
         Box::pin(async move {
-            let mut objects = Vec::new();
-            collect_files(&self.root, &self.root, &prefix, &mut objects)?;
-            objects.sort_by(|a, b| a.key.cmp(&b.key));
-            Ok(objects)
+            let root = self.root.clone();
+            let prefix2 = prefix.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut objects = Vec::new();
+                collect_files(&root, &root, &prefix2, &mut objects)?;
+                objects.sort_by(|a, b| a.key.cmp(&b.key));
+                Ok(objects)
+            })
+            .await
+            .map_err(|e| StorageError::Other(e.to_string()))?
         })
     }
 
@@ -226,26 +232,47 @@ impl StorageBackend for LocalBackend {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
         let prefix = prefix.to_string();
         Box::pin(async move {
-            let dir = self.root.join(&prefix);
-            let entries = match std::fs::read_dir(&dir) {
-                Ok(e) => e,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-                Err(e) => return Err(StorageError::Other(e.to_string())),
-            };
-            let mut prefixes = Vec::new();
-            for entry in entries {
-                let entry = entry.map_err(|e| StorageError::Other(e.to_string()))?;
-                if entry
-                    .file_type()
-                    .map_err(|e| StorageError::Other(e.to_string()))?
-                    .is_dir()
-                {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    prefixes.push(format!("{prefix}{name}/"));
+            let root = self.root.clone();
+            let prefix2 = prefix.clone();
+            tokio::task::spawn_blocking(move || {
+                let dir = root.join(&prefix2);
+                let dir = match dir.canonicalize() {
+                    Ok(d) if d.starts_with(&root) => d,
+                    Ok(_) => {
+                        return Err(StorageError::NotFound(
+                            "path escapes root directory".to_string(),
+                        ));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+                    Err(e) => return Err(StorageError::Other(e.to_string())),
+                };
+                let entries = match std::fs::read_dir(&dir) {
+                    Ok(e) => e,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+                    Err(e) => return Err(StorageError::Other(e.to_string())),
+                };
+                let mut prefixes = Vec::new();
+                for entry in entries {
+                    let entry = entry.map_err(|e| StorageError::Other(e.to_string()))?;
+                    let path = entry.path();
+                    // Resolve symlinks and verify the target stays within root.
+                    let canonical = match path.canonicalize() {
+                        Ok(c) if c.starts_with(&root) => c,
+                        _ => continue,
+                    };
+                    if canonical.is_dir() {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        // NOTE: This uses "/" unconditionally, matching S3 key semantics.
+                        // On Windows, this would need to use the platform separator or
+                        // normalize paths to forward slashes throughout.
+                        prefixes.push(format!("{prefix2}{name}/"));
+                    }
                 }
-            }
-            prefixes.sort();
-            Ok(prefixes)
+                prefixes.sort();
+                Ok(prefixes)
+            })
+            .await
+            .map_err(|e| StorageError::Other(e.to_string()))?
         })
     }
 
@@ -255,11 +282,29 @@ impl StorageBackend for LocalBackend {
         key: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
         let path = self.root.join(key);
+        let root = self.root.clone();
         Box::pin(async move {
-            std::fs::read(&path).map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => StorageError::NotFound(path.display().to_string()),
-                _ => StorageError::Other(e.to_string()),
+            tokio::task::spawn_blocking(move || {
+                let canonical = path.canonicalize().map_err(|e| match e.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        StorageError::NotFound(path.display().to_string())
+                    }
+                    _ => StorageError::Other(e.to_string()),
+                })?;
+                if !canonical.starts_with(&root) {
+                    return Err(StorageError::NotFound(
+                        "path escapes root directory".to_string(),
+                    ));
+                }
+                std::fs::read(&canonical).map_err(|e| match e.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        StorageError::NotFound(path.display().to_string())
+                    }
+                    _ => StorageError::Other(e.to_string()),
+                })
             })
+            .await
+            .map_err(|e| StorageError::Other(e.to_string()))?
         })
     }
 }
@@ -278,20 +323,22 @@ fn collect_files(
     for entry in entries {
         let entry = entry.map_err(|e| StorageError::Other(e.to_string()))?;
         let path = entry.path();
-        let ft = entry
-            .file_type()
-            .map_err(|e| StorageError::Other(e.to_string()))?;
-        if ft.is_dir() {
-            collect_files(root, &path, prefix, out)?;
-        } else if ft.is_file() {
+        // Resolve symlinks and verify the target stays within root.
+        let canonical = match path.canonicalize() {
+            Ok(c) if c.starts_with(root) => c,
+            _ => continue,
+        };
+        if canonical.is_dir() {
+            collect_files(root, &canonical, prefix, out)?;
+        } else if canonical.is_file() {
             let key = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
             if key.starts_with(prefix) {
-                let meta =
-                    std::fs::metadata(&path).map_err(|e| StorageError::Other(e.to_string()))?;
+                let meta = std::fs::metadata(&canonical)
+                    .map_err(|e| StorageError::Other(e.to_string()))?;
                 out.push(ObjectInfo {
                     key,
                     size: meta.len() as i64,

@@ -18,7 +18,7 @@ mod skills {
 #[derive(Parser, Debug)]
 #[command(
     name = "dial9-viewer",
-    about = "S3 trace browser and viewer for dial9-tokio-telemetry"
+    about = "Trace browser and viewer for dial9-tokio-telemetry"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -37,7 +37,7 @@ pub struct Cli {
     prefix: Option<String>,
 
     /// Serve traces from a local directory instead of S3
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with = "bucket")]
     local_dir: Option<PathBuf>,
 
     /// Directory containing UI static files (when running without a subcommand)
@@ -53,27 +53,7 @@ enum Commands {
         action: Option<AgentsAction>,
     },
     /// Start the web server
-    Serve {
-        /// Port to listen on
-        #[arg(long, default_value = "3000")]
-        port: u16,
-
-        /// S3 bucket name (if omitted, bucket must be specified per-request)
-        #[arg(long)]
-        bucket: Option<String>,
-
-        /// S3 key prefix to filter traces
-        #[arg(long)]
-        prefix: Option<String>,
-
-        /// Serve traces from a local directory instead of S3
-        #[arg(long)]
-        local_dir: Option<PathBuf>,
-
-        /// Directory containing UI static files
-        #[arg(long, default_value = "ui")]
-        ui_dir: PathBuf,
-    },
+    Serve {},
 }
 
 #[derive(Subcommand, Debug)]
@@ -118,14 +98,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             },
         },
-        Some(Commands::Serve {
-            port,
-            bucket,
-            prefix,
-            local_dir,
-            ui_dir,
-        }) => return serve(port, bucket, prefix, local_dir, ui_dir).await,
-        None => return serve(cli.port, cli.bucket, cli.prefix, cli.local_dir, cli.ui_dir).await,
+        Some(Commands::Serve {}) | None => {
+            return serve(cli.port, cli.bucket, cli.prefix, cli.local_dir, cli.ui_dir).await;
+        }
     }
     Ok(())
 }
