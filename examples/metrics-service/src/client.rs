@@ -134,6 +134,8 @@ impl StatsMap {
 struct AllStats {
     cumulative: StatsMap,
     window: StatsMap,
+    /// Rolling 1-second bucket for time-series output.
+    timeseries: StatsMap,
 }
 
 impl AllStats {
@@ -141,12 +143,14 @@ impl AllStats {
         Self {
             cumulative: StatsMap::default(),
             window: StatsMap::default(),
+            timeseries: StatsMap::default(),
         }
     }
 
     fn record(&mut self, operation: &str, latency: Duration, ok: bool) {
         self.cumulative.record(operation, latency, ok);
         self.window.record(operation, latency, ok);
+        self.timeseries.record(operation, latency, ok);
     }
 }
 
@@ -207,6 +211,35 @@ pub async fn run(base_url: &str, shutdown: CancellationToken, demo: bool) {
                             result.ok,
                         );
                         tick += 1;
+                    }
+                }
+            }
+        });
+    }
+
+    // periodic time-series reporter (1s buckets) — outputs CSV for graphing
+    {
+        let stats = stats.clone();
+        let shutdown = shutdown.clone();
+        let start = start;
+        tokio::spawn(async move {
+            println!("TIMESERIES:elapsed_s,rps,p99_ms");
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        let mut s = stats.lock().await;
+                        let elapsed = start.elapsed().as_secs_f64();
+                        let total: u64 = s.timeseries.ops.values().map(|o| o.total()).sum();
+                        let p99 = s.timeseries.ops.values_mut()
+                            .filter_map(|o| o.percentile(0.99))
+                            .max()
+                            .map(|d| d.as_secs_f64() * 1000.0)
+                            .unwrap_or(0.0);
+                        println!("TIMESERIES:{elapsed:.1},{total},{p99:.2}");
+                        s.timeseries.clear();
                     }
                 }
             }
