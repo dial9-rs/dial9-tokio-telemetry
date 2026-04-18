@@ -210,7 +210,7 @@ pub async fn run(base_url: &str, shutdown: CancellationToken, demo: bool) {
                         if demo {
                             // Throttle request rate so the demo trace stays
                             // small enough for the viewer to load smoothly.
-                            sleep(Duration::from_millis(5)).await;
+                            sleep(Duration::from_millis(2)).await;
                         }
                     }
                 }
