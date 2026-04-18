@@ -506,14 +506,21 @@
     const spansByWorker = {};
     const spanMeta = new Map(); // spanId → {spanName, fields, parentSpanId}
 
+    const BASE_ENTER_FIELDS = new Set(["worker_id", "span_id", "parent_span_id", "span_name"]);
+    const BASE_EXIT_FIELDS = new Set(["worker_id", "span_id", "span_name"]);
+
     for (const ev of customEvents) {
-      if (ev.name === "SpanEnterEvent") {
+      if (ev.name.startsWith("SpanEnter:") || ev.name === "SpanEnterEvent") {
         const v = ev.fields;
         const workerId = Number(v.worker_id);
         const spanId = Number(v.span_id);
         const parentSpanId = v.parent_span_id != null ? Number(v.parent_span_id) : null;
         const spanName = v.span_name || "unknown";
-        const fields = v.fields || {};
+        // Collect user-defined fields (everything not in the base set)
+        const fields = {};
+        for (const [k, val] of Object.entries(v)) {
+          if (!BASE_ENTER_FIELDS.has(k)) fields[k] = val;
+        }
 
         const key = `${spanId}:${workerId}`;
         openSpans.set(key, {
@@ -523,11 +530,8 @@
           parentSpanId,
         });
 
-        // Best-effort metadata: always update so late-recorded fields are
-        // captured. Span IDs can be recycled by tracing, which may cause
-        // stale parent name lookups in the viewer tooltip.
         spanMeta.set(spanId, { spanName, fields, parentSpanId });
-      } else if (ev.name === "SpanExitEvent") {
+      } else if (ev.name.startsWith("SpanExit:") || ev.name === "SpanExitEvent") {
         const v = ev.fields;
         const workerId = Number(v.worker_id);
         const spanId = Number(v.span_id);
@@ -536,13 +540,18 @@
         const enter = openSpans.get(key);
         if (enter) {
           openSpans.delete(key);
+          // Collect exit fields
+          const exitFields = {};
+          for (const [k, val] of Object.entries(v)) {
+            if (!BASE_EXIT_FIELDS.has(k)) exitFields[k] = val;
+          }
           if (!spansByWorker[workerId]) spansByWorker[workerId] = [];
           spansByWorker[workerId].push({
             start: enter.timestamp,
             end: ev.timestamp,
             spanId,
             spanName: enter.spanName,
-            fields: (v.fields && Object.keys(v.fields).length > 0) ? v.fields : enter.fields,
+            fields: Object.keys(exitFields).length > 0 ? exitFields : enter.fields,
             parentSpanId: enter.parentSpanId,
           });
         }
