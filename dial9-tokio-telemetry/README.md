@@ -126,6 +126,28 @@ Compared to [tokio-console](https://github.com/tokio-rs/console), which is desig
 
 Tokio's runtime hooks only fire for _spawned_ tasks. The future you pass to `runtime.block_on(...)` is not a spawned task, so code that runs directly in it produces no `PollStart` / `PollEnd` events and is invisible to dial9. This includes everything at the top level of `#[tokio::main]`.
 
+## Tracing span events (opt-in)
+
+Enable the `tracing-layer` feature to record `tracing` span enter/exit events into the trace. This shows what happened inside each poll (e.g., which functions ran, how long each took, what fields they carried).
+
+```rust,ignore
+use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
+use tracing_subscriber::prelude::*;
+
+tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer())
+    .with(
+        Dial9TokioLayer::new().with_filter(
+            tracing_subscriber::filter::Targets::new()
+                .with_target("my_app", tracing::Level::TRACE)
+                .with_default(tracing::Level::ERROR),
+        ),
+    )
+    .init();
+```
+
+Filtering is strongly recommended. Libraries like the AWS SDK emit many internal spans that can produce over 100K events per second. The example above captures only spans from `my_app`. Each span enter+exit costs ~300ns total (~50-100ns is dial9 encoding overhead).
+
 To make work visible, spawn it:
 
 ```rust,ignore

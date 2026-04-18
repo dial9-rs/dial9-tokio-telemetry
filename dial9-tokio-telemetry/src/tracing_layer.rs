@@ -49,11 +49,12 @@
 //!
 //! # Overhead
 //!
-//! Each span enter+exit pair costs roughly **220ns** (measured with
-//! `NullWriter` to isolate encoding from I/O). This scales linearly with
-//! nesting depth (~220ns per level). Adding a few fields to a span adds
-//! under 40ns. This is comparable to the cost of a single poll event, so
-//! the layer is suitable for production use with appropriate span filtering.
+//! Each span enter+exit pair costs roughly **300ns** total (tracing dispatch
+//! plus dial9 encoding), of which **~50-100ns** is the dial9 encoding overhead.
+//! Measured with `NullWriter` on a `current_thread` runtime to isolate
+//! encoding from I/O. This scales linearly with nesting depth and is
+//! comparable to the cost of a single poll event, so the layer is suitable
+//! for production use with appropriate span filtering.
 
 use crate::telemetry::{TelemetryHandle, clock_monotonic_ns, current_worker_id};
 use dial9_trace_format::encoder::Schema;
