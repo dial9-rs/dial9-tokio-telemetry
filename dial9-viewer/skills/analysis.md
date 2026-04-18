@@ -85,3 +85,29 @@ Filter samples before passing to get per-spawn-location or per-worker flamegraph
 const workerSamples = trace.cpuSamples.filter(s => s.workerId === 0);
 const fgData = buildFgData(workerSamples, trace.callframeSymbols);
 ```
+
+## buildSpanData(customEvents)
+
+Pairs `SpanEnter`/`SpanExit` custom events into span intervals per worker. Requires the `tracing-layer` feature on `dial9-tokio-telemetry` and `Dial9TokioLayer` in the subscriber.
+
+```javascript
+const { spansByWorker, spanMeta, maxDepth } = buildSpanData(trace.customEvents);
+```
+
+Returns:
+```
+{
+  spansByWorker: {
+    [workerId]: [{start, end, spanId, spanName, fields, parentSpanId, depth}]
+  },
+  spanMeta: Map<spanId, {spanName, fields, parentSpanId}>,
+  maxDepth: number,
+}
+```
+
+Key concepts:
+- **Span interval**: One enter/exit pair. A span re-entered across multiple polls produces multiple intervals with the same `spanId`.
+- **fields**: User-defined span fields (e.g., `{request_id: "abc", metric_name: "cpu"}`). Base fields (`worker_id`, `span_id`, `span_name`) are excluded.
+- **parentSpanId**: Only set for explicit parents (`span!(parent: &x, ..)`). Most `#[instrument]` spans have `null`. Use timestamp containment to infer nesting.
+- **depth**: Computed from the parent chain. 0 for root spans, incremented for each ancestor.
+- Schema names follow the pattern `SpanEnter:{target}::{name}:{file}:{line}` (one schema per callsite).

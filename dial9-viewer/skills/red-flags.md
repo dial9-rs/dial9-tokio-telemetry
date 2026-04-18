@@ -8,7 +8,7 @@ Run these checks against any trace to surface common Tokio runtime problems. Eac
 const fs = require('fs');
 const { parseTrace, EVENT_TYPES, deduplicateSamples } = require('./trace_parser.js');
 const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
-        computeSchedulingDelays } = require('./trace_analysis.js');
+        computeSchedulingDelays, buildSpanData } = require('./trace_analysis.js');
 
 async function redFlagScan(tracePath) {
   const trace = await parseTrace(fs.readFileSync(tracePath));
@@ -140,6 +140,51 @@ async function redFlagScan(tracePath) {
     }
   }
 
+  // 9. Many spans per poll (tight loop without yielding)
+  if (trace.customEvents && trace.customEvents.length > 0) {
+    const spanResult = buildSpanData(trace.customEvents);
+    const { spansByWorker: sWorker } = spanResult;
+
+    // 9. Many spans per poll (tight loop without yielding)
+    for (const w of workerIds) {
+      const wSpans = sWorker[w] || [];
+      for (const p of spans.workerSpans[w].polls) {
+        let lo = 0, hi = wSpans.length - 1;
+        while (lo <= hi) { const mid = (lo + hi) >> 1; if (wSpans[mid].end < p.start) lo = mid + 1; else hi = mid - 1; }
+        let count = 0;
+        for (let i = lo; i < wSpans.length && wSpans[i].start <= p.end; i++) {
+          if (wSpans[i].start >= p.start && wSpans[i].end <= p.end) count++;
+        }
+        if (count > 20) {
+          findings.push({ severity: 'warn', check: 'many-spans-per-poll', msg: `Worker ${w}: poll with ${count} spans (${((p.end - p.start) / 1e6).toFixed(2)}ms)` });
+        }
+      }
+    }
+
+    // 10. Span duration outliers (>10x the P50 for that span name)
+    const allSpans = Object.values(sWorker).flat();
+    const byName = {};
+    for (const s of allSpans) (byName[s.spanName] ??= []).push(s.end - s.start);
+    for (const [name, durations] of Object.entries(byName)) {
+      if (durations.length < 10) continue;
+      durations.sort((a, b) => a - b);
+      const p50 = durations[Math.floor(durations.length * 0.5)];
+      const threshold = p50 * 10;
+      const outliers = durations.filter(d => d > threshold).length;
+      if (outliers > 0) {
+        findings.push({ severity: 'info', check: 'span-duration-outlier', msg: `${name}: ${outliers} spans >10x P50 (P50=${(p50 / 1e3).toFixed(1)}µs, threshold=${(threshold / 1e3).toFixed(1)}µs)` });
+      }
+    }
+
+    // 11. Unmatched span enters (cancelled tasks or segment boundary)
+    const enters = trace.customEvents.filter(e => e.name.startsWith('SpanEnter:') || e.name === 'SpanEnterEvent').length;
+    const exits = trace.customEvents.filter(e => e.name.startsWith('SpanExit:') || e.name === 'SpanExitEvent').length;
+    const unmatched = Math.abs(enters - exits);
+    if (unmatched > 0) {
+      findings.push({ severity: 'info', check: 'unmatched-span-enters', msg: `${unmatched} unmatched span enter/exit events (possible task cancellation or segment boundary)` });
+    }
+  }
+
   // Print findings
   console.log(`\n=== Red Flag Scan: ${tracePath} ===`);
   console.log(`Duration: ${durationMs.toFixed(1)}ms, ${workerIds.length} workers, ${trace.events.length} events\n`);
@@ -187,3 +232,12 @@ Workers are active (not parked) but spending less than 50% of wall time on CPU. 
 
 ### kernel-sched-wait
 When a worker is woken (unparked), the kernel scheduling wait measures how long until the thread actually runs. High values indicate CPU contention at the OS level.
+
+### many-spans-per-poll
+When span events are present (`trace.customEvents`), check for polls containing many span intervals of the same name. This indicates a tight loop of synchronous operations inside a single poll (e.g., 50 redis commands where IO was immediately ready). The task should yield between iterations to let other tasks run. Use `buildSpanData(trace.customEvents)` and cross-reference with long polls to identify the culprit spans.
+
+### span-duration-outlier
+A span whose duration exceeds 10x the P50 for its name. Flags individual slow operations that may indicate contention, cold caches, or upstream latency spikes.
+
+### unmatched-span-enters
+More span enters than exits (or vice versa). A small mismatch is normal at segment boundaries. A large mismatch may indicate task cancellation or a bug in span instrumentation.
