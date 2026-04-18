@@ -470,6 +470,24 @@ async function main() {
     pass("Recycled span IDs produce separate intervals");
   }
 
+  function testBuildSpanDataPerCallsiteSchema() {
+    // New format: schema names are "SpanEnter:target::name:file:line"
+    // User fields are top-level (not nested in a "fields" StringMap)
+    const customEvents = [
+      { name: "SpanEnter:myapp::handle:src/main.rs:10", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "handle", request_id: "abc-123" } },
+      { name: "SpanExit:myapp::handle:src/main.rs:10",  timestamp: 1100, fields: { worker_id: 0, span_id: 1, span_name: "handle", request_id: "abc-123" } },
+    ];
+    const { spansByWorker } = buildSpanData(customEvents);
+    const spans = spansByWorker[0];
+    if (!spans || spans.length !== 1) fail(`Expected 1 span, got ${spans?.length}`);
+    if (spans[0].spanName !== "handle") fail(`Expected span name 'handle', got '${spans[0].spanName}'`);
+    if (spans[0].fields.request_id !== "abc-123") fail(`Expected request_id='abc-123', got '${spans[0].fields.request_id}'`);
+    // Base fields should NOT appear in the user fields
+    if (spans[0].fields.worker_id) fail("worker_id should not be in user fields");
+    if (spans[0].fields.span_name) fail("span_name should not be in user fields");
+    pass("Per-callsite schema with typed fields parsed correctly");
+  }
+
   // ── Regression: open PollStart at trace end must not create phantom poll (#194) ──
 
   function testOpenPollStartDiscarded() {
@@ -540,6 +558,7 @@ async function main() {
   testBuildSpanDataDepth();
   testBuildSpanDataCycleDetection();
   testBuildSpanDataRecycledId();
+  testBuildSpanDataPerCallsiteSchema();
 
   console.log("\n✓ All analysis checks passed!");
 }
