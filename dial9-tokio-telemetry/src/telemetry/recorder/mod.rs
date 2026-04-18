@@ -213,6 +213,7 @@ fn register_hooks(
                 {
                     let _ = p.track_current_thread();
                 }
+                let _ = dial9_perf_self_profile::register_current_thread();
             })
             .on_thread_stop(move || {
                 {
@@ -224,6 +225,7 @@ fn register_hooks(
                 {
                     p.stop_tracking_current_thread();
                 }
+                dial9_perf_self_profile::unregister_current_thread();
             });
     }
 }
