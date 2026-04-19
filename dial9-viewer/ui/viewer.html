@@ -231,6 +231,7 @@
                 flex-shrink: 0;
                 position: relative;
                 overflow: hidden;
+                padding-left: 100px;
             }
             #span-panel .chart-label {
                 position: absolute;
@@ -499,7 +500,8 @@
                 </div>
                 <div id="lanes-container" id="lanes"></div>
                 <div id="span-legend" style="display:none;padding:4px 12px;background:#1a1a2e;border-top:1px solid #333;font-size:0.78em;color:#aaa;display:none">
-                    <input id="span-filter" type="text" placeholder="Filter spans" style="background:#0f1629;border:1px solid #444;color:#ccc;padding:2px 6px;border-radius:3px;font-size:1em;width:160px;margin-right:4px">
+                    <input id="span-filter" type="text" placeholder="Filter spans" style="background:#0f1629;border:1px solid #444;color:#ccc;padding:2px 6px;border-radius:3px;font-size:1em;width:160px;margin-right:2px">
+                    <button id="btn-span-filter-clear" style="font-size:0.8em;display:none;margin-right:4px">✕</button>
                     <button id="btn-span-prev" style="font-size:0.9em" disabled>◀</button>
                     <button id="btn-span-next" style="font-size:0.9em" disabled>▶</button>
                     <span id="span-filter-count" style="margin:0 4px;color:#666"></span>
@@ -1210,6 +1212,7 @@
                         spanPanel.style.display = "block";
                         document.getElementById("span-filter").addEventListener("input", (e) => {
                             spanFilter = e.target.value;
+                            document.getElementById("btn-span-filter-clear").style.display = spanFilter ? "" : "none";
                             // Build sorted list of matching spans across all workers
                             filteredSpans = [];
                             if (spanFilter) {
@@ -1228,6 +1231,12 @@
                             prevBtn.disabled = filteredSpans.length === 0;
                             nextBtn.disabled = filteredSpans.length === 0;
                             renderAll();
+                        });
+
+                        document.getElementById("btn-span-filter-clear").addEventListener("click", () => {
+                            const input = document.getElementById("span-filter");
+                            input.value = "";
+                            input.dispatchEvent(new Event("input"));
                         });
 
                         function jumpToFilteredSpan(index) {
