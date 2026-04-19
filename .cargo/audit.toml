@@ -1,0 +1,21 @@
+# Ignored advisories for rustls-webpki name constraint bugs.
+#
+# Both are low-severity: exploitable only after signature verification
+# passes, and require certificate misissuance. The vulnerable crate
+# (rustls-webpki 0.101.7) is pulled in transitively by
+# aws-sdk-s3-transfer-manager and s3s-aws, which unconditionally enable
+# the legacy rustls feature on aws-sdk-s3. We cannot remove it without
+# upstream changes.
+#
+# Upstream issues:
+#   https://github.com/awslabs/aws-s3-transfer-manager-rs/issues/138
+#   https://github.com/s3s-project/s3s/issues/571
+#
+# Remove these ignores once the upstream crates stop pulling in the
+# legacy rustls 0.21 dependency chain.
+
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0098", # rustls-webpki: URI name constraints incorrectly accepted
+    "RUSTSEC-2026-0099", # rustls-webpki: name constraints accepted for wildcard certs
+]
