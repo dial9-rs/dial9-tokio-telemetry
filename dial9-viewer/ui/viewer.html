@@ -223,6 +223,29 @@
                 position: relative;
                 overflow: hidden;
             }
+            #span-panel {
+                display: none;
+                height: 120px;
+                background: #1a1a2e;
+                border-top: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+            #span-panel .chart-label {
+                position: absolute;
+                top: 4px;
+                left: 8px;
+                font-size: 0.75em;
+                color: #888;
+                z-index: 2;
+                pointer-events: none;
+            }
+            #span-panel canvas {
+                width: 100%;
+                height: 100%;
+                display: block;
+            }
             #task-detail .chart-label {
                 position: absolute;
                 top: 4px;
@@ -482,6 +505,11 @@
                     <div id="toast-container" style="position:absolute;top:0;bottom:0;left:0;display:flex;align-items:center;gap:8px;z-index:60;pointer-events:none"></div>
                 </div>
                 <div id="lanes-container" id="lanes"></div>
+                <div id="span-panel">
+                    <span class="chart-label" id="span-panel-label">Spans</span>
+                    <span id="span-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
+                    <canvas id="span-panel-canvas"></canvas>
+                </div>
                 <div id="task-detail">
                     <span class="chart-label" id="task-detail-label">Task Detail</span>
                     <span id="task-detail-status" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2"></span>
@@ -762,6 +790,7 @@
             // Task selection state
             let selectedTaskId = null;
             let selectedSpanId = null; // when a span bar is clicked, highlight all polls containing this span
+            let selectedSpanIds = new Set(); // includes selected span + parent chain
             // Active task count timeline: [{t, count}]
             let activeTaskSamples = [];
             // First poll time per task: taskId → timestamp (ns)
@@ -1137,9 +1166,10 @@
                 buildLanes();
                 updatePointsOfInterest();
 
-                // Populate span legend
+                // Populate span legend and show span panel
                 {
                     const legend = document.getElementById("span-legend");
+                    const spanPanel = document.getElementById("span-panel");
                     const allNames = new Set();
                     for (const spans of Object.values(spansByWorker)) {
                         for (const s of spans) allNames.add(s.spanName);
@@ -1150,6 +1180,7 @@
                         ).join("&nbsp;&nbsp;");
                         document.getElementById("span-legend-items").innerHTML = `<span style="color:#666">Spans:</span> ${items}`;
                         legend.style.display = "block";
+                        spanPanel.style.display = "block";
                         document.getElementById("span-filter").addEventListener("input", (e) => {
                             spanFilter = e.target.value;
                             // Build sorted list of matching spans across all workers
@@ -1400,6 +1431,7 @@
 
                 renderTimeline(drawW - scrollbarW);
                 for (const w of workerIds) renderLane(w, drawW);
+                renderSpanPanel(drawW, scrollbarW);
                 renderTaskDetail(scrollbarW);
                 renderQueueChart(drawW, scrollbarW);
             }
@@ -1658,82 +1690,6 @@
                     }
                 }
 
-                // Draw span bars below the poll band
-                {
-                    const wSpans = spansByWorker[workerId];
-                    if (wSpans && wSpans.length > 0) {
-                        const spanTop = bandTop + bandH + 8;
-                        const spanH = 10;
-                        // Binary search for first visible span
-                        let lo = 0, hi = wSpans.length - 1;
-                        while (lo <= hi) {
-                            const mid = (lo + hi) >> 1;
-                            if (wSpans[mid].end < viewStart) lo = mid + 1;
-                            else hi = mid - 1;
-                        }
-                        // Count visible spans (cap scan at 3000 to avoid slow iteration)
-                        let visCount = 0;
-                        for (let i = lo; i < wSpans.length && wSpans[i].start <= viewEnd; i++) {
-                            if (++visCount > 3000) break;
-                        }
-                        if (visCount > 3000) {
-                            // Too many spans: sample every Nth span
-                            const step = Math.max(1, Math.ceil(wSpans.length / 1000));
-                            const spanTop2 = bandTop + bandH + 8;
-                            for (let i = lo; i < wSpans.length; i += step) {
-                                const s = wSpans[i];
-                                if (s.start > viewEnd) break;
-                                if (!spanMatchesFilter(s)) continue;
-                                const x = Math.max(0, nsToX(s.start, pw)) | 0;
-                                ctx.fillStyle = spanColor(s.spanName);
-                                ctx.globalAlpha = 0.6;
-                                ctx.fillRect(x, spanTop2, 1, spanH);
-                            }
-                            ctx.globalAlpha = 1.0;
-                        } else if (nsPerPx > 5000) {
-                            // LOD: bucket by pixel
-                            let prevPx = -2, prevColor = null, runStart = -1;
-                            for (let i = lo; i < wSpans.length; i++) {
-                                const s = wSpans[i];
-                                if (s.start > viewEnd) break;
-                                if (!spanMatchesFilter(s)) continue;
-                                const x1 = Math.max(0, nsToX(s.start, pw)) | 0;
-                                const x2 = Math.min(pw, nsToX(s.end, pw)) | 0;
-                                const color = spanColor(s.spanName);
-                                if (x1 <= prevPx + 1 && color === prevColor) {
-                                    prevPx = Math.max(prevPx, x2);
-                                } else {
-                                    if (prevColor) {
-                                        ctx.fillStyle = prevColor;
-                                        ctx.fillRect(runStart, spanTop, Math.max(prevPx - runStart, 1), spanH);
-                                    }
-                                    runStart = x1;
-                                    prevPx = Math.max(x1, x2);
-                                    prevColor = color;
-                                }
-                            }
-                            if (prevColor) {
-                                ctx.fillStyle = prevColor;
-                                ctx.fillRect(runStart, spanTop, Math.max(prevPx - runStart, 1), spanH);
-                            }
-                        } else {
-                            const rowH = 10;
-                            const maxRows = Math.floor((LANE_H - spanTop) / rowH);
-                            for (let i = lo; i < wSpans.length; i++) {
-                                const s = wSpans[i];
-                                if (s.start > viewEnd) break;
-                                if (!spanMatchesFilter(s)) continue;
-                                const x1 = Math.max(0, nsToX(s.start, pw));
-                                const x2 = Math.min(pw, nsToX(s.end, pw));
-                                const d = Math.min(s.depth || 0, maxRows - 1);
-                                const y = spanTop + d * rowH;
-                                ctx.fillStyle = spanColor(s.spanName);
-                                ctx.fillRect(x1, y, Math.max(x2 - x1, 1), rowH - 1);
-                            }
-                        }
-                    }
-                }
-
                 // Highlight hovered waker task's polls (orange)
                 if (hoveredWakerTaskId) {
                     ctx.fillStyle = "#ff8a65";
@@ -1748,11 +1704,11 @@
                 }
 
                 // Highlight polls containing the selected span
-                if (selectedSpanId != null) {
+                if (selectedSpanIds.size > 0) {
                     const wSpans2 = spansByWorker[workerId];
                     if (wSpans2) {
                         for (const s of wSpans2) {
-                            if (s.spanId !== selectedSpanId) continue;
+                            if (!selectedSpanIds.has(s.spanId)) continue;
                             // Find the poll that contains this span interval
                             const poll = findSpanAt(spans.polls, s.start);
                             if (poll) {
@@ -1843,6 +1799,238 @@
 
             // Hit regions for task detail tooltip: [{x1, x2, y1, y2, type, detail}]
             let taskDetailHitRegions = [];
+
+            function renderSpanPanel(drawW, scrollbarW) {
+                const panel = document.getElementById("span-panel");
+                if (panel.style.display === "none") return;
+                const c = document.getElementById("span-panel-canvas");
+                const dpr = devicePixelRatio || 1;
+                const pw = panel.clientWidth;
+                const ph = 120;
+                c.width = pw * dpr;
+                c.height = ph * dpr;
+                c.style.width = pw + "px";
+                c.style.height = ph + "px";
+                const ctx = c.getContext("2d");
+                ctx.scale(dpr, dpr);
+                ctx.clearRect(0, 0, pw, ph);
+
+                // Merge all spans across workers, sorted by start
+                const allSpans = [];
+                for (const [w, wSpans] of Object.entries(spansByWorker)) {
+                    for (const s of wSpans) {
+                        if (s.end < viewStart || s.start > viewEnd) continue;
+                        if (!spanMatchesFilter(s)) continue;
+                        allSpans.push({ ...s, workerId: Number(w) });
+                    }
+                }
+
+                if (allSpans.length === 0) {
+                    ctx.fillStyle = "#555";
+                    ctx.font = "12px sans-serif";
+                    ctx.fillText("No spans in view" + (spanFilter ? ` (filter: "${spanFilter}")` : ""), 10, 60);
+                    return;
+                }
+
+                // Group by span name, assign a row per name (max 5 rows visible)
+                const nameSet = [...new Set(allSpans.map(s => s.spanName))].sort();
+                const maxRows = 5;
+                const visibleNames = nameSet.slice(0, maxRows);
+                const rowH = Math.min(20, Math.floor((ph - 20) / Math.max(visibleNames.length, 1)));
+                const nameToRow = {};
+                visibleNames.forEach((n, i) => { nameToRow[n] = i; });
+
+                // Draw row labels
+                ctx.font = "10px monospace";
+                for (const [name, row] of Object.entries(nameToRow)) {
+                    const y = 14 + row * rowH;
+                    ctx.fillStyle = "#666";
+                    ctx.fillText(name, 4, y + rowH / 2 + 3);
+                }
+                if (nameSet.length > maxRows) {
+                    ctx.fillStyle = "#555";
+                    ctx.fillText(`+${nameSet.length - maxRows} more`, 4, 14 + maxRows * rowH + 10);
+                }
+
+                const labelOffset = 140; // space for labels
+                const barW = pw - labelOffset;
+                if (barW <= 0) return;
+
+                // Draw span bars
+                const maxVisible = 5000;
+                const step = allSpans.length > maxVisible ? Math.ceil(allSpans.length / maxVisible) : 1;
+                for (let i = 0; i < allSpans.length; i += step) {
+                    const s = allSpans[i];
+                    const row = nameToRow[s.spanName];
+                    if (row == null) continue; // collapsed
+                    const y = 14 + row * rowH;
+                    const x1 = labelOffset + Math.max(0, ((s.start - viewStart) / (viewEnd - viewStart)) * barW);
+                    const x2 = labelOffset + Math.min(barW, ((s.end - viewStart) / (viewEnd - viewStart)) * barW);
+                    const isSelected = selectedSpanIds.has(s.spanId);
+                    ctx.fillStyle = spanColor(s.spanName);
+                    ctx.globalAlpha = isSelected ? 1.0 : (selectedSpanIds.size > 0 ? 0.3 : 0.5);
+                    ctx.fillRect(x1, y + 2, Math.max(x2 - x1, 1), rowH - 4);
+                    if (isSelected) {
+                        ctx.strokeStyle = "#fff";
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(x1, y + 2, Math.max(x2 - x1, 2), rowH - 4);
+                    }
+                }
+                ctx.globalAlpha = 1.0;
+
+                // Info text
+                const info = document.getElementById("span-panel-info");
+                info.textContent = `${allSpans.length} spans · ${nameSet.length} types`;
+            }
+
+            // Span panel hover: show tooltip with span details
+            document.getElementById("span-panel-canvas").addEventListener("mousemove", (e) => {
+                const c = document.getElementById("span-panel-canvas");
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const labelOffset = 140;
+                const barW = rect.width - labelOffset;
+                if (mx < labelOffset || barW <= 0) { tooltip.style.display = "none"; return; }
+
+                const ns = viewStart + ((mx - labelOffset) / barW) * (viewEnd - viewStart);
+                let hit = null;
+                let bestDist = Infinity;
+                for (const [w, wSpans] of Object.entries(spansByWorker)) {
+                    if (!wSpans || wSpans.length === 0) continue;
+                    // Binary search for nearest span
+                    let lo = 0, hi = wSpans.length - 1;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (wSpans[mid].end < ns) lo = mid + 1;
+                        else if (wSpans[mid].start > ns) hi = mid - 1;
+                        else { // exact hit
+                            if (spanMatchesFilter(wSpans[mid])) {
+                                hit = { ...wSpans[mid], workerId: Number(w) };
+                                bestDist = 0;
+                            }
+                            break;
+                        }
+                    }
+                    if (bestDist === 0) break;
+                    // Check neighbors for nearest
+                    for (const idx of [lo - 1, lo, lo + 1]) {
+                        if (idx < 0 || idx >= wSpans.length) continue;
+                        const s = wSpans[idx];
+                        if (!spanMatchesFilter(s)) continue;
+                        const dist = Math.min(Math.abs(s.start - ns), Math.abs(s.end - ns));
+                        // Only match if within 1 pixel worth of nanoseconds
+                        const pxThreshold = (viewEnd - viewStart) / barW * 3;
+                        if (dist < bestDist && dist < pxThreshold) {
+                            bestDist = dist;
+                            hit = { ...s, workerId: Number(w) };
+                        }
+                    }
+                }
+                if (hit) {
+                    const dur = hit.end - hit.start;
+                    let html = `<span class="label">Span:</span> <span class="value">${esc(hit.spanName)}</span> <span style="color:#888">${formatHumanDuration(dur)}</span>`;
+                    html += `<br><span class="label">Worker:</span> <span class="value">${hit.workerId}</span>`;
+                    if (hit.fields && typeof hit.fields === "object") {
+                        const entries = Object.entries(hit.fields);
+                        if (entries.length > 0) {
+                            html += `<br><span class="label">Fields:</span> <span class="value">${entries.map(([k, v]) => esc(k) + "=" + esc(String(v))).join(", ")}</span>`;
+                        }
+                    }
+                    tooltip.innerHTML = html;
+                    tooltip.style.display = "block";
+                    tooltip.style.left = Math.min(e.clientX + 12, window.innerWidth - 340) + "px";
+                    tooltip.style.top = (e.clientY + 16) + "px";
+                } else {
+                    tooltip.style.display = "none";
+                }
+            });
+            document.getElementById("span-panel-canvas").addEventListener("mouseleave", () => {
+                tooltip.style.display = "none";
+            });
+
+            // Span panel click: select a span, highlight polls and task
+            document.getElementById("span-panel-canvas").addEventListener("click", (e) => {
+                const c = document.getElementById("span-panel-canvas");
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const labelOffset = 140;
+                const barW = rect.width - labelOffset;
+                if (mx < labelOffset || barW <= 0) return;
+
+                const ns = viewStart + ((mx - labelOffset) / barW) * (viewEnd - viewStart);
+
+                // Find the clicked span using nearest-span search
+                let hit = null;
+                let bestDist = Infinity;
+                for (const [w, wSpans] of Object.entries(spansByWorker)) {
+                    if (!wSpans || wSpans.length === 0) continue;
+                    let lo = 0, hi = wSpans.length - 1;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (wSpans[mid].end < ns) lo = mid + 1;
+                        else if (wSpans[mid].start > ns) hi = mid - 1;
+                        else {
+                            if (spanMatchesFilter(wSpans[mid])) {
+                                hit = { ...wSpans[mid], workerId: Number(w) };
+                                bestDist = 0;
+                            }
+                            break;
+                        }
+                    }
+                    if (bestDist === 0) break;
+                    for (const idx of [lo - 1, lo, lo + 1]) {
+                        if (idx < 0 || idx >= wSpans.length) continue;
+                        const s = wSpans[idx];
+                        if (!spanMatchesFilter(s)) continue;
+                        const dist = Math.min(Math.abs(s.start - ns), Math.abs(s.end - ns));
+                        const pxThreshold = (viewEnd - viewStart) / barW * 3;
+                        if (dist < bestDist && dist < pxThreshold) {
+                            bestDist = dist;
+                            hit = { ...s, workerId: Number(w) };
+                        }
+                    }
+                }
+
+                if (hit) {
+                    selectedSpanId = (hit.spanId !== selectedSpanId) ? hit.spanId : null;
+                    selectedSpanIds = new Set();
+                    if (selectedSpanId != null) {
+                        // Build parent chain
+                        selectedSpanIds.add(selectedSpanId);
+                        let parentId = hit.parentSpanId;
+                        while (parentId != null && !selectedSpanIds.has(parentId)) {
+                            selectedSpanIds.add(parentId);
+                            const parent = spanMeta.get(parentId);
+                            parentId = parent?.parentSpanId ?? null;
+                        }
+                    }
+                    // Find the task that was polling when this span ran
+                    if (selectedSpanId != null) {
+                        const polls = workerSpans[hit.workerId]?.polls;
+                        if (polls) {
+                            const poll = polls.find(p => p.start <= hit.start && p.end >= hit.end);
+                            if (poll && poll.taskId) selectedTaskId = poll.taskId;
+                        }
+                        // Show percentile info
+                        const allOfName = Object.values(spansByWorker).flat()
+                            .filter(s => s.spanName === hit.spanName)
+                            .map(s => s.end - s.start)
+                            .sort((a, b) => a - b);
+                        const dur = hit.end - hit.start;
+                        const rank = allOfName.filter(d => d <= dur).length;
+                        const pct = (rank / allOfName.length * 100).toFixed(0);
+                        const p50 = allOfName[Math.floor(allOfName.length * 0.5)];
+                        const p99 = allOfName[Math.floor(allOfName.length * 0.99)];
+                        document.getElementById("span-panel-info").textContent =
+                            `${hit.spanName}: ${(dur / 1e3).toFixed(1)}µs (P${pct} of ${allOfName.length}) · P50=${(p50 / 1e3).toFixed(1)}µs P99=${(p99 / 1e3).toFixed(1)}µs`;
+                    } else {
+                        selectedTaskId = null;
+                    }
+                } else {
+                    selectedSpanId = null;
+                }
+                renderAll();
+            });
 
             function renderTaskDetail(scrollbarW) {
                 const panel = document.getElementById("task-detail");
@@ -2701,12 +2889,15 @@
 
                 if (clickedSpanId != null) {
                     selectedSpanId = (clickedSpanId !== selectedSpanId) ? clickedSpanId : null;
+                    selectedSpanIds = new Set();
+                    if (selectedSpanId != null) selectedSpanIds.add(selectedSpanId);
                     selectedTaskId = null;
                     renderAll();
                     return;
                 }
 
                 selectedSpanId = null;
+                selectedSpanIds = new Set();
                 selectedTaskId = (found && found !== selectedTaskId) ? found : null;
                 renderAll();
             });
@@ -3095,6 +3286,11 @@
                 .addEventListener("mousemove", (e) => {
                     if (dragging) {
                         tooltip.style.display = "none";
+                        mouseNs = null;
+                        return;
+                    }
+                    // Don't override span panel tooltip
+                    if (e.target.closest && e.target.closest("#span-panel")) {
                         mouseNs = null;
                         return;
                     }
