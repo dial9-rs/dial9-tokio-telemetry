@@ -690,8 +690,11 @@
             function spanMatchesFilter(span) {
                 if (selectedSpanNames.size > 0 && !selectedSpanNames.has(span.spanName)) return false;
                 if (spanPctFilter > 0) {
-                    const pct = spanPercentileRank(span);
-                    if (pct == null || pct < spanPctFilter) return false;
+                    const durs = getSpanDurations()[span.spanName];
+                    if (!durs) return false;
+                    const thresholdIdx = Math.floor(durs.length * spanPctFilter / 100);
+                    const threshold = durs[thresholdIdx] || 0;
+                    if ((span.end - span.start) < threshold) return false;
                 }
                 if (!spanFilter) return true;
                 const f = spanFilter.toLowerCase();
@@ -1270,6 +1273,14 @@
 
                         function buildFilteredSpans() {
                             filteredSpans = [];
+                            const hasFilter = spanFilter || selectedSpanNames.size > 0 || spanPctFilter > 0;
+                            if (!hasFilter) {
+                                filteredSpanIndex = -1;
+                                document.getElementById("span-filter-count").textContent = "";
+                                document.getElementById("btn-span-prev").disabled = true;
+                                document.getElementById("btn-span-next").disabled = true;
+                                return;
+                            }
                             for (const [w, spans] of Object.entries(spansByWorker)) {
                                 for (const s of spans) {
                                     if (spanMatchesFilter(s)) filteredSpans.push({ ...s, workerId: Number(w) });
