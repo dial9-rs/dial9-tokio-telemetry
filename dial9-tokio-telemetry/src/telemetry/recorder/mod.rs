@@ -278,6 +278,16 @@ fn attach_runtime(
 
     let runtime = builder.build()?;
 
+    // Install the handle on the calling thread. For current_thread runtimes,
+    // this thread IS the worker (block_on runs here), so the tracing layer
+    // needs CURRENT_HANDLE to be set. Harmless for multi_thread runtimes.
+    CURRENT_HANDLE.with(|cell| {
+        *cell.borrow_mut() = Some(TelemetryHandle {
+            shared: shared.clone(),
+            control_tx: control_tx.clone(),
+        });
+    });
+
     // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
     let metrics = runtime.handle().metrics();
     let num_workers = metrics.num_workers() as u64;
