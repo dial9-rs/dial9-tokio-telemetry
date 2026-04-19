@@ -505,6 +505,13 @@
                     <button id="btn-span-prev" style="font-size:0.9em" disabled>◀</button>
                     <button id="btn-span-next" style="font-size:0.9em" disabled>▶</button>
                     <span id="span-filter-count" style="margin:0 4px;color:#666"></span>
+                    <select id="span-pct-filter" style="background:#0f1629;border:1px solid #444;color:#ccc;padding:2px 4px;border-radius:3px;font-size:0.95em;margin-right:4px">
+                        <option value="0">All</option>
+                        <option value="50">≥ P50</option>
+                        <option value="90">≥ P90</option>
+                        <option value="95">≥ P95</option>
+                        <option value="99">≥ P99</option>
+                    </select>
                     <button id="btn-span-clear-names" style="font-size:0.8em;display:none">✕ Clear</button>
                     <span id="span-legend-items"></span>
                 </div>
@@ -682,6 +689,10 @@
 
             function spanMatchesFilter(span) {
                 if (selectedSpanNames.size > 0 && !selectedSpanNames.has(span.spanName)) return false;
+                if (spanPctFilter > 0) {
+                    const pct = spanPercentileRank(span);
+                    if (pct == null || pct < spanPctFilter) return false;
+                }
                 if (!spanFilter) return true;
                 const f = spanFilter.toLowerCase();
                 if (span.spanName.toLowerCase().includes(f)) return true;
@@ -692,6 +703,30 @@
                 }
                 return false;
             }
+
+            // Cache of sorted durations per span name for percentile lookups
+            let _spanDurCache = null;
+            function getSpanDurations() {
+                if (_spanDurCache) return _spanDurCache;
+                _spanDurCache = {};
+                for (const wSpans of Object.values(spansByWorker)) {
+                    for (const s of wSpans) {
+                        (_spanDurCache[s.spanName] ??= []).push(s.end - s.start);
+                    }
+                }
+                for (const durs of Object.values(_spanDurCache)) durs.sort((a, b) => a - b);
+                return _spanDurCache;
+            }
+
+            function spanPercentileRank(span) {
+                const durs = getSpanDurations()[span.spanName];
+                if (!durs || durs.length === 0) return null;
+                const dur = span.end - span.start;
+                const rank = durs.filter(d => d <= dur).length;
+                return Math.round(rank / durs.length * 100);
+            }
+
+            let spanPctFilter = 0; // 0 = no filter, 50/90/99 = show only >= that percentile
 
             function pollColorDim(startNs, endNs) {
                 const durUs = (endNs - startNs) / 1e3;
@@ -1128,6 +1163,7 @@
                 if (trace.customEvents && trace.customEvents.length > 0) {
                     const spanResult2 = buildSpanData(trace.customEvents);
                     spansByWorker = spanResult2.spansByWorker;
+                    _spanDurCache = null;
                     spanMeta = spanResult2.spanMeta;
                     spanMaxDepth = spanResult2.maxDepth;
                     const totalSpans = Object.values(spansByWorker).reduce((s, a) => s + a.length, 0);
@@ -1223,6 +1259,13 @@
                             const input = document.getElementById("span-filter");
                             input.value = "";
                             input.dispatchEvent(new Event("input"));
+                        });
+
+                        document.getElementById("span-pct-filter").addEventListener("change", (e) => {
+                            spanPctFilter = Number(e.target.value);
+                            _spanDurCache = null; // invalidate cache
+                            buildFilteredSpans();
+                            renderAll();
                         });
 
                         function buildFilteredSpans() {
@@ -1965,7 +2008,9 @@
                 }
                 if (hit) {
                     const dur = hit.end - hit.start;
-                    let html = `<span class="label">Span:</span> <span class="value">${esc(hit.spanName)}</span> <span style="color:#888">${formatHumanDuration(dur)}</span>`;
+                    const pct = spanPercentileRank(hit);
+                    const pctStr = pct != null ? ` (P${pct})` : "";
+                    let html = `<span class="label">Span:</span> <span class="value">${esc(hit.spanName)}</span> <span style="color:#888">${formatHumanDuration(dur)}${pctStr}</span>`;
                     html += `<br><span class="label">Worker:</span> <span class="value">${hit.workerId}</span>`;
                     if (hit.fields && typeof hit.fields === "object") {
                         const entries = Object.entries(hit.fields);
