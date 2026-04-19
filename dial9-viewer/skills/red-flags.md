@@ -235,7 +235,7 @@ Workers are active (not parked) but spending less than 50% of wall time on CPU. 
 When a worker is woken (unparked), the kernel scheduling wait measures how long until the thread actually runs. High values indicate CPU contention at the OS level.
 
 ### many-spans-per-poll
-When span events are present (`trace.customEvents`), check for polls containing many span intervals of the same name. This indicates a tight loop of synchronous operations inside a single poll (e.g., 50 redis commands where IO was immediately ready). The task should yield between iterations to let other tasks run. Use `buildSpanData(trace.customEvents)` and cross-reference with long polls to identify the culprit spans.
+A single poll contains many span enter/exit pairs. This usually means a tight loop of operations inside one poll without yielding. Cross-reference with long polls to find the culprit.
 
 ### span-duration-outlier
 A span whose duration exceeds 10x the P50 for its name. Flags individual slow operations that may indicate contention, cold caches, or upstream latency spikes.
