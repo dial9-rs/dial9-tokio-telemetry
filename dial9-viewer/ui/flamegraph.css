@@ -39,15 +39,16 @@
     max-width: 350px;
 }
 .fg-help-btn {
-    color: #666;
+    color: #aaa;
     cursor: pointer;
-    font-size: 0.85em;
-    border: 1px solid #444;
-    border-radius: 3px;
-    padding: 0 5px;
-    line-height: 1.4;
+    font-size: 1.1em;
+    background: none;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 2px 6px;
+    line-height: 1;
 }
-.fg-help-btn:hover { color: #ccc; border-color: #666; }
+.fg-help-btn:hover { color: #fff; border-color: #888; }
 
 .fg-breadcrumb {
     display: none;

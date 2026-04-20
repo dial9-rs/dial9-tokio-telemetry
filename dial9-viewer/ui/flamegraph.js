@@ -108,7 +108,7 @@
       '<span class="fg-search-clear" title="Clear search">\u00d7</span>' +
       '<span class="fg-search-stats"></span>' +
       '<select class="fg-spawn-filter"></select>' +
-      '<span class="fg-help-btn" tabindex="0" role="button" title="Keyboard shortcuts">i</span>';
+      '<span class="fg-help-btn" tabindex="0" role="button" title="Keyboard shortcuts">\u2139\ufe0f</span>';
     container.appendChild(searchBar);
 
     const searchInput = searchBar.querySelector(".fg-search-input");
