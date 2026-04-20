@@ -28,6 +28,8 @@ use std::mem;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
+use crate::sys::linux::gettid;
+
 static INTERVAL_NS: AtomicI64 = AtomicI64::new(0);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -182,11 +184,6 @@ pub fn unregister_thread() {
             }
         }
     });
-}
-
-#[inline]
-fn gettid() -> libc::c_int {
-    unsafe { libc::syscall(libc::SYS_gettid) as libc::c_int }
 }
 
 #[cfg(test)]

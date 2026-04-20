@@ -19,6 +19,7 @@ use perf_event_open_sys::bindings::{
 };
 
 use super::USER_ADDR_LIMIT;
+use super::gettid;
 use super::ring_buffer::{RingBuffer, page_size};
 use crate::sampler::{EventSource, Sample, SamplerConfig};
 
@@ -298,9 +299,9 @@ impl super::sampler::SamplerBackend for PerfSamplerImpl {
     }
 
     /// Must be called from the same thread that called track_current_thread.
-    /// Dropping the event closes fd + unmaps ring; unread samples are lost.
+    /// Dropping the event closes fd and unmaps ring, unread samples are lost.
     fn stop_tracking_current_thread(&mut self) {
-        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as i32;
+        let tid = gettid() as i32;
         if let Some(idx) = self.events.iter().position(|ev| ev.tid == tid) {
             self.events.swap_remove(idx);
         }

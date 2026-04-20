@@ -18,6 +18,13 @@ pub(crate) const USER_ADDR_LIMIT: u64 = 0x8000_0000_0000_0000;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("perf-self-profile: USER_ADDR_LIMIT not defined for this architecture");
 
+/// Thread ID of the calling thread.
+#[inline]
+pub(crate) fn gettid() -> libc::pid_t {
+    // SAFETY: gettid has no args, only returns the caller's TID.
+    unsafe { libc::syscall(libc::SYS_gettid) as libc::pid_t }
+}
+
 pub use ctimer_sampler::is_ctimer_active;
 pub(crate) use offline_symbolize::write_symbol_data;
 pub use sampler::PerfSampler;

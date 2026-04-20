@@ -11,6 +11,7 @@ use super::fp_profiler::{
     self, ctimer, sample_buffer,
     unwind::{self, Frame, MAX_FRAMES},
 };
+use super::gettid;
 use super::sampler::SamplerBackend;
 
 use crate::sampler::{Sample, SamplerConfig};
@@ -150,7 +151,7 @@ extern "C" fn sigprof_handler(
         };
 
         let pid = libc::getpid() as u32;
-        let tid = libc::syscall(libc::SYS_gettid) as u32;
+        let tid = gettid() as u32;
         let cpu = sched_getcpu() as u32;
 
         let mut ts: libc::timespec = core::mem::zeroed();
