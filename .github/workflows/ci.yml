@@ -86,10 +86,29 @@ jobs:
           sudo sysctl kernel.kptr_restrict=0
       - run: scripts/e2e-trace-tests.sh
 
+  package:
+    name: Cargo package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify all publishable crates package cleanly
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: |
+          for crate in dial9-trace-format-derive dial9-trace-format dial9-perf-self-profile dial9-macro dial9-tokio-telemetry dial9-viewer; do
+            echo "::group::cargo package -p $crate"
+            cargo package -p "$crate"
+            echo "::endgroup::"
+          done
+
   ci-pass:
     name: CI Pass
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, build, check-docs, trace-integrity]
+    needs: [fmt, clippy, build, check-docs, trace-integrity, package]
     if: always()
     steps:
       - run: |
