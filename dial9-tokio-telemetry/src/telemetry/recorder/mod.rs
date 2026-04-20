@@ -211,8 +211,11 @@ fn register_hooks(
                 if let Ok(mut prof) = s_start.sched_profiler.lock()
                     && let Some(ref mut p) = *prof
                 {
+                    // Register the current thread for sched event sampling.
                     let _ = p.track_current_thread();
                 }
+                // Registers the current thread for the CPU-profiling fallback (ctimer).
+                // No-op when perf is the active backend (perf uses inherit).
                 let _ = dial9_perf_self_profile::register_current_thread();
             })
             .on_thread_stop(move || {
