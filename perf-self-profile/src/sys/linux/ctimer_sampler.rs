@@ -4,6 +4,7 @@
 //! Uses per-thread CPU timers to deliver SIGPROF,
 //! then unwinds frame pointers via safe_load.
 
+use core::{mem, ptr};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -145,6 +146,7 @@ extern "C" fn sigprof_handler(
         return;
     }
 
+    // SAFETY: all operations are async-signal-safe.
     unsafe {
         let Some(mut slot) = sample_buffer::claim_slot() else {
             return; // buffer full, sample dropped (counted internally)
@@ -152,9 +154,20 @@ extern "C" fn sigprof_handler(
 
         let pid = libc::getpid() as u32;
         let tid = gettid() as u32;
-        let cpu = sched_getcpu() as u32;
 
-        let mut ts: libc::timespec = core::mem::zeroed();
+        let mut cpu = 0u32;
+        // SAFETY: `getcpu` writes one `u32` through `&mut cpu`, node/cache pointers are null (allowed).
+        let ok = libc::syscall(
+            libc::SYS_getcpu,
+            &mut cpu,
+            ptr::null_mut::<libc::c_void>(),
+            ptr::null_mut::<libc::c_void>(),
+        ) == 0;
+        if !ok {
+            cpu = 0; // fallback if getcpu fails
+        }
+
+        let mut ts: libc::timespec = mem::zeroed();
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
         let time = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
 
@@ -182,8 +195,8 @@ extern "C" fn sigprof_handler(
     }
 }
 
+// timer_getoverrun is POSIX async-signal-safe.
 unsafe extern "C" {
-    fn sched_getcpu() -> libc::c_int;
     fn timer_getoverrun(timerid: libc::timer_t) -> libc::c_int;
 }
 

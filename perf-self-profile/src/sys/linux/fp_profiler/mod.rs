@@ -7,7 +7,7 @@
 //! - **ctimer**: per-thread CPU timer engine (`CLOCK_THREAD_CPUTIME_ID` +
 //!   `SIGEV_THREAD_ID`) that fires SIGPROF when CPU time is consumed.
 //!
-//! Linux x86_64 and aarch64 only.
+//! x86_64 and aarch64 only.
 
 pub mod ctimer;
 pub mod sample_buffer;
@@ -28,7 +28,7 @@ mod supported {
 
     use super::SAFE_LOAD_FAULT;
 
-    // Tiny trampoline for a fault-tolerant load (bounded by start/end labels).
+    // Trampoline for a fault-tolerant load (bounded by start/end labels).
 
     #[cfg(target_arch = "x86_64")]
     core::arch::global_asm!(
