@@ -24,7 +24,7 @@ Without this flag, compilation will fail with errors about missing methods on `t
 
 ## Quick start
 
-There are two ways to set up dial9: the `#[main]` macro (recommended for most apps) or manual `TracedRuntime` setup. The macro handles the boilerplate of building the runtime and spawning your code as an instrumented task. Inside the body, call `TelemetryHandle::current()` to reach a handle for wake-event tracking. Use manual setup when you have multiple tokio runtimes, don't own main (e.g. library code, embedded services), or need to integrate into existing runtime-building code.
+There are two ways to set up dial9: the `#[main]` macro (recommended for most apps) or manual `TracedRuntime` setup. The macro handles the boilerplate of building the runtime and spawning your code as an instrumented task. Inside your `main` body, call `TelemetryHandle::current()` to get the handle for wake-event tracking. Use manual setup when you have multiple Tokio runtimes, don't own `main` (e.g., library code or embedded services), or need to integrate with existing runtime-building code.
 
 ### Using the `#[main]` macro
 
@@ -48,7 +48,7 @@ fn my_config() -> Dial9Config {
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
     // your async code here
-    // `TelemetryHandle::current()` reaches the per-thread handle for
+    // `TelemetryHandle::current()` returns the per-thread handle for
     // spawning instrumented sub-tasks:
     let handle = TelemetryHandle::current();
     handle
@@ -58,7 +58,7 @@ async fn main() {
 }
 ```
 
-The macro automatically spawns your function body as a task, so top-level code is visible in traces (unlike plain `#[tokio::main]` where `block_on` work is invisible — see [below](#the-root-future-is-not-instrumented)). On every runtime-owned thread, dial9 installs a `TelemetryHandle` via `on_thread_start` — `TelemetryHandle::current()` returns it for spawning sub-tasks with wake-event tracking.
+The macro automatically spawns your function body as a task, so top-level code is visible in traces (unlike plain `#[tokio::main]` where `block_on` work is invisible — see [below](#the-root-future-is-not-instrumented)). dial9 installs a `TelemetryHandle` on every runtime-owned thread via `on_thread_start`. Call `TelemetryHandle::current()` to get it for spawning wake-tracked sub-tasks.
 
 ### Manual setup
 
@@ -99,7 +99,7 @@ dial9-tokio-telemetry is designed for always-on production use, but it's still e
 
 ## Is there a demo?
 
-Yes, checkout this [quick walkthrough (YouTube)](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)!
+Yes, check out this [quick walkthrough (YouTube)](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)!
 
 The [viewer](https://dial9-tokio-telemetry.netlify.app/) (autodeployed from code in `main`) is hosted on Netlify for convenience. You can [load the demo trace](https://dial9-tokio-telemetry.netlify.app/?trace=demo-trace.bin) directly, or use [serve.py](/dial9-tokio-telemetry/serve.py) to run it locally (pure HTML and JS, client side only).
 
@@ -107,7 +107,7 @@ The [viewer](https://dial9-tokio-telemetry.netlify.app/) (autodeployed from code
 
 ## Why dial9-tokio-telemetry?
 
-It can be hard to understand application performance and behavior, in async code. Dial9 tracks every event Tokio emits to create a detailed, micro-second-by-microsecond trace of your application behavior that you can analyze.
+It can be hard to understand application performance and behavior in async code. Dial9 tracks every event Tokio emits to create a detailed, micro-second-by-microsecond trace of your application behavior that you can analyze.
 
 Compared to [tokio-console](https://github.com/tokio-rs/console), which is designed for live debugging, dial9-tokio-telemetry is designed for post-hoc analysis. Because traces are written to files with bounded disk usage, you can leave it running in production and come back later to deeply analyze what went wrong or why a specific request was slow. On Linux, traces include CPU profile samples and kernel scheduling events, so you can see not just _that_ a task was delayed but _what code_ was running on the worker instead.
 
@@ -162,7 +162,7 @@ runtime.block_on(async {
 
 ## Wake event tracking
 
-To understand when Tokio itself is delaying your code, generally referred to as scheduler delay, you need to know when your future was _ready_ to run. Wake events — which task woke which other task — are _not_ captured automatically. Tokio's runtime hooks don't currently allow instrumenting wakes: capturing wakes requires wrapping the future. The simplest way to do that is by using `handle.spawn` instead of `task::spawn`.
+To understand when Tokio itself is delaying your code (scheduler delay), you need to know when your future was _ready_ to run. Wake events — which task woke which other task — are _not_ captured automatically. Tokio's runtime hooks don't currently allow instrumenting wakes: capturing wakes requires wrapping the future. The simplest way is to use `handle.spawn` instead of `tokio::spawn`.
 
 Use `handle.spawn()` instead of `tokio::spawn()`:
 
@@ -238,8 +238,8 @@ On non-Linux platforms these fields are zero.
 
 With the `cpu-profiling` feature, you can enable `perf_event_open`-based CPU sampling. This gives two key pieces of data:
 
-1. Stack traces when code was running on the CPU — aka flamegraphs
-2. Stack traces when the kernel _descheduled_ your thread. For example, if you use `std::thread::sleep` in your future or are seeing `std::sync::Mutex` contention, this will allow you to see precisely where this is happening in async code.
+1. Stack traces when code was running on the CPU (visualized as flamegraphs in the viewer)
+2. Stack traces when the kernel _descheduled_ your thread, showing precisely where `std::thread::sleep`, `std::sync::Mutex` contention, or other blocking occurs in async code.
 
 Both of these events are tied to the precise instant and thread that they happened on, so you can compare what was different between degraded and normal performance.
 
@@ -324,7 +324,7 @@ handle.disable();
 
 ### Multiple runtimes
 
-For applications with multiple tokio runtimes (e.g. thread-per-core, or separate request/IO runtimes), use `TelemetryCore` to create the telemetry session first, then attach each runtime:
+For applications with multiple Tokio runtimes (e.g. thread-per-core, or separate request/IO runtimes), use `TelemetryCore` to create the telemetry session first, then attach each runtime:
 
 ```rust,no_run
 # use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryCore};
@@ -357,7 +357,7 @@ See [`examples/thread_per_core.rs`](/dial9-tokio-telemetry/examples/thread_per_c
 
 ### Writers
 
-`RotatingWriter` rotates files based on size and time, and evicts old ones to stay within a total size budget. By default, segments rotate every 60 seconds (wall-clock-aligned) or when they exceed `max_file_size`, whichever comes first. Time-based rotation produces clean segment boundaries (thread-local buffers are drained before sealing), so set `max_file_size` large enough that time-based rotation fires first under normal conditions (100 MiB is a good default). Size-based rotation then acts as a safety valve for unexpected data bursts. For quick experiments, `RotatingWriter::single_file(path)` writes a single file with no rotation.
+`RotatingWriter` rotates files based on size and time, and evicts old ones to stay within a total size budget. By default, segments rotate every 60 seconds (wall-clock-aligned) or when they exceed `max_file_size`, whichever comes first. Time-based rotation produces clean segment boundaries (thread-local buffers are drained before sealing), so set `max_file_size` large enough that time-based rotation fires first under normal conditions (100 MiB is a good default). Size-based rotation then acts as a safety valve for unexpected data bursts. For quick experiments, use `RotatingWriter::single_file(path)` to skip rotation entirely.
 
 ### Analyzing traces
 
@@ -397,7 +397,7 @@ See [TRACE_ANALYSIS_GUIDE.md](/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) fo
 
 ## S3 upload
 
-With the `worker-s3` feature, sealed trace segments are automatically gzip-compressed and uploaded to S3 by a background worker thread. The application process is unaffected: uploads happen asynchronously after segments are sealed.
+With the `worker-s3` feature, sealed trace segments are automatically gzip-compressed and uploaded to S3 by a background worker thread. Application threads are unaffected: uploads happen on a background thread after segments are sealed.
 
 Only `bucket` and `service_name` are required. See `S3Config` for additional options.
 
