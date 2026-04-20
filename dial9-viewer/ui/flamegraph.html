@@ -189,8 +189,19 @@
                 loadingEl.classList.add("hidden");
                 containerEl.style.display = "flex";
 
+                function updateUrlZoom() {
+                    const p = new URLSearchParams(window.location.search);
+                    const z = fg.getZoomPath();
+                    if (z.worker.length > 0) p.set("worker-zoom", z.worker.join("\t"));
+                    else p.delete("worker-zoom");
+                    if (z.offworker.length > 0) p.set("offworker-zoom", z.offworker.join("\t"));
+                    else p.delete("offworker-zoom");
+                    const newUrl = window.location.pathname + "?" + p.toString();
+                    window.history.replaceState(null, "", newUrl);
+                }
+
                 // Create flamegraph instance
-                const fg = FlamegraphRenderer.createFlamegraph(containerEl);
+                const fg = FlamegraphRenderer.createFlamegraph(containerEl, updateUrlZoom);
 
                 function applyFilter() {
                     const filterVal = spawnFilter.value;
@@ -205,6 +216,12 @@
 
                 spawnFilter.addEventListener("change", applyFilter);
                 applyFilter();
+
+                // Restore zoom from URL if present
+                const wz = params.get("worker-zoom");
+                const oz = params.get("offworker-zoom");
+                if (wz) fg.zoomToPath("worker", wz.split("\t"));
+                if (oz) fg.zoomToPath("offworker", oz.split("\t"));
 
                 // Responsive resize
                 window.addEventListener("resize", () => fg.resize());

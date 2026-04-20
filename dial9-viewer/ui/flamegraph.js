@@ -75,7 +75,8 @@
     return matched;
   }
 
-  function createFlamegraph(container) {
+  function createFlamegraph(container, onZoomChange) {
+    onZoomChange = onZoomChange || function () {};
     let workerTree = null;
     let offworkerTree = null;
     let workerData = null;
@@ -83,6 +84,8 @@
     let workerZoomStack = [];
     let offworkerZoomStack = [];
     let searchQuery = "";
+    let highlightName = null;
+    let repaintQueued = false;
     const hitRegions = { worker: [], offworker: [] };
 
     // DOM
@@ -92,15 +95,53 @@
     searchBar.innerHTML =
       '<input type="text" class="fg-search-input" placeholder="Search frames... (' +
       (isMac ? '\u2318' : 'Ctrl+') + 'F or /)" />' +
-      '<span class="fg-search-stats"></span>';
+      '<span class="fg-search-clear" title="Clear search">\u00d7</span>' +
+      '<span class="fg-search-stats"></span>' +
+      '<span class="fg-help-btn" tabindex="0" role="button" title="Keyboard shortcuts">i</span>';
     container.appendChild(searchBar);
 
     const searchInput = searchBar.querySelector(".fg-search-input");
+    const searchClear = searchBar.querySelector(".fg-search-clear");
     const searchStats = searchBar.querySelector(".fg-search-stats");
+    const helpBtn = searchBar.querySelector(".fg-help-btn");
+
+    const helpOverlay = document.createElement("div");
+    helpOverlay.className = "fg-help-overlay";
+    helpOverlay.innerHTML =
+      '<div class="fg-help-content">' +
+      '<h3>\u2328 Flamegraph Shortcuts</h3>' +
+      '<table>' +
+      '<tr><td class="fg-help-key">Click</td><td>Zoom into frame</td></tr>' +
+      '<tr><td class="fg-help-key">Right-click</td><td>Zoom out one level</td></tr>' +
+      '<tr><td class="fg-help-key">' + (isMac ? '\u2318' : 'Ctrl+') + 'F or /</td><td>Search frames</td></tr>' +
+      '<tr><td class="fg-help-key">Esc</td><td>Clear search \u2192 reset zoom \u2192 close</td></tr>' +
+      '</table>' +
+      '<div class="fg-help-dismiss">Press Esc or click outside to close</div>' +
+      '</div>';
+    helpOverlay.style.display = "none";
+    container.appendChild(helpOverlay);
+
+    helpBtn.addEventListener("click", function () {
+      helpOverlay.style.display = helpOverlay.style.display === "none" ? "flex" : "none";
+    });
+    helpOverlay.addEventListener("click", function (e) {
+      if (e.target === helpOverlay) helpOverlay.style.display = "none";
+    });
+
+    searchClear.style.display = "none";
+    searchClear.addEventListener("click", function () {
+      searchInput.value = "";
+      searchQuery = "";
+      searchClear.style.display = "none";
+      repaint();
+      searchInput.focus();
+    });
 
     const breadcrumbBar = document.createElement("div");
     breadcrumbBar.className = "fg-breadcrumb";
     container.appendChild(breadcrumbBar);
+
+    container.style.position = container.style.position || "relative";
 
     const body = document.createElement("div");
     body.className = "fg-body";
@@ -161,8 +202,10 @@
         const y = baseY - (node.depth + 1) * FG_ROW_H;
         if (w < 0.5) continue;
 
-        const matches = !searching || node.name.toLowerCase().includes(qLower);
-        ctx.globalAlpha = searching && !matches ? 0.25 : 1.0;
+        const searchMatch = !searching || node.name.toLowerCase().includes(qLower);
+        const highlighted = highlightName != null && node.name === highlightName;
+        const dimmed = (searching && !searchMatch) || (highlightName != null && !highlighted);
+        ctx.globalAlpha = dimmed ? 0.25 : 1.0;
         ctx.fillStyle = flamegraphColor(node.name);
         ctx.fillRect(x, y, Math.max(w - 0.5, 0.5), FG_ROW_H - 1);
         regions.push({ x1: x, x2: x + w, y, node, totalSamples: data.totalSamples });
@@ -246,6 +289,7 @@
         if (key === "worker") workerZoomStack = [];
         else offworkerZoomStack = [];
         renderAll();
+        onZoomChange();
       });
       breadcrumbBar.appendChild(rootSpan);
 
@@ -266,6 +310,7 @@
             if (key === "worker") workerZoomStack = workerZoomStack.slice(0, idx + 1);
             else offworkerZoomStack = offworkerZoomStack.slice(0, idx + 1);
             renderAll();
+            onZoomChange();
           });
         }
         breadcrumbBar.appendChild(span);
@@ -299,6 +344,7 @@
     searchInput.addEventListener("input", onSearchInput);
     function onSearchInput() {
       searchQuery = searchInput.value;
+      searchClear.style.display = searchQuery ? "" : "none";
       repaint();
     }
 
@@ -307,12 +353,14 @@
       if (key === "worker") workerZoomStack.push(treeNode);
       else offworkerZoomStack.push(treeNode);
       renderAll();
+      onZoomChange();
     }
 
     function resetZoom() {
       workerZoomStack = [];
       offworkerZoomStack = [];
       renderAll();
+      onZoomChange();
     }
 
     function isZoomed() {
@@ -331,6 +379,14 @@
         if (mx >= r.x1 && mx <= r.x2 && my >= r.y && my < r.y + FG_ROW_H) {
           hit = r;
           break;
+        }
+      }
+      const newHighlight = hit ? hit.node.name : null;
+      if (newHighlight !== highlightName) {
+        highlightName = newHighlight;
+        if (!repaintQueued) {
+          repaintQueued = true;
+          requestAnimationFrame(() => { repaintQueued = false; repaint(); });
         }
       }
       if (hit) {
@@ -352,6 +408,13 @@
 
     function canvasMouseLeave() {
       tooltip.style.display = "none";
+      if (highlightName !== null) {
+        highlightName = null;
+        if (!repaintQueued) {
+          repaintQueued = true;
+          requestAnimationFrame(() => { repaintQueued = false; repaint(); });
+        }
+      }
     }
 
     function canvasClick(e, hitKey) {
@@ -371,11 +434,26 @@
       }
     }
 
+    function canvasContextMenu(e, hitKey) {
+      e.preventDefault();
+      // Zoom out the canvas you right-clicked, fall back to the other
+      const primary = hitKey === "offworker" ? offworkerZoomStack : workerZoomStack;
+      const fallback = hitKey === "offworker" ? workerZoomStack : offworkerZoomStack;
+      const stack = primary.length > 0 ? primary : fallback;
+      if (stack.length > 0) {
+        stack.pop();
+        renderAll();
+        onZoomChange();
+      }
+    }
+
     // Named handlers so destroy() can remove them
     function onWorkerMove(e) { canvasMouseMove(e, "worker"); }
     function onOffworkerMove(e) { canvasMouseMove(e, "offworker"); }
     function onWorkerClick(e) { canvasClick(e, "worker"); }
     function onOffworkerClick(e) { canvasClick(e, "offworker"); }
+    function onWorkerContext(e) { canvasContextMenu(e, "worker"); }
+    function onOffworkerContext(e) { canvasContextMenu(e, "offworker"); }
 
     workerCanvas.addEventListener("mousemove", onWorkerMove);
     offworkerCanvas.addEventListener("mousemove", onOffworkerMove);
@@ -383,6 +461,8 @@
     offworkerCanvas.addEventListener("mouseleave", canvasMouseLeave);
     workerCanvas.addEventListener("click", onWorkerClick);
     offworkerCanvas.addEventListener("click", onOffworkerClick);
+    workerCanvas.addEventListener("contextmenu", onWorkerContext);
+    offworkerCanvas.addEventListener("contextmenu", onOffworkerContext);
 
     function onKeyDown(e) {
       if (container.offsetHeight === 0) return;
@@ -397,14 +477,19 @@
     // Returns true if consumed (search cleared or zoom reset),
     // false if nothing to do (caller should close the panel).
     function handleEscape() {
+      if (helpOverlay.style.display !== "none") {
+        helpOverlay.style.display = "none";
+        return true;
+      }
       if (searchQuery) {
         searchInput.value = "";
         searchQuery = "";
+        searchClear.style.display = "none";
         renderAll();
         return true;
       }
       if (isZoomed()) {
-        resetZoom();
+        resetZoom(); // resetZoom already calls onZoomChange
         return true;
       }
       return false;
@@ -442,12 +527,39 @@
       offworkerCanvas.removeEventListener("mouseleave", canvasMouseLeave);
       workerCanvas.removeEventListener("click", onWorkerClick);
       offworkerCanvas.removeEventListener("click", onOffworkerClick);
+      workerCanvas.removeEventListener("contextmenu", onWorkerContext);
+      offworkerCanvas.removeEventListener("contextmenu", onOffworkerContext);
       searchInput.removeEventListener("input", onSearchInput);
       if (tooltip.parentNode) tooltip.parentNode.removeChild(tooltip);
       container.innerHTML = "";
     }
 
-    return { setData, resize, destroy, handleEscape, isZoomed };
+    function getZoomPath() {
+      return {
+        worker: workerZoomStack.map((n) => n.name),
+        offworker: offworkerZoomStack.map((n) => n.name),
+      };
+    }
+
+    // Walk the tree to find a child by name at each level, pushing onto zoom stack
+    function zoomToPath(key, names) {
+      const tree = key === "worker" ? workerTree : offworkerTree;
+      if (!tree || !names.length) return;
+      const stack = key === "worker" ? workerZoomStack : offworkerZoomStack;
+      let node = tree;
+      for (const name of names) {
+        let found = null;
+        for (const child of node.children.values()) {
+          if (child.name === name) { found = child; break; }
+        }
+        if (!found) break;
+        stack.push(found);
+        node = found;
+      }
+      if (stack.length > 0) renderAll();
+    }
+
+    return { setData, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath };
   }
 
   const fgExports = { createFlamegraph: createFlamegraph };
