@@ -2,6 +2,18 @@
 
 CLI tool that serves a web UI for browsing and viewing [dial9-tokio-telemetry](../dial9-tokio-telemetry) trace files stored in S3 or on the local filesystem.
 
+## Installation
+
+Pre-built binaries are available from [GitHub Releases](https://github.com/dial9-rs/dial9-tokio-telemetry/releases) for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64).
+
+```bash
+# From source via crates.io
+cargo install --locked dial9-viewer
+
+# Or with cargo-binstall (downloads a pre-built binary, faster)
+cargo binstall dial9-viewer
+```
+
 ## Quick start
 
 ```bash
