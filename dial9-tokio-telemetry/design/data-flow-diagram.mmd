@@ -1,0 +1,92 @@
+---
+title: "dial9-tokio-telemetry: Data Flow"
+---
+graph LR
+    %% ── Main horizontal spine ──────────────────────────────
+    Workers["🔧 <b>Tokio Workers</b><br/>N threads, each with<br/>TL Buffer ≤1 MB"]
+    Collector["📦 <b>CentralCollector</b><br/>ArrayQueue (1024 slots)<br/>force_push eviction"]
+    Flush["⏱ <b>dial9-flush</b><br/>5 ms tick"]
+    Writer["💾 <b>RotatingWriter</b><br/>trace.N.bin.active"]
+    BgWorker["⚙️ <b>dial9-worker</b><br/>1 s poll"]
+    Output(["📤 <b>Output</b>"])
+
+    Workers -- "Batch<br/>(~1 MB)" --> Collector
+    Collector --> Flush
+    Flush -- "write bytes" --> Writer
+    Writer -- "sealed .bin" --> BgWorker
+    BgWorker --> Output
+
+    %% ── Hooks feed in from top ─────────────────────────────
+    subgraph Hooks["Runtime Hooks"]
+        direction LR
+        HP["PollStart/End"]
+        HW["Park/Unpark"]
+        HT["TaskSpawn/Term"]
+        HK["WakeEvent<br/>(handle.spawn)"]
+    end
+    Hooks --> Workers
+
+    %% ── Encoding detail from bottom ────────────────────────
+    subgraph Encode["Per-Event Encoding (~100–200 ns)"]
+        direction LR
+        EA["Atomic check"]
+        EB["Schema + StringPool<br/>(1st use)"]
+        EC["u24 Δt + varint fields"]
+        ED["Flush if ≥1 MB<br/>or epoch stale"]
+        EA --> EB --> EC --> ED
+    end
+    Workers -.-> Encode
+
+    %% ── Flush details from bottom ──────────────────────────
+    subgraph DrainProto["Drain Protocol"]
+        direction LR
+        D1["Tick N: bump epoch"]
+        D2["Tick N+1: drain idle TLBs"]
+        D1 --> D2
+    end
+    Flush -.-> DrainProto
+
+    %% ── Rotation detail from top ───────────────────────────
+    subgraph Rotation["Segment Lifecycle"]
+        direction LR
+        R1[".active → .bin<br/>(seal)"]
+        R2["Time: 60 s wall-aligned<br/>Size: safety valve"]
+        R3["Evict oldest<br/>over disk budget"]
+        R1 --- R2 --- R3
+    end
+    Rotation -.-> Writer
+
+    %% ── Pipeline stages from bottom ────────────────────────
+    subgraph Pipeline["Background Pipeline"]
+        direction LR
+        P1["Symbolize<br/>(Linux)"]
+        P2["Gzip"]
+        P1 --> P2
+    end
+    BgWorker -.-> Pipeline
+
+    %% ── Output branches from top ───────────────────────────
+    S3["☁️ <b>S3 Upload</b><br/>{prefix}/{date}/{HH}/{svc}/…<br/>circuit breaker: 1 s → 5 min"]
+    Local["📁 <b>Local .bin.gz</b><br/>writeback + delete original"]
+    Output --> S3
+    Output --> Local
+
+    %% ── Format reference from bottom ───────────────────────
+    subgraph Format["Binary Trace Format"]
+        direction LR
+        FH["TRC\\0 v1"]
+        FM["SegmentMeta"]
+        FC["ClockSync"]
+        FF["Schema 0x01 · Event 0x02<br/>StringPool 0x03 · TsReset 0x05"]
+        FH --- FM --- FC --- FF
+    end
+    Format -.-> Writer
+
+    %% ── Styling ────────────────────────────────────────────
+    classDef spine fill:#2d5986,stroke:#1a3a5c,color:#fff,font-weight:bold
+    classDef detail fill:#f5f5f5,stroke:#999,color:#333
+    classDef output fill:#c96b3c,stroke:#a04f28,color:#fff
+
+    class Workers,Collector,Flush,Writer,BgWorker spine
+    class Output output
+    class S3,Local output
