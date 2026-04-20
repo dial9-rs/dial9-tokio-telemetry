@@ -2,17 +2,22 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{ItemFn, Path, Token, parse_macro_input};
+use syn::{ExprClosure, ItemFn, Path, Token, parse_macro_input};
 
-struct MainArgs {
-    config: Path,
+enum ConfigSource {
+    Path(Path),
+    Closure(ExprClosure),
 }
 
-const MISSING_CONFIG_HELP: &str = "missing required `config = <fn>` argument, \
-                           e.g. #[dial9_tokio_telemetry::main(config = my_config)]";
+struct MainArgs {
+    config: ConfigSource,
+}
 
-const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a path to a zero-argument function, \
-                           e.g. #[dial9_tokio_telemetry::main(config = my_config)]";
+const MISSING_CONFIG_HELP: &str = "missing required `config` argument, e.g. \
+                           #[dial9_tokio_telemetry::main(config = || { Dial9ConfigBuilder::new(...).build() })]";
+
+const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a zero-argument function path or a zero-argument closure, e.g. \
+                           #[dial9_tokio_telemetry::main(config = || { Dial9ConfigBuilder::new(...).build() })]";
 impl Parse for MainArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if input.is_empty() {
@@ -23,7 +28,20 @@ impl Parse for MainArgs {
             return Err(syn::Error::new(ident.span(), MISSING_CONFIG_HELP));
         }
         input.parse::<Token![=]>()?;
-        let config: Path = input.parse()?;
+
+        let config = if input.peek(Token![|]) || input.peek(Token![move]) {
+            let closure: ExprClosure = input.parse()?;
+            if !closure.inputs.is_empty() {
+                return Err(syn::Error::new_spanned(
+                    &closure.inputs,
+                    CONFIG_MUST_BE_ZERO_ARG_HELP,
+                ));
+            }
+            ConfigSource::Closure(closure)
+        } else {
+            ConfigSource::Path(input.parse()?)
+        };
+
         if !input.is_empty() {
             return Err(input.error(CONFIG_MUST_BE_ZERO_ARG_HELP));
         }
@@ -60,7 +78,10 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
         ));
     }
 
-    let config_fn = &args.config;
+    let config_call = match &args.config {
+        ConfigSource::Path(p) => quote! { #p() },
+        ConfigSource::Closure(c) => quote! { (#c)() },
+    };
     let attrs = &input.attrs;
     let vis = &input.vis;
     let name = &input.sig.ident;
@@ -70,7 +91,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     Ok(quote! {
         #(#attrs)*
         #vis fn #name() #ret {
-            let (__tokio_runtime, __maybe_guard) = #config_fn()
+            let (__tokio_runtime, __maybe_guard) = #config_call
                 .build()
                 .expect("failed to initialize runtime");
             if let Some(__dial9_guard) = __maybe_guard {
@@ -105,11 +126,14 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// # Arguments
 ///
-/// * `config` — path to a zero-argument function returning [`Dial9Config`].
-///   Build one with [`Dial9ConfigBuilder::new`] (telemetry enabled) or
-///   [`Dial9ConfigBuilder::disabled`] (plain tokio, no telemetry).
+/// * `config` — a zero-argument function path or a zero-argument closure
+///   returning [`Dial9Config`]. Build one with [`Dial9ConfigBuilder::new`]
+///   (telemetry enabled) or [`Dial9ConfigBuilder::disabled`] (plain tokio,
+///   no telemetry).
 ///
-/// # Example
+/// # Examples
+///
+/// Using a named function:
 ///
 /// ```rust,ignore
 /// use dial9_tokio_telemetry::{main, config::{Dial9Config, Dial9ConfigBuilder}, telemetry::TelemetryHandle};
@@ -126,6 +150,17 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///         .spawn(async { /* instrumented sub-task */ })
 ///         .await
 ///         .unwrap();
+/// }
+/// ```
+///
+/// Using an inline closure:
+///
+/// ```rust,ignore
+/// #[dial9_tokio_telemetry::main(config = || {
+///     Dial9ConfigBuilder::new("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024).build()
+/// })]
+/// async fn main() {
+///     /* ... */
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -235,31 +270,63 @@ mod tests {
     #[test]
     fn error_empty_args() {
         let msg = parse_args_err(quote! {});
-        assert!(msg.contains("config = <fn>"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("missing required `config`"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
     fn error_wrong_arg_name() {
         let msg = parse_args_err(quote! { foo = bar });
-        assert!(msg.contains("config = <fn>"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("missing required `config`"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
     fn error_config_with_args() {
         let msg = parse_args_err(quote! { config = my_config(arg) });
-        assert!(
-            msg.contains("zero-argument function"),
-            "unexpected error: {msg}"
-        );
+        assert!(msg.contains("zero-argument"), "unexpected error: {msg}");
     }
 
     #[test]
     fn error_config_trailing_tokens() {
         let msg = parse_args_err(quote! { config = my_config, extra = stuff });
-        assert!(
-            msg.contains("zero-argument function"),
-            "unexpected error: {msg}"
+        assert!(msg.contains("zero-argument"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn expand_with_inline_closure() {
+        let output = expand(
+            quote! { config = || my_config() },
+            quote! {
+                async fn main() {
+                    do_work().await;
+                }
+            },
         );
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn expand_with_move_closure() {
+        let output = expand(
+            quote! { config = move || my_config() },
+            quote! {
+                async fn main() {
+                    do_work().await;
+                }
+            },
+        );
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn error_closure_with_args() {
+        let msg = parse_args_err(quote! { config = |x| my_config() });
+        assert!(msg.contains("zero-argument"), "unexpected error: {msg}");
     }
 
     #[test]

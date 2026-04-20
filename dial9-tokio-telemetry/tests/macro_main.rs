@@ -32,6 +32,18 @@ fn macro_runs_async_body() {
     runs_async_body();
 }
 
+#[dial9_tokio_telemetry::main(config = || {
+    Dial9ConfigBuilder::new(tmp_base_path(), 1024 * 1024, 4 * 1024 * 1024).build()
+})]
+async fn runs_with_inline_closure() {
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+}
+
+#[test]
+fn macro_runs_with_inline_closure() {
+    runs_with_inline_closure();
+}
+
 #[dial9_tokio_telemetry::main(config = test_config)]
 async fn with_return_type() -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
     let val = tokio::spawn(async { 42 }).await?;
