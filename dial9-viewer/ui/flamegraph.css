@@ -1,0 +1,76 @@
+/* Shared styles for flamegraph.js module — used by viewer.html and flamegraph.html */
+
+.fg-search-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    background: #16213e;
+    border-bottom: 1px solid #222;
+    flex-shrink: 0;
+}
+.fg-search-input {
+    background: #2a2a4a;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    width: 260px;
+    outline: none;
+}
+.fg-search-input:focus { border-color: #6c63ff; }
+.fg-search-stats { color: #888; font-size: 0.82em; }
+
+.fg-breadcrumb {
+    display: none;
+    align-items: center;
+    gap: 0;
+    padding: 3px 12px;
+    background: #1e1e3a;
+    border-bottom: 1px solid #222;
+    font-size: 0.78em;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+.fg-breadcrumb-item {
+    color: #aaa;
+    max-width: 250px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.fg-breadcrumb-link { color: #6c63ff; cursor: pointer; }
+.fg-breadcrumb-link:hover { text-decoration: underline; }
+.fg-breadcrumb-sep { color: #555; }
+
+.fg-body {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+}
+.fg-section-label {
+    padding: 4px 12px;
+    font-size: 0.78em;
+    color: #aaa;
+    background: #16213e;
+    border-bottom: 1px solid #222;
+    flex-shrink: 0;
+}
+.fg-canvas { display: block; }
+
+.fg-tooltip {
+    display: none;
+    position: fixed;
+    background: #222244;
+    border: 1px solid #555;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 0.78em;
+    pointer-events: none;
+    z-index: 200;
+    max-width: 600px;
+    white-space: nowrap;
+    color: #e0e0e0;
+}
