@@ -47,6 +47,12 @@ If you modify the trace format (event structure, encoding, parser, etc.), you MU
 ./scripts/regenerate_demo_trace.sh
 ```
 
+Or via Docker (no host Rust/AWS/Java needed — DDB Local runs as a sidecar):
+
+```bash
+./scripts/regenerate_demo_trace_docker.sh
+```
+
 Or manually:
 
 ```bash
