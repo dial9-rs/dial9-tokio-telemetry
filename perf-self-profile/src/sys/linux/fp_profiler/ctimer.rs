@@ -28,46 +28,6 @@ use std::mem;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-const SIGEV_THREAD_ID: libc::c_int = 4;
-
-#[repr(C)]
-union SigvalUnion {
-    sival_int: libc::c_int,
-    sival_ptr: *mut libc::c_void,
-}
-
-// Layout must match glibc's `struct sigevent` (64 bytes on LP64).
-// We split the _sigev_un union into an explicit _tid field (which
-// SIGEV_THREAD_ID needs) plus padding for the remaining union bytes.
-#[repr(C)]
-struct Sigevent {
-    sigev_value: SigvalUnion,
-    sigev_signo: libc::c_int,
-    sigev_notify: libc::c_int,
-    sigev_notify_thread_id: libc::c_int,
-    _pad: [libc::c_int; 11],
-}
-
-const _: () = assert!(
-    mem::size_of::<Sigevent>() == 64,
-    "Sigevent layout must match kernel struct sigevent (64 bytes)"
-);
-
-unsafe extern "C" {
-    fn timer_create(
-        clockid: libc::clockid_t,
-        sevp: *mut Sigevent,
-        timerid: *mut libc::timer_t,
-    ) -> libc::c_int;
-    fn timer_settime(
-        timerid: libc::timer_t,
-        flags: libc::c_int,
-        new_value: *const libc::itimerspec,
-        old_value: *mut libc::itimerspec,
-    ) -> libc::c_int;
-    fn timer_delete(timerid: libc::timer_t) -> libc::c_int;
-}
-
 static INTERVAL_NS: AtomicI64 = AtomicI64::new(0);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -77,8 +37,13 @@ thread_local! {
 
 /// Install SIGPROF handler and remember the sampling interval.
 ///
+/// Must be called exactly once, from a single thread, before any `register_thread` calls.
+/// Calling again replaces the handler and resets the interval without re-arming existing timers.
+///
 /// # Safety
-/// Modifies process-global signal state. Call once.
+///
+/// `handler` runs in SIGPROF signal context and must be async-signal-safe
+/// (no heap allocation, no locks, no panic).
 pub unsafe fn start(
     interval_ns: i64,
     handler: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void),
@@ -90,15 +55,14 @@ pub unsafe fn start(
         ));
     }
 
-    // SAFETY: `sigaction` is a plain C POD, zero-init is the standard baseline
-    // before setting handler fields explicitly.
+    // SAFETY: zero-filled `libc::sigaction` is valid before we assign handler fields.
     let mut sa: libc::sigaction = unsafe { mem::zeroed() };
     sa.sa_sigaction = handler as usize;
     sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
     // SAFETY: `sa.sa_mask` points to a valid sigset_t inside `sa`.
     unsafe { libc::sigemptyset(&mut sa.sa_mask) };
 
-    // SAFETY: installs a SIGPROF SA_SIGINFO handler for this process.
+    // SAFETY: `sa` is a valid `sigaction`, `oldact` is null (allowed).
     if unsafe { libc::sigaction(libc::SIGPROF, &sa, ptr::null_mut()) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -108,12 +72,13 @@ pub unsafe fn start(
     Ok(())
 }
 
+/// Disable sampling process-wide. Per-thread timers keep firing but
+/// the signal handler drops samples while RUNNING is false.
 pub fn stop() {
     RUNNING.store(false, Ordering::Release);
 }
 
-/// Re-enable sampling after `stop()`. Per-thread timers keep firing;
-/// this just tells the signal handler to record samples again.
+/// Re-enable sampling process-wide after `stop()`.
 pub fn resume() {
     RUNNING.store(true, Ordering::Release);
 }
@@ -151,17 +116,18 @@ pub fn register_thread() -> Result<(), io::Error> {
 
     let tid = gettid();
 
-    // SAFETY: `Sigevent` mirrors C layout and is filled with explicit fields
-    // needed by `timer_create`.
-    let mut sev: Sigevent = unsafe { mem::zeroed() };
-    sev.sigev_notify = SIGEV_THREAD_ID;
+    // SAFETY: Zero-filled `libc::sigevent` is valid before we assign the fields we use.
+    let mut sev: libc::sigevent = unsafe { mem::zeroed() };
+    sev.sigev_notify = libc::SIGEV_THREAD_ID;
     sev.sigev_signo = libc::SIGPROF;
     sev.sigev_notify_thread_id = tid;
-    sev.sigev_value = SigvalUnion { sival_int: tid };
+    sev.sigev_value = libc::sigval {
+        sival_ptr: tid as *mut libc::c_void,
+    };
 
     let mut timerid: libc::timer_t = ptr::null_mut();
-    // SAFETY: pointers are valid for writes/reads during the call.
-    if unsafe { timer_create(libc::CLOCK_THREAD_CPUTIME_ID, &mut sev, &mut timerid) } != 0 {
+    // SAFETY: `sev` and `timerid` are stack locals, libc may read/write them for this syscall only.
+    if unsafe { libc::timer_create(libc::CLOCK_THREAD_CPUTIME_ID, &mut sev, &mut timerid) } != 0 {
         return Err(io::Error::last_os_error());
     }
 
@@ -178,11 +144,13 @@ pub fn register_thread() -> Result<(), io::Error> {
         },
     };
 
-    // SAFETY: `timerid` comes from `timer_create`, `spec` lives for call duration.
-    if unsafe { timer_settime(timerid, 0, &spec, ptr::null_mut()) } != 0 {
+    // SAFETY: `timerid` is from successful `timer_create`, `spec` is a stack-local reference,
+    // `old_value` is null (allowed).
+    if unsafe { libc::timer_settime(timerid, 0, &spec, ptr::null_mut()) } != 0 {
         let err = io::Error::last_os_error();
-        // SAFETY: best-effort cleanup for a timer created above.
-        if unsafe { timer_delete(timerid) } != 0 {
+        // Best-effort cleanup on failure.
+        // SAFETY: same `timerid`, valid to delete after a failed `timer_settime`.
+        if unsafe { libc::timer_delete(timerid) } != 0 {
             let cleanup_err = io::Error::last_os_error();
             tracing::warn!(
                 "ctimer: timer_delete after timer_settime failure failed: {cleanup_err}"
@@ -198,15 +166,17 @@ pub fn register_thread() -> Result<(), io::Error> {
 pub fn unregister_thread() {
     THREAD_TIMER.with(|c| {
         if let Some(t) = c.take() {
-            // SAFETY: itimerspec is a POD C struct, zero disarms the timer.
+            // SAFETY: zero-filled `libc::itimerspec` disarms the timer (all-zero interval and value).
             let zero: libc::itimerspec = unsafe { mem::zeroed() };
-            // SAFETY: best-effort disarm before delete.
-            if unsafe { timer_settime(t, 0, &zero, ptr::null_mut()) } != 0 {
+            // Best-effort disarm before delete.
+            // SAFETY: `t` is a live `timer_t` from this thread's registration, `zero` is stack-local,
+            // `old_value` is null (allowed).
+            if unsafe { libc::timer_settime(t, 0, &zero, ptr::null_mut()) } != 0 {
                 let err = io::Error::last_os_error();
                 tracing::warn!("ctimer: timer_settime(disarm) failed in unregister_thread: {err}");
             }
-            // SAFETY: delete the per-thread timer handle we previously stored.
-            if unsafe { timer_delete(t) } != 0 {
+            // SAFETY: `t` is still valid until `timer_delete` succeeds.
+            if unsafe { libc::timer_delete(t) } != 0 {
                 let err = io::Error::last_os_error();
                 tracing::warn!("ctimer: timer_delete failed in unregister_thread: {err}");
             }
