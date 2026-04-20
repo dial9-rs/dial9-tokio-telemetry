@@ -96,20 +96,27 @@ impl SamplerBackend for CtimerSampler {
             tracing::debug!("[ctimer] dropped {dropped} samples (buffer full)");
         }
 
-        sample_buffer::drain(|raw| {
-            let num_frames = raw.num_frames as usize;
-            let callchain: Vec<u64> = raw.frames[..num_frames.min(MAX_FRAMES)].to_vec();
+        let mut sample = Sample {
+            ip: 0,
+            pid: 0,
+            tid: 0,
+            time: 0,
+            cpu: 0,
+            period: 0,
+            callchain: Vec::with_capacity(MAX_FRAMES),
+            raw: None,
+        };
 
-            let sample = Sample {
-                ip: callchain.first().copied().unwrap_or(0),
-                pid: raw.pid,
-                tid: raw.tid,
-                time: raw.time,
-                cpu: raw.cpu,
-                period: raw.period,
-                callchain,
-                raw: None,
-            };
+        sample_buffer::drain(|raw| {
+            let n = (raw.num_frames as usize).min(MAX_FRAMES);
+            sample.callchain.clear();
+            sample.callchain.extend_from_slice(&raw.frames[..n]);
+            sample.ip = sample.callchain.first().copied().unwrap_or(0);
+            sample.pid = raw.pid;
+            sample.tid = raw.tid;
+            sample.time = raw.time;
+            sample.cpu = raw.cpu;
+            sample.period = raw.period;
             f(&sample);
         });
     }
