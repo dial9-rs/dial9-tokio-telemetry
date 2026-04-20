@@ -361,6 +361,25 @@ See [`examples/thread_per_core.rs`](/dial9-tokio-telemetry/examples/thread_per_c
 
 ### Analyzing traces
 
+[`dial9-viewer`](/dial9-viewer) is an interactive trace viewer and S3 browser. Point it at a local directory or an S3 bucket to browse and visualize traces in the browser. [Here's a demo.](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)
+
+```bash
+# Install
+cargo install --locked dial9-viewer
+# or, for pre-built binaries:
+cargo binstall dial9-viewer
+
+# Serve traces from a local directory
+dial9-viewer serve --local-dir /tmp/my_traces
+
+# Serve traces from S3
+dial9-viewer serve --bucket my-trace-bucket
+```
+
+`dial9-viewer` also ships an agent toolkit (`dial9-viewer agents`) with skill documentation and JS analysis modules that AI agents can use to diagnose traces programmatically.
+
+For CLI analysis without the viewer, there are example scripts:
+
 ```bash
 # per-worker stats, wake→poll delays, idle worker detection
 cargo run --example analyze_trace --features analysis -- /tmp/my_traces/trace.0.bin.gz
@@ -368,8 +387,6 @@ cargo run --example analyze_trace --features analysis -- /tmp/my_traces/trace.0.
 # convert to JSONL for ad-hoc scripting
 cargo run --example trace_to_jsonl --features analysis -- /tmp/my_traces/trace.0.bin.gz output.jsonl
 ```
-
-There's also an interactive HTML trace viewer — open `../dial9-viewer/ui/viewer.html` and drag in a `.bin` file. [Here's a demo.](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)
 
 See [TRACE_ANALYSIS_GUIDE.md](/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) for a walkthrough of diagnosing scheduling delays and CPU hotspots from trace data.
 
@@ -457,9 +474,10 @@ Overhead:   3.2%
 
 ## Workspace
 
-This repo is a Cargo workspace with four members:
+This repo is a Cargo workspace with five members:
 
 - [`dial9-tokio-telemetry`](/dial9-tokio-telemetry) — the main crate
+- [`dial9-viewer`](/dial9-viewer) — CLI and web UI for browsing traces in S3 or on the local filesystem
 - [`dial9-macro`](/dial9-macro) — the `#[dial9_tokio_telemetry::main]` attribute macro
 - [`dial9-perf-self-profile`](/perf-self-profile) — minimal Linux `perf_event_open` wrapper for CPU profiling and scheduler events
 - [`examples/metrics-service`](/examples/metrics-service) — end-to-end example service
