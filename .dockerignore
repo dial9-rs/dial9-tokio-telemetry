@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+.claude/
+progress/
+node_modules/
+*.bin
+*.bin.gz
+dial9-viewer/ui/demo-trace.bin
+.vscode/
+.idea/
+compose.yml
+.dockerignore
