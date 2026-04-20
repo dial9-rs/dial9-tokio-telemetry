@@ -66,7 +66,6 @@
         <div class="fg-page-header">
             <span class="fg-title" id="fg-title">Flamegraph</span>
             <span class="fg-stats" id="fg-stats"></span>
-            <select id="fg-spawn-filter" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em;max-width:350px"></select>
         </div>
         <div id="fg-container"></div>
         <div id="loading">Loading trace&hellip;</div>
@@ -88,7 +87,6 @@
                 const containerEl = document.getElementById("fg-container");
                 const titleEl = document.getElementById("fg-title");
                 const statsEl = document.getElementById("fg-stats");
-                const spawnFilter = document.getElementById("fg-spawn-filter");
 
                 function showError(msg) {
                     loadingEl.classList.add("hidden");
@@ -146,12 +144,7 @@
                     console.warn("Failed to attach spawn locations:", err);
                 }
 
-                // Filter samples to the requested time range
-                let allSamples = trace.cpuSamples.filter(
-                    (s) => s.callchain.length > 0
-                );
-                if (startNs != null) allSamples = allSamples.filter((s) => s.timestamp >= startNs);
-                if (endNs != null) allSamples = allSamples.filter((s) => s.timestamp <= endNs);
+                const allSamples = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, startNs, endNs);
 
                 if (!allSamples.length) {
                     showError("No CPU samples found in the specified time range.");
@@ -168,24 +161,6 @@
                 statsEl.textContent =
                     `${allSamples.length} samples` + (durMs ? ` \u00b7 ${durMs}ms selected` : "");
 
-                // Build spawn location dropdown
-                const locCounts = new Map();
-                for (const s of allSamples) {
-                    const loc = s.spawnLoc || "(unknown)";
-                    locCounts.set(loc, (locCounts.get(loc) || 0) + 1);
-                }
-                spawnFilter.innerHTML = `<option value="">All tasks (${allSamples.length} samples)</option>`;
-                const sorted = [...locCounts.entries()].sort((a, b) => b[1] - a[1]);
-                for (const [loc, count] of sorted) {
-                    const short = loc.replace(/.*\//, "");
-                    const opt = document.createElement("option");
-                    opt.value = loc;
-                    opt.textContent = `${short} (${count})`;
-                    opt.title = loc;
-                    spawnFilter.appendChild(opt);
-                }
-
-                // Hide loading, show flamegraph
                 loadingEl.classList.add("hidden");
                 containerEl.style.display = "flex";
 
@@ -200,22 +175,8 @@
                     window.history.replaceState(null, "", newUrl);
                 }
 
-                // Create flamegraph instance
                 const fg = FlamegraphRenderer.createFlamegraph(containerEl, updateUrlZoom);
-
-                function applyFilter() {
-                    const filterVal = spawnFilter.value;
-                    const samples = filterVal
-                        ? allSamples.filter((s) => (s.spawnLoc || "(unknown)") === filterVal)
-                        : allSamples;
-
-                    const workerSamples = samples.filter((s) => s.workerId !== 255);
-                    const offworkerSamples = samples.filter((s) => s.workerId === 255);
-                    fg.setData(workerSamples, offworkerSamples, trace.callframeSymbols);
-                }
-
-                spawnFilter.addEventListener("change", applyFilter);
-                applyFilter();
+                fg.setData(allSamples, trace.callframeSymbols);
 
                 // Restore zoom from URL if present
                 const wz = params.get("worker-zoom");

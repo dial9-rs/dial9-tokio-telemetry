@@ -517,7 +517,6 @@
                     <div class="fg-header">
                         <span class="fg-title" id="fg-title">Flamegraph</span>
                         <span class="fg-stats" id="fg-stats"></span>
-                        <select id="fg-spawn-filter" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em;max-width:350px"></select>
                         <span class="fg-popout" id="fg-popout" tabindex="0" role="button" title="Open in new tab">&#8599; Pop Out</span>
                         <span class="fg-close" id="fg-close" tabindex="0" role="button">&#10005; Close (Esc)</span>
                     </div>
@@ -3620,7 +3619,6 @@
             })();
 
             // ── Flamegraph ──
-            let fgAllSamples = [];
             let fgSelStart = 0, fgSelEnd = 0;
             const fgInstance = FlamegraphRenderer.createFlamegraph(
                 document.getElementById("fg-container")
@@ -3659,58 +3657,24 @@
             }
 
             function showFlamegraph(selStart, selEnd) {
-                const allSamples = trace.cpuSamples.filter(s =>
-                    s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
-                );
-                if (!allSamples.length) {
+                const samples = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, selStart, selEnd);
+                if (!samples.length) {
                     showToast("no-cpu-samples-region", "No CPU samples in selected region", "error", 4000);
                     return;
                 }
 
-                fgAllSamples = allSamples;
                 fgSelStart = selStart;
                 fgSelEnd = selEnd;
                 const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
                 document.getElementById("fg-title").textContent = "Flamegraph";
                 document.getElementById("fg-stats").textContent =
-                    `${allSamples.length} samples \u00b7 ${durMs}ms selected`;
-
-                // Build spawn location dropdown
-                const locCounts = new Map();
-                for (const s of allSamples) {
-                    const loc = s.spawnLoc || "(unknown)";
-                    locCounts.set(loc, (locCounts.get(loc) || 0) + 1);
-                }
-                const sel = document.getElementById("fg-spawn-filter");
-                sel.innerHTML = `<option value="">All tasks (${allSamples.length} samples)</option>`;
-                const sorted = [...locCounts.entries()].sort((a, b) => b[1] - a[1]);
-                for (const [loc, count] of sorted) {
-                    const short = loc.replace(/.*\//, '');
-                    const opt = document.createElement("option");
-                    opt.value = loc;
-                    opt.textContent = `${short} (${count})`;
-                    opt.title = loc;
-                    sel.appendChild(opt);
-                }
+                    `${samples.length} samples \u00b7 ${durMs}ms selected`;
 
                 clearToasts();
                 document.getElementById("flamegraph-panel").style.display = "flex";
                 document.getElementById("fg-close").focus();
-                applyFgFilter();
+                fgInstance.setData(samples, trace.callframeSymbols);
             }
-
-            function applyFgFilter() {
-                const filterVal = document.getElementById("fg-spawn-filter").value;
-                const samples = filterVal
-                    ? fgAllSamples.filter(s => (s.spawnLoc || "(unknown)") === filterVal)
-                    : fgAllSamples;
-
-                const workerSamples = samples.filter(s => s.workerId !== 255);
-                const offworkerSamples = samples.filter(s => s.workerId === 255);
-                fgInstance.setData(workerSamples, offworkerSamples, trace.callframeSymbols);
-            }
-
-            document.getElementById("fg-spawn-filter").addEventListener("change", applyFgFilter);
 
             document.getElementById("fg-close").addEventListener("click", () => {
                 document.getElementById("flamegraph-panel").style.display = "none";

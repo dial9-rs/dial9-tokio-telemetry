@@ -29,6 +29,15 @@
 }
 .fg-search-clear:hover { color: #fff; }
 .fg-search-stats { color: #888; font-size: 0.82em; }
+.fg-spawn-filter {
+    background: #2a2a4a;
+    border: 1px solid #444;
+    color: #ccc;
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 0.9em;
+    max-width: 350px;
+}
 .fg-help-btn {
     color: #666;
     cursor: pointer;
@@ -36,7 +45,6 @@
     border: 1px solid #444;
     border-radius: 3px;
     padding: 0 5px;
-    margin-left: auto;
     line-height: 1.4;
 }
 .fg-help-btn:hover { color: #ccc; border-color: #666; }

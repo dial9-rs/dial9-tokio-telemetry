@@ -61,18 +61,26 @@
     return { nodes, maxDepth: maxD };
   }
 
-  // Sum self-sample counts for frames whose name matches the query.
-  // Uses self (not inclusive count) to avoid double-counting in the percentage.
+  // Count matching frames and their self-samples for search stats.
   function countSearchMatches(root, queryLower) {
-    let matched = 0;
+    let selfCount = 0;
+    let frameCount = 0;
     function walk(node) {
       if (node.name.toLowerCase().includes(queryLower)) {
-        matched += node.self;
+        selfCount += node.self;
+        frameCount++;
       }
       for (const child of node.children.values()) walk(child);
     }
     walk(root);
-    return matched;
+    return { selfCount, frameCount };
+  }
+
+  function filterCpuSamples(cpuSamples, startNs, endNs) {
+    let out = cpuSamples.filter((s) => s.callchain.length > 0 && s.source !== 1);
+    if (startNs != null) out = out.filter((s) => s.timestamp >= startNs);
+    if (endNs != null) out = out.filter((s) => s.timestamp <= endNs);
+    return out;
   }
 
   function createFlamegraph(container, onZoomChange) {
@@ -86,6 +94,8 @@
     let searchQuery = "";
     let highlightName = null;
     let repaintQueued = false;
+    let allSamples = [];
+    let currentSymbols = null;
     const hitRegions = { worker: [], offworker: [] };
 
     // DOM
@@ -97,12 +107,14 @@
       (isMac ? '\u2318' : 'Ctrl+') + 'F or /)" />' +
       '<span class="fg-search-clear" title="Clear search">\u00d7</span>' +
       '<span class="fg-search-stats"></span>' +
+      '<select class="fg-spawn-filter"></select>' +
       '<span class="fg-help-btn" tabindex="0" role="button" title="Keyboard shortcuts">i</span>';
     container.appendChild(searchBar);
 
     const searchInput = searchBar.querySelector(".fg-search-input");
     const searchClear = searchBar.querySelector(".fg-search-clear");
     const searchStats = searchBar.querySelector(".fg-search-stats");
+    const spawnFilter = searchBar.querySelector(".fg-spawn-filter");
     const helpBtn = searchBar.querySelector(".fg-help-btn");
 
     const helpOverlay = document.createElement("div");
@@ -324,21 +336,32 @@
       }
       const qLower = searchQuery.toLowerCase();
       let matchedSelf = 0;
+      let matchedFrames = 0;
       let totalSelf = 0;
-      if (workerTree) {
-        matchedSelf += countSearchMatches(workerTree, qLower);
-        totalSelf += workerTree.count;
+      const wRoot = workerZoomStack.length > 0 ? workerZoomStack[workerZoomStack.length - 1] : workerTree;
+      const oRoot = offworkerZoomStack.length > 0 ? offworkerZoomStack[offworkerZoomStack.length - 1] : offworkerTree;
+      if (wRoot) {
+        const m = countSearchMatches(wRoot, qLower);
+        matchedSelf += m.selfCount;
+        matchedFrames += m.frameCount;
+        totalSelf += wRoot.count;
       }
-      if (offworkerTree) {
-        matchedSelf += countSearchMatches(offworkerTree, qLower);
-        totalSelf += offworkerTree.count;
+      if (oRoot) {
+        const m = countSearchMatches(oRoot, qLower);
+        matchedSelf += m.selfCount;
+        matchedFrames += m.frameCount;
+        totalSelf += oRoot.count;
       }
-      if (totalSelf === 0) {
-        searchStats.textContent = "";
+      if (matchedFrames === 0) {
+        searchStats.textContent = "no matches";
         return;
       }
-      const pct = ((matchedSelf / totalSelf) * 100).toFixed(1);
-      searchStats.textContent = `${pct}% self time (${matchedSelf} samples)`;
+      let text = matchedFrames + (matchedFrames === 1 ? " frame" : " frames");
+      if (matchedSelf > 0 && totalSelf > 0) {
+        const pct = ((matchedSelf / totalSelf) * 100).toFixed(1);
+        text += ` \u00b7 ${pct}% of samples`;
+      }
+      searchStats.textContent = text;
     }
 
     searchInput.addEventListener("input", onSearchInput);
@@ -495,12 +518,20 @@
       return false;
     }
 
-    function setData(workerSamples, offworkerSamples, callframeSymbols) {
+    function applySpawnFilter() {
+      const filterVal = spawnFilter.value;
+      const samples = filterVal
+        ? allSamples.filter((s) => (s.spawnLoc || "(unknown)") === filterVal)
+        : allSamples;
+
+      const workerSamples = samples.filter((s) => s.workerId !== 255);
+      const offworkerSamples = samples.filter((s) => s.workerId === 255);
+
       workerTree = workerSamples.length > 0
-        ? buildFlamegraphTree(workerSamples, callframeSymbols)
+        ? buildFlamegraphTree(workerSamples, currentSymbols)
         : null;
       offworkerTree = offworkerSamples.length > 0
-        ? buildFlamegraphTree(offworkerSamples, callframeSymbols)
+        ? buildFlamegraphTree(offworkerSamples, currentSymbols)
         : null;
 
       workerZoomStack = [];
@@ -512,6 +543,32 @@
         `Off-worker (sampler thread) \u2014 ${offworkerSamples.length} samples`;
 
       renderAll();
+    }
+
+    spawnFilter.addEventListener("change", applySpawnFilter);
+
+    function setData(samples, callframeSymbols) {
+      allSamples = samples;
+      currentSymbols = callframeSymbols;
+
+      // Build spawn location dropdown
+      const locCounts = new Map();
+      for (const s of samples) {
+        const loc = s.spawnLoc || "(unknown)";
+        locCounts.set(loc, (locCounts.get(loc) || 0) + 1);
+      }
+      spawnFilter.innerHTML = '<option value="">All tasks (' + samples.length + ' samples)</option>';
+      const sorted = [...locCounts.entries()].sort((a, b) => b[1] - a[1]);
+      for (const [loc, count] of sorted) {
+        const short = loc.replace(/.*\//, "");
+        const opt = document.createElement("option");
+        opt.value = loc;
+        opt.textContent = short + " (" + count + ")";
+        opt.title = loc;
+        spawnFilter.appendChild(opt);
+      }
+
+      applySpawnFilter();
     }
 
     function resize() {
@@ -562,7 +619,7 @@
     return { setData, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath };
   }
 
-  const fgExports = { createFlamegraph: createFlamegraph };
+  const fgExports = { createFlamegraph: createFlamegraph, filterCpuSamples: filterCpuSamples };
   if (typeof module !== "undefined" && module.exports) {
     module.exports = fgExports;
   } else {
