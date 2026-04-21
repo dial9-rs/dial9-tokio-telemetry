@@ -1,35 +1,30 @@
-//! Ring buffer used by the ctimer SIGPROF path.
+//! Lock-free ring buffer for SIGPROF samples.
 //!
-//! The signal handler writes samples here, and the sampler drain path reads
-//! them later on a normal thread. The write side must stay async-signal-safe:
-//! no allocs or locks.
+//! Implements a sequence-number ring buffer (Vyukov-style, though single-consumer)
 //!
-//! Each claim gets a slot via a monotonic write index. A small per-slot state
-//! machine (`EMPTY -> WRITING -> READY`) lets the consumer read only fully
-//! published samples in order. If the producer laps the consumer, we drop the
-//! new sample and bump a dropped counter.
+//! Signal handlers produce; one drain thread consumes.
+//! Write path must stay async-signal-safe.
+//!
+//! Each slot has a `seq` counter that indicates whether this slot is ready for
+//! the current producer ticket, already published for drain, or still from an older lap.
+//! Producers claim tickets via CAS on `tail` so buffer-full drops never
+//! leave cursor holes that stall the drain.
 
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crossbeam_utils::CachePadded;
 
 use super::unwind::MAX_FRAMES;
 
-/// Buffer capacity. Must be large enough to absorb bursts between drains.
-/// At 100 Hz across 16 threads, drained every 100ms = ~160 samples/drain.
-/// 16384 gives ~100x headroom.
+/// At 99 Hz × 64 threads × 1 s drain interval ≈ 6400 samples/cycle.
+/// 16384 gives ~2.5× headroom which should be enough for most environments.
 const BUFFER_CAP: usize = 16384;
 
-/// Slot states.
-const SLOT_EMPTY: u8 = 0;
-const SLOT_WRITING: u8 = 1;
-const SLOT_READY: u8 = 2;
-
-/// A single sample slot. Fixed-size, no heap allocation.
-///
-/// Layout is carefully ordered: `state` first so the flush thread can
-/// skip-scan efficiently.
-#[repr(C)]
-struct SampleSlot {
-    state: AtomicU8,
+/// Mutable payload written by the producer and read by drain.
+/// Wrapped in `UnsafeCell` so producers can write through a shared
+/// reference without UB — the `seq` protocol provides the exclusivity.
+struct SampleData {
     pid: u32,
     tid: u32,
     time: u64,
@@ -39,55 +34,70 @@ struct SampleSlot {
     frames: [u64; MAX_FRAMES],
 }
 
+/// A single sample slot.
+///
+/// `seq` is first so the drain can check readiness without touching the
+/// larger `data` field.
+#[repr(C)]
+struct SampleSlot {
+    seq: AtomicUsize,
+    data: UnsafeCell<SampleData>,
+}
+
 impl SampleSlot {
-    const fn new() -> Self {
+    const fn new(initial_seq: usize) -> Self {
         Self {
-            state: AtomicU8::new(SLOT_EMPTY),
-            pid: 0,
-            tid: 0,
-            time: 0,
-            cpu: 0,
-            period: 0,
-            num_frames: 0,
-            frames: [0u64; MAX_FRAMES],
+            seq: AtomicUsize::new(initial_seq),
+            data: UnsafeCell::new(SampleData {
+                pid: 0,
+                tid: 0,
+                time: 0,
+                cpu: 0,
+                period: 0,
+                num_frames: 0,
+                frames: [0u64; MAX_FRAMES],
+            }),
         }
     }
 }
 
-// SAFETY: SampleSlot is only accessed via atomic state coordination.
-// Signal handlers write only to slots they've claimed (unique index),
-// and the flush thread reads only READY slots.
+// SAFETY: access is safe across threads because the `seq` protocol gives
+// each producer exclusive ownership of a slot's data until commit, and the
+// drain reads only after observing that no producer is writing to it.
 unsafe impl Sync for SampleSlot {}
 
+/// Build the slot array with `seq[i] = i`.
+const fn make_slots() -> [SampleSlot; BUFFER_CAP] {
+    let mut slots: [SampleSlot; BUFFER_CAP] = [const { SampleSlot::new(0) }; BUFFER_CAP];
+    let mut i = 0;
+    while i < BUFFER_CAP {
+        slots[i] = SampleSlot::new(i);
+        i += 1;
+    }
+    slots
+}
+
 /// The global sample buffer. Static so signal handlers can access it
-/// without any indirection.
-static BUFFER: SampleBuffer = SampleBuffer::new();
+/// without indirection.
+static BUFFER: SampleBuffer = SampleBuffer {
+    slots: make_slots(),
+    tail: CachePadded::new(AtomicUsize::new(0)),
+    head: CachePadded::new(AtomicUsize::new(0)),
+    dropped: CachePadded::new(AtomicUsize::new(0)),
+};
 
 struct SampleBuffer {
     slots: [SampleSlot; BUFFER_CAP],
-    /// Monotonically increasing write cursor. Signal handlers `fetch_add`
-    /// this to claim a unique slot index (index % BUFFER_CAP).
-    write_idx: AtomicUsize,
-    /// Read cursor for the drain path. Only advanced by the flush thread
-    /// (single consumer).
-    read_idx: AtomicUsize,
-    /// Count of dropped samples (buffer full).
-    dropped: AtomicUsize,
+    /// Producer cursor. Monotonically increasing; producers CAS this to
+    /// claim a unique ticket. CAS only advances on success.
+    tail: CachePadded<AtomicUsize>,
+    /// Consumer cursor. Advanced only by the single drain thread.
+    head: CachePadded<AtomicUsize>,
+    /// Count of dropped samples (buffer full or claim retries exhausted).
+    dropped: CachePadded<AtomicUsize>,
 }
 
-impl SampleBuffer {
-    const fn new() -> Self {
-        const EMPTY_SLOT: SampleSlot = SampleSlot::new();
-        Self {
-            slots: [EMPTY_SLOT; BUFFER_CAP],
-            write_idx: AtomicUsize::new(0),
-            read_idx: AtomicUsize::new(0),
-            dropped: AtomicUsize::new(0),
-        }
-    }
-}
-
-/// Data extracted from a sample slot for the flush thread.
+/// Data extracted from a sample slot for the drain thread.
 pub(crate) struct DrainedSample {
     pub pid: u32,
     pub tid: u32,
@@ -100,71 +110,108 @@ pub(crate) struct DrainedSample {
     pub frames: [u64; MAX_FRAMES],
 }
 
-/// Claim a slot for writing from a signal handler. Returns a mutable
-/// reference to the slot's data fields (excluding `state`).
+/// Claim a slot for writing from a signal handler.
 ///
 /// # Safety
 /// - Must be called from a signal handler context (async-signal-safe).
-/// - The returned pointer is valid only until the caller calls [`commit_slot`].
-/// - Only one signal handler invocation writes to a given slot (guaranteed
-///   by the atomic `fetch_add`).
+/// - The returned writer is valid only until [`SlotWriter::commit`] or drop.
+/// - Exclusive access to the claimed slot is guaranteed by the `tail`
+///   CAS: no two callers can win the same ticket.
 pub(crate) unsafe fn claim_slot() -> Option<SlotWriter> {
-    let idx = BUFFER.write_idx.fetch_add(1, Ordering::Relaxed);
-    let slot_idx = idx % BUFFER_CAP;
-    let slot = &BUFFER.slots[slot_idx];
+    // Hard cap so the signal handler can't spin unboundedly under
+    // heavy contention. 128 is well past typical fan-in.
+    const MAX_ATTEMPTS: usize = 128;
 
-    // If the slot isn't empty, the buffer wrapped around and the flush
-    // thread hasn't caught up. Drop this sample.
-    if slot
-        .state
-        .compare_exchange(
-            SLOT_EMPTY,
-            SLOT_WRITING,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        )
-        .is_err()
-    {
-        BUFFER.dropped.fetch_add(1, Ordering::Relaxed);
-        return None;
+    let mut ticket = BUFFER.tail.load(Ordering::Relaxed);
+    for _ in 0..MAX_ATTEMPTS {
+        let slot = &BUFFER.slots[ticket % BUFFER_CAP];
+
+        // Acquire syncs with:
+        //   - drain's `seq.store(head + CAP, Release)` (slot recycled), or
+        //   - another producer's commit `seq.store(prev + 1, Release)`.
+        let seq = slot.seq.load(Ordering::Acquire);
+
+        if seq == ticket {
+            // Slot ready for `ticket`. Try to reserve it.
+            match BUFFER.tail.compare_exchange(
+                ticket,
+                ticket.wrapping_add(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(SlotWriter {
+                        slot: slot as *const SampleSlot as *mut SampleSlot,
+                        ticket,
+                        committed: false,
+                    });
+                }
+                Err(current) => {
+                    // Lost the race to another producer, retry with its value.
+                    ticket = current;
+                }
+            }
+        } else {
+            // Slot doesn't match `ticket`.
+            let diff = seq.wrapping_sub(ticket) as isize;
+            if diff < 0 {
+                // Prior-lap sample still sitting in the slot, buffer is full.
+                BUFFER.dropped.fetch_add(1, Ordering::Relaxed);
+                return None;
+            } else {
+                // Another producer committed past our stale cursor, reload.
+                ticket = BUFFER.tail.load(Ordering::Relaxed);
+            }
+        }
     }
 
-    Some(SlotWriter {
-        slot: slot as *const SampleSlot as *mut SampleSlot,
-        committed: false,
-    })
+    // Exceeded retry limit, drop the sample.
+    BUFFER.dropped.fetch_add(1, Ordering::Relaxed);
+    None
 }
 
 /// Handle for writing sample data into a claimed slot.
 ///
-/// If dropped without calling [`commit`](Self::commit), the slot is
-/// committed with `num_frames = 0` so the drain cursor can advance past it
-/// (a permanently stuck SLOT_WRITING would block all subsequent drains).
+/// If dropped without calling [`commit`](Self::commit), the slot is published
+/// with `num_frames = 0` so the drain can advance past it. Every claimed
+/// ticket must land a matching `seq` publish or the drain's FIFO advance
+/// stalls forever.
 pub(crate) struct SlotWriter {
     slot: *mut SampleSlot,
+    ticket: usize,
     committed: bool,
 }
 
 impl SlotWriter {
     #[inline]
     pub(crate) unsafe fn write(&mut self, pid: u32, tid: u32, time: u64, cpu: u32, period: u64) {
-        // Write through raw pointer — no &mut ref, so no aliasing UB.
-        // The atomic state machine (SLOT_WRITING) guarantees exclusive access.
+        // SAFETY: slot lives in the 'static BUFFER, and the tail CAS in
+        // claim_slot hands us exclusive access until commit.
         unsafe {
-            (*self.slot).pid = pid;
-            (*self.slot).tid = tid;
-            (*self.slot).time = time;
-            (*self.slot).cpu = cpu;
-            (*self.slot).period = period;
+            let data = (*self.slot).data.get();
+            (*data).pid = pid;
+            (*data).tid = tid;
+            (*data).time = time;
+            (*data).cpu = cpu;
+            (*data).period = period;
         }
     }
 
+    /// Caller should pass a `count` not greater than `frames.len()`.
     #[inline]
     pub(crate) unsafe fn write_frames(&mut self, frames: &[u64], count: u32) {
-        let copy_len = (count as usize).min(MAX_FRAMES);
+        debug_assert!(
+            (count as usize) <= frames.len(),
+            "write_frames count exceeds source slice length"
+        );
+        let copy_len = (count as usize).min(MAX_FRAMES).min(frames.len());
+        // SAFETY: exclusive slot access as in `write`, copy_len <= MAX_FRAMES so the
+        // write stays within slot.frames, and copy_len <= frames.len() so the read
+        // stays within the source slice.
         unsafe {
-            (*self.slot).num_frames = copy_len as u32;
-            let dst = std::ptr::addr_of_mut!((*self.slot).frames) as *mut u64;
+            let data = (*self.slot).data.get();
+            (*data).num_frames = copy_len as u32;
+            let dst = std::ptr::addr_of_mut!((*data).frames) as *mut u64;
             core::ptr::copy_nonoverlapping(frames.as_ptr(), dst, copy_len);
         }
     }
@@ -172,19 +219,34 @@ impl SlotWriter {
     #[inline]
     pub(crate) unsafe fn commit(mut self) {
         self.committed = true;
-        unsafe { (*self.slot).state.store(SLOT_READY, Ordering::Release) };
+        // SAFETY: same exclusivity as `write`. The Release store publishes
+        // our writes to any drain that later Acquires this seq.
+        unsafe {
+            (*self.slot)
+                .seq
+                .store(self.ticket.wrapping_add(1), Ordering::Release)
+        };
     }
 }
 
 impl Drop for SlotWriter {
     fn drop(&mut self) {
         if !self.committed {
-            // Abandoned slot: commit with zero frames so drain can advance
-            // past it. A permanently stuck SLOT_WRITING would block all
-            // subsequent drains.
+            // Abandoned slot: publish as an empty sample so the drain's FIFO
+            // advance isn't blocked waiting on a `seq` that never lands.
+            // SAFETY: same exclusivity as `write`, we still hold the ticket
+            // and no other writer or drain can touch this slot.
             unsafe {
-                (*self.slot).num_frames = 0;
-                (*self.slot).state.store(SLOT_READY, Ordering::Release);
+                let data = (*self.slot).data.get();
+                (*data).pid = 0;
+                (*data).tid = 0;
+                (*data).time = 0;
+                (*data).cpu = 0;
+                (*data).period = 0;
+                (*data).num_frames = 0;
+                (*self.slot)
+                    .seq
+                    .store(self.ticket.wrapping_add(1), Ordering::Release);
             }
         }
     }
@@ -192,47 +254,56 @@ impl Drop for SlotWriter {
 
 /// Drain all ready samples, calling `f` for each one.
 ///
-/// Single-consumer: must be called from one thread only (the flush thread).
+/// Single-consumer: must be called from one thread only (the drain thread).
+/// `f` must not panic; a panic before the cursor is committed will cause
+/// the same samples to be re-delivered on the next call.
 pub(crate) fn drain(mut f: impl FnMut(DrainedSample)) {
-    let write = BUFFER.write_idx.load(Ordering::Acquire);
-    let mut read = BUFFER.read_idx.load(Ordering::Relaxed);
+    let mut head = BUFFER.head.load(Ordering::Relaxed);
 
-    while read < write {
-        let slot_idx = read % BUFFER_CAP;
-        let slot = &BUFFER.slots[slot_idx];
+    loop {
+        let slot = &BUFFER.slots[head % BUFFER_CAP];
 
-        // If the slot isn't READY yet, the signal handler is still writing.
-        // Since we process in order, stop here and retry next drain cycle.
-        if slot.state.load(Ordering::Acquire) != SLOT_READY {
+        // Acquire syncs with the producer's `seq.store(ticket + 1, Release)` in
+        // `commit` (or the abandoned-slot store in `Drop`).
+        if slot.seq.load(Ordering::Acquire) != head.wrapping_add(1) {
+            // Either the producer is still writing, or the slot's ticket is
+            // in the future (impossible under single-consumer), stop here.
             break;
         }
 
-        // Read out the sample data.
-        let sample = DrainedSample {
-            pid: slot.pid,
-            tid: slot.tid,
-            time: slot.time,
-            cpu: slot.cpu,
-            period: slot.period,
-            num_frames: slot.num_frames,
-            frames: slot.frames,
+        // SAFETY: seq Acquire above syncs with the producer's Release commit,
+        // so all writes to `data` are visible. Single consumer means no
+        // concurrent drain reader, no writer can access a READY slot.
+        let sample = unsafe {
+            let data = &*slot.data.get();
+            DrainedSample {
+                pid: data.pid,
+                tid: data.tid,
+                time: data.time,
+                cpu: data.cpu,
+                period: data.period,
+                num_frames: data.num_frames,
+                frames: data.frames,
+            }
         };
 
-        // Reset slot to empty.
-        slot.state.store(SLOT_EMPTY, Ordering::Release);
+        // Release the slot for the next-lap producer (head + CAP).
+        // Release syncs with that producer's Acquire load of seq.
+        slot.seq
+            .store(head.wrapping_add(BUFFER_CAP), Ordering::Release);
 
-        read += 1;
+        head = head.wrapping_add(1);
         f(sample);
     }
 
-    BUFFER.read_idx.store(read, Ordering::Relaxed);
+    BUFFER.head.store(head, Ordering::Relaxed);
 }
 
 /// Returns true if there are pending samples to read.
 pub(crate) fn has_pending() -> bool {
-    let write = BUFFER.write_idx.load(Ordering::Acquire);
-    let read = BUFFER.read_idx.load(Ordering::Relaxed);
-    read < write
+    let write = BUFFER.tail.load(Ordering::Acquire);
+    let read = BUFFER.head.load(Ordering::Relaxed);
+    (write.wrapping_sub(read) as isize) > 0
 }
 
 /// Returns and resets the count of dropped samples since last call.
@@ -242,19 +313,23 @@ pub(crate) fn take_dropped_count() -> usize {
 
 #[cfg(test)]
 fn reset_buffer() {
-    // Reset all slots and cursors. Only safe in single-threaded tests.
-    for slot in &BUFFER.slots {
-        slot.state.store(SLOT_EMPTY, Ordering::Relaxed);
+    // Restore the per-slot `seq = i` invariant and zero the cursors. Only
+    // safe in single-threaded tests.
+    for (i, slot) in BUFFER.slots.iter().enumerate() {
+        slot.seq.store(i, Ordering::Relaxed);
     }
-    BUFFER.write_idx.store(0, Ordering::Relaxed);
-    BUFFER.read_idx.store(0, Ordering::Relaxed);
+    BUFFER.tail.store(0, Ordering::Relaxed);
+    BUFFER.head.store(0, Ordering::Relaxed);
     BUFFER.dropped.store(0, Ordering::Relaxed);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::thread;
+    use std::time::Duration;
 
     // Shared static buffer state means these tests cannot run concurrently.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -325,8 +400,10 @@ mod tests {
         drain(|s| got.push(s));
         assert_eq!(got.len(), 3);
         assert_eq!(got[0].pid, 1);
-        assert_eq!(got[1].pid, 2);
-        assert_eq!(got[1].num_frames, 0); // abandoned slot
+        assert_eq!(got[1].pid, 0); // abandoned slot
+        assert_eq!(got[1].tid, 0);
+        assert_eq!(got[1].time, 0);
+        assert_eq!(got[1].num_frames, 0);
         assert_eq!(got[2].pid, 3);
     }
 
@@ -369,14 +446,14 @@ mod tests {
             s0.write_frames(&[0x10], 1);
             s0.commit();
 
-            // Slot 1: left WRITING to block ordered drain.
+            // Slot 1: left uncommitted to block ordered drain.
             let mut s1 = claim_slot().unwrap();
             s1.write(20, 20, 20, 0, 1);
             s1.write_frames(&[0x20], 1);
             blocked_writer = s1;
 
             // Slot 2: committed, but should not be drained yet because slot 1
-            // is not READY.
+            // is not ready.
             let mut s2 = claim_slot().unwrap();
             s2.write(30, 30, 30, 0, 1);
             s2.write_frames(&[0x30], 1);
@@ -395,12 +472,134 @@ mod tests {
     }
 
     #[test]
+    fn failed_claims_do_not_advance_tail() {
+        let _guard = test_guard();
+        reset_buffer();
+
+        // Fill the entire buffer.
+        for i in 0..BUFFER_CAP {
+            unsafe {
+                let mut s = claim_slot().expect("should claim during fill");
+                s.write(i as u32, 0, 0, 0, 1);
+                s.write_frames(&[], 0);
+                s.commit();
+            }
+        }
+        assert_eq!(BUFFER.tail.load(Ordering::Relaxed), BUFFER_CAP);
+
+        assert_eq!(
+            BUFFER.tail.load(Ordering::Relaxed),
+            BUFFER_CAP,
+            "tail must not advance on failed claims",
+        );
+
+        // Drain the first batch.
+        let mut first_drained = 0;
+        drain(|_| first_drained += 1);
+        assert_eq!(first_drained, BUFFER_CAP);
+
+        // Write 50 new samples.
+        for i in 0..50u32 {
+            unsafe {
+                let mut s = claim_slot().expect("should claim after drain");
+                s.write(10000 + i, 0, 0, 0, 1);
+                s.write_frames(&[], 0);
+                s.commit();
+            }
+        }
+
+        // Drain must get all 50.
+        let mut got = Vec::new();
+        drain(|s| got.push(s.pid));
+        assert_eq!(got.len(), 50, "all post-drain samples must be reachable");
+        assert_eq!(got[0], 10000);
+        assert_eq!(*got.last().unwrap(), 10049);
+    }
+
+    /// Spawns N producer threads each calling `claim_slot` + `commit` in a
+    /// tight loop while a drainer thread concurrently pulls samples. After
+    /// all producers finish and the drainer catches up, every successfully
+    /// claimed sample must have been drained exactly once.
+    #[test]
+    fn concurrent_producers_conserve_samples() {
+        let _guard = test_guard();
+        reset_buffer();
+
+        const N_PRODUCERS: usize = 8;
+        const CLAIMS_PER_PRODUCER: usize = 10_000;
+        const DRAIN_SLEEP: Duration = Duration::from_micros(100);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let claimed = Arc::new(AtomicUsize::new(0));
+        let drained = Arc::new(AtomicUsize::new(0));
+
+        let producers: Vec<_> = (0..N_PRODUCERS)
+            .map(|pid| {
+                let claimed = claimed.clone();
+                thread::spawn(move || {
+                    for i in 0..CLAIMS_PER_PRODUCER {
+                        unsafe {
+                            if let Some(mut s) = claim_slot() {
+                                s.write(pid as u32, i as u32, 0, 0, 1);
+                                s.write_frames(&[], 0);
+                                s.commit();
+                                claimed.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let drainer = {
+            let stop = stop.clone();
+            let drained = drained.clone();
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    drain(|_| {
+                        drained.fetch_add(1, Ordering::Relaxed);
+                    });
+                    thread::sleep(DRAIN_SLEEP);
+                }
+                // Final catch-up drain after producers signal stop.
+                drain(|_| {
+                    drained.fetch_add(1, Ordering::Relaxed);
+                });
+            })
+        };
+
+        for p in producers {
+            p.join().expect("producer thread panicked");
+        }
+        stop.store(true, Ordering::Relaxed);
+        drainer.join().expect("drainer thread panicked");
+
+        let claimed = claimed.load(Ordering::Relaxed);
+        let drained = drained.load(Ordering::Relaxed);
+        let dropped = take_dropped_count();
+        let attempts = N_PRODUCERS * CLAIMS_PER_PRODUCER;
+
+        // No sample should be lost.
+        assert_eq!(
+            claimed + dropped,
+            attempts,
+            "every attempt accounted for: claimed={claimed} + dropped={dropped} != attempts={attempts}",
+        );
+        // No commited sample should be stuck in the ring.
+        assert_eq!(
+            drained, claimed,
+            "every committed sample reaches drain: drained={drained} != claimed={claimed} (dropped={dropped})",
+        );
+    }
+
+    #[test]
     fn preserves_order_across_ring_wraparound() {
         let _guard = test_guard();
         reset_buffer();
 
-        BUFFER.write_idx.store(BUFFER_CAP - 1, Ordering::Relaxed);
-        BUFFER.read_idx.store(BUFFER_CAP - 1, Ordering::Relaxed);
+        BUFFER.tail.store(BUFFER_CAP - 1, Ordering::Relaxed);
+        BUFFER.head.store(BUFFER_CAP - 1, Ordering::Relaxed);
+        BUFFER.slots[0].seq.store(BUFFER_CAP, Ordering::Relaxed);
 
         unsafe {
             let mut a = claim_slot().unwrap();

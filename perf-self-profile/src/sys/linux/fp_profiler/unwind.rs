@@ -21,7 +21,7 @@
 use super::{SAFE_LOAD_FAULT, load};
 
 // Cap on frames per sample; prevents runaway walks on corrupted FP chains.
-pub const MAX_FRAMES: usize = 256;
+pub const MAX_FRAMES: usize = 128;
 
 // Minimum distance from address-space edges for a plausible return address.
 const DEAD_ZONE: usize = 0x1000;
