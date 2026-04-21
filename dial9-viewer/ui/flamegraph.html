@@ -141,6 +141,8 @@
                     console.warn("Failed to attach spawn locations:", err);
                 }
 
+                // Filter to the selected time range, fall back to all samples if
+                // the URL timestamps don't align with the parsed trace.
                 let allSamples = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, startNs, endNs);
                 let timeRangeMatched = allSamples.length > 0;
                 if (!timeRangeMatched) {
@@ -164,7 +166,7 @@
                 statsEl.textContent =
                     `${allSamples.length} samples` +
                     (durMs ? ` \u00b7 ${durMs}ms selected` : "") +
-                    (timeRangeMatched ? "" : " (showing all \u2014 time range did not match)");
+                    (timeRangeMatched ? "" : " (full trace \u2014 selected region could not be reproduced)");
 
                 loadingEl.classList.add("hidden");
                 containerEl.style.display = "flex";
