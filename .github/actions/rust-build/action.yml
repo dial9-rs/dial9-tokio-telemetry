@@ -4,6 +4,10 @@ inputs:
     toolchain:
         required: true
         description: "the Rust toolchain to use"
+    save-if:
+        required: false
+        description: "whether to save the cache (e.g. only on main)"
+        default: "true"
 
 runs:
     using: "composite"
@@ -12,6 +16,8 @@ runs:
           with:
               toolchain: ${{ inputs.toolchain }}
         - uses: Swatinem/rust-cache@v2
+          with:
+              save-if: ${{ inputs.save-if }}
         - name: Enable perf_event_open and kallsyms for tests
           if: runner.os == 'Linux'
           shell: bash

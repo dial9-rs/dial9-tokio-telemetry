@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.2...dial9-tokio-telemetry-v0.3.3) - 2026-04-20
+
+### Other
+
+- tighten README prose for readability and conciseness ([#265](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/265))
+
+## [0.3.2](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.1...dial9-tokio-telemetry-v0.3.2) - 2026-04-20
+
+### Other
+
+- crosslink dial9-viewer from the readme ([#262](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/262))
+
 ## [0.3.1](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.0...dial9-tokio-telemetry-v0.3.1) - 2026-04-19
 
 ### Added
