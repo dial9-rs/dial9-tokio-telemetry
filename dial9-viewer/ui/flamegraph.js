@@ -25,9 +25,16 @@
 
   // Like flattenFlamegraph in trace_analysis.js but attaches treeNode refs
   // for click-to-zoom. Filters out nodes < 0.1% of total.
-  function flattenFromNode(root, total) {
+  function flattenFromNode(root, total, includeRoot) {
     const nodes = [];
     let maxD = 0;
+    const startDepth = includeRoot ? 1 : 0;
+    if (includeRoot) {
+      nodes.push({
+        name: root.name, depth: 0, x: 0, w: 1,
+        count: root.count, self: root.self, treeNode: root,
+      });
+    }
     function walk(treeNode, depth, xStart) {
       const w = treeNode.count / total;
       if (w < 0.001) return;
@@ -55,7 +62,7 @@
     );
     let cx = 0;
     for (const child of kids) {
-      walk(child, 0, cx);
+      walk(child, startDepth, cx);
       cx += child.count / total;
     }
     return { nodes, maxDepth: maxD };
@@ -243,8 +250,9 @@
       const tree = key === "worker" ? workerTree : offworkerTree;
       const stack = key === "worker" ? workerZoomStack : offworkerZoomStack;
       if (!tree) return null;
-      const zoomNode = stack.length > 0 ? stack[stack.length - 1] : tree;
-      const flat = flattenFromNode(zoomNode, zoomNode.count);
+      const zoomed = stack.length > 0;
+      const zoomNode = zoomed ? stack[stack.length - 1] : tree;
+      const flat = flattenFromNode(zoomNode, zoomNode.count, zoomed);
       return {
         nodes: flat.nodes,
         maxDepth: flat.maxDepth,
