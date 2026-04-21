@@ -111,7 +111,7 @@
     const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
     searchBar.innerHTML =
       '<input type="text" class="fg-search-input" placeholder="Search frames... (' +
-      (isMac ? '\u2318' : 'Ctrl+') + 'F or /)" />' +
+      (isMac ? '\u2318' : 'Ctrl') + ' + F or /)" />' +
       '<span class="fg-search-clear" title="Clear search">\u00d7</span>' +
       '<span class="fg-search-stats"></span>' +
       '<select class="fg-spawn-filter"></select>' +
@@ -131,9 +131,11 @@
       '<h3>\u2328 Flamegraph Shortcuts</h3>' +
       '<table>' +
       '<tr><td class="fg-help-key">Click</td><td>Zoom into frame</td></tr>' +
+      '<tr><td class="fg-help-key">Option / Alt + click</td><td>Pin tooltip (selectable text, links)</td></tr>' +
+      '<tr><td class="fg-help-key">' + (isMac ? '\u2318' : 'Ctrl') + ' + click</td><td>Open docs.rs (when available)</td></tr>' +
       '<tr><td class="fg-help-key">Right-click</td><td>Zoom out one level</td></tr>' +
-      '<tr><td class="fg-help-key">' + (isMac ? '\u2318' : 'Ctrl+') + 'F or /</td><td>Search frames</td></tr>' +
-      '<tr><td class="fg-help-key">Esc</td><td>Clear search \u2192 reset zoom \u2192 close</td></tr>' +
+      '<tr><td class="fg-help-key">' + (isMac ? '\u2318' : 'Ctrl') + ' + F or /</td><td>Search frames</td></tr>' +
+      '<tr><td class="fg-help-key">Esc</td><td>Unpin \u2192 clear search \u2192 reset zoom \u2192 close</td></tr>' +
       '</table>' +
       '<div class="fg-help-dismiss">Press Esc or click outside to close</div>' +
       '</div>';
@@ -398,20 +400,108 @@
       return workerZoomStack.length > 0 || offworkerZoomStack.length > 0;
     }
 
-    function canvasMouseMove(e, hitKey) {
+    let tooltipPinned = false;
+
+    function hitTest(e) {
       const c = e.target;
       const rect = c.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
-      const regions = hitRegions[hitKey] || [];
-      let hit = null;
+      const key = c === workerCanvas ? "worker" : "offworker";
+      const regions = hitRegions[key] || [];
       for (let i = regions.length - 1; i >= 0; i--) {
         const r = regions[i];
         if (mx >= r.x1 && mx <= r.x2 && my >= r.y && my < r.y + FG_ROW_H) {
-          hit = r;
-          break;
+          return { hit: r, hitKey: key };
         }
       }
+      return { hit: null, hitKey: key };
+    }
+
+    function buildTooltipHtml(hit, pinned) {
+      const node = hit.node;
+      const tn = node.treeNode || {};
+      const total = hit.totalSamples || 1;
+      const pct = ((node.count / total) * 100).toFixed(1);
+      const selfPct = ((node.self / total) * 100).toFixed(1);
+      const nameElt = document.createElement("b");
+      nameElt.innerText = node.name;
+      let h = nameElt.outerHTML;
+      if (tn.fullName && tn.fullName !== node.name) {
+        const fullElt = document.createElement("span");
+        fullElt.innerText = tn.fullName;
+        h += '<br><span style="color:#aaa">' + fullElt.innerHTML + '</span>';
+      }
+      if (tn.location) {
+        const locShort = tn.location.replace(/^.*\/([^/]+(?::\d+)?)$/, "$1");
+        const hasFullPath = tn.location !== locShort;
+        if (hasFullPath) {
+          const locEsc = document.createElement("span");
+          locEsc.innerText = tn.location;
+          h += '<br><span class="fg-loc-toggle" style="color:#888;cursor:pointer">' +
+            locShort + ' <span style="color:#555">\u25b6</span></span>' +
+            '<span class="fg-loc-full" style="color:#888;display:none;overflow-wrap:anywhere">' +
+            locEsc.innerHTML + '</span>';
+        } else {
+          h += '<br><span style="color:#888">' + locShort + '</span>';
+        }
+      }
+      h += '<br>' + node.count + ' samples (' + pct + '%) \u00b7 ' + node.self + ' self (' + selfPct + '%)';
+      if (pinned && tn.docsUrl) {
+        h += '<br><a href="' + tn.docsUrl + '" target="_blank" rel="noopener" style="color:#6c63ff;text-decoration:underline">docs.rs \u2197</a>';
+      } else if (tn.docsUrl) {
+        h += '<br><span style="color:#6c63ff">docs.rs \u2197</span>' +
+          '<span style="color:#555"> (' + (isMac ? '\u2318' : 'Ctrl') + ' + click)</span>';
+      }
+      if (!pinned) {
+        h += '<br><span style="color:#555">' + (isMac ? '\u2325' : 'Alt') + ' + click to pin</span>';
+      }
+      return h;
+    }
+
+    function showTooltip(hit, x, y, pinned) {
+      tooltip.innerHTML = buildTooltipHtml(hit, pinned);
+      tooltip.style.pointerEvents = pinned ? "auto" : "none";
+      tooltip.style.display = "block";
+      // Clamp to viewport
+      const tipX = Math.min(x + 12, window.innerWidth - tooltip.offsetWidth - 8);
+      let tipY = Math.max(8, y - 50);
+      if (tipY + tooltip.offsetHeight > window.innerHeight - 8) {
+        tipY = window.innerHeight - tooltip.offsetHeight - 8;
+      }
+      tooltip.style.left = tipX + "px";
+      tooltip.style.top = tipY + "px";
+      if (pinned) {
+        // Wire up expandable location
+        const toggle = tooltip.querySelector(".fg-loc-toggle");
+        const full = tooltip.querySelector(".fg-loc-full");
+        if (toggle && full) {
+          const tn = hit.node.treeNode || {};
+          toggle.addEventListener("click", function () {
+            if (full.style.display === "none") {
+              full.textContent = tn.location;
+              full.style.display = "block";
+              toggle.querySelector("span").textContent = "\u25bc";
+            } else {
+              full.style.display = "none";
+              toggle.querySelector("span").textContent = "\u25b6";
+            }
+          });
+        }
+      }
+    }
+
+    function unpinTooltip() {
+      if (tooltipPinned) {
+        tooltipPinned = false;
+        tooltip.style.display = "none";
+        tooltip.style.pointerEvents = "none";
+      }
+    }
+
+    function canvasMouseMove(e) {
+      if (tooltipPinned) return;
+      const { hit } = hitTest(e);
       const newHighlight = hit ? hit.node.name : null;
       if (newHighlight !== highlightName) {
         highlightName = newHighlight;
@@ -421,24 +511,16 @@
         }
       }
       if (hit) {
-        const total = hit.totalSamples;
-        const pct = ((hit.node.count / total) * 100).toFixed(1);
-        const selfPct = ((hit.node.self / total) * 100).toFixed(1);
-        const nameElt = document.createElement("b");
-        nameElt.innerText = hit.node.name;
-        tooltip.innerHTML = `${nameElt.outerHTML}<br>${hit.node.count} samples (${pct}%) \u00b7 ${hit.node.self} self (${selfPct}%)`;
-        tooltip.style.display = "block";
-        tooltip.style.left = Math.min(e.clientX + 12, window.innerWidth - 620) + "px";
-        tooltip.style.top = (e.clientY - 50) + "px";
-        c.style.cursor = "pointer";
+        showTooltip(hit, e.clientX, e.clientY, false);
+        e.target.style.cursor = "pointer";
       } else {
         tooltip.style.display = "none";
-        c.style.cursor = "";
+        e.target.style.cursor = "";
       }
     }
 
     function canvasMouseLeave() {
-      tooltip.style.display = "none";
+      if (!tooltipPinned) tooltip.style.display = "none";
       if (highlightName !== null) {
         highlightName = null;
         if (!repaintQueued) {
@@ -449,18 +531,19 @@
     }
 
     function canvasClick(e, hitKey) {
-      const c = e.target;
-      const rect = c.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
-      const regions = hitRegions[hitKey] || [];
-      for (let i = regions.length - 1; i >= 0; i--) {
-        const r = regions[i];
-        if (mx >= r.x1 && mx <= r.x2 && my >= r.y && my < r.y + FG_ROW_H) {
-          if (r.node.treeNode && r.node.treeNode.children.size > 0) {
-            zoomTo(hitKey, r.node.treeNode);
-          }
-          break;
+      const { hit } = hitTest(e);
+      if (!hit) { unpinTooltip(); return; }
+      const tn = hit.node.treeNode || {};
+      if ((e.metaKey || e.ctrlKey) && tn.docsUrl) {
+        const w = window.open(tn.docsUrl, "_blank");
+        if (w) w.focus();
+      } else if (e.altKey) {
+        tooltipPinned = true;
+        showTooltip(hit, e.clientX, e.clientY, true);
+      } else {
+        unpinTooltip();
+        if (tn.children && tn.children.size > 0) {
+          zoomTo(hitKey, tn);
         }
       }
     }
@@ -479,8 +562,8 @@
     }
 
     // Named handlers so destroy() can remove them
-    function onWorkerMove(e) { canvasMouseMove(e, "worker"); }
-    function onOffworkerMove(e) { canvasMouseMove(e, "offworker"); }
+    function onWorkerMove(e) { canvasMouseMove(e); }
+    function onOffworkerMove(e) { canvasMouseMove(e); }
     function onWorkerClick(e) { canvasClick(e, "worker"); }
     function onOffworkerClick(e) { canvasClick(e, "offworker"); }
     function onWorkerContext(e) { canvasContextMenu(e, "worker"); }
@@ -505,9 +588,21 @@
     }
     document.addEventListener("keydown", onKeyDown);
 
+    function onDocClick(e) {
+      if (tooltipPinned && !tooltip.contains(e.target) &&
+          e.target !== workerCanvas && e.target !== offworkerCanvas) {
+        unpinTooltip();
+      }
+    }
+    document.addEventListener("click", onDocClick);
+
     // Returns true if consumed (search cleared or zoom reset),
     // false if nothing to do (caller should close the panel).
     function handleEscape() {
+      if (tooltipPinned) {
+        unpinTooltip();
+        return true;
+      }
       if (helpOverlay.style.display !== "none") {
         helpOverlay.style.display = "none";
         return true;
@@ -586,6 +681,7 @@
 
     function destroy() {
       document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("click", onDocClick);
       workerCanvas.removeEventListener("mousemove", onWorkerMove);
       offworkerCanvas.removeEventListener("mousemove", onOffworkerMove);
       workerCanvas.removeEventListener("mouseleave", canvasMouseLeave);
@@ -604,8 +700,8 @@
         if (!tree || stack.length === 0) return [];
         // If stack already has the full path (from zoomToPath restore), use it directly.
         // Otherwise find the path from root to the zoom target.
-        var target = stack[stack.length - 1];
-        var path = findNodePath(tree, target.name);
+        const target = stack[stack.length - 1];
+        const path = findNodePath(tree, target.name);
         return path ? path.map((n) => n.name) : stack.map((n) => n.name);
       }
       return {

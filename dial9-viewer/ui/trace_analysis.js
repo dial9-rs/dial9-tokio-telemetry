@@ -414,11 +414,15 @@
       node.count++;
       for (const addr of chain) {
         const entry = callframeSymbols.get(addr);
-        const key = entry ? entry.symbol : addr || "??";
-        const name = formatFrame(addr, callframeSymbols).text;
+        const resolved = Array.isArray(entry) ? entry[0] : entry;
+        const key = resolved ? resolved.symbol : addr || "??";
+        const formatted = formatFrame(addr, callframeSymbols);
         if (!node.children.has(key)) {
           node.children.set(key, {
-            name,
+            name: formatted.text,
+            fullName: key,
+            location: resolved ? resolved.location : null,
+            docsUrl: formatted.docsUrl,
             children: new Map(),
             count: 0,
             self: 0,

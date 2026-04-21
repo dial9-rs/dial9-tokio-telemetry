@@ -121,7 +121,7 @@
     font-size: 0.78em;
     pointer-events: none;
     z-index: 200;
-    max-width: 600px;
-    white-space: nowrap;
+    max-width: min(600px, calc(100vw - 24px));
+    overflow-wrap: anywhere;
     color: #e0e0e0;
 }
