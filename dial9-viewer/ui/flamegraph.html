@@ -162,7 +162,9 @@
                 document.title = `Flamegraph \u2014 ${name}` + (durMs ? ` (${durMs}ms)` : "");
                 titleEl.textContent = "Flamegraph";
                 statsEl.textContent =
-                    `${allSamples.length} samples` + (durMs ? ` \u00b7 ${durMs}ms selected` : "");
+                    `${allSamples.length} samples` +
+                    (durMs ? ` \u00b7 ${durMs}ms selected` : "") +
+                    (timeRangeMatched ? "" : " (showing all \u2014 time range did not match)");
 
                 loadingEl.classList.add("hidden");
                 containerEl.style.display = "flex";

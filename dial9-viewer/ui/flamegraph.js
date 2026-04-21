@@ -592,9 +592,17 @@
     }
 
     function getZoomPath() {
+      function fullPath(tree, stack) {
+        if (!tree || stack.length === 0) return [];
+        // If stack already has the full path (from zoomToPath restore), use it directly.
+        // Otherwise find the path from root to the zoom target.
+        var target = stack[stack.length - 1];
+        var path = findNodePath(tree, target.name);
+        return path ? path.map((n) => n.name) : stack.map((n) => n.name);
+      }
       return {
-        worker: workerZoomStack.map((n) => n.name),
-        offworker: offworkerZoomStack.map((n) => n.name),
+        worker: fullPath(workerTree, workerZoomStack),
+        offworker: fullPath(offworkerTree, offworkerZoomStack),
       };
     }
 
@@ -620,12 +628,23 @@
       const tree = key === "worker" ? workerTree : offworkerTree;
       if (!tree || !names.length) return;
       const stack = key === "worker" ? workerZoomStack : offworkerZoomStack;
-      const target = names[names.length - 1];
-      const path = findNodePath(tree, target);
-      if (path) {
-        stack.push.apply(stack, path);
-        renderAll();
+      // Try walking child-by-child (works when names is a full path from root)
+      let node = tree;
+      for (let i = 0; i < names.length; i++) {
+        let found = null;
+        for (const child of node.children.values()) {
+          if (child.name === names[i]) { found = child; break; }
+        }
+        if (!found) {
+          // Path walk failed, fall back to DFS for the last name
+          const path = findNodePath(tree, names[names.length - 1]);
+          if (path) stack.push.apply(stack, path);
+          break;
+        }
+        stack.push(found);
+        node = found;
       }
+      if (stack.length > 0) renderAll();
     }
 
     return { setData, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath };
