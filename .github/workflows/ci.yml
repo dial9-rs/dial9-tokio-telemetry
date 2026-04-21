@@ -134,7 +134,7 @@ jobs:
       - name: Run perf-self-profile tests under ASAN (perf path)
         run: |
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
-          cargo test -p dial9-perf-self-profile --all-features \
+          cargo test -p dial9-perf-self-profile --lib --all-features \
             -Z build-std --target x86_64-unknown-linux-gnu \
             -- --skip sys::linux::symbolize::tests::resolve_kernel_symbol_returns_name
       - name: Restrict perf_event_open to force ctimer path
@@ -143,7 +143,7 @@ jobs:
         # paranoid=3 blocks perf_event_open
         run: |
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
-          cargo test -p dial9-perf-self-profile --all-features \
+          cargo test -p dial9-perf-self-profile --lib --all-features \
             -Z build-std --target x86_64-unknown-linux-gnu \
             -- --skip sys::linux::symbolize::tests::resolve_kernel_symbol_returns_name
 
@@ -164,7 +164,7 @@ jobs:
         run: sudo sysctl kernel.perf_event_paranoid=3
       - name: Run perf-self-profile tests (auto-fallback path)
         run: |
-          cargo test -p dial9-perf-self-profile --all-features \
+          cargo test -p dial9-perf-self-profile --lib --all-features \
             -- --skip sys::linux::symbolize::tests::resolve_kernel_symbol_returns_name
 
   package:
