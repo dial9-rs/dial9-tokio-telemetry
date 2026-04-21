@@ -157,9 +157,11 @@ jobs:
         with:
           toolchain: ${{ env.STABLE_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - name: Restrict perf_event_open (simulate ECS/Fargate)
-        # paranoid=3 blocks perf_event_open
-        run: sudo sysctl kernel.perf_event_paranoid=3
+      - name: Restrict perf_event_open (simulate ECS/Fargate), keep kallsyms readable
+        run: |
+          # paranoid=3 blocks perf_event_open
+          sudo sysctl kernel.perf_event_paranoid=3
+          sudo sysctl kernel.kptr_restrict=0
       - name: Run perf-self-profile tests (auto-fallback path)
         run: cargo test -p dial9-perf-self-profile --all-features
 
