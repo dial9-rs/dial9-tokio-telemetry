@@ -1,5 +1,9 @@
 name: CI
-on: [pull_request, merge_group]
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -17,6 +21,9 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-ubuntu
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -29,6 +36,9 @@ jobs:
           toolchain: ${{ env.STABLE_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: stable-ubuntu
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run clippy check
         run: cargo clippy --all-targets --all-features -- -D warnings
         env:
@@ -48,17 +58,27 @@ jobs:
       - uses: ./.github/actions/rust-build
         with:
           toolchain: ${{ matrix.toolchain }}
+          shared-key: ${{ matrix.toolchain }}-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
   check-docs:
     name: Check docs.rs
     runs-on: ubuntu-latest
-    if: ${{ !startsWith(github.head_ref, 'release-') && !startsWith(github.ref_name, 'release-') }}
+    if: >-
+      ${{
+        github.event_name == 'pull_request'
+        && !startsWith(github.head_ref, 'release-')
+        && !startsWith(github.head_ref, 'release/')
+      }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-docs
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-ubuntu
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get update && sudo apt-get install -y jq
       - run: cargo install cargo-docs-rs
       - run: ./scripts/check-docsrs.sh
@@ -77,6 +97,9 @@ jobs:
         with:
           toolchain: ${{ env.STABLE_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: stable-ubuntu
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -89,12 +112,21 @@ jobs:
   package:
     name: Cargo package
     runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.event_name == 'pull_request'
+        && !startsWith(github.head_ref, 'release-')
+        && !startsWith(github.head_ref, 'release/')
+      }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.STABLE_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: stable-ubuntu
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Verify all publishable crates package cleanly
         env:
           RUSTFLAGS: "--cfg tokio_unstable"

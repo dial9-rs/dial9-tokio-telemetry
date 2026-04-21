@@ -1,11 +1,15 @@
 [package]
 name = "dial9-viewer"
-version = "0.3.1"
+version = "0.3.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "CLI trace viewer and S3 browser for dial9-tokio-telemetry"
 default-run = "dial9-viewer"
+exclude = ["src/bin/dev_server.rs"]
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }"
 
 [features]
 dev-server = ["dep:s3s", "dep:s3s-fs", "dep:s3s-aws", "dep:tempfile"]
