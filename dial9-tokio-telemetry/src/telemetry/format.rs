@@ -4,6 +4,7 @@ use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::TaskId;
 #[cfg(any(feature = "analysis", test))]
 use dial9_trace_format::decoder::StringPool;
+#[cfg(any(feature = "analysis", test))]
 use dial9_trace_format::schema::SchemaEntry;
 use dial9_trace_format::types::{EventEncoder, FieldType, FieldValueRef};
 use dial9_trace_format::{InternedString, StackFrames, TraceEvent, TraceField};

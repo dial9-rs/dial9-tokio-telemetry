@@ -12,8 +12,13 @@ dial9 traces capture the internal behavior of a Tokio async runtime: task pollin
 - **CPU samples**: Periodic stack traces from perf/eBPF, attached to the poll they occurred in
 - **Scheduling samples**: Stack traces captured when the kernel deschedules a worker thread (shows blocking calls)
 - **Clock sync**: Monotonic-to-wall-clock anchors for correlating with external logs
+- **Span events**: Enter/exit events from `tracing` spans (`#[instrument]`), showing what happened inside each poll with field values and nesting
 
-## Quick start
+## Instrumenting your app
+
+Run `dial9-viewer agents skill setup` for full setup instructions (prerequisites, macro and manual setup, tracing layer, wake tracking).
+
+## Quick start (analysis)
 
 Get the analysis toolkit:
 
@@ -30,7 +35,8 @@ This copies `decode.js`, `trace_parser.js`, `trace_analysis.js`, and `analyze.js
 const fs = require('fs');
 const { parseTrace, EVENT_TYPES } = require('./trace_parser.js');
 const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
-        computeSchedulingDelays, filterPointsOfInterest, buildFgData } = require('./trace_analysis.js');
+        computeSchedulingDelays, filterPointsOfInterest, buildFgData,
+        buildSpanData } = require('./trace_analysis.js');
 
 const buf = fs.readFileSync('trace.bin');
 const trace = await parseTrace(buf);
@@ -44,11 +50,18 @@ const workerIds = [...new Set(
 const minTs = trace.events.reduce((m, e) => Math.min(m, e.timestamp), Infinity);
 const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
 
-// Build the full analysis pipeline
+// Runtime events (polls, parks, wakes, scheduling)
 const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
 attachCpuSamples(trace.cpuSamples, spans.workerSpans);
 const taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
 const schedDelays = computeSchedulingDelays(spans.workerSpans, workerIds, spans.wakesByTask);
+
+// Span events from #[instrument] (what happened INSIDE each poll)
+// These are separate from runtime events and require buildSpanData()
+const spanData = buildSpanData(trace.customEvents);
+// spanData.spansByWorker[workerId] = [{start, end, spanId, spanName, fields, parentSpanId, depth}, ...]
+// spanData.spanMeta = Map<spanId, {spanName, fields, parentSpanId}>
+// spanData.unmatchedSpans = spans with enter but no exit (trace ended mid-span)
 ```
 
 ## Fetching traces from S3
@@ -74,6 +87,7 @@ Run `dial9-viewer agents <segment>` for detailed information:
 | Command / Segment | Description |
 |-------------------|-------------|
 | `agents toolkit DIR` | **Start here.** Copies the analysis toolkit to a directory |
+| `agents skill setup` | How to instrument your app with dial9 and the tracing layer (from README) |
 | `agents skill runtime` | Tokio runtime internals: execution model, scheduling, wake/poll lifecycle, and how to fix common problems |
 | `agents skill loading` | Trace format details, parsing options, time range filtering |
 | `agents skill analysis` | Full analysis pipeline API reference |

@@ -143,6 +143,7 @@
     const cpuSamples = [];
     const threadNames = new Map();
     const runtimeWorkers = new Map(); // runtime name → [workerId, ...]
+    const customEvents = []; // unrecognized event types: {name, timestamp, fields}
     // { monotonicNs, realtimeNs } anchors used to recover wall clock.
     const clockSyncAnchors = [];
     // Legacy classifier: epoch ns are ~1e18, monotonic ns are much smaller.
@@ -372,6 +373,17 @@
           }
           break;
         }
+        default: {
+          // Unrecognized event type: capture as a custom event
+          if (ts != null) {
+            customEvents.push({
+              name: frame.name,
+              timestamp: ts,
+              fields: v,
+            });
+          }
+          break;
+        }
       }
     }
 
@@ -420,6 +432,7 @@
       threadNames,
       taskTerminateTimes,
       runtimeWorkers,
+      customEvents,
       clockSyncAnchors,
       clockOffsetNs,
     };

@@ -124,15 +124,15 @@ fn register_tid_if_needed(global_id: u64, shared: &SharedState) {
     });
 }
 
-/// Get the current thread's global worker ID (255 = unknown).
-/// Used by the `Traced` waker to record which worker issued the wake.
-pub(crate) fn current_worker_id() -> u8 {
-    GLOBAL_WORKER_ID.with(|cell| {
-        cell.get()
-            // TODO: cleanly handle more than 255 global workers
-            .map(|id| if id <= 254 { id as u8 } else { 255 })
-            .unwrap_or(255)
-    })
+/// Get the current thread's global worker ID.
+///
+/// Returns [`WorkerId::UNKNOWN`] if called from a thread that has not yet
+/// been claimed by a dial9-traced runtime (e.g., before the first poll or
+/// from a non-runtime thread).
+///
+/// This is a thread-local read with no synchronization overhead.
+pub fn current_worker_id() -> WorkerId {
+    GLOBAL_WORKER_ID.with(|cell| cell.get().map(WorkerId).unwrap_or(WorkerId::UNKNOWN))
 }
 
 // ── Event construction helpers ───────────────────────────────────────────────

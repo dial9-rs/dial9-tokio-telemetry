@@ -51,7 +51,10 @@ impl MetricsBuffer {
             .record(value);
     }
 
+    #[tracing::instrument(skip(self, ddb))]
     pub async fn flush_to_ddb(&self, ddb: &DdbClient) {
+        use tracing::Instrument;
+
         let snapshot: HashMap<String, (f64, u64, f64, f64)> = {
             let mut guard = self.inner.lock().await;
             guard
@@ -65,8 +68,14 @@ impl MetricsBuffer {
             .unwrap()
             .as_secs();
 
+        let parent = tracing::Span::current();
         for (name, (sum, count, min, max)) in snapshot {
-            if let Err(e) = ddb.put_aggregate(&name, ts, sum, count, min, max).await {
+            let span = tracing::info_span!(parent: &parent, "put_aggregate", metric = %name);
+            if let Err(e) = ddb
+                .put_aggregate(&name, ts, sum, count, min, max)
+                .instrument(span)
+                .await
+            {
                 eprintln!("flush error for {name}: {e}");
             }
         }

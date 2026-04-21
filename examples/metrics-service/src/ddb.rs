@@ -8,6 +8,9 @@ use aws_sdk_dynamodb::{
     },
 };
 
+/// (timestamp, sum, count, min, max)
+type MetricRow = (u64, f64, u64, f64, f64);
+
 pub struct DdbClient {
     client: Client,
     table: String,
@@ -116,10 +119,8 @@ impl DdbClient {
         Ok(())
     }
 
-    pub async fn query_metric(
-        &self,
-        name: &str,
-    ) -> Result<Vec<(u64, f64, u64, f64, f64)>, BoxError> {
+    #[tracing::instrument(skip(self))]
+    pub async fn query_metric(&self, name: &str) -> Result<Vec<MetricRow>, BoxError> {
         let resp = self
             .client
             .query()

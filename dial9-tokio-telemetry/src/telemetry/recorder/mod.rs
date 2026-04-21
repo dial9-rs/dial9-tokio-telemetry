@@ -2,7 +2,8 @@ mod event_writer;
 mod runtime_context;
 mod shared_state;
 
-pub(crate) use runtime_context::{RuntimeContext, current_worker_id};
+pub(crate) use runtime_context::RuntimeContext;
+pub use runtime_context::current_worker_id;
 pub(crate) use shared_state::SharedState;
 
 use event_writer::EventWriter;
@@ -17,10 +18,17 @@ use crate::telemetry::writer::{RotatingWriter, TraceWriter};
 use metrique::timers::Timer;
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
+
+thread_local! {
+    /// Per-thread [`TelemetryHandle`], populated in `on_thread_start` and
+    /// cleared in `on_thread_stop`. Enables [`TelemetryHandle::current`].
+    static CURRENT_HANDLE: RefCell<Option<TelemetryHandle>> = const { RefCell::new(None) };
+}
 
 // ---------------------------------------------------------------------------
 // Channel-based control for the flush thread
@@ -75,7 +83,9 @@ fn flush_once(
     let cpu_events_time = Instant::now();
     #[cfg(feature = "cpu-profiling")]
     {
-        event_writer.flush_cpu(shared);
+        if shared.enabled.load(Ordering::Relaxed) {
+            event_writer.flush_cpu(shared);
+        }
     }
     let cpu_flush_duration = cpu_events_time.elapsed();
 
@@ -138,6 +148,7 @@ fn register_hooks(
     builder: &mut tokio::runtime::Builder,
     ctx: &Arc<RuntimeContext>,
     shared: &Arc<SharedState>,
+    control_tx: &std::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
 ) {
     let c1 = ctx.clone();
@@ -190,24 +201,38 @@ fn register_hooks(
         });
     }
 
+    // Unified on_thread_start / on_thread_stop. Tokio only stores one
+    // callback per hook, so any feature-gated work must live here rather
+    // than registering its own hook.
+    let handle_for_tl = TelemetryHandle {
+        shared: shared.clone(),
+        control_tx: control_tx.clone(),
+    };
     #[cfg(feature = "cpu-profiling")]
-    {
-        let s_start = shared.clone();
-        let s_stop = shared.clone();
-        builder
-            .on_thread_start(move || {
+    let s_start = shared.clone();
+    #[cfg(feature = "cpu-profiling")]
+    let s_stop = shared.clone();
+
+    builder
+        .on_thread_start(move || {
+            // Install this thread's TelemetryHandle so user code can call
+            // `TelemetryHandle::current()` from anywhere on this thread.
+            CURRENT_HANDLE.with(|cell| {
+                *cell.borrow_mut() = Some(handle_for_tl.clone());
+            });
+
+            #[cfg(feature = "cpu-profiling")]
+            {
                 // Register as Blocking initially; worker threads will
                 // overwrite this to Worker(i) in resolve_worker_id.
                 // NOTE: `tokio::runtime::worker_index()` will always return `None` at this point
                 // so we can't utilize that here.
-                {
-                    let tid = crate::telemetry::events::current_tid();
-                    s_start
-                        .thread_roles
-                        .lock()
-                        .unwrap()
-                        .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
-                }
+                let tid = crate::telemetry::events::current_tid();
+                s_start
+                    .thread_roles
+                    .lock()
+                    .unwrap()
+                    .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
                 if let Ok(mut prof) = s_start.sched_profiler.lock()
                     && let Some(ref mut p) = *prof
                 {
@@ -217,20 +242,25 @@ fn register_hooks(
                 // Registers the current thread for the CPU-profiling fallback (ctimer).
                 // No-op when perf is the active backend (perf uses inherit).
                 let _ = dial9_perf_self_profile::register_current_thread();
-            })
-            .on_thread_stop(move || {
-                {
-                    let tid = crate::telemetry::events::current_tid();
-                    s_stop.thread_roles.lock().unwrap().remove(&tid);
-                }
+            }
+        })
+        .on_thread_stop(move || {
+            CURRENT_HANDLE.with(|cell| {
+                *cell.borrow_mut() = None;
+            });
+
+            #[cfg(feature = "cpu-profiling")]
+            {
+                let tid = crate::telemetry::events::current_tid();
+                s_stop.thread_roles.lock().unwrap().remove(&tid);
                 if let Ok(mut prof) = s_stop.sched_profiler.lock()
                     && let Some(ref mut p) = *prof
                 {
                     p.stop_tracking_current_thread();
                 }
                 dial9_perf_self_profile::unregister_current_thread();
-            });
-    }
+            }
+        });
 }
 
 /// Attach a runtime to an existing telemetry session: register hooks, build
@@ -239,12 +269,29 @@ fn attach_runtime(
     shared: &Arc<SharedState>,
     mut builder: tokio::runtime::Builder,
     runtime_name: Option<String>,
+    control_tx: &std::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
 ) -> std::io::Result<tokio::runtime::Runtime> {
     let ctx = Arc::new(RuntimeContext::new(runtime_name));
-    register_hooks(&mut builder, &ctx, shared, task_tracking_enabled);
+    register_hooks(
+        &mut builder,
+        &ctx,
+        shared,
+        control_tx,
+        task_tracking_enabled,
+    );
 
     let runtime = builder.build()?;
+
+    // Install the handle on the calling thread. For current_thread runtimes,
+    // this thread IS the worker (block_on runs here), so the tracing layer
+    // needs CURRENT_HANDLE to be set. Harmless for multi_thread runtimes.
+    CURRENT_HANDLE.with(|cell| {
+        *cell.borrow_mut() = Some(TelemetryHandle {
+            shared: shared.clone(),
+            control_tx: control_tx.clone(),
+        });
+    });
 
     // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
     let metrics = runtime.handle().metrics();
@@ -283,6 +330,32 @@ impl std::fmt::Debug for TelemetryHandle {
 }
 
 impl TelemetryHandle {
+    /// Return the [`TelemetryHandle`] for the current thread.
+    ///
+    /// The handle is installed on every thread owned by a traced runtime
+    /// (workers and blocking threads) via the runtime's `on_thread_start`
+    /// hook, and cleared on `on_thread_stop`.
+    ///
+    /// This is always safe to call inside a
+    /// `#[dial9_tokio_telemetry::main]` body, since the macro runs your code
+    /// on a runtime-owned thread.
+    ///
+    /// Panics if called from a thread that is not owned by a dial9 runtime
+    /// (e.g. the thread that called `runtime.block_on(...)` on a
+    /// `current_thread` runtime, or any non-runtime thread). Use
+    /// [`TelemetryHandle::try_current`] if you need to handle that case.
+    #[track_caller]
+    pub fn current() -> Self {
+        Self::try_current()
+            .expect("TelemetryHandle::current() called outside of a dial9 runtime thread")
+    }
+
+    /// Return the [`TelemetryHandle`] for the current thread, or `None` if
+    /// no dial9 runtime has claimed this thread.
+    pub fn try_current() -> Option<Self> {
+        CURRENT_HANDLE.with(|cell| cell.borrow().clone())
+    }
+
     /// Enable telemetry recording.
     pub fn enable(&self) {
         self.shared.enabled.store(true, Ordering::Relaxed);
@@ -303,6 +376,19 @@ impl TelemetryHandle {
     /// Record a user-defined [`Encodable`](crate::telemetry::buffer::Encodable) event.
     pub(crate) fn record_encodable_event(&self, event: &dyn crate::telemetry::buffer::Encodable) {
         self.shared.record_encodable_event(event);
+    }
+
+    /// Run a closure with direct access to the thread-local encoder.
+    ///
+    /// Use this for dynamic schema encoding where you need to intern strings
+    /// and write events without an intermediate [`Encodable`] struct.
+    // TODO(GH-XXX): consider making this public as an alternative to record_event
+    // for zero-copy dynamic schema encoding
+    pub(crate) fn with_encoder(
+        &self,
+        f: impl FnOnce(&mut crate::telemetry::buffer::ThreadLocalEncoder<'_>),
+    ) {
+        self.shared.with_encoder(f);
     }
 
     /// Spawn a future wrapped with wake-event tracking.
@@ -624,6 +710,7 @@ impl<P> TracedRuntimeBuilder<P> {
             guard.shared(),
             builder,
             self.runtime_name,
+            &guard.handle.control_tx,
             self.task_tracking_enabled,
         )
     }
@@ -781,10 +868,12 @@ impl TracedRuntimeBuilder<HasTracePath> {
             .maybe_s3_client(self.s3_client);
 
         let guard = core_builder.build()?;
+        let control_tx = guard.handle.control_tx.clone();
         let runtime = attach_runtime(
             guard.shared(),
             builder,
             self.runtime_name,
+            &control_tx,
             self.task_tracking_enabled,
         )?;
         Ok((runtime, guard))
@@ -823,6 +912,7 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
             self.guard.shared(),
             builder,
             Some(self.name),
+            &self.guard.handle.control_tx,
             self.task_tracking,
         )?;
         let handle = RuntimeTelemetryHandle {
@@ -1042,6 +1132,13 @@ fn run_flush_loop(
                 exit = true;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        // When disabled, skip all recording work (queue sampling, metadata
+        // merging, drain coordination, flush). The loop still wakes every
+        // 5ms to check for control commands and the exit signal.
+        if !exit && !shared.enabled.load(Ordering::Relaxed) {
+            continue;
         }
 
         let now = Instant::now();

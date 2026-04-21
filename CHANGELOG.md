@@ -7,6 +7,166 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.2...dial9-tokio-telemetry-v0.3.3) - 2026-04-20
+
+### Other
+
+- tighten README prose for readability and conciseness ([#265](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/265))
+
+## [0.3.2](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.1...dial9-tokio-telemetry-v0.3.2) - 2026-04-20
+
+### Other
+
+- crosslink dial9-viewer from the readme ([#262](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/262))
+
+## [0.3.1](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.0...dial9-tokio-telemetry-v0.3.1) - 2026-04-19
+
+### Added
+
+- **Tracing layer** ([#252](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/252)): `Dial9TokioLayer` records `tracing` span enter/exit events, including field values, into the trace, showing what happened inside each poll. Enable with the `tracing-layer` feature flag.
+
+The viewer (`dial9-viewer serve`) shows spans in a dedicated panel with filtering, percentile ranking, and click-to-highlight. The agent analysis toolkit (`dial9-viewer agents`) includes span correlation recipes and automated span checks in the red-flags scan.
+
+```rust,ignore
+use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
+use tracing_subscriber::prelude::*;
+
+tracing_subscriber::registry()
+    .with(Dial9TokioLayer::new().with_filter(
+        tracing_subscriber::filter::Targets::new()
+            .with_target("my_app", tracing::Level::TRACE)
+            .with_default(tracing::Level::ERROR),
+    ))
+    .init();
+```
+
+Tracing support means you can attach a request ID or other context to spans via `#[instrument(fields(request_id = %id))]` and then search for specific requests in the trace. You can also see what's happening inside long polls: if a single poll contains many small operations without yielding, the span breakdown shows exactly where the time went. 
+
+Standard `tracing-subscriber` filtering rules apply. Without a filter, libraries like the AWS SDK will flood the trace with internal spans. The preceding captures only spans from `my_app`.
+
+## [0.3.0](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.2.0...dial9-tokio-telemetry-v0.3.0) - 2026-04-17
+
+Big release. The setup story is much better, there's support for tracing multiple runtimes, you can emit your own events into the trace, and the viewer is its own crate now. 
+
+### `#[dial9_tokio_telemetry::main]` macro ([#212](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/212))
+
+Drop-in replacement for `#[tokio::main]`. Point it at a config function and you're done. Unlike `#[tokio::main]`, the macro spawns your function body as a task, so top-level code shows up in traces.
+
+```rust
+use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
+use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+
+fn my_config() -> Dial9Config {
+    Dial9ConfigBuilder::new("trace.bin", 64 * 1024 * 1024, 256 * 1024 * 1024)
+        .with_runtime(|r| r.with_task_tracking(true))
+        .build()
+}
+
+#[dial9_tokio_telemetry::main(config = my_config)]
+async fn main() {
+    let handle = TelemetryHandle::current();
+    handle.spawn(async { /* wake events tracked */ }).await.unwrap();
+}
+```
+
+### Multiple runtime support ([#141](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/141), [#193](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/193))
+
+If you run separate runtimes for request handling and background IO (or thread-per-core, etc.), you can now attach them all to one telemetry session with `TelemetryCore`. Workers are grouped by runtime name in the viewer.
+
+```rust
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryCore};
+
+let writer = RotatingWriter::builder()
+    .base_path("/tmp/traces/trace.bin")
+    .max_file_size(100 * 1024 * 1024)
+    .max_total_size(500 * 1024 * 1024)
+    .build()?;
+
+let guard = TelemetryCore::builder().writer(writer).build()?;
+guard.enable();
+
+let mut main_builder = tokio::runtime::Builder::new_multi_thread();
+main_builder.worker_threads(4).enable_all();
+let (main_rt, main_handle) = guard.trace_runtime("main").build(main_builder)?;
+
+let mut io_builder = tokio::runtime::Builder::new_multi_thread();
+io_builder.worker_threads(2).enable_all();
+let (io_rt, io_handle) = guard.trace_runtime("io").build(io_builder)?;
+```
+
+### `dial9-viewer` crate ([#177](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/177))
+
+The trace viewer is its own crate now: `cargo install dial9-viewer`. It serves the interactive HTML viewer locally and can browse traces on S3.
+
+### Custom application events ([#196](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/196), [#216](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/216), [#218](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/218))
+
+You can emit your own events into the trace. Derive `TraceEvent`, call `record_event`. They are not currently visible in the viewer although they can be loaded from the trace via the JS parser directly. Repeated string values (HTTP methods, paths, etc.) can be interned to save space on the wire.
+
+```rust
+use dial9_trace_format::TraceEvent;
+use dial9_tokio_telemetry::telemetry::{record_event, clock_monotonic_ns, TelemetryHandle};
+
+#[derive(TraceEvent)]
+struct RequestCompleted {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
+    status_code: u32,
+    latency_us: u64,
+    error_message: Option<String>,
+}
+
+record_event(
+    RequestCompleted {
+        timestamp_ns: clock_monotonic_ns(),
+        status_code: 200,
+        latency_us: 1500,
+        error_message: None,
+    },
+    &handle,
+);
+```
+
+### Trace file concatenation ([#134](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/134))
+
+Uncompressed trace files can be concatenated (`cat trace.0.bin trace.1.bin > combined.bin`) and loaded as a single trace. The decoder resets parser state at segment boundaries via reset frames.
+
+### Added
+
+- Time-based rotation for `RotatingWriter`: segments rotate on wall-clock boundaries (e.g. every 60s), which gives clean S3 key paths ([#136](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/136), [#179](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/179))
+- `boot_id` in default S3 key layout so segments from different process starts don't collide ([#225](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/225), [#237](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/237))
+- Sampling for scheduler events: record 1-in-N context switches via `SchedEventConfig::sampling_interval` ([#233](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/233))
+- Optional field type modifiers and named field decode in trace format ([#216](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/216))
+
+### Fixed
+
+- Segments now contain all data for their time range. Previously, thread-local buffers could drain mid-rotation, causing events from one wall-clock period to land in the wrong segment (up to 8s of timestamp overlap between adjacent files). Rotation now coordinates with the flush loop: bump epoch, drain all buffers, flush, then rotate ([#224](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/224), [#186](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/186))
+- Traces now include monotonic-to-realtime clock sync frames for precise wall-clock alignment ([#210](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/210), [#214](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/214))
+- `perf-self-profile` compiles on macOS ([#174](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/174))
+- Background worker no longer busy-loops re-processing already gzipped segments ([#154](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/154), [#155](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/155))
+- `single_file` writer uses `.active` suffix so the background worker can symbolize and gzip sealed segments ([#164](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/164))
+- Empty segments are no longer sealed on finalize ([#127](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/127))
+- Blocking thread TIDs are captured directly instead of guessed by name ([#120](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/120))
+- Rate-limited internal tracing/logging to prevent log spam ([#209](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/209))
+
+### Viewer
+
+- Binary search for CPU sample attachment, faster rendering ([#201](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/201), [#143](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/143))
+- Relative/absolute time toggle ([#146](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/146))
+- Gzip decompression in JS parser: load `.bin.gz` files directly ([#178](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/178))
+- Escape stack frame names in flamegraph tooltips ([#142](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/142))
+- Handle truncated frames without crashing ([#98](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/98))
+
+### Breaking changes
+
+- `SamplerConfig` and `CpuProfilingConfig` now use builders instead of struct-literal construction, consistent with `SchedEventConfig` ([#244](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/244))
+
+### Internal
+
+- Removed recorder mutex; events encode directly into thread-local buffers ([#122](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/122), [#133](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/133), [#135](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/135))
+- `graceful_shutdown` is synchronous now ([#151](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/151))
+- Public API cleanup and lints ([#175](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/175), [#129](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/129))
+- Bencher integration for continuous overhead tracking ([#150](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/150))
+
 ## [0.2.0](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.1.1...dial9-tokio-telemetry-v0.2.0) - 2026-03-20
 
 0.2.0 brings two major improvements:

@@ -18,7 +18,7 @@ mod skills {
 #[derive(Parser, Debug)]
 #[command(
     name = "dial9-viewer",
-    about = "S3 trace browser and viewer for dial9-tokio-telemetry"
+    about = "Trace browser and viewer for dial9-tokio-telemetry"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -36,9 +36,13 @@ pub struct Cli {
     #[arg(long, global = true)]
     prefix: Option<String>,
 
-    /// Directory containing UI static files (when running without a subcommand)
-    #[arg(long, default_value = "ui", global = true)]
-    ui_dir: PathBuf,
+    /// Serve traces from a local directory instead of S3
+    #[arg(long, global = true, conflicts_with = "bucket")]
+    local_dir: Option<PathBuf>,
+
+    /// Dev mode: serve UI files from disk for faster iteration
+    #[arg(long, global = true)]
+    dev: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -49,23 +53,7 @@ enum Commands {
         action: Option<AgentsAction>,
     },
     /// Start the web server
-    Serve {
-        /// Port to listen on
-        #[arg(long, default_value = "3000")]
-        port: u16,
-
-        /// S3 bucket name (if omitted, bucket must be specified per-request)
-        #[arg(long)]
-        bucket: Option<String>,
-
-        /// S3 key prefix to filter traces
-        #[arg(long)]
-        prefix: Option<String>,
-
-        /// Directory containing UI static files
-        #[arg(long, default_value = "ui")]
-        ui_dir: PathBuf,
-    },
+    Serve {},
 }
 
 #[derive(Subcommand, Debug)]
@@ -110,22 +98,36 @@ async fn main() -> anyhow::Result<()> {
                 }
             },
         },
-        Some(Commands::Serve {
-            port,
-            bucket,
-            prefix,
-            ui_dir,
-        }) => return serve(port, bucket, prefix, ui_dir).await,
-        None => return serve(cli.port, cli.bucket, cli.prefix, cli.ui_dir).await,
+        Some(Commands::Serve {}) | None => {
+            return serve(cli.port, cli.bucket, cli.prefix, cli.local_dir, cli.dev).await;
+        }
     }
     Ok(())
+}
+
+async fn detect_bucket_region(bucket: &str) -> Option<String> {
+    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let client = aws_sdk_s3::Client::new(&config);
+    match client.head_bucket().bucket(bucket).send().await {
+        Ok(resp) => resp.bucket_region().map(|r| r.to_string()),
+        Err(err) => {
+            // HeadBucket errors include the x-amz-bucket-region header
+            let raw = err.raw_response();
+            raw.and_then(|r| {
+                r.headers()
+                    .get("x-amz-bucket-region")
+                    .map(|v| v.to_string())
+            })
+        }
+    }
 }
 
 async fn serve(
     port: u16,
     bucket: Option<String>,
     prefix: Option<String>,
-    ui_dir: PathBuf,
+    local_dir: Option<PathBuf>,
+    dev: bool,
 ) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -134,32 +136,93 @@ async fn serve(
         )
         .init();
 
-    let ui_dir = if ui_dir.exists() {
-        ui_dir
-    } else if let Ok(exe) = std::env::current_exe() {
-        let candidate = exe.parent().unwrap_or(exe.as_ref()).join(&ui_dir);
-        if candidate.exists() {
-            candidate
-        } else {
-            ui_dir
+    let dev_ui_dir = if dev {
+        // In dev mode, find the ui/ directory relative to the manifest or CWD
+        let candidates = [PathBuf::from("ui"), PathBuf::from("dial9-viewer/ui")];
+        let dir = candidates.into_iter().find(|p| p.exists());
+        match dir {
+            Some(d) => {
+                tracing::info!(path = %d.display(), "dev mode: serving UI from disk");
+                Some(d)
+            }
+            None => {
+                anyhow::bail!(
+                    "--dev: could not find ui/ directory. Run from the dial9-viewer/ or repo root directory."
+                );
+            }
         }
     } else {
-        ui_dir
+        None
     };
 
-    let backend = dial9_viewer::storage::S3Backend::from_env().await;
-    let app_state = dial9_viewer::server::AppState::new(
-        std::sync::Arc::new(backend),
-        bucket.clone(),
-        prefix.clone(),
-    );
+    let app_state = if let Some(dir) = &local_dir {
+        let dir = std::fs::canonicalize(dir)?;
+        tracing::info!(path = %dir.display(), "serving traces from local directory");
+        let backend = dial9_viewer::storage::LocalBackend::new(&dir);
+        let mut state = dial9_viewer::server::AppState::new(
+            std::sync::Arc::new(backend),
+            Some("local".into()),
+            prefix.clone(),
+        );
+        if let Some(d) = dev_ui_dir {
+            state = state.with_dev_ui_dir(d);
+        }
+        state
+    } else {
+        // Detect bucket region if a bucket is provided
+        if let Some(bucket_name) = &bucket {
+            if let Some(region) = detect_bucket_region(bucket_name).await {
+                tracing::info!(%region, bucket = %bucket_name, "detected bucket region");
+                let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .region(aws_sdk_s3::config::Region::new(region))
+                    .load()
+                    .await;
+                let client = aws_sdk_s3::Client::new(&config);
+                let backend = dial9_viewer::storage::S3Backend::from_client(client);
+                let mut state = dial9_viewer::server::AppState::new(
+                    std::sync::Arc::new(backend),
+                    bucket.clone(),
+                    prefix.clone(),
+                );
+                if let Some(d) = dev_ui_dir {
+                    state = state.with_dev_ui_dir(d);
+                }
+                state
+            } else {
+                tracing::warn!(bucket = %bucket_name, "could not detect bucket region, using default");
+                let backend = dial9_viewer::storage::S3Backend::from_env().await;
+                let mut state = dial9_viewer::server::AppState::new(
+                    std::sync::Arc::new(backend),
+                    bucket.clone(),
+                    prefix.clone(),
+                );
+                if let Some(d) = dev_ui_dir {
+                    state = state.with_dev_ui_dir(d);
+                }
+                state
+            }
+        } else {
+            let backend = dial9_viewer::storage::S3Backend::from_env().await;
+            let mut state = dial9_viewer::server::AppState::new(
+                std::sync::Arc::new(backend),
+                bucket.clone(),
+                prefix.clone(),
+            );
+            if let Some(d) = dev_ui_dir {
+                state = state.with_dev_ui_dir(d);
+            }
+            state
+        }
+    };
 
-    let app = dial9_viewer::server::router(app_state, &ui_dir);
+    let app = dial9_viewer::server::router(app_state);
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    tracing::info!(port, ui_dir = %ui_dir.display(), "dial9-viewer listening");
+    tracing::info!(port, dev, "dial9-viewer listening");
     println!("\n  → http://localhost:{}\n", port);
-    if let Some(bucket) = &bucket {
+    if let Some(dir) = &local_dir {
+        tracing::info!(path = %dir.display(), "local directory mode");
+    } else if let Some(bucket) = &bucket {
         tracing::info!(%bucket, "default bucket");
     }
 

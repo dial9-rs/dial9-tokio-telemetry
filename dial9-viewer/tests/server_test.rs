@@ -1,6 +1,6 @@
 use assert2::check;
 use dial9_viewer::server::{AppState, router};
-use dial9_viewer::storage::{ObjectInfo, S3Backend, StorageBackend, StorageError};
+use dial9_viewer::storage::{LocalBackend, ObjectInfo, S3Backend, StorageBackend, StorageError};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -56,7 +56,8 @@ fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
 
 async fn start_server(state: AppState) -> String {
     let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
-    let app = router(state, &ui_dir);
+    let state = state.with_dev_ui_dir(ui_dir);
+    let app = router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -476,4 +477,234 @@ async fn trace_serves_large_decompressed_segment() {
     check!(resp.status().as_u16() == 200);
     let body = resp.bytes().await.unwrap();
     check!(body.len() == big_data.len());
+}
+
+// --- local backend tests ---
+
+fn setup_local_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    // Create a directory structure mimicking trace output:
+    //   2026-04-09/1910/svc/host/123-0.bin.gz
+    //   2026-04-09/1910/svc/host/123-1.bin.gz
+    //   2026-04-09/1920/svc/host/456-0.bin.gz
+    let base = dir.path().join("2026-04-09/1910/svc/host");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join("123-0.bin.gz"), gzip_bytes(b"trace seg 0")).unwrap();
+    std::fs::write(base.join("123-1.bin.gz"), gzip_bytes(b"trace seg 1")).unwrap();
+
+    let base2 = dir.path().join("2026-04-09/1920/svc/host");
+    std::fs::create_dir_all(&base2).unwrap();
+    std::fs::write(base2.join("456-0.bin.gz"), gzip_bytes(b"other trace")).unwrap();
+    dir
+}
+
+fn local_state(dir: &std::path::Path) -> AppState {
+    AppState::new(Arc::new(LocalBackend::new(dir)), Some("local".into()), None)
+}
+
+#[tokio::test]
+async fn local_search_lists_all_files() {
+    let dir = setup_local_dir();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    let resp: Vec<ObjectInfo> = client
+        .get(format!("{base}/api/search"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp.len() == 3);
+}
+
+#[tokio::test]
+async fn local_search_filters_by_prefix() {
+    let dir = setup_local_dir();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    let resp: Vec<ObjectInfo> = client
+        .get(format!("{base}/api/search?q=2026-04-09/1910/"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp.len() == 2);
+    for obj in &resp {
+        check!(obj.key.contains("1910"));
+    }
+}
+
+#[tokio::test]
+async fn local_trace_fetches_and_decompresses() {
+    let dir = setup_local_dir();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "{base}/api/trace?keys=2026-04-09/1910/svc/host/123-0.bin.gz&keys=2026-04-09/1910/svc/host/123-1.bin.gz"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body = resp.bytes().await.unwrap();
+    // Both segments decompressed and concatenated
+    let body_slice = body.as_ref();
+    let has_seg0 = body_slice
+        .windows(b"trace seg 0".len())
+        .any(|w| w == b"trace seg 0");
+    let has_seg1 = body_slice
+        .windows(b"trace seg 1".len())
+        .any(|w| w == b"trace seg 1");
+    check!(has_seg0);
+    check!(has_seg1);
+}
+
+#[tokio::test]
+async fn local_trace_not_found() {
+    let dir = setup_local_dir();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/trace?keys=nonexistent.bin"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 500);
+}
+
+#[tokio::test]
+async fn local_prefixes_lists_subdirs() {
+    let dir = setup_local_dir();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    // Top-level prefixes
+    let resp: Vec<String> = client
+        .get(format!("{base}/api/prefixes"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp == vec!["2026-04-09/"]);
+
+    // Nested prefixes
+    let resp: Vec<String> = client
+        .get(format!("{base}/api/prefixes?prefix=2026-04-09/"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp.contains(&"2026-04-09/1910/".to_string()));
+    check!(resp.contains(&"2026-04-09/1920/".to_string()));
+}
+
+#[tokio::test]
+async fn local_e2e_search_then_view() {
+    let dir = setup_local_dir();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    // Search for segments in the 1910 time bucket
+    let search_resp: Vec<ObjectInfo> = client
+        .get(format!("{base}/api/search?q=2026-04-09/1910/"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(search_resp.len() == 2);
+
+    // Build trace URL from search results
+    let keys_param: String = search_resp
+        .iter()
+        .map(|o| format!("keys={}", urlencoding::encode(&o.key)))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let trace_resp = client
+        .get(format!("{base}/api/trace?{keys_param}"))
+        .send()
+        .await
+        .unwrap();
+    check!(trace_resp.status().as_u16() == 200);
+
+    let body = trace_resp.bytes().await.unwrap();
+    // Both segments present (decompressed)
+    let body_slice = body.as_ref();
+    let has_seg0 = body_slice
+        .windows(b"trace seg 0".len())
+        .any(|w| w == b"trace seg 0");
+    let has_seg1 = body_slice
+        .windows(b"trace seg 1".len())
+        .any(|w| w == b"trace seg 1");
+    check!(has_seg0);
+    check!(has_seg1);
+}
+
+#[tokio::test]
+async fn local_search_empty_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    let resp: Vec<ObjectInfo> = client
+        .get(format!("{base}/api/search"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp.is_empty());
+}
+
+#[tokio::test]
+async fn local_search_returns_file_sizes() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = b"hello world";
+    std::fs::write(dir.path().join("test.bin"), data).unwrap();
+
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    let resp: Vec<ObjectInfo> = client
+        .get(format!("{base}/api/search"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp.len() == 1);
+    check!(resp[0].key == "test.bin");
+    check!(resp[0].size == data.len() as i64);
+}
+
+#[tokio::test]
+async fn local_path_traversal_rejected() {
+    let dir = setup_local_dir();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    // Attempt to escape root via ../
+    let resp = client
+        .get(format!("{base}/api/trace?keys=../../../etc/passwd"))
+        .send()
+        .await
+        .unwrap();
+    // Should fail — either not found or error, but not 200
+    check!(resp.status().as_u16() != 200);
 }

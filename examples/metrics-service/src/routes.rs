@@ -23,6 +23,7 @@ struct MetricPayload {
     value: f64,
 }
 
+#[tracing::instrument(skip(state, payload), fields(metric_name = %payload.name, request_id = %uuid::Uuid::new_v4()))]
 async fn record_metric(
     State(state): State<AppState>,
     Json(payload): Json<MetricPayload>,
@@ -40,6 +41,7 @@ struct AggregateRow {
     max: f64,
 }
 
+#[tracing::instrument(skip_all, fields(name = %name, request_id = %uuid::Uuid::new_v4()))]
 async fn query_metric(
     State(state): State<AppState>,
     Path(name): Path<String>,

@@ -1,7 +1,18 @@
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::time::Duration;
+
+use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
+use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+fn my_config() -> Dial9Config {
+    Dial9ConfigBuilder::new("realistic_trace.bin", 64 * 1024 * 1024, 256 * 1024 * 1024)
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
+        .with_runtime(|r| r.with_task_tracking(true))
+        .build()
+}
 
 async fn cpu_bound_work(n: u64) -> u64 {
     let mut result = 0u64;
@@ -12,9 +23,10 @@ async fn cpu_bound_work(n: u64) -> u64 {
 }
 
 async fn network_server(listener: TcpListener) {
+    let handle = TelemetryHandle::current();
     loop {
         if let Ok((mut socket, _)) = listener.accept().await {
-            tokio::spawn(async move {
+            handle.spawn(async move {
                 let mut buf = [0u8; 1024];
                 if let Ok(n) = socket.read(&mut buf).await {
                     let result = cpu_bound_work(10000).await;
@@ -44,13 +56,15 @@ async fn network_client(port: u16, id: usize) {
 }
 
 async fn mixed_workload(port: u16) {
+    let handle = TelemetryHandle::current();
+
     let clients: Vec<_> = (0..5)
-        .map(|i| tokio::spawn(network_client(port, i)))
+        .map(|i| handle.spawn(network_client(port, i)))
         .collect();
 
     let cpu_tasks: Vec<_> = (0..3)
         .map(|_| {
-            tokio::spawn(async {
+            handle.spawn(async {
                 for _ in 0..10 {
                     cpu_bound_work(50000).await;
                     tokio::task::yield_now().await;
@@ -67,26 +81,18 @@ async fn mixed_workload(port: u16) {
     }
 }
 
-fn main() {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
-    let writer = RotatingWriter::single_file("realistic_trace.bin").unwrap();
-    let (runtime, _guard) = TracedRuntime::builder()
-        .build_and_start(builder, writer)
-        .unwrap();
-
+#[dial9_tokio_telemetry::main(config = my_config)]
+async fn main() {
     println!("Running realistic workload...");
-    runtime.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(network_server(listener));
 
-        tokio::time::timeout(Duration::from_secs(5), mixed_workload(port))
-            .await
-            .ok();
-    });
+    let handle = TelemetryHandle::current();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    handle.spawn(network_server(listener));
 
-    drop(_guard);
-    println!("Trace written to realistic_trace.bin");
+    tokio::time::timeout(Duration::from_secs(5), mixed_workload(port))
+        .await
+        .ok();
+
+    println!("Trace written to realistic_trace.*.bin");
 }

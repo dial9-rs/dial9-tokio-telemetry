@@ -490,6 +490,119 @@
     };
   }
 
+  /**
+   * Build span data structures from custom events.
+   * Pairs SpanEnterEvent/SpanExitEvent into span intervals per worker,
+   * and builds a lookup table for span metadata (name, fields, parent).
+   * @param {Array<{name: string, timestamp: number, fields: Object}>} customEvents
+   * @returns {{
+   *   spansByWorker: Object<number, Array<{start: number, end: number, spanId: number, spanName: string, fields: Object, parentSpanId: number|null}>>,
+   *   spanMeta: Map<number, {spanName: string, fields: Object, parentSpanId: number|null}>,
+   * }}
+   */
+  function buildSpanData(customEvents) {
+    // Index: spanId+workerId → most recent enter timestamp
+    const openSpans = new Map(); // "spanId:workerId" → {timestamp, spanName, fields, parentSpanId}
+    const spansByWorker = {};
+    const spanMeta = new Map(); // spanId → {spanName, fields, parentSpanId}
+
+    const BASE_ENTER_FIELDS = new Set(["worker_id", "span_id", "parent_span_id", "span_name"]);
+    const BASE_EXIT_FIELDS = new Set(["worker_id", "span_id", "span_name"]);
+
+    for (const ev of customEvents) {
+      if (ev.name.startsWith("SpanEnter:") || ev.name === "SpanEnterEvent") {
+        const v = ev.fields;
+        const workerId = Number(v.worker_id);
+        const spanId = Number(v.span_id);
+        const parentSpanId = v.parent_span_id != null ? Number(v.parent_span_id) : null;
+        const spanName = v.span_name || "unknown";
+        // Collect user-defined fields (everything not in the base set)
+        const fields = {};
+        for (const [k, val] of Object.entries(v)) {
+          if (!BASE_ENTER_FIELDS.has(k)) fields[k] = val;
+        }
+
+        const key = `${spanId}:${workerId}`;
+        openSpans.set(key, {
+          timestamp: ev.timestamp,
+          spanName,
+          fields,
+          parentSpanId,
+        });
+
+        spanMeta.set(spanId, { spanName, fields, parentSpanId });
+      } else if (ev.name.startsWith("SpanExit:") || ev.name === "SpanExitEvent") {
+        const v = ev.fields;
+        const workerId = Number(v.worker_id);
+        const spanId = Number(v.span_id);
+
+        const key = `${spanId}:${workerId}`;
+        const enter = openSpans.get(key);
+        if (enter) {
+          openSpans.delete(key);
+          // Collect exit fields
+          const exitFields = {};
+          for (const [k, val] of Object.entries(v)) {
+            if (!BASE_EXIT_FIELDS.has(k)) exitFields[k] = val;
+          }
+          if (!spansByWorker[workerId]) spansByWorker[workerId] = [];
+          spansByWorker[workerId].push({
+            start: enter.timestamp,
+            end: ev.timestamp,
+            spanId,
+            spanName: enter.spanName,
+            fields: Object.keys(exitFields).length > 0 ? exitFields : enter.fields,
+            parentSpanId: enter.parentSpanId,
+          });
+        }
+      }
+    }
+
+    // Sort each worker's spans by start time
+    for (const spans of Object.values(spansByWorker)) {
+      spans.sort((a, b) => a.start - b.start);
+    }
+
+    // Collect unmatched spans (enter without exit, e.g. trace ended mid-span)
+    const unmatchedSpans = [];
+    for (const [key, enter] of openSpans) {
+      const [spanId, workerId] = key.split(":").map(Number);
+      unmatchedSpans.push({
+        start: enter.timestamp,
+        spanId,
+        workerId,
+        spanName: enter.spanName,
+        fields: enter.fields,
+        parentSpanId: enter.parentSpanId,
+      });
+    }
+    unmatchedSpans.sort((a, b) => a.start - b.start);
+
+    // Compute depth for each span by walking the parent chain
+    const depthCache = new Map(); // spanId → depth
+    function getDepth(spanId, seen) {
+      if (spanId == null) return -1;
+      if (depthCache.has(spanId)) return depthCache.get(spanId);
+      if (seen && seen.has(spanId)) { depthCache.set(spanId, 0); return 0; } // cycle
+      const meta = spanMeta.get(spanId);
+      if (!meta) { depthCache.set(spanId, 0); return 0; }
+      const visited = seen || new Set();
+      visited.add(spanId);
+      const d = getDepth(meta.parentSpanId, visited) + 1;
+      depthCache.set(spanId, d);
+      return d;
+    }
+    let maxDepth = 0;
+    for (const spans of Object.values(spansByWorker)) {
+      for (const s of spans) {
+        s.depth = getDepth(s.spanId);
+        if (s.depth > maxDepth) maxDepth = s.depth;
+      }
+    }
+
+    return { spansByWorker, spanMeta, maxDepth, unmatchedSpans };
+  }
+
   // Export for both browser and Node.js
   const analysisExports = {
     buildWorkerSpans,
@@ -500,6 +613,7 @@
     buildFlamegraphTree,
     flattenFlamegraph,
     buildFgData,
+    buildSpanData,
   };
 
   if (typeof module !== "undefined" && module.exports) {

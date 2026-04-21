@@ -55,6 +55,34 @@ impl ThreadLocalEncoder<'_> {
         self.encoder.write_infallible(event);
     }
 
+    /// Write an event with a dynamically-registered schema.
+    ///
+    /// The first element of `values` must be `FieldValue::Varint(timestamp_ns)`.
+    /// The remaining values must match the schema's field definitions in order.
+    /// The schema is auto-registered on first use per buffer flush cycle.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use dial9_trace_format::types::FieldValue;
+    ///
+    /// enc.write_event(&schema, &[
+    ///     FieldValue::Varint(timestamp_ns),  // must be first
+    ///     FieldValue::Varint(worker_id),
+    ///     FieldValue::PooledString(enc.intern_string("hello")),
+    /// ]);
+    /// ```
+    // TODO(GH-XXX): replace with a version that takes timestamp as a separate parameter
+    pub(crate) fn write_event(
+        &mut self,
+        schema: &dial9_trace_format::encoder::Schema,
+        values: &[dial9_trace_format::types::FieldValue],
+    ) {
+        self.encoder
+            .write_event(schema, values)
+            .expect("writing to Vec<u8> is infallible");
+    }
+
     /// Intern a `&'static Location` (caching the `to_string()` result).
     pub(crate) fn intern_location(
         &mut self,
@@ -112,6 +140,7 @@ impl ThreadLocalEncoder<'_> {
 /// [`ThreadLocalEncoder::encode`], not from the type implementing `Encodable`.
 /// In the example above, the trace will contain events named `"HttpRequestWire"`,
 /// not `"HttpRequest"`.
+///
 pub trait Encodable {
     /// Encode this event into the thread-local trace buffer.
     ///
@@ -314,6 +343,7 @@ impl ThreadLocalBuffer {
         }
     }
 
+    #[cfg(test)]
     fn record_encodable(&mut self, event: &dyn Encodable) {
         event.encode(&mut self.thread_local_encoder());
         self.event_count += 1;
@@ -420,18 +450,32 @@ pub(crate) fn record_encodable_event(
     collector: &Arc<CentralCollector>,
     drain_epoch: &AtomicU64,
 ) -> Option<TlBufferHandle> {
+    with_encoder(|enc| event.encode(enc), collector, drain_epoch)
+}
+
+/// Run a closure with access to the thread-local encoder.
+///
+/// This is the low-level primitive behind [`record_event`] and
+/// [`record_encodable_event`]. Use it when you need to encode directly
+/// (e.g., dynamic schemas) without an intermediate [`Encodable`] struct.
+pub(crate) fn with_encoder(
+    f: impl FnOnce(&mut ThreadLocalEncoder<'_>),
+    collector: &Arc<CentralCollector>,
+    drain_epoch: &AtomicU64,
+) -> Option<TlBufferHandle> {
     BUFFER.with(|arc| {
         let mut buf = match arc.lock() {
             Ok(guard) => guard,
             Err(_) => {
                 crate::rate_limit::rate_limited!(Duration::from_secs(60), {
-                    tracing::error!("dial9: thread-local buffer mutex poisoned in record_encodable_event; dropping events for this thread");
+                    tracing::error!("dial9: thread-local buffer mutex poisoned in with_encoder; dropping events for this thread");
                 });
                 return None;
             }
         };
         let first_call = buf.set_collector(collector);
-        buf.record_encodable(event);
+        f(&mut buf.thread_local_encoder());
+        buf.event_count += 1;
         let current_epoch = drain_epoch.load(Ordering::Relaxed);
         if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
             collector.accept_flush(buf.flush());

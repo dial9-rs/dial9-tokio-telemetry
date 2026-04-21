@@ -207,6 +207,11 @@ pub async fn run(base_url: &str, shutdown: CancellationToken, demo: bool) {
                             result.ok,
                         );
                         tick += 1;
+                        if demo {
+                            // Throttle request rate so the demo trace stays
+                            // small enough for the viewer to load smoothly.
+                            sleep(Duration::from_millis(2)).await;
+                        }
                     }
                 }
             }

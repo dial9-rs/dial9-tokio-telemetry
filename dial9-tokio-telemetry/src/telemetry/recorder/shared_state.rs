@@ -107,6 +107,16 @@ impl SharedState {
         }
     }
 
+    /// Run a closure with direct access to the thread-local encoder.
+    pub(crate) fn with_encoder(&self, f: impl FnOnce(&mut buffer::ThreadLocalEncoder<'_>)) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(handle) = buffer::with_encoder(f, &self.collector, &self.drain_epoch) {
+            self.tl_buffers.lock().unwrap().push(handle);
+        }
+    }
+
     /// Bump the drain epoch and flush all idle/silent thread-local buffers.
     ///
     /// Buffers whose `FlushEpoch` matches the current epoch are skipped
