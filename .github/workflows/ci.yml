@@ -41,6 +41,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         toolchain: ["1.94.1", nightly]
+        # aarch64 Linux exercises arch-specific unwind asm, PAC stripping,
+        # and ucontext layout that x86_64 Linux doesn't cover.
+        include:
+          - os: ubuntu-24.04-arm
+            toolchain: "1.94.1"
     env:
       RUST_BACKTRACE: 1
     steps:
