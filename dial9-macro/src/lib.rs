@@ -13,11 +13,15 @@ struct MainArgs {
     config: ConfigSource,
 }
 
-const MISSING_CONFIG_HELP: &str = "missing required `config` argument, e.g. \
-                           #[dial9_tokio_telemetry::main(config = || { Dial9ConfigBuilder::new(...).build() })]";
+const MISSING_CONFIG_HELP: &str = "missing required `config` argument, e.g.\n  \
+                           #[dial9_tokio_telemetry::main(config = my_config_fn)]\n\
+                           or with an inline closure:\n  \
+                           #[dial9_tokio_telemetry::main(config = || Dial9ConfigBuilder::new(...).build())]";
 
-const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a zero-argument function path or a zero-argument closure, e.g. \
-                           #[dial9_tokio_telemetry::main(config = || { Dial9ConfigBuilder::new(...).build() })]";
+const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a zero-argument function path or a zero-argument closure, e.g.\n  \
+                           #[dial9_tokio_telemetry::main(config = my_config_fn)]\n\
+                           or with an inline closure:\n  \
+                           #[dial9_tokio_telemetry::main(config = || Dial9ConfigBuilder::new(...).build())]";
 impl Parse for MainArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if input.is_empty() {
