@@ -930,7 +930,11 @@ impl TelemetryCore {
                         let _ = libc::nice(10);
                     }
 
+                    #[cfg(feature = "cpu-profiling")]
+                    let _ = dial9_perf_self_profile::register_current_thread();
                     run_flush_loop(control_rx, &shared, &flush_metrics_sink, event_writer);
+                    #[cfg(feature = "cpu-profiling")]
+                    dial9_perf_self_profile::unregister_current_thread();
                 })
                 .expect("failed to spawn telemetry-flush thread")
         };
@@ -982,7 +986,11 @@ impl TelemetryCore {
             let wt = std::thread::Builder::new()
                 .name("dial9-worker".into())
                 .spawn(move || {
+                    #[cfg(feature = "cpu-profiling")]
+                    let _ = dial9_perf_self_profile::register_current_thread();
                     crate::background_task::run_background_task(config, shutdown_rx);
+                    #[cfg(feature = "cpu-profiling")]
+                    dial9_perf_self_profile::unregister_current_thread();
                 })
                 .expect("failed to spawn dial9-worker thread");
             worker = Some(WorkerHandle {

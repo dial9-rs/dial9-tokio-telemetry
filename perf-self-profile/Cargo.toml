@@ -17,6 +17,7 @@ tracing = "0.1.44"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 blazesym = "0.2"
+crossbeam-utils = "0.8"
 libc = "0.2"
 perf-event-data = "0.1.8"
 perf-event-open-sys2 = "5.0.6"
