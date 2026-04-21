@@ -115,10 +115,7 @@
                 let trace;
                 try {
                     loadingEl.textContent = "Parsing trace\u2026";
-                    const parseOpts = {};
-                    if (startNs != null) parseOpts.startTime = startNs;
-                    if (endNs != null) parseOpts.endTime = endNs;
-                    trace = await TraceParser.parseTrace(buffer, parseOpts);
+                    trace = await TraceParser.parseTrace(buffer);
                 } catch (err) {
                     showError("Failed to parse trace: " + err.message);
                     return;
@@ -144,11 +141,17 @@
                     console.warn("Failed to attach spawn locations:", err);
                 }
 
-                const allSamples = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, startNs, endNs);
-
-                if (!allSamples.length) {
-                    showError("No CPU samples found in the specified time range.");
-                    return;
+                let allSamples = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, startNs, endNs);
+                let timeRangeMatched = allSamples.length > 0;
+                if (!timeRangeMatched) {
+                    const unfiltered = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, null, null);
+                    if (unfiltered.length > 0 && (startNs != null || endNs != null)) {
+                        allSamples = unfiltered;
+                        console.warn("Time range filter matched 0 samples — showing all", unfiltered.length, "samples");
+                    } else {
+                        showError("No CPU samples found in the specified time range.");
+                        return;
+                    }
                 }
 
                 // Update title
@@ -178,11 +181,13 @@
                 const fg = FlamegraphRenderer.createFlamegraph(containerEl, updateUrlZoom);
                 fg.setData(allSamples, trace.callframeSymbols);
 
-                // Restore zoom from URL if present
-                const wz = params.get("worker-zoom");
-                const oz = params.get("offworker-zoom");
-                if (wz) fg.zoomToPath("worker", wz.split("\t"));
-                if (oz) fg.zoomToPath("offworker", oz.split("\t"));
+                // Restore zoom from URL (only if time range filter succeeded, otherwise tree differs)
+                if (timeRangeMatched) {
+                    const wz = params.get("worker-zoom");
+                    const oz = params.get("offworker-zoom");
+                    if (wz) fg.zoomToPath("worker", wz.split("\t"));
+                    if (oz) fg.zoomToPath("offworker", oz.split("\t"));
+                }
 
                 // Responsive resize
                 window.addEventListener("resize", () => fg.resize());

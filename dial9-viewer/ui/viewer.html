@@ -3693,7 +3693,10 @@
                     showToast("popout-no-url", "Pop-out requires a loaded trace", "error", 3000);
                     return;
                 }
-                const url = `flamegraph.html?trace=${encodeURIComponent(traceUrl)}&start=${Math.round(fgSelStart)}&end=${Math.round(fgSelEnd)}`;
+                let url = `flamegraph.html?trace=${encodeURIComponent(traceUrl)}&start=${Math.round(fgSelStart)}&end=${Math.round(fgSelEnd)}`;
+                const z = fgInstance.getZoomPath();
+                if (z.worker.length > 0) url += `&worker-zoom=${encodeURIComponent(z.worker.join("\t"))}`;
+                if (z.offworker.length > 0) url += `&offworker-zoom=${encodeURIComponent(z.offworker.join("\t"))}`;
                 window.open(url, "_blank");
                 if (isBlobUrl) {
                     showToast("popout-blob", "Pop-out linked to this tab \u2014 keep it open", "info", 5000);

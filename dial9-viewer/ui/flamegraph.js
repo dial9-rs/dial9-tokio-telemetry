@@ -598,22 +598,34 @@
       };
     }
 
-    // Walk the tree to find a child by name at each level, pushing onto zoom stack
+    // Find a node by name anywhere in the tree via DFS, return path from root.
+    function findNodePath(tree, name) {
+      const path = [];
+      function dfs(node) {
+        path.push(node);
+        if (node.name === name) return true;
+        for (const child of node.children.values()) {
+          if (dfs(child)) return true;
+        }
+        path.pop();
+        return false;
+      }
+      for (const child of tree.children.values()) {
+        if (dfs(child)) return path;
+      }
+      return null;
+    }
+
     function zoomToPath(key, names) {
       const tree = key === "worker" ? workerTree : offworkerTree;
       if (!tree || !names.length) return;
       const stack = key === "worker" ? workerZoomStack : offworkerZoomStack;
-      let node = tree;
-      for (const name of names) {
-        let found = null;
-        for (const child of node.children.values()) {
-          if (child.name === name) { found = child; break; }
-        }
-        if (!found) break;
-        stack.push(found);
-        node = found;
+      const target = names[names.length - 1];
+      const path = findNodePath(tree, target);
+      if (path) {
+        stack.push.apply(stack, path);
+        renderAll();
       }
-      if (stack.length > 0) renderAll();
     }
 
     return { setData, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath };
