@@ -53,17 +53,13 @@ impl CtimerSampler {
 
         unsafe {
             fp_profiler::install_handler().map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("failed to install safe_load SIGSEGV handler: {e}"),
-                )
+                io::Error::other(format!("failed to install safe_load SIGSEGV handler: {e}"))
             })?;
         }
 
         unsafe {
-            ctimer::start(interval_ns, sigprof_handler).map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("failed to start ctimer: {e}"))
-            })?;
+            ctimer::start(interval_ns, sigprof_handler)
+                .map_err(|e| io::Error::other(format!("failed to start ctimer: {e}")))?;
         }
 
         CTIMER_ACTIVE.store(true, Ordering::Release);
@@ -74,12 +70,8 @@ impl CtimerSampler {
 
 impl SamplerBackend for CtimerSampler {
     fn track_current_thread(&mut self) -> io::Result<()> {
-        ctimer::register_thread().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("ctimer::register_thread failed: {e}"),
-            )
-        })
+        ctimer::register_thread()
+            .map_err(|e| io::Error::other(format!("ctimer::register_thread failed: {e}")))
     }
 
     fn stop_tracking_current_thread(&mut self) {

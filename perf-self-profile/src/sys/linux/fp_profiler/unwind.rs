@@ -88,7 +88,7 @@ pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [Frame]) -> 
             break;
         }
 
-        if ret_addr < DEAD_ZONE || ret_addr > usize::MAX - DEAD_ZONE {
+        if !(DEAD_ZONE..=usize::MAX - DEAD_ZONE).contains(&ret_addr) {
             break;
         }
 

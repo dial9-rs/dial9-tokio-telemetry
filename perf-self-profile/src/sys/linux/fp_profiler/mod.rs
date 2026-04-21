@@ -1,12 +1,4 @@
 //! Userspace frame-pointer profiling infrastructure.
-//!
-//! Three components:
-//! - **safe_load**: asm trampoline + SIGSEGV handler for fault-tolerant pointer
-//!   reads (so a corrupt FP chain aborts the walk instead of crashing).
-//! - **unwind**: frame-pointer stack walker using safe_load.
-//! - **ctimer**: per-thread CPU timer engine (`CLOCK_THREAD_CPUTIME_ID` +
-//!   `SIGEV_THREAD_ID`) that fires SIGPROF when CPU time is consumed.
-//!
 //! x86_64 and aarch64 only.
 
 pub mod ctimer;
@@ -148,12 +140,10 @@ mod supported {
                     libc::sigemptyset(&mut dfl.sa_mask);
                     libc::sigaction(libc::SIGSEGV, &dfl, ptr::null_mut());
                     libc::raise(libc::SIGSEGV);
-                    return;
                 } else if h != libc::SIG_IGN {
                     // SAFETY: SA_SIGINFO guarantees sa_sigaction has 3-arg handler signature.
                     let f: extern "C" fn(libc::c_int) = std::mem::transmute(h);
                     f(signo);
-                    return;
                 }
             }
         }

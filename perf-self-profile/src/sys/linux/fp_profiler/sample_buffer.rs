@@ -22,8 +22,6 @@ use super::unwind::MAX_FRAMES;
 const BUFFER_CAP: usize = 16384;
 
 /// Mutable payload written by the producer and read by drain.
-/// Wrapped in `UnsafeCell` so producers can write through a shared
-/// reference without UB — the `seq` protocol provides the exclusivity.
 struct SampleData {
     pid: u32,
     tid: u32,

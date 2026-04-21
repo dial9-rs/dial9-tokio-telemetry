@@ -104,10 +104,7 @@ pub fn current_thread_timer_id() -> Option<libc::timer_t> {
 /// Create and arm a per-thread CPU timer for the *calling* thread.
 pub fn register_thread() -> Result<(), io::Error> {
     if !RUNNING.load(Ordering::Acquire) {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "ctimer is not running (call start first)",
-        ));
+        return Err(io::Error::other("ctimer is not running (call start first)"));
     }
     let interval = INTERVAL_NS.load(Ordering::Acquire);
 
