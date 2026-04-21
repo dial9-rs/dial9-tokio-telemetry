@@ -91,10 +91,59 @@ jobs:
           sudo sysctl kernel.kptr_restrict=0
       - run: scripts/e2e-trace-tests.sh
 
+  asan:
+    name: AddressSanitizer (perf-self-profile)
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "--cfg tokio_unstable -Zsanitizer=address"
+      RUSTDOCFLAGS: "-Zsanitizer=address"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+      - name: Enable perf_event_open and kallsyms
+        run: |
+          sudo sysctl kernel.perf_event_paranoid=1
+          sudo sysctl kernel.kptr_restrict=0
+      - name: Run perf-self-profile tests under ASAN (perf path)
+        run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          cargo test -p dial9-perf-self-profile --all-features \
+            -Z build-std --target x86_64-unknown-linux-gnu
+      - name: Restrict perf_event_open to force ctimer path
+        run: sudo sysctl kernel.perf_event_paranoid=3
+      - name: Run perf-self-profile tests under ASAN (ctimer path)
+        # paranoid=3 blocks perf_event_open
+        run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          cargo test -p dial9-perf-self-profile --all-features \
+            -Z build-std --target x86_64-unknown-linux-gnu
+
+  ecs-sim:
+    name: ECS simulation (ctimer fallback)
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "--cfg tokio_unstable"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Restrict perf_event_open (simulate ECS/Fargate)
+        # paranoid=3 blocks perf_event_open
+        run: sudo sysctl kernel.perf_event_paranoid=3
+      - name: Run perf-self-profile tests (auto-fallback path)
+        run: cargo test -p dial9-perf-self-profile --all-features
+
   ci-pass:
     name: CI Pass
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, build, check-docs, trace-integrity]
+    needs: [fmt, clippy, build, check-docs, trace-integrity, asan, ecs-sim]
     if: always()
     steps:
       - run: |
