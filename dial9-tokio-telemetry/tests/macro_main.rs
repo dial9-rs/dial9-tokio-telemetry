@@ -1,7 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
-use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
+use dial9_tokio_telemetry::config::Dial9Config;
 
 fn tmp_base_path() -> PathBuf {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -11,15 +11,22 @@ fn tmp_base_path() -> PathBuf {
 }
 
 fn test_config() -> Dial9Config {
-    Dial9ConfigBuilder::new(tmp_base_path(), 1024 * 1024, 4 * 1024 * 1024).build()
+    Dial9Config::builder()
+        .base_path(tmp_base_path())
+        .max_file_size(1024 * 1024)
+        .max_total_size(4 * 1024 * 1024)
+        .build()
+        .expect("config build failed")
 }
 
 fn disabled_config() -> Dial9Config {
-    Dial9ConfigBuilder::disabled()
+    Dial9Config::builder()
+        .enabled(false)
         .with_tokio(|t| {
             t.worker_threads(2);
         })
         .build()
+        .expect("config build failed")
 }
 
 #[dial9_tokio_telemetry::main(config = test_config)]
@@ -33,7 +40,12 @@ fn macro_runs_async_body() {
 }
 
 #[dial9_tokio_telemetry::main(config = || {
-    Dial9ConfigBuilder::new(tmp_base_path(), 1024 * 1024, 4 * 1024 * 1024).build()
+    Dial9Config::builder()
+        .base_path(tmp_base_path())
+        .max_file_size(1024 * 1024)
+        .max_total_size(4 * 1024 * 1024)
+        .build()
+        .expect("config build failed")
 })]
 async fn runs_with_inline_closure() {
     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -46,7 +58,12 @@ fn macro_runs_with_inline_closure() {
 
 #[dial9_tokio_telemetry::main(config = move || {
     let path = tmp_base_path();
-    Dial9ConfigBuilder::new(path, 1024 * 1024, 4 * 1024 * 1024).build()
+    Dial9Config::builder()
+        .base_path(path)
+        .max_file_size(1024 * 1024)
+        .max_total_size(4 * 1024 * 1024)
+        .build()
+        .expect("config build failed")
 })]
 async fn runs_with_move_closure() {
     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -149,7 +166,10 @@ fn macro_propagates_unwrap_panic() {
 // --- Disabled telemetry ---
 
 fn disabled_config_default() -> Dial9Config {
-    Dial9ConfigBuilder::disabled().build()
+    Dial9Config::builder()
+        .enabled(false)
+        .build()
+        .expect("config build failed")
 }
 
 #[dial9_tokio_telemetry::main(config = disabled_config)]

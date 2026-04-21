@@ -16,12 +16,12 @@ struct MainArgs {
 const MISSING_CONFIG_HELP: &str = "missing required `config` argument, e.g.\n  \
                            #[dial9_tokio_telemetry::main(config = my_config_fn)]\n\
                            or with an inline closure:\n  \
-                           #[dial9_tokio_telemetry::main(config = || Dial9ConfigBuilder::new(...).build())]";
+                           #[dial9_tokio_telemetry::main(config = || Dial9Config::builder().base_path(...).max_file_size(...).max_total_size(...).build().unwrap())]";
 
 const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a zero-argument function path or a zero-argument closure, e.g.\n  \
                            #[dial9_tokio_telemetry::main(config = my_config_fn)]\n\
                            or with an inline closure:\n  \
-                           #[dial9_tokio_telemetry::main(config = || Dial9ConfigBuilder::new(...).build())]";
+                           #[dial9_tokio_telemetry::main(config = || Dial9Config::builder().base_path(...).max_file_size(...).max_total_size(...).build().unwrap())]";
 impl Parse for MainArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if input.is_empty() {
@@ -131,20 +131,23 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// # Arguments
 ///
 /// * `config` — a zero-argument function path or a zero-argument closure
-///   returning [`Dial9Config`]. Build one with [`Dial9ConfigBuilder::new`]
-///   (telemetry enabled) or [`Dial9ConfigBuilder::disabled`] (plain tokio,
-///   no telemetry).
+///   returning [`Dial9Config`]. Build one with [`Dial9Config::builder()`].
+///   Use `.enabled(false)` on the builder to run without telemetry.
 ///
 /// # Examples
 ///
 /// Using a named function:
 ///
 /// ```rust,ignore
-/// use dial9_tokio_telemetry::{main, config::{Dial9Config, Dial9ConfigBuilder}, telemetry::TelemetryHandle};
+/// use dial9_tokio_telemetry::{main, config::Dial9Config, telemetry::TelemetryHandle};
 ///
 /// fn my_config() -> Dial9Config {
-///     Dial9ConfigBuilder::new("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024)
+///     Dial9Config::builder()
+///         .base_path("/tmp/trace.bin")
+///         .max_file_size(1024 * 1024)
+///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
+///         .expect("config build failed")
 /// }
 ///
 /// #[dial9_tokio_telemetry::main(config = my_config)]
@@ -161,7 +164,12 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// ```rust,ignore
 /// #[dial9_tokio_telemetry::main(config = || {
-///     Dial9ConfigBuilder::new("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024).build()
+///     Dial9Config::builder()
+///         .base_path("/tmp/trace.bin")
+///         .max_file_size(1024 * 1024)
+///         .max_total_size(16 * 1024 * 1024)
+///         .build()
+///         .expect("config build failed")
 /// })]
 /// async fn main() {
 ///     /* ... */

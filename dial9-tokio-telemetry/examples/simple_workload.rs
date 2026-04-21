@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use dial9_tokio_telemetry::config::Dial9ConfigBuilder;
+use dial9_tokio_telemetry::config::Dial9Config;
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
 async fn cpu_work(iterations: u64) -> u64 {
@@ -40,14 +40,14 @@ async fn mixed_task(id: usize) {
 }
 
 #[dial9_tokio_telemetry::main(config = || {
-    Dial9ConfigBuilder::new(
-        "simple_workload_trace.bin",
-        64 * 1024 * 1024,
-        256 * 1024 * 1024,
-    )
-    .with_tokio(|t| {t.worker_threads(4);})
-    .with_runtime(|r| r.with_task_tracking(true))
-    .build()
+    Dial9Config::builder()
+        .base_path("simple_workload_trace.bin")
+        .max_file_size(64 * 1024 * 1024)
+        .max_total_size(256 * 1024 * 1024)
+        .with_tokio(|t| { t.worker_threads(4); })
+        .with_runtime(|r| r.with_task_tracking(true))
+        .build()
+        .expect("config build failed")
 })]
 async fn main() {
     println!("Running workload...");

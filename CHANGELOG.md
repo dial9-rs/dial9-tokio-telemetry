@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- `Dial9Config` now has a single fluent builder entry point: `Dial9Config::builder()`. The previous `Dial9ConfigBuilder::new(path, file_size, total_size)` and `Dial9ConfigBuilder::disabled()` APIs have been removed. Required fields (`base_path`, `max_file_size`, `max_total_size`) are set via named setters; the disabled path is now `.enabled(false)` on the same builder. The final `.build()` returns `Result<Dial9Config, Dial9Error>` — missing required fields no longer compile-fail but surface as `Dial9Error::MissingFields`.
+- `Dial9Config::build()` now returns `Result<(Runtime, Option<TelemetryGuard>), Dial9Error>` instead of `std::io::Result<_>`. `Dial9Error::Io` wraps the underlying `io::Error` (via `From<io::Error>`).
+
+### Added
+
+- `Dial9Error` enum with `MissingFields(Vec<&'static str>)` and `Io(std::io::Error)` variants, implementing `std::error::Error` and `From<std::io::Error>`.
+- `Dial9Config::builder()` — a `bon`-generated fluent builder with stackable `with_tokio` / `with_runtime` closures and an `.enabled(bool)` toggle.
+
 ## [0.3.1](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.0...dial9-tokio-telemetry-v0.3.1) - 2026-04-19
 
 ### Added

@@ -1,17 +1,21 @@
 use std::time::Duration;
 
-use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
+use dial9_tokio_telemetry::config::Dial9Config;
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 fn my_config() -> Dial9Config {
-    Dial9ConfigBuilder::new("long_trace.bin", 64 * 1024 * 1024, 256 * 1024 * 1024)
+    Dial9Config::builder()
+        .base_path("long_trace.bin")
+        .max_file_size(64 * 1024 * 1024)
+        .max_total_size(256 * 1024 * 1024)
         .with_tokio(|t| {
             t.worker_threads(4);
         })
         .with_runtime(|r| r.with_task_tracking(true))
         .build()
+        .expect("config build failed")
 }
 
 async fn cpu_work(iterations: u64) -> u64 {
