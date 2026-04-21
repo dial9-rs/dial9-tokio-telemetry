@@ -1,0 +1,71 @@
+# Regenerate dial9-viewer/ui/demo-trace.bin with no host-side Rust/AWS/Java setup.
+#
+#   docker compose run --rm --build regenerate
+#   docker compose down        # tears down the DDB sidecar afterwards
+#
+# --privileged is needed because metrics-service enables `cpu-profiling` on
+# Linux, which calls perf_event_open.
+
+services:
+  dynamodb:
+    image: amazon/dynamodb-local
+    command: -jar DynamoDBLocal.jar -inMemory -sharedDb
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/ |
+            grep -qE '^(200|400|404)$$'",
+        ]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  regenerate:
+    build:
+      context: .
+      dockerfile_inline: |
+        # syntax=docker/dockerfile:1.7
+        FROM rust:1.94.1-bookworm AS chef
+        RUN cargo install cargo-chef --locked
+        WORKDIR /repo
+
+        FROM chef AS planner
+        COPY . .
+        RUN cargo chef prepare --recipe-path recipe.json
+
+        FROM chef AS builder
+        COPY --from=planner /repo/recipe.json recipe.json
+        RUN cargo chef cook --release -p metrics-service --recipe-path recipe.json
+        COPY . .
+        RUN cargo build --release -p metrics-service
+
+        FROM rust:1.94.1-bookworm AS runtime
+        RUN apt-get update && apt-get install -y --no-install-recommends \
+                ca-certificates git \
+            && rm -rf /var/lib/apt/lists/*
+        WORKDIR /repo
+        COPY --from=builder /repo /repo
+        # regenerate_demo_trace.sh uses `git rev-parse --show-toplevel`.
+        RUN git -C /repo init -q
+    depends_on:
+      dynamodb:
+        condition: service_healthy
+    privileged: true
+    environment:
+      AWS_ENDPOINT_URL: http://dynamodb:8000
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_PROFILE: local
+    volumes:
+      - ./dial9-viewer/ui:/out
+    working_dir: /repo
+    command:
+      - bash
+      - -euc
+      - |
+        sysctl -w kernel.perf_event_paranoid=1 kernel.kptr_restrict=0
+        scripts/regenerate_demo_trace.sh
+        install -m 0644 dial9-viewer/ui/demo-trace.bin /out/demo-trace.bin
+        echo "Wrote /out/demo-trace.bin ($(stat -c %s /out/demo-trace.bin) bytes)"

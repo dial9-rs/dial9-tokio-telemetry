@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Flamegraph</title>
+        <link rel="stylesheet" href="flamegraph.css" />
+        <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body {
+                background: #1a1a2e;
+                color: #e0e0e0;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                font-size: 14px;
+                display: flex;
+                flex-direction: column;
+                height: 100vh;
+                overflow: hidden;
+            }
+            .fg-page-header {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 6px 12px;
+                background: #16213e;
+                border-bottom: 1px solid #333;
+                font-size: 0.8em;
+                flex-shrink: 0;
+            }
+            .fg-page-header .fg-title { color: #6c63ff; font-weight: 600; }
+            .fg-page-header .fg-stats { color: #888; }
+
+            /* Main container */
+            #fg-container {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+
+            /* Loading */
+            #loading {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                flex: 1;
+                color: #888;
+                font-size: 1.1em;
+            }
+            #loading.hidden { display: none; }
+
+            /* Error */
+            #error {
+                display: none;
+                align-items: center;
+                justify-content: center;
+                flex: 1;
+                color: #ff6b6b;
+                font-size: 1em;
+                padding: 24px;
+                text-align: center;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="fg-page-header">
+            <span class="fg-title" id="fg-title">Flamegraph</span>
+            <span class="fg-stats" id="fg-stats"></span>
+        </div>
+        <div id="fg-container"></div>
+        <div id="loading">Loading trace&hellip;</div>
+        <div id="error"></div>
+
+        <script src="decode.js"></script>
+        <script src="trace_parser.js"></script>
+        <script src="trace_analysis.js"></script>
+        <script src="flamegraph.js"></script>
+        <script>
+            (async function () {
+                const params = new URLSearchParams(window.location.search);
+                const traceUrl = params.get("trace");
+                const startNs = params.get("start") != null ? Number(params.get("start")) : null;
+                const endNs = params.get("end") != null ? Number(params.get("end")) : null;
+
+                const loadingEl = document.getElementById("loading");
+                const errorEl = document.getElementById("error");
+                const containerEl = document.getElementById("fg-container");
+                const titleEl = document.getElementById("fg-title");
+                const statsEl = document.getElementById("fg-stats");
+
+                function showError(msg) {
+                    loadingEl.classList.add("hidden");
+                    errorEl.style.display = "flex";
+                    errorEl.textContent = msg;
+                }
+
+                if (!traceUrl) {
+                    showError("No trace URL provided. Use ?trace=<url>&start=<ns>&end=<ns>");
+                    return;
+                }
+
+                // Fetch trace
+                let buffer;
+                try {
+                    loadingEl.textContent = "Fetching trace\u2026";
+                    const resp = await fetch(traceUrl);
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    buffer = await resp.arrayBuffer();
+                } catch (err) {
+                    showError("Failed to fetch trace: " + err.message);
+                    return;
+                }
+
+                // Parse trace
+                let trace;
+                try {
+                    loadingEl.textContent = "Parsing trace\u2026";
+                    trace = await TraceParser.parseTrace(buffer);
+                } catch (err) {
+                    showError("Failed to parse trace: " + err.message);
+                    return;
+                }
+
+                // Process: build worker spans and attach CPU samples for spawnLoc
+                try {
+                    loadingEl.textContent = "Analyzing\u2026";
+                    const evts = trace.events;
+                    const wSet = new Set();
+                    const ET = TraceParser.EVENT_TYPES;
+                    evts.forEach((e) => {
+                        if (e.eventType !== ET.QueueSample && e.eventType !== ET.WakeEvent) wSet.add(e.workerId);
+                    });
+                    const workerIds = [...wSet].sort((a, b) => a - b);
+                    const maxTs = evts.length > 0 ? evts[evts.length - 1].timestamp : 0;
+                    const spanResult = TraceAnalysis.buildWorkerSpans(evts, workerIds, maxTs);
+                    if (trace.cpuSamples.length > 0) {
+                        TraceAnalysis.attachCpuSamples(trace.cpuSamples, spanResult.workerSpans);
+                    }
+                } catch (err) {
+                    // Non-fatal: spawnLoc just won't be available
+                    console.warn("Failed to attach spawn locations:", err);
+                }
+
+                // Filter to the selected time range, fall back to all samples if
+                // the URL timestamps don't align with the parsed trace.
+                let allSamples = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, startNs, endNs);
+                let timeRangeMatched = allSamples.length > 0;
+                if (!timeRangeMatched) {
+                    const unfiltered = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, null, null);
+                    if (unfiltered.length > 0 && (startNs != null || endNs != null)) {
+                        allSamples = unfiltered;
+                        console.warn("Time range filter matched 0 samples — showing all", unfiltered.length, "samples");
+                    } else {
+                        showError("No CPU samples found in the specified time range.");
+                        return;
+                    }
+                }
+
+                // Update title
+                const name = traceUrl.split("/").pop() || "trace";
+                const durMs = startNs != null && endNs != null
+                    ? ((endNs - startNs) / 1e6).toFixed(2)
+                    : null;
+                document.title = `Flamegraph \u2014 ${name}` + (durMs ? ` (${durMs}ms)` : "");
+                titleEl.textContent = "Flamegraph";
+                statsEl.textContent =
+                    `${allSamples.length} samples` +
+                    (durMs ? ` \u00b7 ${durMs}ms selected` : "") +
+                    (timeRangeMatched ? "" : " (full trace \u2014 selected region could not be reproduced)");
+
+                loadingEl.classList.add("hidden");
+                containerEl.style.display = "flex";
+
+                function updateUrlZoom() {
+                    const p = new URLSearchParams(window.location.search);
+                    const z = fg.getZoomPath();
+                    if (z.worker.length > 0) p.set("worker-zoom", z.worker.join("\t"));
+                    else p.delete("worker-zoom");
+                    if (z.offworker.length > 0) p.set("offworker-zoom", z.offworker.join("\t"));
+                    else p.delete("offworker-zoom");
+                    const newUrl = window.location.pathname + "?" + p.toString();
+                    window.history.replaceState(null, "", newUrl);
+                }
+
+                const fg = FlamegraphRenderer.createFlamegraph(containerEl, updateUrlZoom);
+                fg.setData(allSamples, trace.callframeSymbols);
+
+                // Restore zoom from URL (only if time range filter succeeded, otherwise tree differs)
+                if (timeRangeMatched) {
+                    const wz = params.get("worker-zoom");
+                    const oz = params.get("offworker-zoom");
+                    if (wz) fg.zoomToPath("worker", wz.split("\t"));
+                    if (oz) fg.zoomToPath("offworker", oz.split("\t"));
+                }
+
+                // Responsive resize
+                window.addEventListener("resize", () => fg.resize());
+
+                // Escape key
+                window.addEventListener("keydown", (e) => {
+                    if (e.key === "Escape") {
+                        fg.handleEscape();
+                    }
+                });
+            })();
+        </script>
+    </body>
+</html>

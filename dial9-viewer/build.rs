@@ -19,7 +19,7 @@ fn main() {
     println!("cargo::rerun-if-changed=toolkit");
     println!("cargo::rerun-if-changed=skills");
     println!("cargo::rerun-if-changed=ui");
-    println!("cargo::rerun-if-changed=../dial9-tokio-telemetry/README.md");
+    println!("cargo::rerun-if-changed=README_TELEMETRY.md");
 
     generate_toolkit(&manifest_dir, &out_dir);
     generate_setup_from_readme(&manifest_dir, &out_dir);
@@ -137,7 +137,7 @@ const SETUP_SECTIONS: &[&str] = &[
 /// skills directory. This keeps the README as the single source of truth for
 /// instrumentation docs.
 fn generate_setup_from_readme(manifest_dir: &str, out_dir: &str) {
-    let readme_path = Path::new(manifest_dir).join("../dial9-tokio-telemetry/README.md");
+    let readme_path = Path::new(manifest_dir).join("README_TELEMETRY.md");
     let readme = fs::read_to_string(&readme_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", readme_path.display()));
 
