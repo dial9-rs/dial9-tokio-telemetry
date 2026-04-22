@@ -4,6 +4,7 @@
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>Tokio Trace Viewer</title>
+        <link rel="stylesheet" href="flamegraph.css" />
         <style>
             * {
                 margin: 0;
@@ -346,30 +347,10 @@
             }
             #flamegraph-panel .fg-header .fg-title { color: #6c63ff; font-weight: 600; }
             #flamegraph-panel .fg-header .fg-stats { color: #888; }
+            #flamegraph-panel .fg-header .fg-popout { cursor: pointer; color: #888; padding: 0 4px; }
+            #flamegraph-panel .fg-header .fg-popout:hover { color: #fff; }
             #flamegraph-panel .fg-header .fg-close { cursor: pointer; color: #888; margin-left: auto; padding: 0 4px; }
             #flamegraph-panel .fg-header .fg-close:hover { color: #fff; }
-            .fg-section-label {
-                padding: 4px 12px;
-                font-size: 0.78em;
-                color: #aaa;
-                background: #16213e;
-                border-bottom: 1px solid #222;
-                flex-shrink: 0;
-            }
-            #fg-tooltip {
-                display: none;
-                position: fixed;
-                background: #222244;
-                border: 1px solid #555;
-                padding: 6px 10px;
-                border-radius: 4px;
-                font-size: 0.78em;
-                pointer-events: none;
-                z-index: 200;
-                max-width: 600px;
-                white-space: nowrap;
-                color: #e0e0e0;
-            }
             @keyframes toast-in {
                 from { opacity: 0; transform: translateY(-8px); }
                 to { opacity: 1; transform: translateY(0); }
@@ -536,15 +517,10 @@
                     <div class="fg-header">
                         <span class="fg-title" id="fg-title">Flamegraph</span>
                         <span class="fg-stats" id="fg-stats"></span>
-                        <select id="fg-spawn-filter" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em;max-width:350px"></select>
-                        <span class="fg-close" id="fg-close" tabindex="0" role="button">✕ Close (Esc)</span>
+                        <span class="fg-popout" id="fg-popout" tabindex="0" role="button" title="Open in new tab">&#8599; Pop Out</span>
+                        <span class="fg-close" id="fg-close" tabindex="0" role="button">&#10005; Close (Esc)</span>
                     </div>
-                    <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column">
-                        <div class="fg-section-label" id="fg-worker-label">Worker threads</div>
-                        <canvas id="fg-canvas-worker"></canvas>
-                        <div class="fg-section-label" id="fg-offworker-label">Off-worker (sampler thread)</div>
-                        <canvas id="fg-canvas-offworker"></canvas>
-                    </div>
+                    <div id="fg-container" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>
                 </div>
                 <div id="sched-panel" style="display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:#1a1a2e;z-index:50;flex-direction:column">
                     <div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16213e;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0">
@@ -563,7 +539,6 @@
         </div>
 
         <div id="tooltip"></div>
-        <div id="fg-tooltip"></div>
         <div id="stack-popup" style="display:none;position:fixed;background:#1a1a2e;border:1px solid #6c63ff;border-radius:8px;padding:12px 16px;z-index:200;max-width:800px;max-height:600px;overflow-y:auto;font-size:0.8em;line-height:1.6;box-shadow:0 4px 20px rgba(0,0,0,0.5)">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
                 <span id="stack-popup-title" style="color:#6c63ff;font-weight:600"></span>
@@ -600,9 +575,10 @@
         <script src="trace_parser.js"></script>
         <script src="trace_analysis.js"></script>
         <script src="format.js"></script>
+        <script src="flamegraph.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildFlamegraphTree, flattenFlamegraph, buildFgData, buildSpanData } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -3317,8 +3293,10 @@
                         if (document.getElementById("sched-panel").style.display === "flex") {
                             document.getElementById("sched-panel").style.display = "none";
                         } else if (document.getElementById("flamegraph-panel").style.display === "flex") {
-                            document.getElementById("flamegraph-panel").style.display = "none";
-                            document.getElementById("fg-tooltip").style.display = "none";
+                            // Let the flamegraph module handle Escape first (search clear / zoom reset)
+                            if (!fgInstance.handleEscape()) {
+                                document.getElementById("flamegraph-panel").style.display = "none";
+                            }
                         }
                         selectedTaskId = null;
                         document.getElementById("main-area").focus();
@@ -3641,15 +3619,10 @@
             })();
 
             // ── Flamegraph ──
-            let fgWorkerData = null;    // {nodes, maxDepth, totalSamples}
-            let fgOffworkerData = null; // same shape, for worker 255
-            const FG_ROW_H = 18;
-            // Per-canvas hit regions
-            let fgHitRegions = { worker: [], offworker: [] };
-            // Raw samples for current flamegraph (for re-filtering)
-            let fgAllSamples = [];
-
-            // buildFlamegraphTree, flattenFlamegraph, buildFgData imported from TraceParser
+            let fgSelStart = 0, fgSelEnd = 0;
+            const fgInstance = FlamegraphRenderer.createFlamegraph(
+                document.getElementById("fg-container")
+            );
 
             // Selection picker: shown after shift+drag when both flamegraph and sched data exist
             function showSelectionPicker(selStart, selEnd) {
@@ -3684,176 +3657,50 @@
             }
 
             function showFlamegraph(selStart, selEnd) {
-                const allSamples = trace.cpuSamples.filter(s =>
-                    s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
-                );
-                if (!allSamples.length) {
+                const samples = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, selStart, selEnd);
+                if (!samples.length) {
                     showToast("no-cpu-samples-region", "No CPU samples in selected region", "error", 4000);
                     return;
                 }
 
-                fgAllSamples = allSamples;
+                fgSelStart = selStart;
+                fgSelEnd = selEnd;
                 const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
                 document.getElementById("fg-title").textContent = "Flamegraph";
                 document.getElementById("fg-stats").textContent =
-                    `${allSamples.length} samples · ${durMs}ms selected`;
-
-                // Build spawn location dropdown
-                const locCounts = new Map(); // spawnLoc → count
-                for (const s of allSamples) {
-                    const loc = s.spawnLoc || "(unknown)";
-                    locCounts.set(loc, (locCounts.get(loc) || 0) + 1);
-                }
-                const sel = document.getElementById("fg-spawn-filter");
-                sel.innerHTML = `<option value="">All tasks (${allSamples.length} samples)</option>`;
-                // Sort by count descending
-                const sorted = [...locCounts.entries()].sort((a, b) => b[1] - a[1]);
-                for (const [loc, count] of sorted) {
-                    const short = loc.replace(/.*\//, '');
-                    const opt = document.createElement("option");
-                    opt.value = loc;
-                    opt.textContent = `${short} (${count})`;
-                    opt.title = loc;
-                    sel.appendChild(opt);
-                }
+                    `${samples.length} samples \u00b7 ${durMs}ms selected`;
 
                 clearToasts();
                 document.getElementById("flamegraph-panel").style.display = "flex";
                 document.getElementById("fg-close").focus();
-                applyFgFilter();
+                fgInstance.setData(samples, trace.callframeSymbols);
             }
-
-            function applyFgFilter() {
-                const filterVal = document.getElementById("fg-spawn-filter").value;
-                const samples = filterVal
-                    ? fgAllSamples.filter(s => (s.spawnLoc || "(unknown)") === filterVal)
-                    : fgAllSamples;
-
-                const workerSamples = samples.filter(s => s.workerId !== 255);
-                const offworkerSamples = samples.filter(s => s.workerId === 255);
-
-                fgWorkerData = buildFgData(workerSamples, trace.callframeSymbols);
-                fgOffworkerData = buildFgData(offworkerSamples, trace.callframeSymbols);
-
-                document.getElementById("fg-worker-label").textContent =
-                    `Worker threads — ${workerSamples.length} samples`;
-                document.getElementById("fg-worker-label").style.display = fgWorkerData ? "" : "none";
-                document.getElementById("fg-canvas-worker").style.display = fgWorkerData ? "" : "none";
-
-                const offLabel = document.getElementById("fg-offworker-label");
-                offLabel.textContent =
-                    `Off-worker (sampler thread) — ${offworkerSamples.length} samples`;
-                offLabel.style.display = fgOffworkerData ? "" : "none";
-                document.getElementById("fg-canvas-offworker").style.display = fgOffworkerData ? "" : "none";
-
-                renderFlamegraph();
-            }
-
-            document.getElementById("fg-spawn-filter").addEventListener("change", applyFgFilter);
-
-            function flamegraphColor(name) {
-                let h = 0;
-                for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
-                const hue = 10 + (Math.abs(h) % 40);
-                const sat = 60 + (Math.abs(h >> 8) % 30);
-                const lit = 40 + (Math.abs(h >> 16) % 15);
-                return `hsl(${hue},${sat}%,${lit}%)`;
-            }
-
-            function renderFgCanvas(canvasId, data, hitKey) {
-                const c = document.getElementById(canvasId);
-                if (!data) { c.width = 0; c.height = 0; fgHitRegions[hitKey] = []; return; }
-                const dpr = devicePixelRatio || 1;
-                const pw = c.parentElement.clientWidth;
-                const ph = (data.maxDepth + 2) * FG_ROW_H + 8;
-                c.width = pw * dpr;
-                c.height = ph * dpr;
-                c.style.width = pw + "px";
-                c.style.height = ph + "px";
-                const ctx = c.getContext("2d");
-                ctx.scale(dpr, dpr);
-                ctx.fillStyle = "#1a1a2e";
-                ctx.fillRect(0, 0, pw, ph);
-
-                const regions = [];
-                const padL = 4, padR = 4, drawW = pw - padL - padR;
-                const baseY = ph - 4;
-                ctx.font = "11px monospace";
-                ctx.textBaseline = "middle";
-                for (const node of data.nodes) {
-                    const x = padL + node.x * drawW;
-                    const w = node.w * drawW;
-                    const y = baseY - (node.depth + 1) * FG_ROW_H;
-                    if (w < 0.5) continue;
-                    ctx.fillStyle = flamegraphColor(node.name);
-                    ctx.fillRect(x, y, Math.max(w - 0.5, 0.5), FG_ROW_H - 1);
-                    regions.push({ x1: x, x2: x + w, y, node, totalSamples: data.totalSamples });
-                    if (w > 30) {
-                        ctx.fillStyle = "#fff";
-                        const label = node.name.length * 7 > w - 4
-                            ? node.name.slice(0, Math.floor((w - 10) / 7)) + "…"
-                            : node.name;
-                        ctx.save();
-                        ctx.beginPath();
-                        ctx.rect(x + 2, y, w - 4, FG_ROW_H);
-                        ctx.clip();
-                        ctx.fillText(label, x + 3, y + FG_ROW_H / 2);
-                        ctx.restore();
-                    }
-                }
-                fgHitRegions[hitKey] = regions;
-            }
-
-            function renderFlamegraph() {
-                renderFgCanvas("fg-canvas-worker", fgWorkerData, "worker");
-                renderFgCanvas("fg-canvas-offworker", fgOffworkerData, "offworker");
-            }
-
-            // Flamegraph tooltip — shared handler for both canvases
-            function fgCanvasMouseMove(e, hitKey) {
-                const c = e.target;
-                const rect = c.getBoundingClientRect();
-                const mx = e.clientX - rect.left;
-                const my = e.clientY - rect.top;
-                const tip = document.getElementById("fg-tooltip");
-                const regions = fgHitRegions[hitKey] || [];
-                let hit = null;
-                for (let i = regions.length - 1; i >= 0; i--) {
-                    const r = regions[i];
-                    if (mx >= r.x1 && mx <= r.x2 && my >= r.y && my < r.y + FG_ROW_H) {
-                        hit = r;
-                        break;
-                    }
-                }
-                if (hit) {
-                    const total = hit.totalSamples;
-                    const pct = ((hit.node.count / total) * 100).toFixed(1);
-                    const selfPct = ((hit.node.self / total) * 100).toFixed(1);
-                    const nameElt = document.createElement('b');
-                    nameElt.innerText = hit.node.name;
-                    tip.innerHTML = `${nameElt.outerHTML}<br>${hit.node.count} samples (${pct}%) · ${hit.node.self} self (${selfPct}%)`;
-                    tip.style.display = "block";
-                    tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 620) + "px";
-                    tip.style.top = (e.clientY - 50) + "px";
-                    c.style.cursor = "pointer";
-                } else {
-                    tip.style.display = "none";
-                    c.style.cursor = "";
-                }
-            }
-
-            document.getElementById("fg-canvas-worker").addEventListener("mousemove", (e) => fgCanvasMouseMove(e, "worker"));
-            document.getElementById("fg-canvas-offworker").addEventListener("mousemove", (e) => fgCanvasMouseMove(e, "offworker"));
-            document.getElementById("fg-canvas-worker").addEventListener("mouseleave", () => {
-                document.getElementById("fg-tooltip").style.display = "none";
-            });
-            document.getElementById("fg-canvas-offworker").addEventListener("mouseleave", () => {
-                document.getElementById("fg-tooltip").style.display = "none";
-            });
 
             document.getElementById("fg-close").addEventListener("click", () => {
                 document.getElementById("flamegraph-panel").style.display = "none";
-                document.getElementById("fg-tooltip").style.display = "none";
+            });
+
+            document.getElementById("fg-popout").addEventListener("click", () => {
+                const params = new URLSearchParams(window.location.search);
+                let traceUrl = params.get("trace");
+                let isBlobUrl = false;
+                if (!traceUrl && currentTraceBuffer) {
+                    const blob = new Blob([currentTraceBuffer]);
+                    traceUrl = URL.createObjectURL(blob);
+                    isBlobUrl = true;
+                }
+                if (!traceUrl) {
+                    showToast("popout-no-url", "Pop-out requires a loaded trace", "error", 3000);
+                    return;
+                }
+                let url = `flamegraph.html?trace=${encodeURIComponent(traceUrl)}&start=${Math.round(fgSelStart)}&end=${Math.round(fgSelEnd)}`;
+                const z = fgInstance.getZoomPath();
+                if (z.worker.length > 0) url += `&worker-zoom=${encodeURIComponent(z.worker.join("\t"))}`;
+                if (z.offworker.length > 0) url += `&offworker-zoom=${encodeURIComponent(z.offworker.join("\t"))}`;
+                window.open(url, "_blank");
+                if (isBlobUrl) {
+                    showToast("popout-blob", "Pop-out linked to this tab \u2014 keep it open", "info", 5000);
+                }
             });
 
             // ── Queue chart drag-select: show tasks spawned in time range ──
@@ -3985,7 +3832,7 @@
             // Re-render flamegraph on resize
             window.addEventListener("resize", () => {
                 if (document.getElementById("flamegraph-panel").style.display === "flex") {
-                    renderFlamegraph();
+                    fgInstance.resize();
                 }
             });
         </script>

@@ -4,10 +4,6 @@ inputs:
     toolchain:
         required: true
         description: "the Rust toolchain to use"
-    shared-key:
-        required: false
-        description: "shared cache key for Swatinem/rust-cache"
-        default: ""
     save-if:
         required: false
         description: "whether to save the cache (e.g. only on main)"
@@ -21,7 +17,6 @@ runs:
               toolchain: ${{ inputs.toolchain }}
         - uses: Swatinem/rust-cache@v2
           with:
-              shared-key: ${{ inputs.shared-key }}
               save-if: ${{ inputs.save-if }}
         - name: Enable perf_event_open and kallsyms for tests
           if: runner.os == 'Linux'

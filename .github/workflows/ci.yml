@@ -22,7 +22,6 @@ jobs:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: nightly-ubuntu
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
 
@@ -37,7 +36,6 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: stable-ubuntu
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run clippy check
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -63,7 +61,6 @@ jobs:
       - uses: ./.github/actions/rust-build
         with:
           toolchain: ${{ matrix.toolchain }}
-          shared-key: ${{ matrix.toolchain }}-${{ matrix.os }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
   check-docs:
@@ -82,7 +79,6 @@ jobs:
           components: rust-docs
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: nightly-ubuntu
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get update && sudo apt-get install -y jq
       - run: cargo install cargo-docs-rs
@@ -103,7 +99,6 @@ jobs:
           toolchain: ${{ env.STABLE_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: stable-ubuntu
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
@@ -187,7 +182,6 @@ jobs:
           toolchain: ${{ env.STABLE_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: stable-ubuntu
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Verify all publishable crates package cleanly
         env:
