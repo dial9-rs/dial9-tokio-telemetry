@@ -135,12 +135,12 @@ jobs:
         run: |
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
           cargo test -p dial9-perf-self-profile --lib --all-features \
-            -Z build-std --target x86_64-unknown-linux-gnu \
-            -- --skip sys::linux::symbolize::tests::resolve_kernel_symbol_returns_name
+            -Z build-std --target x86_64-unknown-linux-gnu
       - name: Restrict perf_event_open to force ctimer path
         run: sudo sysctl kernel.perf_event_paranoid=3
       - name: Run perf-self-profile tests under ASAN (ctimer path)
         # paranoid=3 blocks perf_event_open
+        # With paranoid=3, /proc/kallsyms shows zero kernel addresses on this runner
         run: |
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
           cargo test -p dial9-perf-self-profile --lib --all-features \
@@ -160,9 +160,13 @@ jobs:
           toolchain: ${{ env.STABLE_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - name: Restrict perf_event_open (simulate ECS/Fargate)
-        # paranoid=3 blocks perf_event_open
+        # paranoid=3 blocks perf_event_open to trigger the ctimer fallback path
         run: sudo sysctl kernel.perf_event_paranoid=3
       - name: Run perf-self-profile tests (auto-fallback path)
+        # With paranoid=3, /proc/kallsyms also shows zero kernel addresses on this runner 
+        # (exact mechanism is kernel/distro specific), so resolve_kernel_symbol_returns_name fails. 
+        # Kernel symbolization is also irrelevant to this path: frame-pointer unwinding only captures
+        # userspace addresses.
         run: |
           cargo test -p dial9-perf-self-profile --lib --all-features \
             -- --skip sys::linux::symbolize::tests::resolve_kernel_symbol_returns_name
