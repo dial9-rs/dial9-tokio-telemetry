@@ -220,7 +220,7 @@ impl StorageBackend for LocalBackend {
             let prefix2 = prefix.clone();
             tokio::task::spawn_blocking(move || {
                 let mut objects = Vec::new();
-                collect_files(&root, &root, &prefix2, &mut objects)?;
+                collect_files(&root, &root, &prefix2, &mut objects, 0)?;
                 objects.sort_by(|a, b| a.key.cmp(&b.key));
                 Ok(objects)
             })
@@ -313,18 +313,37 @@ impl StorageBackend for LocalBackend {
     }
 }
 
+/// Maximum directory depth to recurse into when listing local files.
+const MAX_COLLECT_DEPTH: u32 = 10;
+
+/// Maximum number of files to return from a local directory listing.
+const MAX_COLLECT_FILES: usize = 5000;
+
+/// Directory names to skip during recursive file collection.
+fn is_skipped_dir(name: &str) -> bool {
+    name.starts_with('.') || matches!(name, "target" | "node_modules")
+}
+
 fn collect_files(
     root: &Path,
     dir: &Path,
     prefix: &str,
     out: &mut Vec<ObjectInfo>,
+    depth: u32,
 ) -> Result<(), StorageError> {
+    if depth > MAX_COLLECT_DEPTH || out.len() >= MAX_COLLECT_FILES {
+        return Ok(());
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
         Err(e) => return Err(StorageError::Other(e.to_string())),
     };
     for entry in entries {
+        if out.len() >= MAX_COLLECT_FILES {
+            break;
+        }
         let entry = entry.map_err(|e| StorageError::Other(e.to_string()))?;
         let path = entry.path();
         // Resolve symlinks and verify the target stays within root.
@@ -333,7 +352,11 @@ fn collect_files(
             _ => continue,
         };
         if canonical.is_dir() {
-            collect_files(root, &canonical, prefix, out)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !is_skipped_dir(&name) {
+                collect_files(root, &canonical, prefix, out, depth + 1)?;
+            }
         } else if canonical.is_file() {
             let key = path
                 .strip_prefix(root)
