@@ -162,10 +162,12 @@ impl PerfSampler {
         self.inner.drain_samples()
     }
 
+    /// Pause collection. Reversible via `enable`.
     pub fn disable(&self) {
         self.inner.disable()
     }
 
+    /// Resume collection after `disable`.
     pub fn enable(&self) {
         self.inner.enable()
     }

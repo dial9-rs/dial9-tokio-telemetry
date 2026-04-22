@@ -20,7 +20,11 @@
 //! 2. Each thread that wants to be profiled calls `register_thread()` from
 //!    its own context. This creates the per-thread timer and arms it.
 //! 3. On thread exit, call `unregister_thread()` to delete the timer.
-//! 4. Call `stop()` to disable sampling globally.
+//! 4. Pause/resume: `disable()` clears RUNNING but leaves timers armed, so
+//!    `enable()` can re-enable sampling.
+//! 5. Teardown: `disable_permanent()` (called from `CtimerSampler::drop`) sets
+//!    a permanent-stop flag, each thread's next SIGPROF self-disarms its
+//!    timer.
 
 use std::cell::Cell;
 use std::io;
@@ -31,7 +35,10 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use crate::sys::linux::gettid;
 
 static INTERVAL_NS: AtomicI64 = AtomicI64::new(0);
+/// Whether sampling is currently enabled. Toggled by `disable`/`enable`.
 static RUNNING: AtomicBool = AtomicBool::new(false);
+/// One-way flag to tell the signal handler to self-disarm each thread's timer.
+static PERMANENTLY_STOPPED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static THREAD_TIMER: Cell<Option<libc::timer_t>> = const { Cell::new(None) };
@@ -70,23 +77,36 @@ pub unsafe fn start(
     }
 
     INTERVAL_NS.store(interval_ns, Ordering::Release);
+    PERMANENTLY_STOPPED.store(false, Ordering::Release);
     RUNNING.store(true, Ordering::Release);
     Ok(())
 }
 
-/// Disable sampling process-wide. Per-thread timers keep firing but
-/// the signal handler drops samples while RUNNING is false.
-pub fn stop() {
+/// Disable sampling process-wide. Reversible via `enable`. Per-thread timers
+/// stay armed and keep firing SIGPROF, but the handler no-ops while paused.
+pub fn disable() {
     RUNNING.store(false, Ordering::Release);
 }
 
-/// Re-enable sampling process-wide after `stop()`.
-pub fn resume() {
+/// Re-enable sampling after `disable`.
+pub fn enable() {
     RUNNING.store(true, Ordering::Release);
+}
+
+/// Permanently disable sampling. Sets both flags so the handler self-disarms
+/// each thread's timer on its next tick. Not reversible; a subsequent `start`
+/// is required to sample again.
+pub fn disable_permanent() {
+    PERMANENTLY_STOPPED.store(true, Ordering::Release);
+    RUNNING.store(false, Ordering::Release);
 }
 
 pub fn is_running() -> bool {
     RUNNING.load(Ordering::Acquire)
+}
+
+pub fn is_permanently_stopped() -> bool {
+    PERMANENTLY_STOPPED.load(Ordering::Acquire)
 }
 
 pub fn interval_ns() -> i64 {

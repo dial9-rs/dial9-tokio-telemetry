@@ -120,17 +120,17 @@ impl SamplerBackend for CtimerSampler {
     }
 
     fn disable(&self) {
-        ctimer::stop();
+        ctimer::disable();
     }
 
     fn enable(&self) {
-        ctimer::resume();
+        ctimer::enable();
     }
 }
 
 impl Drop for CtimerSampler {
     fn drop(&mut self) {
-        ctimer::stop();
+        ctimer::disable_permanent();
         CTIMER_ACTIVE.store(false, Ordering::Release);
     }
 }
@@ -142,6 +142,18 @@ extern "C" fn sigprof_handler(
     ucontext: *mut libc::c_void,
 ) {
     if !ctimer::is_running() {
+        if ctimer::is_permanently_stopped()
+            && let Some(t) = ctimer::current_thread_timer_id()
+        {
+            // Self-disarm so the timer doesn't keep firing for the rest of the
+            // thread's lifetime. timer_settime is async-signal-safe.
+            // SAFETY: `t` is this thread's own live timer_t, zero itimerspec
+            // is valid and disarms without deleting.
+            unsafe {
+                let zero: libc::itimerspec = mem::zeroed();
+                libc::timer_settime(t, 0, &zero, ptr::null_mut());
+            }
+        }
         return;
     }
 

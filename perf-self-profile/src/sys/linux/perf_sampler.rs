@@ -368,7 +368,8 @@ impl super::sampler::SamplerBackend for PerfSamplerImpl {
         samples
     }
 
-    /// Pause collection without tearing down rings.
+    /// Pause collection. Ring buffers remain mapped and pending samples can
+    /// still be drained. Reversible via `enable`.
     fn disable(&self) {
         for ev in &self.events {
             unsafe { perf_event_open_sys::ioctls::DISABLE(ev.fd, 0) };
