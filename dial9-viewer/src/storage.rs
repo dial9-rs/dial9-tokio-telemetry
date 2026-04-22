@@ -317,7 +317,7 @@ impl StorageBackend for LocalBackend {
 const MAX_COLLECT_DEPTH: u32 = 10;
 
 /// Maximum number of files to return from a local directory listing.
-const MAX_COLLECT_FILES: usize = 5000;
+const MAX_COLLECT_FILES: usize = 50;
 
 /// Directory names to skip during recursive file collection.
 fn is_skipped_dir(name: &str) -> bool {
