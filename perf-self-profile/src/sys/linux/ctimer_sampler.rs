@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::fp_profiler::{
     self, ctimer, sample_buffer,
-    unwind::{self, Frame, MAX_FRAMES},
+    unwind::{self, MAX_FRAMES},
 };
 use super::gettid;
 use super::sampler::SamplerBackend;
@@ -191,16 +191,9 @@ extern "C" fn sigprof_handler(
 
         slot.write(pid, tid, time, cpu, period);
 
-        // Walk the frame-pointer chain.
-        let mut frames = [Frame { pc: 0 }; MAX_FRAMES];
-        let count = unwind::unwind_from_ucontext(ucontext, &mut frames);
-
-        // Convert Frame PCs to u64 array for the slot.
-        let mut frame_pcs = [0u64; MAX_FRAMES];
-        for i in 0..count {
-            frame_pcs[i] = frames[i].pc as u64;
-        }
-        slot.write_frames(&frame_pcs, count as u32);
+        // Unwind into the slot's frame buffer
+        let count = unwind::unwind_from_ucontext(ucontext, slot.frames_mut());
+        slot.set_num_frames(count as u32);
 
         slot.commit();
     }

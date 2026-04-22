@@ -196,22 +196,20 @@ impl SlotWriter {
         }
     }
 
-    /// Caller should pass a `count` not greater than `frames.len()`.
+    /// Mutable borrow of the slot's frame buffer. Pair with [`set_num_frames`]
+    /// to record how many entries are valid.
     #[inline]
-    pub(crate) unsafe fn write_frames(&mut self, frames: &[u64], count: u32) {
-        debug_assert!(
-            (count as usize) <= frames.len(),
-            "write_frames count exceeds source slice length"
-        );
-        let copy_len = (count as usize).min(MAX_FRAMES).min(frames.len());
-        // SAFETY: exclusive slot access as in `write`, copy_len <= MAX_FRAMES so the
-        // write stays within slot.frames, and copy_len <= frames.len() so the read
-        // stays within the source slice.
+    pub(crate) unsafe fn frames_mut(&mut self) -> &mut [u64; MAX_FRAMES] {
+        // SAFETY: exclusive slot access via the `tail` CAS in `claim_slot`.
+        unsafe { &mut (*(*self.slot).data.get()).frames }
+    }
+
+    /// Record valid frame count written via [`frames_mut`]. Caps at `MAX_FRAMES`.
+    #[inline]
+    pub(crate) unsafe fn set_num_frames(&mut self, count: u32) {
+        // SAFETY: exclusive slot access as in `frames_mut`.
         unsafe {
-            let data = (*self.slot).data.get();
-            (*data).num_frames = copy_len as u32;
-            let dst = std::ptr::addr_of_mut!((*data).frames) as *mut u64;
-            core::ptr::copy_nonoverlapping(frames.as_ptr(), dst, copy_len);
+            (*(*self.slot).data.get()).num_frames = count.min(MAX_FRAMES as u32);
         }
     }
 
@@ -337,6 +335,16 @@ mod tests {
         TEST_LOCK.lock().expect("test lock poisoned")
     }
 
+    /// Copy a slice into the slot and set `num_frames`.
+    unsafe fn write_frames(slot: &mut SlotWriter, frames: &[u64], count: u32) {
+        // SAFETY: delegates to `frames_mut` + `set_num_frames`.
+        unsafe {
+            let copy_len = (count as usize).min(frames.len()).min(MAX_FRAMES);
+            slot.frames_mut()[..copy_len].copy_from_slice(&frames[..copy_len]);
+            slot.set_num_frames(copy_len as u32);
+        }
+    }
+
     #[test]
     fn round_trip_single_sample() {
         let _guard = test_guard();
@@ -346,7 +354,7 @@ mod tests {
             let mut slot = claim_slot().expect("should claim slot");
             slot.write(1000, 42, 999_000_000, 3, 10_000_000);
             let frames = [0x1234u64, 0x5678, 0x9abc];
-            slot.write_frames(&frames, 3);
+            write_frames(&mut slot, &frames, 3);
             slot.commit();
         }
 
@@ -376,21 +384,21 @@ mod tests {
         unsafe {
             let mut slot = claim_slot().unwrap();
             slot.write(1, 1, 100, 0, 0);
-            slot.write_frames(&[0xAA], 1);
+            write_frames(&mut slot, &[0xAA], 1);
             slot.commit();
         }
 
         unsafe {
             let mut slot = claim_slot().unwrap();
             slot.write(2, 2, 200, 0, 0);
-            slot.write_frames(&[0xBB], 1);
+            write_frames(&mut slot, &[0xBB], 1);
             drop(slot);
         }
 
         unsafe {
             let mut slot = claim_slot().unwrap();
             slot.write(3, 3, 300, 0, 0);
-            slot.write_frames(&[0xCC], 1);
+            write_frames(&mut slot, &[0xCC], 1);
             slot.commit();
         }
 
@@ -442,20 +450,20 @@ mod tests {
             // Slot 0: committed.
             let mut s0 = claim_slot().unwrap();
             s0.write(10, 10, 10, 0, 1);
-            s0.write_frames(&[0x10], 1);
+            write_frames(&mut s0, &[0x10], 1);
             s0.commit();
 
             // Slot 1: left uncommitted to block ordered drain.
             let mut s1 = claim_slot().unwrap();
             s1.write(20, 20, 20, 0, 1);
-            s1.write_frames(&[0x20], 1);
+            write_frames(&mut s1, &[0x20], 1);
             blocked_writer = s1;
 
             // Slot 2: committed, but should not be drained yet because slot 1
             // is not ready.
             let mut s2 = claim_slot().unwrap();
             s2.write(30, 30, 30, 0, 1);
-            s2.write_frames(&[0x30], 1);
+            write_frames(&mut s2, &[0x30], 1);
             s2.commit();
         }
 
@@ -480,7 +488,7 @@ mod tests {
             unsafe {
                 let mut s = claim_slot().expect("should claim during fill");
                 s.write(i as u32, 0, 0, 0, 1);
-                s.write_frames(&[], 0);
+                write_frames(&mut s, &[], 0);
                 s.commit();
             }
         }
@@ -502,7 +510,7 @@ mod tests {
             unsafe {
                 let mut s = claim_slot().expect("should claim after drain");
                 s.write(10000 + i, 0, 0, 0, 1);
-                s.write_frames(&[], 0);
+                write_frames(&mut s, &[], 0);
                 s.commit();
             }
         }
@@ -540,7 +548,7 @@ mod tests {
                         unsafe {
                             if let Some(mut s) = claim_slot() {
                                 s.write(pid as u32, i as u32, 0, 0, 1);
-                                s.write_frames(&[], 0);
+                                write_frames(&mut s, &[], 0);
                                 s.commit();
                                 claimed.fetch_add(1, Ordering::Relaxed);
                             }
@@ -603,12 +611,12 @@ mod tests {
         unsafe {
             let mut a = claim_slot().unwrap();
             a.write(111, 1, 1, 0, 1);
-            a.write_frames(&[0xAA], 1);
+            write_frames(&mut a, &[0xAA], 1);
             a.commit();
 
             let mut b = claim_slot().unwrap();
             b.write(222, 2, 2, 0, 1);
-            b.write_frames(&[0xBB], 1);
+            write_frames(&mut b, &[0xBB], 1);
             b.commit();
         }
 

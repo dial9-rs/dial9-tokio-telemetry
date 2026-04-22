@@ -30,11 +30,6 @@ const DEAD_ZONE: usize = 0x1000;
 /// Rejects wild pointers that happen to be above fp but aren't real frames.
 const MAX_FRAME_SIZE: usize = 0x40000;
 
-#[derive(Copy, Clone, Debug)]
-pub struct Frame {
-    pub pc: usize,
-}
-
 /// Strip pointer authentication (PAC) bits from a return address.
 ///
 /// On ARMv8.3+ with PAC, the kernel signs return addresses in upper bits.
@@ -58,13 +53,13 @@ fn strip_pac(addr: usize) -> usize {
 /// - `install_handler` must have been called.
 /// - Should generally be called from a signal handler where the target thread
 ///   is stopped; walking a running thread's stack races with mutations.
-pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [Frame]) -> usize {
+pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> usize {
     let limit = out.len().min(MAX_FRAMES);
     if limit == 0 {
         return 0;
     }
 
-    out[0] = Frame { pc };
+    out[0] = pc as u64;
     let mut n = 1;
 
     let stack_lo = sp;
@@ -98,7 +93,7 @@ pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [Frame]) -> 
             break;
         }
 
-        out[n] = Frame { pc: ret_addr };
+        out[n] = ret_addr as u64;
         n += 1;
         fp = saved_fp;
     }
@@ -110,7 +105,7 @@ pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [Frame]) -> 
 ///
 /// # Safety
 /// `ucontext` must be the pointer the kernel passed to a SA_SIGINFO handler.
-pub unsafe fn unwind_from_ucontext(ucontext: *mut libc::c_void, out: &mut [Frame]) -> usize {
+pub unsafe fn unwind_from_ucontext(ucontext: *mut libc::c_void, out: &mut [u64]) -> usize {
     let (pc, fp, sp) = unsafe { read_pc_fp_sp(ucontext) };
     unsafe { unwind(pc, fp, sp, out) }
 }
@@ -165,28 +160,28 @@ mod tests {
         stack[3] = 0x40_2000;
         stack[4] = base + 4 * sz;
 
-        let mut out = [Frame { pc: 0 }; MAX_FRAMES];
+        let mut out = [0u64; MAX_FRAMES];
         let n = unsafe { unwind(0x40_0000, base, base, &mut out) };
 
         assert_eq!(n, 3);
-        assert_eq!(out[0].pc, 0x40_0000); // interrupted PC
-        assert_eq!(out[1].pc, 0x40_1000);
-        assert_eq!(out[2].pc, 0x40_2000);
+        assert_eq!(out[0], 0x40_0000); // interrupted PC
+        assert_eq!(out[1], 0x40_1000);
+        assert_eq!(out[2], 0x40_2000);
     }
 
     #[test]
     fn frame_zero_is_always_the_interrupted_pc() {
         install();
-        let mut out = [Frame { pc: 0 }; MAX_FRAMES];
+        let mut out = [0u64; MAX_FRAMES];
         let n = unsafe { unwind(0xDEAD, 0, 0x1000, &mut out) };
         assert_eq!(n, 1);
-        assert_eq!(out[0].pc, 0xDEAD);
+        assert_eq!(out[0], 0xDEAD);
     }
 
     #[test]
     fn stops_at_misaligned_fp() {
         install();
-        let mut out = [Frame { pc: 0 }; MAX_FRAMES];
+        let mut out = [0u64; MAX_FRAMES];
         let sp = 0x7fff_0000_0000usize;
         let n = unsafe { unwind(0x40_0000, sp + 1, sp, &mut out) };
         assert_eq!(n, 1);
@@ -195,7 +190,7 @@ mod tests {
     #[test]
     fn stops_when_fp_below_stack() {
         install();
-        let mut out = [Frame { pc: 0 }; MAX_FRAMES];
+        let mut out = [0u64; MAX_FRAMES];
         let sp = 0x7fff_0000_0000usize;
         let n = unsafe { unwind(0x40_0000, sp.wrapping_sub(8), sp, &mut out) };
         assert_eq!(n, 1);
@@ -211,7 +206,7 @@ mod tests {
         stack[0] = base + 2 * sz; // saved_fp advances
         stack[1] = 0x100; // return addr in dead zone (< 0x1000)
 
-        let mut out = [Frame { pc: 0 }; MAX_FRAMES];
+        let mut out = [0u64; MAX_FRAMES];
         let n = unsafe { unwind(0x40_0000, base, base, &mut out) };
         assert_eq!(n, 1);
     }
@@ -224,7 +219,7 @@ mod tests {
 
         stack[0] = base + MAX_FRAME_SIZE + 8; // jump exceeds MAX_FRAME_SIZE
 
-        let mut out = [Frame { pc: 0 }; MAX_FRAMES];
+        let mut out = [0u64; MAX_FRAMES];
         let n = unsafe { unwind(0x40_0000, base, base, &mut out) };
         assert_eq!(n, 1);
     }
@@ -237,7 +232,7 @@ mod tests {
 
         stack[0] = base; // saved_fp == fp, doesn't advance
 
-        let mut out = [Frame { pc: 0 }; MAX_FRAMES];
+        let mut out = [0u64; MAX_FRAMES];
         let n = unsafe { unwind(0x40_0000, base, base, &mut out) };
         assert_eq!(n, 1);
     }
@@ -245,9 +240,9 @@ mod tests {
     #[test]
     fn respects_output_buffer_limit() {
         install();
-        let mut out = [Frame { pc: 0 }; 1];
+        let mut out = [0u64; 1];
         let n = unsafe { unwind(0x40_0000, 0, 0x1000, &mut out) };
         assert_eq!(n, 1);
-        assert_eq!(out[0].pc, 0x40_0000);
+        assert_eq!(out[0], 0x40_0000);
     }
 }
