@@ -17,9 +17,10 @@ use crossbeam_utils::CachePadded;
 
 use super::unwind::MAX_FRAMES;
 
-/// At 99 Hz × 64 threads × 1 s drain interval ≈ 6400 samples/cycle.
-/// 16384 gives ~2.5× headroom which should be enough for most environments.
-const BUFFER_CAP: usize = 16384;
+/// The drain thread drains every ~5 ms. At 64 threads × 999 Hz × 5 ms ≈ 320
+/// samples per cycle. 4096 gives ~12.8× headroom, it tolerates the drain thread
+/// stalling up to ~64 ms before the first drop.
+const BUFFER_CAP: usize = 4096;
 
 /// Mutable payload written by the producer and read by drain.
 struct SampleData {
