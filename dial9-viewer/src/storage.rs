@@ -220,7 +220,7 @@ impl StorageBackend for LocalBackend {
             let prefix2 = prefix.clone();
             tokio::task::spawn_blocking(move || {
                 let mut objects = Vec::new();
-                collect_files(&root, &root, &prefix2, &mut objects, 0)?;
+                collect_files(&root, &root, &prefix2, &mut objects, 0, &mut 0)?;
                 objects.sort_by(|a, b| a.key.cmp(&b.key));
                 Ok(objects)
             })
@@ -319,6 +319,11 @@ const MAX_COLLECT_DEPTH: u32 = 10;
 /// Maximum number of files to return from a local directory listing.
 const MAX_COLLECT_FILES: usize = 50;
 
+/// Maximum number of directory entries to visit (files + dirs) across the
+/// entire recursive walk. This bounds the number of syscalls (`canonicalize`,
+/// `metadata`) so a huge directory tree cannot hang the listing.
+const MAX_ENTRIES_VISITED: usize = 10_000;
+
 /// Directory names to skip during recursive file collection.
 fn is_skipped_dir(name: &str) -> bool {
     name.starts_with('.') || matches!(name, "target" | "node_modules")
@@ -330,8 +335,12 @@ fn collect_files(
     prefix: &str,
     out: &mut Vec<ObjectInfo>,
     depth: u32,
+    visited: &mut usize,
 ) -> Result<(), StorageError> {
-    if depth > MAX_COLLECT_DEPTH || out.len() >= MAX_COLLECT_FILES {
+    if depth > MAX_COLLECT_DEPTH
+        || out.len() >= MAX_COLLECT_FILES
+        || *visited >= MAX_ENTRIES_VISITED
+    {
         return Ok(());
     }
     let entries = match std::fs::read_dir(dir) {
@@ -341,7 +350,8 @@ fn collect_files(
         Err(e) => return Err(StorageError::Other(e.to_string())),
     };
     for entry in entries {
-        if out.len() >= MAX_COLLECT_FILES {
+        *visited += 1;
+        if out.len() >= MAX_COLLECT_FILES || *visited >= MAX_ENTRIES_VISITED {
             break;
         }
         let entry = entry.map_err(|e| StorageError::Other(e.to_string()))?;
@@ -355,7 +365,7 @@ fn collect_files(
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if !is_skipped_dir(&name) {
-                collect_files(root, &canonical, prefix, out, depth + 1)?;
+                collect_files(root, &canonical, prefix, out, depth + 1, visited)?;
             }
         } else if canonical.is_file() {
             let key = path
@@ -379,4 +389,32 @@ fn collect_files(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collect_files_caps_entries_visited() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create more files than MAX_ENTRIES_VISITED to prove we stop early.
+        let n = MAX_ENTRIES_VISITED + 500;
+        for i in 0..n {
+            std::fs::write(dir.path().join(format!("file_{i:05}.bin")), b"x").unwrap();
+        }
+        let mut out = Vec::new();
+        let mut visited = 0;
+        collect_files(dir.path(), dir.path(), "", &mut out, 0, &mut visited).unwrap();
+        // visited must be capped — we should NOT have iterated all n files.
+        assert!(
+            visited <= MAX_ENTRIES_VISITED,
+            "visited {visited} entries, expected at most {MAX_ENTRIES_VISITED}"
+        );
+        assert!(
+            out.len() <= MAX_COLLECT_FILES,
+            "collected {} files, expected at most {MAX_COLLECT_FILES}",
+            out.len()
+        );
+    }
 }
