@@ -83,6 +83,9 @@ mod supported {
 
         let mut new_action: libc::sigaction = unsafe { std::mem::zeroed() };
         new_action.sa_sigaction = sigsegv_handler as *const () as usize;
+        // SA_NODEFER: safe_load may fault inside SIGPROF, without this the second
+        // SIGSEGV queues instead of fires. Invariant: neither this handler nor any
+        // chained handler may fault, or we recurse without bound.
         new_action.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
         unsafe { libc::sigemptyset(&mut new_action.sa_mask) };
 
@@ -141,7 +144,8 @@ mod supported {
                     libc::sigaction(libc::SIGSEGV, &dfl, ptr::null_mut());
                     libc::raise(libc::SIGSEGV);
                 } else if h != libc::SIG_IGN {
-                    // SAFETY: SA_SIGINFO guarantees sa_sigaction has 3-arg handler signature.
+                    // SAFETY: SA_SIGINFO is not set, the old handler uses the 1-arg
+                    // `void (*)(int)` signal-handler signature.
                     let f: extern "C" fn(libc::c_int) = std::mem::transmute(h);
                     f(signo);
                 }
