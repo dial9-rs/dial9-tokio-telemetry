@@ -20,45 +20,68 @@ use crate::telemetry::recorder::{
 use crate::telemetry::writer::RotatingWriter;
 
 // ---------------------------------------------------------------------------
-// Dial9Error — unified error for builder validation and runtime construction
+// Dial9ConfigBuilderError — unified error for builder validation and runtime construction
 // ---------------------------------------------------------------------------
 
 /// Errors produced while building a [`Dial9Config`] or its tokio runtime.
 #[derive(Debug)]
-pub enum Dial9Error {
+#[non_exhaustive]
+pub enum Dial9ConfigBuilderError {
     /// Telemetry is enabled (the default) but one or more required writer
     /// fields were never set on the builder.
-    MissingFields(Vec<&'static str>),
-    /// Failure from the tokio runtime builder, the rotating writer, or the
-    /// telemetry core.
-    Io(std::io::Error),
+    MissingFields(MissingFields),
+    /// Failure from [`tokio::runtime::Builder::build`].
+    TokioRuntimeBuilder(std::io::Error),
+    /// Failure from [`RotatingWriter`] construction.
+    RotatingWriter(std::io::Error),
+    /// Failure from telemetry core setup (traced runtime + background worker).
+    TelemetryCore(std::io::Error),
 }
 
-impl std::fmt::Display for Dial9Error {
+/// Opaque payload for [`Dial9ConfigBuilderError::MissingFields`].
+#[derive(Debug)]
+pub struct MissingFields {
+    fields: Vec<&'static str>,
+}
+
+impl MissingFields {
+    /// The names of the required builder setters that were not called.
+    pub fn fields(&self) -> &[&'static str] {
+        &self.fields
+    }
+}
+
+impl std::fmt::Display for MissingFields {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "missing required Dial9Config fields: {}",
+            self.fields.join(", ")
+        )
+    }
+}
+
+impl std::fmt::Display for Dial9ConfigBuilderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Dial9Error::MissingFields(fields) => write!(
-                f,
-                "missing required Dial9Config fields: {}",
-                fields.join(", ")
-            ),
-            Dial9Error::Io(e) => write!(f, "{e}"),
+            Dial9ConfigBuilderError::MissingFields(m) => write!(f, "{m}"),
+            Dial9ConfigBuilderError::TokioRuntimeBuilder(e) => {
+                write!(f, "tokio runtime builder: {e}")
+            }
+            Dial9ConfigBuilderError::RotatingWriter(e) => write!(f, "rotating writer: {e}"),
+            Dial9ConfigBuilderError::TelemetryCore(e) => write!(f, "telemetry core: {e}"),
         }
     }
 }
 
-impl std::error::Error for Dial9Error {
+impl std::error::Error for Dial9ConfigBuilderError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Dial9Error::Io(e) => Some(e),
-            Dial9Error::MissingFields(_) => None,
+            Dial9ConfigBuilderError::TokioRuntimeBuilder(e)
+            | Dial9ConfigBuilderError::RotatingWriter(e)
+            | Dial9ConfigBuilderError::TelemetryCore(e) => Some(e),
+            Dial9ConfigBuilderError::MissingFields(_) => None,
         }
-    }
-}
-
-impl From<std::io::Error> for Dial9Error {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
     }
 }
 
@@ -92,7 +115,9 @@ impl Dial9Config {
     ///
     /// Returns `Some(guard)` when telemetry is enabled, `None` when the
     /// config was built with `.enabled(false)`.
-    pub fn build(self) -> Result<(tokio::runtime::Runtime, Option<TelemetryGuard>), Dial9Error> {
+    pub fn build(
+        self,
+    ) -> Result<(tokio::runtime::Runtime, Option<TelemetryGuard>), Dial9ConfigBuilderError> {
         match self.0 {
             Inner::Enabled {
                 base_path,
@@ -107,12 +132,17 @@ impl Dial9Config {
                     .max_file_size(max_file_size)
                     .max_total_size(max_total_size)
                     .maybe_rotation_period(rotation_period)
-                    .build()?;
-                let (runtime, guard) = runtime_builder.build_and_start(tokio_builder, writer)?;
+                    .build()
+                    .map_err(Dial9ConfigBuilderError::RotatingWriter)?;
+                let (runtime, guard) = runtime_builder
+                    .build_and_start(tokio_builder, writer)
+                    .map_err(Dial9ConfigBuilderError::TelemetryCore)?;
                 Ok((runtime, Some(guard)))
             }
             Inner::Disabled { mut tokio_builder } => {
-                let runtime = tokio_builder.build()?;
+                let runtime = tokio_builder
+                    .build()
+                    .map_err(Dial9ConfigBuilderError::TokioRuntimeBuilder)?;
                 Ok((runtime, None))
             }
         }
@@ -154,7 +184,8 @@ impl Dial9Config {
 
         /// Defaults to `true`. When `false`, required writer fields are
         /// ignored and the runtime is built without telemetry.
-        enabled: Option<bool>,
+        #[builder(default = true)]
+        enabled: bool,
         /// Trace output path.
         #[builder(into)]
         base_path: Option<PathBuf>,
@@ -164,29 +195,30 @@ impl Dial9Config {
         max_total_size: Option<u64>,
         /// Wall-clock rotation period for the writer.
         rotation_period: Option<Duration>,
-    ) -> Result<Dial9Config, Dial9Error> {
-        let enabled = enabled.unwrap_or(true);
+    ) -> Result<Dial9Config, Dial9ConfigBuilderError> {
         if !enabled {
             return Ok(Dial9Config(Inner::Disabled { tokio_builder }));
         }
 
-        let (base_path, max_file_size, max_total_size) =
-            match (base_path, max_file_size, max_total_size) {
-                (Some(bp), Some(mfs), Some(mts)) => (bp, mfs, mts),
-                (bp, mfs, mts) => {
-                    let mut missing: Vec<&'static str> = Vec::new();
-                    if bp.is_none() {
-                        missing.push("base_path");
-                    }
-                    if mfs.is_none() {
-                        missing.push("max_file_size");
-                    }
-                    if mts.is_none() {
-                        missing.push("max_total_size");
-                    }
-                    return Err(Dial9Error::MissingFields(missing));
-                }
-            };
+        let required_fields = (base_path, max_file_size, max_total_size);
+        let required_fields = match required_fields {
+            (Some(bp), Some(mfs), Some(mts)) => (bp, mfs, mts),
+            (bp, mfs, mts) => {
+                let missing = [
+                    ("base_path", bp.is_none()),
+                    ("max_file_size", mfs.is_none()),
+                    ("max_total_size", mts.is_none()),
+                ]
+                .into_iter()
+                .filter_map(|(name, missing)| missing.then_some(name))
+                .collect();
+                return Err(Dial9ConfigBuilderError::MissingFields(MissingFields {
+                    fields: missing,
+                }));
+            }
+        };
+
+        let (base_path, max_file_size, max_total_size) = required_fields;
 
         let mut runtime_builder = TracedRuntime::builder().with_trace_path(base_path.clone());
         for configure in runtime_configurators {
@@ -396,8 +428,8 @@ mod tests {
     #[test]
     fn missing_required_fields_errors_with_all_missing_names() {
         match Dial9Config::builder().build() {
-            Err(Dial9Error::MissingFields(fields)) => {
-                assert_eq!(fields, vec!["base_path", "max_file_size", "max_total_size"]);
+            Err(Dial9ConfigBuilderError::MissingFields(m)) => {
+                assert_eq!(m.fields(), ["base_path", "max_file_size", "max_total_size"]);
             }
             Err(other) => panic!("expected MissingFields, got {other:?}"),
             Ok(_) => panic!("expected MissingFields error, got Ok"),
@@ -407,8 +439,8 @@ mod tests {
     #[test]
     fn missing_some_required_fields_lists_only_missing() {
         match Dial9Config::builder().max_file_size(1024).build() {
-            Err(Dial9Error::MissingFields(fields)) => {
-                assert_eq!(fields, vec!["base_path", "max_total_size"]);
+            Err(Dial9ConfigBuilderError::MissingFields(m)) => {
+                assert_eq!(m.fields(), ["base_path", "max_total_size"]);
             }
             Err(other) => panic!("expected MissingFields, got {other:?}"),
             Ok(_) => panic!("expected MissingFields error, got Ok"),
@@ -418,7 +450,7 @@ mod tests {
     #[test]
     fn explicitly_enabled_still_requires_fields() {
         match Dial9Config::builder().enabled(true).build() {
-            Err(Dial9Error::MissingFields(_)) => {}
+            Err(Dial9ConfigBuilderError::MissingFields(_)) => {}
             Err(other) => panic!("expected MissingFields, got {other:?}"),
             Ok(_) => panic!("expected MissingFields error, got Ok"),
         }
