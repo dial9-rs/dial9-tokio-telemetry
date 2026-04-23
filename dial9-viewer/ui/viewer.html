@@ -155,13 +155,18 @@
 
             #toolbar {
                 display: flex;
-                align-items: center;
-                gap: 12px;
-                padding: 8px 16px;
+                flex-direction: column;
+                gap: 4px;
+                padding: 6px 16px;
                 background: #16213e;
                 border-bottom: 1px solid #333;
                 flex-shrink: 0;
-                min-height: 44px;
+            }
+            #toolbar .toolbar-row {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                min-height: 36px;
                 overflow-x: auto;
                 overflow-y: hidden;
             }
@@ -254,6 +259,44 @@
                 overflow: hidden;
                 position: relative;
             }
+            #viewport-controls {
+                position: absolute;
+                right: 16px;
+                bottom: 16px;
+                z-index: 50;
+                display: flex;
+                flex-direction: column;
+                background: rgba(22, 33, 62, 0.92);
+                border: 1px solid #444;
+                border-radius: 6px;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+                backdrop-filter: blur(4px);
+            }
+            #viewport-controls button {
+                background: none;
+                border: none;
+                border-bottom: 1px solid #333;
+                color: #ccc;
+                width: 34px;
+                height: 34px;
+                padding: 0;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            #viewport-controls button:last-child {
+                border-bottom: none;
+            }
+            #viewport-controls button:hover {
+                background: #2a3a5a;
+                color: #fff;
+            }
+            #viewport-controls .vc-sep {
+                height: 1px;
+                background: #555;
+                margin: 0;
+            }
 
             #timeline-header {
                 height: 30px;
@@ -264,6 +307,13 @@
                 overflow: hidden;
             }
 
+            #lanes-wrapper {
+                flex: 1;
+                min-height: 0;
+                display: flex;
+                flex-direction: column;
+                position: relative;
+            }
             #lanes-container {
                 flex: 1;
                 overflow-y: auto;
@@ -499,34 +549,36 @@
 
         <div id="viewer">
             <div id="toolbar">
-                <div class="tb-info">
-                    <span class="filename" id="tb-filename"></span>
-                    <span class="stats" id="tb-stats"></span>
+                <div class="toolbar-row" id="toolbar-row-data">
+                    <div class="tb-info">
+                        <span class="filename" id="tb-filename"></span>
+                        <span class="stats" id="tb-stats"></span>
+                    </div>
+                    <span style="flex: 1"></span>
+                    <select id="poi-filter">
+                        <option value="sched">Kernel Scheduling Delays</option>
+                        <option value="long-poll">Long Polls (>1ms)</option>
+                        <option value="cpu-sampled">Polls with CPU Samples</option>
+                        <option value="wake-delay">Wake→Poll Delays (>100µs)</option>
+                    </select>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer">
+                        <input type="checkbox" id="sort-by-worst" style="cursor:pointer" checked>
+                        Worst first
+                    </label>
+                    <button id="btn-prev-poi">◀ Prev</button>
+                    <button id="btn-next-poi">Next ▶</button>
+                    <span id="poi-counter" style="font-size:0.85em;color:#888"></span>
+                    <span style="width:1px;height:20px;background:#444;margin:0 8px"></span>
+                    <button id="btn-sched-panel" style="background:#3a1a1a;border-color:#ff4444;color:#ff8a65">⚠ Blocking Calls</button>
+                    <button id="btn-set-range" title="Set time range filter (reloads with only events in range)">Set Range</button>
+                    <button id="btn-clear-range" title="Clear time range filter" style="display:none">Clear Range</button>
+                    <button id="btn-reset">New File</button>
                 </div>
-                <span style="flex: 1"></span>
-                <select id="poi-filter">
-                    <option value="sched">Kernel Scheduling Delays</option>
-                    <option value="long-poll">Long Polls (>1ms)</option>
-                    <option value="cpu-sampled">Polls with CPU Samples</option>
-                    <option value="wake-delay">Wake→Poll Delays (>100µs)</option>
-                </select>
-                <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer">
-                    <input type="checkbox" id="sort-by-worst" style="cursor:pointer" checked>
-                    Worst first
-                </label>
-                <button id="btn-prev-poi">◀ Prev</button>
-                <button id="btn-next-poi">Next ▶</button>
-                <span id="poi-counter" style="font-size:0.85em;color:#888"></span>
-                <span style="width:1px;height:20px;background:#444;margin:0 8px"></span>
-                <button id="btn-sched-panel" style="background:#3a1a1a;border-color:#ff4444;color:#ff8a65">⚠ Blocking Calls</button>
-                <button id="btn-zoom-in">Zoom +</button>
-                <button id="btn-zoom-out">Zoom −</button>
-                <button id="btn-fit">Fit All</button>
-                <button id="btn-set-range" title="Set time range filter (reloads with only events in range)">Set Range</button>
-                <button id="btn-clear-range" title="Clear time range filter" style="display:none">Clear Range</button>
-                <button id="btn-time-mode" title="Toggle between relative (offset from trace start) and absolute timestamps">Time: Relative</button>
-                <button id="btn-tz-mode" title="Toggle between UTC and local timezone for absolute timestamps" style="display:none">TZ: UTC</button>
-                <button id="btn-reset">New File</button>
+                <div class="toolbar-row" id="toolbar-row-view">
+                    <span style="flex: 1"></span>
+                    <button id="btn-time-mode" title="Toggle between relative (offset from trace start) and absolute timestamps">Time: Relative</button>
+                    <button id="btn-tz-mode" title="Toggle between UTC and local timezone for absolute timestamps" style="display:none">TZ: UTC</button>
+                </div>
             </div>
             <div id="viewer-body">
             <div id="main-area" tabindex="0" role="application" aria-label="Trace timeline">
@@ -536,7 +588,21 @@
                     <canvas id="timeline-canvas"></canvas>
                     <div id="toast-container" style="position:absolute;top:0;bottom:0;left:0;display:flex;align-items:center;gap:8px;z-index:60;pointer-events:none"></div>
                 </div>
-                <div id="lanes-container"></div>
+                <div id="lanes-wrapper">
+                    <div id="lanes-container"></div>
+                    <div id="viewport-controls" aria-label="Viewport controls">
+                        <button id="btn-zoom-in" title="Zoom in" aria-label="Zoom in">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="15.2" y1="15.2" x2="21" y2="21"/><line x1="7.5" y1="10.5" x2="13.5" y2="10.5"/><line x1="10.5" y1="7.5" x2="10.5" y2="13.5"/></svg>
+                        </button>
+                        <button id="btn-zoom-out" title="Zoom out" aria-label="Zoom out">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="15.2" y1="15.2" x2="21" y2="21"/><line x1="7.5" y1="10.5" x2="13.5" y2="10.5"/></svg>
+                        </button>
+                        <div class="vc-sep"></div>
+                        <button id="btn-fit" title="Fit all" aria-label="Fit all">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 9 4 4 9 4"/><polyline points="20 9 20 4 15 4"/><polyline points="4 15 4 20 9 20"/><polyline points="20 15 20 20 15 20"/></svg>
+                        </button>
+                    </div>
+                </div>
                 <div id="span-legend" style="display:none;padding:4px 12px;background:#1a1a2e;border-top:1px solid #333;font-size:0.78em;color:#aaa">
                     <input id="span-filter" type="text" placeholder="Filter spans" style="background:#0f1629;border:1px solid #444;color:#ccc;padding:2px 6px;border-radius:3px;font-size:1em;width:160px;margin-right:2px">
                     <button id="btn-span-filter-clear" style="font-size:0.8em;display:none;margin-right:4px">✕</button>
@@ -3640,10 +3706,10 @@
 
             // ── Legend (inline in toolbar area) ──
             (function addLegend() {
-                const tb = document.getElementById("toolbar");
+                const tb = document.getElementById("toolbar-row-view");
                 const leg = document.createElement("span");
                 leg.style.cssText =
-                    "font-size:0.8em;display:flex;gap:12px;align-items:center;";
+                    "font-size:0.8em;display:flex;gap:12px;align-items:center;flex-wrap:wrap;";
                 leg.innerHTML = `
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a5a7a;display:inline-block;border-radius:2px"></span>Poll ≤10µs</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#4fc3f7;display:inline-block;border-radius:2px"></span>&gt;10µs</span>
@@ -3656,9 +3722,20 @@
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#66bb6a;font-size:10px">▼</span>Wake</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#81c784;display:inline-block"></span>Active Tasks</span>
-    <button id="btn-info" aria-label="Help" style="margin-left:8px;background:none;border:1px solid #555;border-radius:4px;color:#aaa;cursor:pointer;font-size:1.4em;padding:4px 8px;line-height:1;display:flex;flex-direction:column;align-items:center;gap:1px"><span>ℹ️</span><span style="font-size:0.55em;color:#888">Help</span></button>
   `;
-                tb.insertBefore(leg, document.getElementById("btn-zoom-in"));
+                tb.insertBefore(leg, tb.firstChild);
+
+                const helpBtn = document.createElement("button");
+                helpBtn.id = "btn-info";
+                helpBtn.setAttribute("aria-label", "Help");
+                helpBtn.title = "Help";
+                helpBtn.style.cssText =
+                    "margin-left:8px;background:none;border:1px solid #555;border-radius:4px;color:#aaa;cursor:pointer;padding:6px;line-height:1;display:inline-flex;align-items:center;justify-content:center";
+                helpBtn.innerHTML =
+                    '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.5-2.5 2-2.5 3.5"/><line x1="12" y1="16.5" x2="12" y2="16.6"/></svg>';
+                helpBtn.addEventListener("mouseenter", () => { helpBtn.style.color = "#fff"; helpBtn.style.borderColor = "#888"; });
+                helpBtn.addEventListener("mouseleave", () => { helpBtn.style.color = "#aaa"; helpBtn.style.borderColor = "#555"; });
+                tb.appendChild(helpBtn);
             })();
 
             // ── Help overlay toggle ──
