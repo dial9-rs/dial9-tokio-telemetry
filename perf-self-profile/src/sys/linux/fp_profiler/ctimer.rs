@@ -80,11 +80,8 @@ pub fn enable() {
     RUNNING.store(true, Ordering::Release);
 }
 
-/// Request per-thread timer disarm. Sets the flag and pauses sampling; each
-/// thread's SIGPROF handler observes the flag on its next tick and calls
-/// `timer_delete` on its own timer, so disarm completes within one sample
-/// interval per thread. Not reversible — a subsequent `start` is required
-/// to sample again. Called from `CtimerSampler::drop`.
+/// Requests that all timers are disarmed.
+/// A subsequent `start` is required to sample again.
 pub fn disarm_all_timers() {
     DISARM_REQUESTED.store(true, Ordering::Release);
     RUNNING.store(false, Ordering::Release);
