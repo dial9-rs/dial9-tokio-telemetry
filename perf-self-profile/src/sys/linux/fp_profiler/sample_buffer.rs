@@ -494,11 +494,16 @@ mod tests {
         }
         assert_eq!(BUFFER.tail.load(Ordering::Relaxed), BUFFER_CAP);
 
+        // Claim while full, tail should stay at BUFFER_CAP.
+        let overflow = unsafe { claim_slot() };
+        assert!(overflow.is_none(), "buffer full: claim must fail");
+        drop(overflow);
         assert_eq!(
             BUFFER.tail.load(Ordering::Relaxed),
             BUFFER_CAP,
-            "tail must not advance on failed claims",
+            "tail must not advance on a failed claim",
         );
+        let _ = take_dropped_count();
 
         // Drain the first batch.
         let mut first_drained = 0;
