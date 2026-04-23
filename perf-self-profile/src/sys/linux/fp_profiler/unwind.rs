@@ -274,10 +274,11 @@ mod tests {
         let mut out = [0u64; MAX_FRAMES];
         let n = unsafe { unwind(0x40_0000, fp, fp, &mut out) };
 
+        // Unmap before the asserts so a panic doesn't leak the mapping.
+        assert_eq!(unsafe { libc::munmap(guard, ps) }, 0);
+
         assert_eq!(n, 1, "unwind must stop when saved_fp load faults");
         assert_eq!(out[0], 0x40_0000);
-
-        assert_eq!(unsafe { libc::munmap(guard, ps) }, 0);
     }
 
     #[test]
@@ -311,9 +312,10 @@ mod tests {
         let mut out = [0u64; MAX_FRAMES];
         let n = unsafe { unwind(0x40_0000, fp, fp, &mut out) };
 
+        // Unmap before the asserts so a panic doesn't leak the mapping.
+        assert_eq!(unsafe { libc::munmap(region, 2 * ps) }, 0);
+
         assert_eq!(n, 1, "unwind must stop when ret_addr load faults");
         assert_eq!(out[0], 0x40_0000);
-
-        assert_eq!(unsafe { libc::munmap(region, 2 * ps) }, 0);
     }
 }
