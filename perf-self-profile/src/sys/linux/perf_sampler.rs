@@ -255,9 +255,8 @@ impl PerfSamplerImpl {
                 0
             };
 
-        // Use CLOCK_MONOTONIC so perf timestamps are in the same clock domain
-        // as Rust's `Instant::now()`. Without this, perf defaults to
-        // CLOCK_MONOTONIC_RAW which drifts relative to CLOCK_MONOTONIC.
+        // Stamp samples with CLOCK_MONOTONIC so they share a clock with ctimer
+        // samples and `telemetry::events::clock_monotonic_ns()`.
         attr.set_use_clockid(1);
         attr.clockid = libc::CLOCK_MONOTONIC;
 

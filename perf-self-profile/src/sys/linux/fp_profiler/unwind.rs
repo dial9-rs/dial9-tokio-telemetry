@@ -245,4 +245,75 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(out[0], 0x40_0000);
     }
+
+    fn page_size() -> usize {
+        let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        assert!(ps > 0, "sysconf(_SC_PAGESIZE) must return a positive value");
+        ps as usize
+    }
+
+    #[test]
+    fn stops_when_saved_fp_load_faults() {
+        install();
+        let ps = page_size();
+        // Guard page, any load faults.
+        let guard = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                ps,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(guard, libc::MAP_FAILED);
+        let fp = guard as usize;
+
+        // sp = fp keeps fp in range, page-aligned.
+        let mut out = [0u64; MAX_FRAMES];
+        let n = unsafe { unwind(0x40_0000, fp, fp, &mut out) };
+
+        assert_eq!(n, 1, "unwind must stop when saved_fp load faults");
+        assert_eq!(out[0], 0x40_0000);
+
+        assert_eq!(unsafe { libc::munmap(guard, ps) }, 0);
+    }
+
+    #[test]
+    fn stops_when_ret_addr_load_faults() {
+        install();
+        let ps = page_size();
+        // Two pages: first writable, second PROT_NONE. fp at last usize of
+        // first page => *fp succeeds, *(fp+8) crosses into guard and faults.
+        let region = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                2 * ps,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(region, libc::MAP_FAILED);
+        let guard = unsafe { (region as *mut u8).add(ps) };
+        assert_eq!(
+            unsafe { libc::mprotect(guard as *mut _, ps, libc::PROT_NONE) },
+            0,
+        );
+
+        let sz = std::mem::size_of::<usize>();
+        let fp = unsafe { (region as *mut u8).add(ps - sz) } as usize;
+        // Ensure saved_fp load succeeds so the walk reaches ret_addr load.
+        unsafe { (fp as *mut usize).write(fp + 16) };
+
+        let mut out = [0u64; MAX_FRAMES];
+        let n = unsafe { unwind(0x40_0000, fp, fp, &mut out) };
+
+        assert_eq!(n, 1, "unwind must stop when ret_addr load faults");
+        assert_eq!(out[0], 0x40_0000);
+
+        assert_eq!(unsafe { libc::munmap(region, 2 * ps) }, 0);
+    }
 }
