@@ -14,6 +14,9 @@ if (!TRACE_PATH) { console.error('Usage: node analyze.js <trace.bin>'); process.
 
 // ── Helpers ──
 
+function maxBy(arr, fn) { return arr.reduce((m, x) => Math.max(m, fn(x)), -Infinity); }
+function minBy(arr, fn) { return arr.reduce((m, x) => Math.min(m, fn(x)), Infinity); }
+
 /** Classify a symbol as kernel, libc, allocator, tokio-runtime, or application code */
 function frameKind(sym) {
   if (!sym || sym.startsWith('0x')) return 'unknown';
@@ -73,8 +76,8 @@ async function main() {
       .map(e => e.workerId)
   )].sort((a, b) => a - b);
 
-  const minTs = trace.events.reduce((m, e) => Math.min(m, e.timestamp), Infinity);
-  const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
+  const minTs = minBy(trace.events, e => e.timestamp);
+  const maxTs = maxBy(trace.events, e => e.timestamp);
   const durationMs = (maxTs - minTs) / 1e6;
 
   // Run full analysis pipeline
@@ -215,7 +218,7 @@ async function main() {
   // Task leak check
   const atSamples = taskTimeline.activeTaskSamples;
   if (atSamples.length > 0) {
-    const peak = Math.max(...atSamples.map(s => s.count));
+    const peak = maxBy(atSamples, s => s.count);
     const final_ = atSamples[atSamples.length - 1].count;
     console.log(`\n  Peak active tasks: ${peak}`);
     console.log(`  Active at trace end: ${final_}`);
@@ -278,7 +281,7 @@ async function main() {
   console.log(`QUEUE DEPTH`);
   console.log(`${'─'.repeat(60)}`);
   if (spans.queueSamples.length > 0) {
-    const maxQ = Math.max(...spans.queueSamples.map(s => s.global));
+    const maxQ = maxBy(spans.queueSamples, s => s.global);
     const avgQ = spans.queueSamples.reduce((s, q) => s + q.global, 0) / spans.queueSamples.length;
     console.log(`  Global queue: max=${maxQ}, avg=${avgQ.toFixed(1)}, samples=${spans.queueSamples.length}`);
     if (maxQ > 100) console.log('  ⚠ High queue depth — runtime may be overloaded');

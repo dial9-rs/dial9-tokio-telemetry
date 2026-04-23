@@ -67,7 +67,7 @@ const samples = taskTimeline.activeTaskSamples;
 if (samples.length > 0) {
   const first = samples[0].count;
   const last = samples[samples.length - 1].count;
-  const peak = Math.max(...samples.map(s => s.count));
+  const peak = samples.reduce((m, s) => Math.max(m, s.count), -Infinity);
   console.log(`Active tasks: start=${first}, end=${last}, peak=${peak}`);
 
   // Check if active count is monotonically increasing (never decreases)
@@ -178,7 +178,7 @@ for (const [loc, e] of [...byLoc.entries()].sort((a, b) => b.totalMs - a.totalMs
 const highDelays = schedDelays.filter(d => d.delay > 1e6); // >1ms
 console.log(`\n${highDelays.length} scheduling delays > 1ms`);
 if (highDelays.length > 0) {
-  const maxDelay = Math.max(...highDelays.map(d => d.delay));
+  const maxDelay = highDelays.reduce((m, d) => Math.max(m, d.delay), -Infinity);
   console.log(`Worst scheduling delay: ${(maxDelay / 1e6).toFixed(2)}ms`);
   console.log('This means tasks were woken but had to wait for a worker — workers were busy with long polls.');
 }
