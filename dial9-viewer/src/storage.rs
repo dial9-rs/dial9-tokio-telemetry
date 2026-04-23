@@ -322,7 +322,7 @@ const MAX_COLLECT_FILES: usize = 50;
 /// Maximum number of directory entries to visit (files + dirs) across the
 /// entire recursive walk. This bounds the number of syscalls (`canonicalize`,
 /// `metadata`) so a huge directory tree cannot hang the listing.
-const MAX_ENTRIES_VISITED: usize = 10_000;
+const MAX_ENTRIES_VISITED: usize = 500;
 
 /// Directory names to skip during recursive file collection.
 fn is_skipped_dir(name: &str) -> bool {
@@ -346,7 +346,9 @@ fn collect_files(
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(StorageError::Other("permission denied".into()));
+        }
         Err(e) => return Err(StorageError::Other(e.to_string())),
     };
     for entry in entries {
