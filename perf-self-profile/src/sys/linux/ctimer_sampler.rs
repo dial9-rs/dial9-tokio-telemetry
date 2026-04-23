@@ -130,7 +130,7 @@ impl SamplerBackend for CtimerSampler {
 
 impl Drop for CtimerSampler {
     fn drop(&mut self) {
-        ctimer::disable_permanent();
+        ctimer::disarm_all_timers();
         CTIMER_ACTIVE.store(false, Ordering::Release);
     }
 }
@@ -142,7 +142,7 @@ extern "C" fn sigprof_handler(
     ucontext: *mut libc::c_void,
 ) {
     if !ctimer::is_running() {
-        if ctimer::is_permanently_stopped()
+        if ctimer::is_disarm_requested()
             && let Some(t) = ctimer::current_thread_timer_id()
         {
             // Self-disarm so the timer doesn't keep firing for the rest of the

@@ -12,19 +12,6 @@
 //!
 //! ctimer avoids both by binding each timer to a specific tid (`SIGEV_THREAD_ID`)
 //! and charging against per-thread CPU time.
-//!
-//! # Lifecycle
-//!
-//! 1. Call `start(interval_ns)` once from the main thread. This installs the
-//!    SIGPROF handler.
-//! 2. Each thread that wants to be profiled calls `register_thread()` from
-//!    its own context. This creates the per-thread timer and arms it.
-//! 3. On thread exit, call `unregister_thread()` to delete the timer.
-//! 4. Pause/resume: `disable()` clears RUNNING but leaves timers armed, so
-//!    `enable()` can re-enable sampling.
-//! 5. Teardown: `disable_permanent()` (called from `CtimerSampler::drop`) sets
-//!    a permanent-stop flag, each thread's next SIGPROF self-disarms its
-//!    timer.
 
 use std::cell::Cell;
 use std::io;
@@ -38,7 +25,7 @@ static INTERVAL_NS: AtomicI64 = AtomicI64::new(0);
 /// Whether sampling is currently enabled. Toggled by `disable`/`enable`.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 /// One-way flag to tell the signal handler to self-disarm each thread's timer.
-static PERMANENTLY_STOPPED: AtomicBool = AtomicBool::new(false);
+static DISARM_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static THREAD_TIMER: Cell<Option<libc::timer_t>> = const { Cell::new(None) };
@@ -77,7 +64,7 @@ pub unsafe fn start(
     }
 
     INTERVAL_NS.store(interval_ns, Ordering::Release);
-    PERMANENTLY_STOPPED.store(false, Ordering::Release);
+    DISARM_REQUESTED.store(false, Ordering::Release);
     RUNNING.store(true, Ordering::Release);
     Ok(())
 }
@@ -93,11 +80,13 @@ pub fn enable() {
     RUNNING.store(true, Ordering::Release);
 }
 
-/// Permanently disable sampling. Sets both flags so the handler self-disarms
-/// each thread's timer on its next tick. Not reversible; a subsequent `start`
-/// is required to sample again.
-pub fn disable_permanent() {
-    PERMANENTLY_STOPPED.store(true, Ordering::Release);
+/// Request per-thread timer disarm. Sets the flag and pauses sampling; each
+/// thread's SIGPROF handler observes the flag on its next tick and calls
+/// `timer_delete` on its own timer, so disarm completes within one sample
+/// interval per thread. Not reversible — a subsequent `start` is required
+/// to sample again. Called from `CtimerSampler::drop`.
+pub fn disarm_all_timers() {
+    DISARM_REQUESTED.store(true, Ordering::Release);
     RUNNING.store(false, Ordering::Release);
 }
 
@@ -105,8 +94,8 @@ pub fn is_running() -> bool {
     RUNNING.load(Ordering::Acquire)
 }
 
-pub fn is_permanently_stopped() -> bool {
-    PERMANENTLY_STOPPED.load(Ordering::Acquire)
+pub fn is_disarm_requested() -> bool {
+    DISARM_REQUESTED.load(Ordering::Acquire)
 }
 
 pub fn interval_ns() -> i64 {
@@ -182,6 +171,8 @@ pub fn register_thread() -> Result<(), io::Error> {
     Ok(())
 }
 
+/// Disarm and delete the calling thread's timer. Must run on the thread being
+/// unregistered. No-op if never registered.
 pub fn unregister_thread() {
     THREAD_TIMER.with(|c| {
         if let Some(t) = c.take() {
