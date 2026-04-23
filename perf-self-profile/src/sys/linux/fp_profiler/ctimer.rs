@@ -12,6 +12,16 @@
 //!
 //! ctimer avoids both by binding each timer to a specific tid (`SIGEV_THREAD_ID`)
 //! and charging against per-thread CPU time.
+//!
+//! # Lifecycle                                                                                                                                                                                       
+//!                                                                                   
+//! 1. Call `start(interval_ns)` once in the main thread to install the SIGPROF handler.
+//! 2. Each thread calls `register_thread` from its own context to arm a per-thread
+//! timer, and `unregister_thread` (same thread) to tear it down.
+//! 3. `disable` and `enable` pause sampling without disarming the timers, so resuming doesn't
+//! require re-registration.
+//! Teardown: `disarm_all_timers` disarms timers globally (called automatically on `CtimerSampler` drop)
+//! A subsequent `start` is required to sample again.
 
 use std::cell::Cell;
 use std::io;
