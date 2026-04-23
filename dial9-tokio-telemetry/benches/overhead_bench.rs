@@ -110,7 +110,6 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
     let (server_rt, guard): (tokio::runtime::Runtime, Option<TelemetryGuard>) = match mode {
         "telemetry" => {
             let writer = RotatingWriter::single_file("/tmp/overhead_bench_trace.bin").unwrap();
-            #[allow(unused_mut)]
             let mut tb = TracedRuntime::builder().with_task_tracking(true);
             #[cfg(target_os = "linux")]
             {

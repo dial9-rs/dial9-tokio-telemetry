@@ -101,7 +101,7 @@ dial9-tokio-telemetry is designed for always-on production use, but it's still e
 
 Yes, check out this [quick walkthrough (YouTube)](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)!
 
-The [viewer](https://dial9-tokio-telemetry.netlify.app/) (autodeployed from code in `main`) is hosted on Netlify for convenience. You can [load the demo trace](https://dial9-tokio-telemetry.netlify.app/?trace=demo-trace.bin) directly, or use [serve.py](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/serve.py) to run it locally (pure HTML and JS, client side only).
+The [viewer](https://dial9-tokio-telemetry.netlify.app/) (autodeployed from code in `main`) is hosted on Netlify for convenience. You can [load the demo trace](https://dial9-tokio-telemetry.netlify.app/?trace=demo-trace.bin) directly, or use [serve.py](/dial9-tokio-telemetry/serve.py) to run it locally (pure HTML and JS, client side only).
 
 <img width="1288" height="659" alt="Screenshot 2026-03-01 at 3 52 59 PM" src="https://github.com/user-attachments/assets/77225801-70b1-4aef-b064-32bc2326b1ef" />
 
@@ -185,7 +185,7 @@ runtime.block_on(async {
 # }
 ```
 
-For frameworks like Axum where you don't control the spawn call, you need to wrap the accept loop. See [`examples/metrics-service/src/axum_traced.rs`](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/examples/metrics-service/src/axum_traced.rs) for a working example that wraps both the accept loop and per-connection futures.
+For frameworks like Axum where you don't control the spawn call, you need to wrap the accept loop. See [`examples/metrics-service/src/axum_traced.rs`](/examples/metrics-service/src/axum_traced.rs) for a working example that wraps both the accept loop and per-connection futures.
 
 ## Custom events
 
@@ -219,7 +219,7 @@ record_event(
 # }
 ```
 
-For events with repeated string values (HTTP methods, endpoint paths, etc.), implement `Encodable` manually to use string interning — see [`examples/custom_events.rs`](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/examples/custom_events.rs) for a complete example showing both patterns.
+For events with repeated string values (HTTP methods, endpoint paths, etc.), implement `Encodable` manually to use string interning — see [`examples/custom_events.rs`](/dial9-tokio-telemetry/examples/custom_events.rs) for a complete example showing both patterns.
 
 Custom events are encoded into the same thread-local buffer as built-in events (~100–200 ns per call) and appear in the trace viewer alongside poll/park/wake events.
 
@@ -263,7 +263,7 @@ let (runtime, guard) = TracedRuntime::builder()
 # fn main() {}
 ```
 
-This pulls in [`dial9-perf-self-profile`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/perf-self-profile) for `perf_event_open` access. It records `CpuSample` events with raw stack frame addresses. When a `trace_path` is set, the background worker automatically symbolizes sealed segments (resolving addresses to function names via `/proc/self/maps` and blazesym) and gzip-compresses them on disk.
+This pulls in [`dial9-perf-self-profile`](/perf-self-profile) for `perf_event_open` access. It records `CpuSample` events with raw stack frame addresses. When a `trace_path` is set, the background worker automatically symbolizes sealed segments (resolving addresses to function names via `/proc/self/maps` and blazesym) and gzip-compresses them on disk.
 
 #### Requirements
 
@@ -351,7 +351,7 @@ let (io_rt, io_handle) = guard.trace_runtime("io").build(io_builder)?;
 # }
 ```
 
-See [`examples/thread_per_core.rs`](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/examples/thread_per_core.rs) and [`examples/multi_runtime.rs`](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/examples/multi_runtime.rs) for complete examples.
+See [`examples/thread_per_core.rs`](/dial9-tokio-telemetry/examples/thread_per_core.rs) and [`examples/multi_runtime.rs`](/dial9-tokio-telemetry/examples/multi_runtime.rs) for complete examples.
 
 **Shutdown**: Drop all runtimes before the `TelemetryGuard` so worker threads exit and flush their thread-local buffers. For a clean shutdown that waits for the background worker (e.g. S3 uploads) to drain, call `guard.graceful_shutdown(timeout)` instead of dropping the guard.
 
@@ -361,7 +361,7 @@ See [`examples/thread_per_core.rs`](https://github.com/dial9-rs/dial9-tokio-tele
 
 ### Analyzing traces
 
-[`dial9-viewer`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-viewer) is an interactive trace viewer and S3 browser. Point it at a local directory or an S3 bucket to browse and visualize traces in the browser. [Here's a demo.](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)
+[`dial9-viewer`](/dial9-viewer) is an interactive trace viewer and S3 browser. Point it at a local directory or an S3 bucket to browse and visualize traces in the browser. [Here's a demo.](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)
 
 ```bash
 # Install
@@ -388,7 +388,7 @@ cargo run --example analyze_trace --features analysis -- /tmp/my_traces/trace.0.
 cargo run --example trace_to_jsonl --features analysis -- /tmp/my_traces/trace.0.bin.gz output.jsonl
 ```
 
-See [TRACE_ANALYSIS_GUIDE.md](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) for a walkthrough of diagnosing scheduling delays and CPU hotspots from trace data.
+See [TRACE_ANALYSIS_GUIDE.md](/dial9-tokio-telemetry/TRACE_ANALYSIS_GUIDE.md) for a walkthrough of diagnosing scheduling delays and CPU hotspots from trace data.
 
 ## Features
 
@@ -456,7 +456,7 @@ cargo run --example telemetry_rotating     # manual setup + rotating writer conf
 cargo run --example multi_runtime          # multiple runtimes, manual TelemetryCore
 ```
 
-The [`examples/metrics-service`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/examples/metrics-service) directory has a full Axum service with DynamoDB persistence, a load-generating client, and telemetry wired up end-to-end.
+The [`examples/metrics-service`](/examples/metrics-service) directory has a full Axum service with DynamoDB persistence, a load-generating client, and telemetry wired up end-to-end.
 
 ## Overhead
 
@@ -476,11 +476,11 @@ Overhead:   3.2%
 
 This repo is a Cargo workspace with five members:
 
-- [`dial9-tokio-telemetry`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-tokio-telemetry) — the main crate
-- [`dial9-viewer`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-viewer) — CLI and web UI for browsing traces in S3 or on the local filesystem
-- [`dial9-macro`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-macro) — the `#[dial9_tokio_telemetry::main]` attribute macro
-- [`dial9-perf-self-profile`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/perf-self-profile) — minimal Linux `perf_event_open` wrapper for CPU profiling and scheduler events
-- [`examples/metrics-service`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/examples/metrics-service) — end-to-end example service
+- [`dial9-tokio-telemetry`](/dial9-tokio-telemetry) — the main crate
+- [`dial9-viewer`](/dial9-viewer) — CLI and web UI for browsing traces in S3 or on the local filesystem
+- [`dial9-macro`](/dial9-macro) — the `#[dial9_tokio_telemetry::main]` attribute macro
+- [`dial9-perf-self-profile`](/perf-self-profile) — minimal Linux `perf_event_open` wrapper for CPU profiling and scheduler events
+- [`examples/metrics-service`](/examples/metrics-service) — end-to-end example service
 
 ## Future work
 
