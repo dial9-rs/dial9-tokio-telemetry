@@ -197,6 +197,12 @@ pub fn unregister_thread() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+
+    // Serializes tests touching process-global state: RUNNING,
+    // DISARM_REQUESTED, INTERVAL_NS, and the SIGPROF handler.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     extern "C" fn dummy_handler(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {}
 
@@ -214,6 +220,7 @@ mod tests {
 
     #[test]
     fn register_thread_fails_when_not_running() {
+        let _g = TEST_LOCK.lock().unwrap();
         RUNNING.store(false, Ordering::Release);
         let err = register_thread().unwrap_err();
         assert!(err.to_string().contains("not running"));
@@ -224,5 +231,57 @@ mod tests {
         THREAD_TIMER.with(|c| c.set(None));
         unregister_thread();
         assert!(THREAD_TIMER.with(|c| c.get()).is_none());
+    }
+
+    static SAMPLE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn counting_handler(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {
+        SAMPLE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn thread_cpu_time_ns() -> u64 {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+        ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+    }
+
+    fn burn_cpu(duration_ns: u64) {
+        let deadline = thread_cpu_time_ns() + duration_ns;
+        let mut acc: u64 = 0;
+        while thread_cpu_time_ns() < deadline {
+            for i in 0..10_000u64 {
+                acc = acc.wrapping_add(i);
+            }
+        }
+        std::hint::black_box(acc);
+    }
+
+    #[test]
+    fn register_thread_fires_samples_under_cpu_load() {
+        let _g = TEST_LOCK.lock().unwrap();
+        SAMPLE_COUNT.store(0, Ordering::Relaxed);
+
+        // ~1000 samples/sec.
+        unsafe { start(1_000_000, counting_handler) }.expect("start");
+        register_thread().expect("should register thread");
+
+        // 200ms of CPU => expect ~200 samples.
+        burn_cpu(200_000_000);
+
+        let count = SAMPLE_COUNT.load(Ordering::Relaxed);
+
+        unregister_thread();
+
+        RUNNING.store(false, Ordering::Release);
+        DISARM_REQUESTED.store(false, Ordering::Release);
+
+        // lower threshold to account for noise
+        assert!(
+            count >= 150,
+            "expected >=150 samples from 200ms of CPU at 1kHz, got {count}"
+        );
     }
 }
