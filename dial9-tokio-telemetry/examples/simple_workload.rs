@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use dial9_tokio_telemetry::config::Dial9Config;
+use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
 async fn cpu_work(iterations: u64) -> u64 {

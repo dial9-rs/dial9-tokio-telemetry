@@ -24,7 +24,13 @@ pub(crate) mod traced;
 /// Tracing subscriber layer for emitting span events into dial9 traces.
 pub mod tracing_layer;
 
-/// Unified configuration for the [`main`] macro.
+/// Deprecated configuration, kept for back-compat. Prefer [`current_config`]
+/// (re-exported at the crate root as [`Dial9Config`] / [`Dial9ConfigBuilder`]).
+#[path = "legacy_config.rs"]
 pub mod config;
 
+#[path = "config.rs"]
+mod current_config;
+
+pub use current_config::{Dial9Config, Dial9ConfigBuilder, Dial9ConfigBuilderError, MissingFields};
 pub use dial9_macro::main;

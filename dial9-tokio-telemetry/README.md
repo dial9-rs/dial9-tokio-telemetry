@@ -31,7 +31,7 @@ There are two ways to set up dial9: the `#[main]` macro (recommended for most ap
 > **Note:** `#[dial9_tokio_telemetry::main]` is a **replacement** for `#[tokio::main]`, not a complement — do not use both on the same function. The macro builds and configures the Tokio runtime internally.
 
 ```rust,no_run
-use dial9_tokio_telemetry::{main, config::Dial9Config, telemetry::TelemetryHandle};
+use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
 
 fn my_config() -> Dial9Config {
     Dial9Config::builder()

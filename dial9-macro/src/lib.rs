@@ -139,7 +139,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// Using a named function:
 ///
 /// ```rust,ignore
-/// use dial9_tokio_telemetry::{main, config::Dial9Config, telemetry::TelemetryHandle};
+/// use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
 ///
 /// fn my_config() -> Dial9Config {
 ///     Dial9Config::builder()

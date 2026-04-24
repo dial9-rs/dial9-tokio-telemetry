@@ -1,7 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
-use dial9_tokio_telemetry::config::Dial9Config;
+use dial9_tokio_telemetry::Dial9Config;
 
 fn tmp_base_path() -> PathBuf {
     let dir = tempfile::tempdir().expect("tempdir");
