@@ -108,16 +108,31 @@
 
             #stack-sidebar {
                 width: 400px;
-                min-width: 300px;
-                max-width: 50vw;
+                min-width: 200px;
+                max-width: 70vw;
                 background: #1a1a2e;
-                border-left: 1px solid #6c63ff;
                 display: none;
                 flex-direction: column;
                 flex-shrink: 0;
                 font-size: 0.8em;
                 line-height: 1.6;
                 z-index: 5;
+                position: relative;
+            }
+            #stack-sidebar .sidebar-resize {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 4px;
+                height: 100%;
+                cursor: col-resize;
+                background: #6c63ff;
+                z-index: 10;
+                transition: background 0.15s;
+            }
+            #stack-sidebar .sidebar-resize:hover,
+            #stack-sidebar .sidebar-resize.active {
+                background: #8a82ff;
             }
             #stack-sidebar .sidebar-header {
                 display: flex;
@@ -165,10 +180,9 @@
             #toolbar .toolbar-row {
                 display: flex;
                 align-items: center;
-                gap: 12px;
+                flex-wrap: wrap;
+                gap: 6px 12px;
                 min-height: 36px;
-                overflow-x: auto;
-                overflow-y: hidden;
             }
             #toolbar .tb-info {
                 display: flex;
@@ -660,6 +674,7 @@
                 </div>
             </div>
             <div id="stack-sidebar">
+                <div class="sidebar-resize" id="sidebar-resize-handle"></div>
                 <div class="sidebar-header">
                     <span class="sidebar-title" id="stack-sidebar-title"></span>
                     <span class="sidebar-close" id="stack-sidebar-close">&times;</span>
@@ -690,6 +705,7 @@
                     <tr><td>Shift</td><td>Toggle region selection (analysis). Press once to start, ← → to extend, press again or Enter to confirm</td></tr>
                     <tr><td>Option / Alt</td><td>Toggle region selection (zoom). Press once to start, ← → to extend, press again or Enter to confirm</td></tr>
                     <tr><td>Esc</td><td>Cancel selection / close panels</td></tr>
+                    <tr><td>?</td><td>Toggle this help</td></tr>
                 </table>
                 <div class="close-hint">Press Esc or click outside to close</div>
             </div>
@@ -3131,8 +3147,8 @@
                         }
                         if (g.frames.length > 3) {
                             const id = 'sched-expand-' + Math.random().toString(36).slice(2);
-                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:16px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▶ ${g.frames.length - 3} more frames</div>`;
-                            html += `<div id="${id}" style="display:none">`;
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:16px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▼ collapse</div>`;
+                            html += `<div id="${id}">`;
                             for (let i = 3; i < g.frames.length; i++) {
                                 html += `<div style="color:#666;padding-left:24px;font-size:0.85em;word-break:break-all">${renderFrame(g.frames[i])}</div>`;
                             }
@@ -3160,8 +3176,8 @@
                         }
                         if (g.frames.length > 3) {
                             const id = 'cpu-expand-' + Math.random().toString(36).slice(2);
-                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:8px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▶ ${g.frames.length - 3} more frames</div>`;
-                            html += `<div id="${id}" style="display:none">`;
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:8px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▼ collapse</div>`;
+                            html += `<div id="${id}">`;
                             for (let i = 3; i < g.frames.length; i++) {
                                 html += `<div style="color:#666;padding-left:16px;font-size:0.85em;word-break:break-all">${renderFrame(g.frames[i])}</div>`;
                             }
@@ -3186,6 +3202,44 @@
             }
 
             document.getElementById("stack-sidebar-close").addEventListener("click", hideStackPopup);
+
+            // ── Sidebar resize drag ──
+            (function initSidebarResize() {
+                const handle = document.getElementById("sidebar-resize-handle");
+                const sidebar = document.getElementById("stack-sidebar");
+                let resizing = false;
+                let startX = 0;
+                let startW = 0;
+
+                handle.addEventListener("mousedown", (e) => {
+                    e.preventDefault();
+                    resizing = true;
+                    startX = e.clientX;
+                    startW = sidebar.offsetWidth;
+                    handle.classList.add("active");
+                    document.body.style.cursor = "col-resize";
+                    document.body.style.userSelect = "none";
+                });
+
+                window.addEventListener("mousemove", (e) => {
+                    if (!resizing) return;
+                    const dx = startX - e.clientX; // dragging left = wider
+                    const newW = Math.min(
+                        Math.max(200, startW + dx),
+                        window.innerWidth * 0.7
+                    );
+                    sidebar.style.width = newW + "px";
+                });
+
+                window.addEventListener("mouseup", () => {
+                    if (!resizing) return;
+                    resizing = false;
+                    handle.classList.remove("active");
+                    document.body.style.cursor = "";
+                    document.body.style.userSelect = "";
+                    if (trace) requestAnimationFrame(renderAll);
+                });
+            })();
 
             // ── Sched Events Panel (global view of all blocking operations) ──
             let schedPanelTimeRange = null; // {start, end} or null for full trace
@@ -3470,6 +3524,10 @@
                         renderAll();
                         break;
                     }
+                    case "?":
+                        e.preventDefault();
+                        document.getElementById("help-overlay").classList.toggle("visible");
+                        break;
                 }
             });
 
@@ -3485,11 +3543,13 @@
                     // Don't override span panel tooltip
                     if (e.target.closest && e.target.closest("#span-panel")) {
                         mouseNs = null;
+                        lanesContainer.style.cursor = "";
                         return;
                     }
                     if (document.getElementById("flamegraph-panel").style.display === "flex") {
                         tooltip.style.display = "none";
                         mouseNs = null;
+                        lanesContainer.style.cursor = "";
                         return;
                     }
                     const rect = lanesContainer.getBoundingClientRect();
@@ -3499,6 +3559,7 @@
                     if (mouseX < 0 || mouseX > drawW) {
                         tooltip.style.display = "none";
                         mouseNs = null;
+                        lanesContainer.style.cursor = "";
                         return;
                     }
 
@@ -3519,6 +3580,7 @@
                     );
                     if (laneIdx < 0 || laneIdx >= workerIds.length) {
                         tooltip.style.display = "none";
+                        lanesContainer.style.cursor = "";
                         return;
                     }
 
@@ -3553,6 +3615,7 @@
                     }
 
                     let pollInfo = "";
+                    let hasClickableStack = false;
                     {
                         const s = findSpanAt(spans.polls, ns);
                         if (s) {
@@ -3567,9 +3630,11 @@
                             }
                             if (s.cpuSamples && s.cpuSamples.length > 0) {
                                 pollInfo += `<span class="label">CPU samples:</span> <span class="value">🔥 ${s.cpuSamples.length}</span> <span style="color:#666">(click to view)</span><br>`;
+                                hasClickableStack = true;
                             }
                             if (s.schedSamples && s.schedSamples.length > 0) {
                                 pollInfo += `<span class="label">Sched events:</span> <span class="value">⚠️ ${s.schedSamples.length} blocking</span> <span style="color:#666">(click to view)</span><br>`;
+                                hasClickableStack = true;
                             }
                             // Count span events within this poll
                             const wSpans = spansByWorker[w];
@@ -3598,6 +3663,7 @@
                             }
                         }
                     }
+                    lanesContainer.style.cursor = hasClickableStack ? "pointer" : "";
 
                     // Find nearest local queue sample for this worker
                     const nearest = findNearest(workerQueueSamples[w] || [], ns);
