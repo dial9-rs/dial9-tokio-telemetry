@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// For HashMap keys that are already well-distributed (TypeId, Arc<str>), this
 /// avoids hash collisions.
 #[derive(Default)]
-pub(crate) struct FxHasher(u64);
+pub struct FxHasher(u64);
 
 impl Hasher for FxHasher {
     #[inline]
@@ -61,8 +61,8 @@ impl Hasher for FxHasher {
     }
 }
 
-pub(crate) type FxBuildHasher = BuildHasherDefault<FxHasher>;
-pub(crate) type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+pub type FxBuildHasher = BuildHasherDefault<FxHasher>;
+pub type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 /// A schema handle returned by [`Encoder::register_schema`] or created via
 /// [`Schema::new`].

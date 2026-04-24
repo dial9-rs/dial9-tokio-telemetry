@@ -10,8 +10,7 @@ use crate::telemetry::collector::CentralCollector;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::format::*;
 use dial9_trace_format::InternedString;
-use dial9_trace_format::encoder::Encoder;
-use std::collections::HashMap;
+use dial9_trace_format::encoder::{Encoder, FxHashMap};
 use std::panic::Location;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,7 +27,7 @@ use std::time::Duration;
 /// You don't construct this directly; it's passed to [`Encodable::encode`].
 pub struct ThreadLocalEncoder<'a> {
     encoder: &'a mut Encoder<Vec<u8>>,
-    location_cache: &'a mut HashMap<&'static Location<'static>, String>,
+    location_cache: &'a mut FxHashMap<&'static Location<'static>, String>,
 }
 
 impl std::fmt::Debug for ThreadLocalEncoder<'_> {
@@ -295,7 +294,7 @@ pub(crate) struct ThreadLocalBuffer {
     /// Caches `Location::to_string()` to avoid re-formatting on every event.
     /// Bounded by the number of `#[track_caller]` call sites in the program,
     /// which is fixed at compile time, so this does not grow unboundedly.
-    location_cache: HashMap<&'static Location<'static>, String>,
+    location_cache: FxHashMap<&'static Location<'static>, String>,
     /// Last drain epoch at which this buffer was flushed. Shared with the
     /// flush thread via `TlBufferHandle` so it can skip busy workers.
     pub(crate) flush_epoch: FlushEpoch,
@@ -320,7 +319,7 @@ impl ThreadLocalBuffer {
             event_count: 0,
             batch_size,
             collector: None,
-            location_cache: HashMap::new(),
+            location_cache: FxHashMap::default(),
             flush_epoch: FlushEpoch::new(),
         }
     }
