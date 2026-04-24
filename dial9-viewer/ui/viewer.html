@@ -629,19 +629,6 @@
                 <div id="flamegraph-panel">
                     <div id="fg-container" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>
                 </div>
-                <div id="sched-panel" style="display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:#1a1a2e;z-index:50;flex-direction:column">
-                    <div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16213e;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0">
-                        <span style="color:#ff4444;font-weight:600" id="sched-panel-title">⚠ Scheduling Events</span>
-                        <span style="color:#888" id="sched-panel-stats"></span>
-                        <select id="sched-group-by" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em">
-                            <option value="leaf">Group by blocking call</option>
-                            <option value="full">Group by full stack</option>
-                        </select>
-                        <span style="flex:1"></span>
-                        <span id="sched-panel-close" style="cursor:pointer;color:#888;padding:0 4px" tabindex="0" role="button">✕ Close (Esc)</span>
-                    </div>
-                    <div id="sched-panel-body" style="flex:1;overflow-y:auto;padding:8px 12px;font-family:monospace;font-size:0.82em;line-height:1.5"></div>
-                </div>
             </div>
             <div id="stack-sidebar">
                 <div class="sidebar-resize" id="sidebar-resize-handle"></div>
@@ -3167,6 +3154,7 @@
                     fgActive = false;
                     document.getElementById("flamegraph-panel").appendChild(fgContainer);
                 }
+                schedActive = false;
                 const sidebar = document.getElementById("stack-sidebar");
                 const body = document.getElementById("stack-sidebar-body");
                 const wasVisible = sidebar.style.display === "flex";
@@ -3227,6 +3215,7 @@
 
             // ── Sched Events Panel (global view of all blocking operations) ──
             let schedPanelTimeRange = null; // {start, end} or null for full trace
+            let schedActive = false;
 
             function showSchedPanel(startNs, endNs) {
                 schedPanelTimeRange = (startNs != null && endNs != null) ? { start: startNs, end: endNs } : null;
@@ -3235,10 +3224,19 @@
                     showToast("no-sched-events", "No scheduling events found" + (schedPanelTimeRange ? " in selected range" : " in trace"), "error", 4000);
                     return;
                 }
+                schedActive = true;
+                const sidebar = document.getElementById("stack-sidebar");
+                const title = document.getElementById("stack-sidebar-title");
+                const rangeLabel = schedPanelTimeRange
+                    ? ` in ${formatHumanDuration(schedPanelTimeRange.end - schedPanelTimeRange.start)}`
+                    : "";
+                title.textContent = `Blocking Calls \u00b7 ${allSched.length} events${rangeLabel}`;
+
                 renderSchedPanel(allSched);
                 clearToasts();
-                document.getElementById("sched-panel").style.display = "flex";
-                document.getElementById("sched-panel-close").focus();
+                const wasHidden = sidebar.style.display !== "flex";
+                sidebar.style.display = "flex";
+                if (wasHidden && trace) requestAnimationFrame(renderAll);
             }
 
             function collectSchedSamples(range) {
@@ -3257,14 +3255,11 @@
             }
 
             function renderSchedPanel(allSched) {
-                const groupBy = document.getElementById("sched-group-by").value;
-                const body = document.getElementById("sched-panel-body");
+                const groupBy = schedActive
+                    ? (document.getElementById("sched-group-by-sb") || {}).value || "leaf"
+                    : "leaf";
+                const body = document.getElementById("stack-sidebar-body");
                 const total = allSched.length;
-                const rangeLabel = schedPanelTimeRange
-                    ? ` in ${formatHumanDuration(schedPanelTimeRange.end - schedPanelTimeRange.start)} selection`
-                    : " (full trace)";
-                document.getElementById("sched-panel-stats").textContent =
-                    `${total} events across ${workerIds.length} workers${rangeLabel}`;
 
                 // Group by leaf frame or full stack
                 const groups = new Map();
@@ -3289,9 +3284,14 @@
 
                 const sorted = [...groups.values()].sort((a, b) => b.count - a.count);
 
-                let html = `<div style="margin-bottom:12px;color:#aaa;font-size:0.9em">
+                let html = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                    <select id="sched-group-by-sb" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em">
+                        <option value="leaf"${groupBy === "leaf" ? " selected" : ""}>Group by blocking call</option>
+                        <option value="full"${groupBy === "full" ? " selected" : ""}>Group by full stack</option>
+                    </select>
+                </div>`;
+                html += `<div style="margin-bottom:10px;color:#aaa;font-size:0.9em">
                     Blocking calls that caused the kernel to deschedule a tokio worker thread during a poll.
-                    These indicate synchronous/blocking operations on the async runtime.
                 </div>`;
 
                 // Summary bar chart
@@ -3321,14 +3321,14 @@
                     const gid = 'sg-' + Math.random().toString(36).slice(2);
 
                     html += `<div style="border:1px solid #333;border-radius:6px;margin-bottom:8px;overflow:hidden">`;
-                    html += `<div style="padding:8px 12px;background:#16213e;display:flex;align-items:center;gap:8px;cursor:pointer" onclick="document.getElementById('${gid}').style.display=document.getElementById('${gid}').style.display==='none'?'block':'none'">`;
+                    html += `<div style="padding:8px 12px;background:#16213e;display:flex;align-items:center;gap:8px;cursor:pointer" onclick="var d=document.getElementById('${gid}');d.style.display=d.style.display==='none'?'block':'none';this.querySelector('.sg-toggle').textContent=d.style.display==='none'?'▶ details':'▼ collapse'">`;
                     html += `<span style="color:${color};font-weight:700;font-size:1.1em">${g.count}×</span>`;
                     html += `<span style="color:#fff;font-weight:600">${g.leaf}</span>`;
                     html += `<span style="color:#888">(${pct}% of all sched events)</span>`;
-                    html += `<span style="color:#6c63ff;margin-left:auto;font-size:0.9em">▼ details</span>`;
+                    html += `<span class="sg-toggle" style="color:#6c63ff;margin-left:auto;font-size:0.9em">▼ collapse</span>`;
                     html += `</div>`;
 
-                    html += `<div id="${gid}" style="display:none;padding:8px 12px">`;
+                    html += `<div id="${gid}" style="padding:8px 12px">`;
 
                     // Show unique stacks within this group
                     const subStacks = [...g.stacks.values()].sort((a, b) => b.count - a.count);
@@ -3365,6 +3365,15 @@
 
                 body.innerHTML = html;
 
+                // Wire up group-by dropdown
+                const groupByEl = document.getElementById("sched-group-by-sb");
+                if (groupByEl) {
+                    groupByEl.addEventListener("change", () => {
+                        const allSched = collectSchedSamples(schedPanelTimeRange);
+                        renderSchedPanel(allSched);
+                    });
+                }
+
                 // Wire up jump-to-poll links
                 body.querySelectorAll('.sched-jump').forEach(el => {
                     el.addEventListener('click', (e) => {
@@ -3375,7 +3384,7 @@
                         const pad = Math.max(dur * 5, 1e6);
                         viewStart = Math.max(minTs, t - pad * 0.3);
                         viewEnd = Math.min(maxTs, viewStart + pad);
-                        document.getElementById("sched-panel").style.display = "none";
+                        hideStackPopup();
                         // Scroll to worker lane
                         const laneIdx = workerIds.indexOf(w);
                         if (laneIdx >= 0) lanesContainer.scrollTop = laneIdx * LANE_H;
@@ -3383,15 +3392,6 @@
                     });
                 });
             }
-
-            document.getElementById("sched-group-by").addEventListener("change", () => {
-                const allSched = collectSchedSamples(schedPanelTimeRange);
-                renderSchedPanel(allSched);
-            });
-
-            document.getElementById("sched-panel-close").addEventListener("click", () => {
-                document.getElementById("sched-panel").style.display = "none";
-            });
 
             // Enter activates role="button" elements and toggles checkboxes
             document.addEventListener("keydown", (e) => {
@@ -3468,8 +3468,6 @@
                                 break;
                             }
                             hideStackPopup();
-                        } else if (document.getElementById("sched-panel").style.display === "flex") {
-                            document.getElementById("sched-panel").style.display = "none";
                         }
                         selectedTaskId = null;
                         document.getElementById("main-area").focus();
