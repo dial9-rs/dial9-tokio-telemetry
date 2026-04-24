@@ -446,31 +446,7 @@
 
             #flamegraph-panel {
                 display: none;
-                position: absolute;
-                top: 0;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                background: #1a1a2e;
-                z-index: 50;
-                flex-direction: column;
             }
-            #flamegraph-panel .fg-header {
-                display: flex;
-                align-items: center;
-                gap: 12px;
-                padding: 6px 12px;
-                background: #16213e;
-                border-bottom: 1px solid #333;
-                font-size: 0.8em;
-                flex-shrink: 0;
-            }
-            #flamegraph-panel .fg-header .fg-title { color: #6c63ff; font-weight: 600; }
-            #flamegraph-panel .fg-header .fg-stats { color: #888; }
-            #flamegraph-panel .fg-header .fg-popout { cursor: pointer; color: #888; padding: 0 4px; }
-            #flamegraph-panel .fg-header .fg-popout:hover { color: #fff; }
-            #flamegraph-panel .fg-header .fg-close { cursor: pointer; color: #888; margin-left: auto; padding: 0 4px; }
-            #flamegraph-panel .fg-header .fg-close:hover { color: #fff; }
             @keyframes toast-in {
                 from { opacity: 0; transform: translateY(-8px); }
                 to { opacity: 1; transform: translateY(0); }
@@ -651,12 +627,6 @@
                     <canvas id="queue-canvas"></canvas>
                 </div>
                 <div id="flamegraph-panel">
-                    <div class="fg-header">
-                        <span class="fg-title" id="fg-title">Flamegraph</span>
-                        <span class="fg-stats" id="fg-stats"></span>
-                        <span class="fg-popout" id="fg-popout" tabindex="0" role="button" title="Open in new tab">&#8599; Pop Out</span>
-                        <span class="fg-close" id="fg-close" tabindex="0" role="button">&#10005; Close (Esc)</span>
-                    </div>
                     <div id="fg-container" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>
                 </div>
                 <div id="sched-panel" style="display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:#1a1a2e;z-index:50;flex-direction:column">
@@ -984,7 +954,6 @@
             const dragOverlay = document.getElementById("drag-overlay");
             const fileInput = document.getElementById("file-input");
             const viewer = document.getElementById("viewer");
-            const fgPanel = document.getElementById("flamegraph-panel");
             const taskDetailPanel = document.getElementById("task-detail");
             const clearRangeBtn = document.getElementById("btn-clear-range");
             const tooltip = document.getElementById("tooltip");
@@ -1055,7 +1024,7 @@
             function resetTraceState({ clearUrlRange } = {}) {
                 selectedTaskId = null;
                 hoveredWakerTaskId = null;
-                fgPanel.style.display = "none";
+                hideStackPopup();
                 taskDetailPanel.style.display = "none";
                 schedPanelTimeRange = null;
 
@@ -2823,7 +2792,6 @@
             document.getElementById("main-area").addEventListener(
                 "wheel",
                 (e) => {
-                    if (document.getElementById("flamegraph-panel").style.display === "flex") return;
                     if (e.ctrlKey || e.metaKey) {
                         e.preventDefault();
                         const rect = lanesContainer.getBoundingClientRect();
@@ -3194,9 +3162,17 @@
             }
 
             function hideStackPopup() {
+                // If flamegraph was in the sidebar, move its container back
+                if (fgActive) {
+                    fgActive = false;
+                    document.getElementById("flamegraph-panel").appendChild(fgContainer);
+                }
                 const sidebar = document.getElementById("stack-sidebar");
+                const body = document.getElementById("stack-sidebar-body");
                 const wasVisible = sidebar.style.display === "flex";
                 sidebar.style.display = "none";
+                body.style.display = "";
+                body.style.flexDirection = "";
                 selOverlay.style.display = "none";
                 if (wasVisible && trace) requestAnimationFrame(renderAll);
             }
@@ -3244,6 +3220,7 @@
                     handle.classList.remove("active");
                     document.body.style.cursor = "";
                     document.body.style.userSelect = "";
+                    if (fgActive) fgInstance.resize();
                     if (trace) requestAnimationFrame(renderAll);
                 });
             })();
@@ -3486,14 +3463,13 @@
                         }
                         clearToasts();
                         if (document.getElementById("stack-sidebar").style.display === "flex") {
+                            // If flamegraph is in the sidebar, let it handle Escape first
+                            if (fgActive && fgInstance.handleEscape()) {
+                                break;
+                            }
                             hideStackPopup();
                         } else if (document.getElementById("sched-panel").style.display === "flex") {
                             document.getElementById("sched-panel").style.display = "none";
-                        } else if (document.getElementById("flamegraph-panel").style.display === "flex") {
-                            // Let the flamegraph module handle Escape first (search clear / zoom reset)
-                            if (!fgInstance.handleEscape()) {
-                                document.getElementById("flamegraph-panel").style.display = "none";
-                            }
                         }
                         selectedTaskId = null;
                         document.getElementById("main-area").focus();
@@ -3550,12 +3526,6 @@
                     }
                     // Don't override span panel tooltip
                     if (e.target.closest && e.target.closest("#span-panel")) {
-                        mouseNs = null;
-                        lanesContainer.style.cursor = "";
-                        return;
-                    }
-                    if (document.getElementById("flamegraph-panel").style.display === "flex") {
-                        tooltip.style.display = "none";
                         mouseNs = null;
                         lanesContainer.style.cursor = "";
                         return;
@@ -3841,9 +3811,9 @@
 
             // ── Flamegraph ──
             let fgSelStart = 0, fgSelEnd = 0;
-            const fgInstance = FlamegraphRenderer.createFlamegraph(
-                document.getElementById("fg-container")
-            );
+            let fgActive = false;
+            const fgContainer = document.getElementById("fg-container");
+            const fgInstance = FlamegraphRenderer.createFlamegraph(fgContainer);
 
             // Selection picker: shown after shift+drag when both flamegraph and sched data exist
             function showSelectionPicker(selStart, selEnd) {
@@ -3885,22 +3855,43 @@
 
                 fgSelStart = selStart;
                 fgSelEnd = selEnd;
+                fgActive = true;
                 const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
-                document.getElementById("fg-title").textContent = "Flamegraph";
-                document.getElementById("fg-stats").textContent =
-                    `${samples.length} samples \u00b7 ${durMs}ms selected`;
+
+                const sidebar = document.getElementById("stack-sidebar");
+                const title = document.getElementById("stack-sidebar-title");
+                const body = document.getElementById("stack-sidebar-body");
+                title.textContent = `Flamegraph \u00b7 ${samples.length} samples \u00b7 ${durMs}ms`;
+
+                body.innerHTML = "";
+                body.style.display = "flex";
+                body.style.flexDirection = "column";
+                // Add pop-out button above the flamegraph
+                const actions = document.createElement("div");
+                actions.style.cssText = "display:flex;gap:8px;margin-bottom:6px;flex-shrink:0";
+                actions.innerHTML = `<span id="fg-popout-sb" tabindex="0" role="button" title="Open in new tab" style="cursor:pointer;color:#6c63ff;font-size:0.9em">&#8599; Pop Out</span>`;
+                body.appendChild(actions);
+                // Move fg-container into sidebar body
+                fgContainer.style.flex = "1";
+                fgContainer.style.minHeight = "0";
+                body.appendChild(fgContainer);
 
                 clearToasts();
-                document.getElementById("flamegraph-panel").style.display = "flex";
-                document.getElementById("fg-close").focus();
-                fgInstance.setData(samples, trace.callframeSymbols);
+                const wasHidden = sidebar.style.display !== "flex";
+                sidebar.style.display = "flex";
+                if (wasHidden && trace) requestAnimationFrame(renderAll);
+
+                // Give the container a frame to get its layout, then render
+                requestAnimationFrame(() => {
+                    fgInstance.setData(samples, trace.callframeSymbols);
+                    fgInstance.resize();
+                });
+
+                // Wire pop-out
+                document.getElementById("fg-popout-sb").onclick = handleFgPopout;
             }
 
-            document.getElementById("fg-close").addEventListener("click", () => {
-                document.getElementById("flamegraph-panel").style.display = "none";
-            });
-
-            document.getElementById("fg-popout").addEventListener("click", () => {
+            function handleFgPopout() {
                 const params = new URLSearchParams(window.location.search);
                 let traceUrl = params.get("trace");
                 let isBlobUrl = false;
@@ -3921,7 +3912,7 @@
                 if (isBlobUrl) {
                     showToast("popout-blob", "Pop-out linked to this tab \u2014 keep it open", "info", 5000);
                 }
-            });
+            }
 
             // ── Queue chart drag-select: show tasks spawned in time range ──
             let qcDragging = false, qcDragStartX = 0, qcDragStartNs = 0, qcDragEndNs = 0, qcDragMoved = false;
@@ -4051,7 +4042,7 @@
 
             // Re-render flamegraph on resize
             window.addEventListener("resize", () => {
-                if (document.getElementById("flamegraph-panel").style.display === "flex") {
+                if (fgActive) {
                     fgInstance.resize();
                 }
             });
