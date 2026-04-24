@@ -3210,6 +3210,7 @@
                 let resizing = false;
                 let startX = 0;
                 let startW = 0;
+                let resizeRafId = 0;
 
                 handle.addEventListener("mousedown", (e) => {
                     e.preventDefault();
@@ -3229,6 +3230,12 @@
                         window.innerWidth * 0.7
                     );
                     sidebar.style.width = newW + "px";
+                    if (trace && !resizeRafId) {
+                        resizeRafId = requestAnimationFrame(() => {
+                            resizeRafId = 0;
+                            renderAll();
+                        });
+                    }
                 });
 
                 window.addEventListener("mouseup", () => {
@@ -3526,6 +3533,7 @@
                     }
                     case "?":
                         e.preventDefault();
+                        if (kbSelecting) cancelKbSelection();
                         document.getElementById("help-overlay").classList.toggle("visible");
                         break;
                 }
