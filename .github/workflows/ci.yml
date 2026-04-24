@@ -187,11 +187,13 @@ jobs:
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
         run: |
-          for crate in dial9-trace-format-derive dial9-trace-format dial9-perf-self-profile dial9-macro dial9-tokio-telemetry dial9-viewer; do
-            echo "::group::cargo package -p $crate"
-            cargo package -p "$crate"
-            echo "::endgroup::"
-          done
+          cargo package \
+            -p dial9-trace-format-derive \
+            -p dial9-trace-format \
+            -p dial9-perf-self-profile \
+            -p dial9-macro \
+            -p dial9-tokio-telemetry \
+            -p dial9-viewer
 
   ci-pass:
     name: CI Pass
