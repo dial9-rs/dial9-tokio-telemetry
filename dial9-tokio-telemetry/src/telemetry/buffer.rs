@@ -218,12 +218,14 @@ impl Encodable for RawEvent {
                 timestamp_nanos,
                 task_id,
                 location,
+                instrumented,
             } => {
                 let spawn_loc = enc.intern_location(location);
                 enc.encode(&TaskSpawnEvent {
                     timestamp_ns: *timestamp_nanos,
                     task_id: *task_id,
                     spawn_loc,
+                    instrumented: Some(*instrumented),
                 });
             }
             RawEvent::TaskTerminate {

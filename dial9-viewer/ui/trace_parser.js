@@ -93,6 +93,7 @@
    *   taskSpawnLocs: Map<number, string|null>,
    *   taskSpawnTimes: Map<number, number>,
    *   taskTerminateTimes: Map<number, number>,
+   *   taskInstrumented: Map<number, boolean>,
    *   cpuSamples: CpuSample[],
    *   callframeSymbols: Map<string, SymbolFrame|SymbolFrame[]>,
    *   threadNames: Map<number, string>,
@@ -139,6 +140,7 @@
     const taskSpawnLocs = new Map();
     const taskSpawnTimes = new Map();
     const taskTerminateTimes = new Map();
+    const taskInstrumented = new Map(); // taskId -> bool (true if spawned via TelemetryHandle::spawn)
     const callframeSymbols = new Map();
     const cpuSamples = [];
     const threadNames = new Map();
@@ -276,9 +278,11 @@
         case "TaskSpawnEvent": {
           const taskId = num(v.task_id);
           const spawnLoc = v.spawn_loc || null;
+          const instrumented = v.instrumented ?? true;
           if (spawnLoc) spawnLocations.set(spawnLoc, spawnLoc);
           taskSpawnLocs.set(taskId, spawnLoc);
           taskSpawnTimes.set(taskId, ts);
+          taskInstrumented.set(taskId, !!instrumented);
           break;
         }
         case "TaskTerminateEvent":
@@ -427,6 +431,7 @@
       spawnLocations,
       taskSpawnLocs,
       taskSpawnTimes,
+      taskInstrumented,
       cpuSamples,
       callframeSymbols,
       threadNames,

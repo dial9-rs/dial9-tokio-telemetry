@@ -176,6 +176,9 @@ pub struct TaskSpawnEvent {
     pub task_id: TaskId,
     /// Interned spawn location.
     pub spawn_loc: InternedString,
+    /// Whether this spawn was instrumented (via `TelemetryHandle::spawn`).
+    /// Defaults to true if not present on the wire.
+    pub instrumented: Option<bool>,
 }
 
 #[derive(TraceEvent)]
@@ -390,6 +393,7 @@ pub(crate) fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> Tel
             timestamp_nanos: e.timestamp_ns,
             task_id: e.task_id,
             spawn_loc: e.spawn_loc,
+            instrumented: e.instrumented.unwrap_or(true),
         },
         TelemetryEventRef::TaskTerminate(e) => TelemetryEvent::TaskTerminate {
             timestamp_nanos: e.timestamp_ns,

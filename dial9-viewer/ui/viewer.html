@@ -386,6 +386,21 @@
                 border: 1px solid rgba(255, 68, 68, 0.7);
                 color: #ff8a8a;
             }
+            a.uninstrumented-badge {
+                background: #3a1a1a;
+                border: 1px solid rgba(255, 68, 68, 0.5);
+                padding: 1px 4px;
+                border-radius: 2px;
+                font-size: 0.85em;
+                color: #ff8a8a;
+                text-decoration: none;
+                display: inline-block;
+                vertical-align: text-bottom;
+                cursor: pointer;
+            }
+            a.uninstrumented-badge:hover {
+                text-decoration: underline;
+            }
             #help-overlay {
                 display: none;
                 position: fixed;
@@ -2114,14 +2129,29 @@
                 const terminateTs = trace.taskTerminateTimes?.get(selectedTaskId);
                 const hasTerminate = terminateTs != null;
                 const spawnTs = trace.taskSpawnTimes?.get(selectedTaskId);
+                const isInstrumented = trace.taskInstrumented?.get(selectedTaskId) ?? true;
                 let lifecycleStr = "";
                 if (hasTerminate && spawnTs != null) {
                     const dur = terminateTs - spawnTs;
                     const durMs = dur / 1e6;
                     lifecycleStr = ` · lifetime ${formatHumanDuration(dur)}`;
                 }
-                document.getElementById("task-detail-label").textContent =
-                    `Task 0x${selectedTaskId.toString(16)}${loc ? " — " + loc : ""} · ${polls.length} polls · ${wakeCount} wakes${lifecycleStr}${hasTerminate ? " ✓" : ""}`;
+                const escapeHtml = (s) => String(s)
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;");
+                let labelHtml = `Task 0x${selectedTaskId.toString(16)}`;
+                if (loc) labelHtml += ` — ${escapeHtml(loc)}`;
+                labelHtml += ` · ${polls.length} polls`;
+                if (isInstrumented) {
+                    labelHtml += ` · ${wakeCount} wakes`;
+                }
+                labelHtml += `${lifecycleStr}${hasTerminate ? " ✓" : ""}`;
+                if (!isInstrumented) {
+                    labelHtml += ` · <a class="uninstrumented-badge" href="https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/telemetry/struct.TelemetryHandle.html#method.spawn" target="_blank" title="Task spawned via raw tokio::spawn() — click for docs on TelemetryHandle::spawn">no wake data ⓘ</a>`;
+                }
+                document.getElementById("task-detail-label").innerHTML = labelHtml;
 
                 const parent = c.parentElement;
                 const dpr = devicePixelRatio || 1;

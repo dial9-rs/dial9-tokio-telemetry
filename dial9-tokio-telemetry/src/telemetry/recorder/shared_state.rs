@@ -6,9 +6,11 @@ use crate::telemetry::events::RawEvent;
 #[cfg(feature = "cpu-profiling")]
 use crate::telemetry::events::ThreadRole;
 use crate::telemetry::task_metadata::TaskId;
+use crossbeam_queue::SegQueue;
 use std::cell::Cell;
 #[cfg(feature = "cpu-profiling")]
 use std::collections::HashMap;
+use std::panic::Location;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -43,6 +45,9 @@ pub(crate) struct SharedState {
     /// cycle for queue sampling and metadata generation. `build_and_attach_to_telemetry`
     /// pushes new contexts here so the flush thread picks them up.
     pub(crate) contexts: Mutex<Vec<Arc<RuntimeContext>>>,
+    /// Spawn locations of uninstrumented spawns, appended lock-free at
+    /// runtime and drained at shutdown to build the per-location summary.
+    pub(crate) uninstrumented_spawn_locs: SegQueue<&'static Location<'static>>,
     /// Maps OS tid → thread role so that CPU samples returned from perf can be
     /// attributed to the correct worker or blocking-pool bucket at flush time.
     #[cfg(feature = "cpu-profiling")]
@@ -61,6 +66,7 @@ impl SharedState {
             drain_epoch: AtomicU64::new(0),
             tl_buffers: Mutex::new(Vec::new()),
             contexts: Mutex::new(Vec::new()),
+            uninstrumented_spawn_locs: crossbeam_queue::SegQueue::new(),
             #[cfg(feature = "cpu-profiling")]
             thread_roles: Mutex::new(HashMap::new()),
             #[cfg(feature = "cpu-profiling")]

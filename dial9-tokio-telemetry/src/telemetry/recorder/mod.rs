@@ -18,7 +18,10 @@ use crate::telemetry::writer::{RotatingWriter, TraceWriter};
 use metrique::timers::Timer;
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
+use std::cell::Cell;
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::panic::Location;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -28,6 +31,10 @@ thread_local! {
     /// Per-thread [`TelemetryHandle`], populated in `on_thread_start` and
     /// cleared in `on_thread_stop`. Enables [`TelemetryHandle::current`].
     static CURRENT_HANDLE: RefCell<Option<TelemetryHandle>> = const { RefCell::new(None) };
+
+    /// Set by `TelemetryHandle::spawn()` before calling `tokio::spawn()`,
+    /// so the `on_task_spawn` hook can distinguish instrumented from raw spawns.
+    static INSTRUMENTED_SPAWN: Cell<bool> = const { Cell::new(false) };
 }
 
 // ---------------------------------------------------------------------------
@@ -185,11 +192,18 @@ fn register_hooks(
         builder.on_task_spawn(move |meta| {
             let task_id = TaskId::from(meta.id());
             let location = meta.spawned_at();
+            let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get());
+
             s5.record_event(RawEvent::TaskSpawn {
                 timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
                 task_id,
                 location,
+                instrumented,
             });
+
+            if !instrumented {
+                s5.uninstrumented_spawn_locs.push(location);
+            }
         });
         let s6 = shared.clone();
         builder.on_task_terminate(move |meta| {
@@ -394,10 +408,28 @@ impl TelemetryHandle {
         F::Output: Send + 'static,
     {
         let traced_handle = self.traced_handle();
+        let _guard = InstrumentedSpawnGuard::set();
         tokio::spawn(async move {
             let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
             crate::traced::Traced::new(future, traced_handle, task_id).await
         })
+    }
+}
+
+/// RAII guard that sets `INSTRUMENTED_SPAWN` to `true` on creation and
+/// resets it to `false` on drop, even if `tokio::spawn` panics.
+struct InstrumentedSpawnGuard;
+
+impl InstrumentedSpawnGuard {
+    fn set() -> Self {
+        INSTRUMENTED_SPAWN.set(true);
+        Self
+    }
+}
+
+impl Drop for InstrumentedSpawnGuard {
+    fn drop(&mut self) {
+        INSTRUMENTED_SPAWN.set(false);
     }
 }
 
@@ -423,6 +455,7 @@ impl RuntimeTelemetryHandle {
         F::Output: Send + 'static,
     {
         let traced = self.traced.clone();
+        let _guard = InstrumentedSpawnGuard::set();
         self.runtime.spawn(async move {
             let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
             crate::traced::Traced::new(future, traced, task_id).await
@@ -570,12 +603,43 @@ impl TelemetryGuard {
 
         Ok(())
     }
+
+    fn summarize_spawn_audit(&self) {
+        use std::fmt::Write;
+
+        let mut by_location = HashMap::<&'static Location<'static>, u64>::new();
+        let mut total = 0u64;
+        while let Some(loc) = self.handle.shared.uninstrumented_spawn_locs.pop() {
+            *by_location.entry(loc).or_default() += 1;
+            total += 1;
+        }
+        if total == 0 {
+            return;
+        }
+
+        let mut sites: Vec<_> = by_location.into_iter().collect();
+        sites.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+        let mut summary = format!(
+            "{total} uninstrumented spawn(s) at {} site(s):\n",
+            sites.len()
+        );
+        for (loc, count) in &sites {
+            let _ = writeln!(summary, "  {count:>6} × {loc}");
+        }
+        summary.push_str(
+            "  → use TelemetryHandle::spawn(): https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/telemetry/struct.TelemetryHandle.html#method.spawn",
+        );
+        tracing::debug!(target: "dial9_telemetry", "{summary}");
+    }
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
         // 1. Stop the flush thread (flushes + finalizes)
         self.stop_flush_thread();
+
+        self.summarize_spawn_audit();
         // 2. Hard shutdown: drop the sender without sending — worker sees
         // RecvError and exits without draining. No need to join the thread.
         // For graceful drain, use graceful_shutdown() instead.
@@ -1471,6 +1535,7 @@ mod tests {
                     timestamp_nanos: (i as u64 + 1) * 1000,
                     task_id,
                     location: loc,
+                    instrumented: true,
                 },
                 &collector,
                 &drain_epoch,
