@@ -392,6 +392,22 @@
       }
     }
 
+    if (filterType === "uninstrumented" && opts && opts.taskInstrumented) {
+      for (const w of workerIds) {
+        for (const s of workerSpans[w].polls) {
+          if (s.taskId && opts.taskInstrumented.get(s.taskId) === false) {
+            points.push({
+              time: s.start,
+              worker: w,
+              type: "uninstrumented",
+              value: (s.end - s.start) / 1e6,
+              span: s,
+            });
+          }
+        }
+      }
+    }
+
     if (opts && opts.sortByWorst) {
       points.sort((a, b) => b.value - a.value);
     } else {
