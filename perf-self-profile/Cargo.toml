@@ -1,6 +1,6 @@
 [package]
 name = "dial9-perf-self-profile"
-version = "0.3.3"
+version = "0.3.4"
 edition.workspace = true
 repository.workspace = true
 description = "Minimal self-profiling via Linux perf_event_open with frame-pointer-based stack traces"
@@ -16,7 +16,8 @@ dial9-trace-format = { workspace = true }
 tracing = "0.1.44"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
 blazesym = "0.2"
+crossbeam-utils = "0.8"
+libc = "0.2"
 perf-event-data = "0.1.8"
 perf-event-open-sys2 = "5.0.6"

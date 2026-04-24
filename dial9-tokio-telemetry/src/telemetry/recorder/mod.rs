@@ -250,8 +250,12 @@ fn register_hooks(
                 if let Ok(mut prof) = s_start.sched_profiler.lock()
                     && let Some(ref mut p) = *prof
                 {
+                    // Register the current thread for sched event sampling.
                     let _ = p.track_current_thread();
                 }
+                // Registers the current thread for the CPU-profiling fallback (ctimer).
+                // No-op when perf is the active backend (perf uses inherit).
+                let _ = dial9_perf_self_profile::register_current_thread();
             }
         })
         .on_thread_stop(move || {
@@ -268,6 +272,7 @@ fn register_hooks(
                 {
                     p.stop_tracking_current_thread();
                 }
+                dial9_perf_self_profile::unregister_current_thread();
             }
         });
 }
@@ -1079,7 +1084,11 @@ impl TelemetryCore {
                         let _ = libc::nice(10);
                     }
 
+                    #[cfg(feature = "cpu-profiling")]
+                    let _ = dial9_perf_self_profile::register_current_thread();
                     run_flush_loop(control_rx, &shared, &flush_metrics_sink, event_writer);
+                    #[cfg(feature = "cpu-profiling")]
+                    dial9_perf_self_profile::unregister_current_thread();
                 })
                 .expect("failed to spawn telemetry-flush thread")
         };
@@ -1131,7 +1140,11 @@ impl TelemetryCore {
             let wt = std::thread::Builder::new()
                 .name("dial9-worker".into())
                 .spawn(move || {
+                    #[cfg(feature = "cpu-profiling")]
+                    let _ = dial9_perf_self_profile::register_current_thread();
                     crate::background_task::run_background_task(config, shutdown_rx);
+                    #[cfg(feature = "cpu-profiling")]
+                    dial9_perf_self_profile::unregister_current_thread();
                 })
                 .expect("failed to spawn dial9-worker thread");
             worker = Some(WorkerHandle {

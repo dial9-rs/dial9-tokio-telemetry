@@ -364,11 +364,12 @@
           const cpuCount = s.cpuSamples ? s.cpuSamples.length : 0;
           const schedCount = s.schedSamples ? s.schedSamples.length : 0;
           if (cpuCount + schedCount > 0) {
+            const durMs = (s.end - s.start) / 1e6;
             points.push({
               time: s.start,
               worker: w,
               type: "cpu-sampled",
-              value: cpuCount + schedCount,
+              value: durMs,
               span: s,
             });
           }

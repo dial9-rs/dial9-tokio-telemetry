@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.3...dial9-tokio-telemetry-v0.3.4) - 2026-04-23
+
+### Added
+
+- add CPU profiling fallback for perf-restricted environments. This should enable CPU profiling to work in Fargate. ([#250](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/250))
+- *(viewer)* replace stack trace popup with right sidebar panel ([#274](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/274))
+- *(viewer)* Pop-out flamegraph with interactive features ([#269](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/269))
+
+### Fixed
+
+- fix sort order of polls with cpu samples ([#272](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/272))
+
+### Other
+
+- Make worker lanes scrollable in viewer ([#275](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/275))
+- Fix docs.rs broken links by using absolute GitHub URLs ([#277](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/277))
+
 ## [0.3.3](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.2...dial9-tokio-telemetry-v0.3.3) - 2026-04-20
 
 ### Other

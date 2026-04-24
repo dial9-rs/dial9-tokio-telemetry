@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-macro"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "insta",
  "prettyplease",
@@ -1408,9 +1408,10 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "blazesym",
+ "crossbeam-utils",
  "dial9-trace-format",
  "libc",
  "perf-event-data",
@@ -1420,7 +1421,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "arc-swap",
  "assert2",
@@ -1464,7 +1465,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "criterion",
  "dial9-trace-format-derive",
@@ -1476,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format-derive"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "insta",
  "prettyplease",
@@ -1487,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "assert2",
