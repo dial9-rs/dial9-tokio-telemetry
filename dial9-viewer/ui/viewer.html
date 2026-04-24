@@ -660,6 +660,7 @@
                     <span class="sidebar-close" id="stack-sidebar-close">&times;</span>
                 </div>
                 <div class="sidebar-tabs" id="sidebar-tabs" style="display:none">
+                    <span class="tab" id="tab-poll-detail" data-tab="poll-detail" style="display:none">Poll Detail</span>
                     <span class="tab" id="tab-flamegraph" data-tab="flamegraph">Flamegraph</span>
                     <span class="tab" id="tab-blocking" data-tab="blocking">Blocking Calls</span>
                 </div>
@@ -3165,12 +3166,11 @@
                 }
 
                 body.innerHTML = html;
+                showSidebarTabs("poll-detail");
                 const wasHidden = sidebar.style.display !== "flex";
                 sidebar.style.display = "flex";
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
             }
-
-            // Track the current selection range for tab switching
             let sidebarSelStart = 0, sidebarSelEnd = 0;
 
             function hideStackPopup() {
@@ -3195,12 +3195,27 @@
 
             document.getElementById("stack-sidebar-close").addEventListener("click", hideStackPopup);
 
-            // ── Sidebar view tabs (flamegraph <-> blocking calls) ──
+            // ── Sidebar view tabs (poll-detail | flamegraph <-> blocking calls) ──
             function showSidebarTabs(activeTab) {
                 const tabs = document.getElementById("sidebar-tabs");
                 tabs.style.display = "flex";
-                tabs.querySelector("#tab-flamegraph").classList.toggle("active", activeTab === "flamegraph");
-                tabs.querySelector("#tab-blocking").classList.toggle("active", activeTab === "blocking");
+                const pollDetail = tabs.querySelector("#tab-poll-detail");
+                const flamegraph = tabs.querySelector("#tab-flamegraph");
+                const blocking = tabs.querySelector("#tab-blocking");
+
+                if (activeTab === "poll-detail") {
+                    pollDetail.style.display = "";
+                    flamegraph.style.display = "none";
+                    blocking.style.display = "none";
+                } else {
+                    pollDetail.style.display = "none";
+                    flamegraph.style.display = "";
+                    blocking.style.display = "";
+                }
+
+                pollDetail.classList.toggle("active", activeTab === "poll-detail");
+                flamegraph.classList.toggle("active", activeTab === "flamegraph");
+                blocking.classList.toggle("active", activeTab === "blocking");
             }
 
             document.getElementById("tab-flamegraph").addEventListener("click", () => {
