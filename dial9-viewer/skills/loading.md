@@ -13,7 +13,7 @@
   taskSpawnLocs: Map<number, string|null>,// task ID → spawn location (null if unknown)
   taskSpawnTimes: Map<number, number>,    // task ID → spawn timestamp (ns)
   taskTerminateTimes: Map<number, number>,// task ID → terminate timestamp (ns)
-  callframeSymbols: Map<string, {symbol, location}>, // address → resolved symbol
+  callframeSymbols: Map<string, {symbol, location}|[{symbol, location}]>, // address → resolved symbol (array for inlined frames)
   threadNames: Map<number, string>,       // thread ID → name
   clockOffsetNs: number|null,            // monotonic-to-wall-clock offset
   clockSyncAnchors: [{monotonicNs, realtimeNs}],
