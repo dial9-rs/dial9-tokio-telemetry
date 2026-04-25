@@ -647,6 +647,7 @@
 
     return {
       files: files,
+      allCached: Promise.all(fileReady),
       [Symbol.asyncIterator]() {
         let idx = 0;
         return {

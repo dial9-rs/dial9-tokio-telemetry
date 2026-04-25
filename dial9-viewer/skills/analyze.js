@@ -499,9 +499,11 @@ async function analyzeTraces(tracePath, opts) {
 
   // Phase 1: parallel parse (populate cache)
   const parseOpts = { ...opts };
-  const progressCb = opts.onProgress || null;
-  parseOpts.onProgress = progressCb;
-  for await (const _ of parseTrace(tracePath, parseOpts)) { /* cache */ }
+  parseOpts.onProgress = opts.onProgress || null;
+  const iter = parseTrace(tracePath, parseOpts);
+  // Wait for all workers to finish without reading cache files
+  if (iter.allCached) await iter.allCached;
+  else { for await (const _ of iter) { /* single file, just parse */ } }
 
   // Phase 2: parallel analysis via accumulate workers
   const { execFile } = require('child_process');
