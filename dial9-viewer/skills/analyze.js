@@ -478,43 +478,35 @@ function reportAnalysis(a, label) {
   console.log(`\n${'='.repeat(60)}`);
 }
 
-async function main() {
-  const isDir = fs.statSync(TRACE_PATH).isDirectory();
+/**
+ * Analyze traces from a file or directory. Returns a finalized accumulator
+ * with aggregated stats, histograms, and top-N results.
+ * For directories, parsing and analysis run in parallel subprocesses.
+ * @param {string} tracePath - file or directory path
+ * @param {Object} [opts] - { force, sample, onProgress }
+ */
+async function analyzeTraces(tracePath, opts) {
+  opts = opts || {};
+  const isDir = fs.statSync(tracePath).isDirectory();
+  const acc = createAccumulator();
 
   if (!isDir) {
-    console.log(`Loading ${TRACE_PATH}...`);
-    const acc = createAccumulator();
-    for await (const trace of parseTrace(TRACE_PATH)) {
+    for await (const trace of parseTrace(tracePath, opts)) {
       accumulateTrace(acc, trace);
     }
-    reportAnalysis(finalizeAccumulator(acc), path.basename(TRACE_PATH));
-    return;
+    return finalizeAccumulator(acc);
   }
 
-  // Directory: parallel parse + parallel analysis
-  const opts = {};
-  if (FORCE) opts.force = true;
-  if (SAMPLE) opts.sample = SAMPLE;
-
   // Phase 1: parallel parse (populate cache)
-  let parseCount = 0;
-  let totalFiles = 0;
-  opts.onProgress = ({ done, total }) => {
-    totalFiles = total;
-    if (done === 0) console.log(`Found ${total} trace file(s)`);
-    else { parseCount = done; process.stderr.write(`\r  parsing: [${done}/${total}]`); }
-  };
-  console.log(`Analyzing directory: ${TRACE_PATH}`);
-
-  // Drain the iterator to ensure all files are cached
-  for await (const _ of parseTrace(TRACE_PATH, opts)) { /* just cache */ }
-  process.stderr.write('\n');
+  const parseOpts = { ...opts };
+  const progressCb = opts.onProgress || null;
+  parseOpts.onProgress = progressCb;
+  for await (const _ of parseTrace(tracePath, parseOpts)) { /* cache */ }
 
   // Phase 2: parallel analysis via accumulate workers
   const { execFile } = require('child_process');
   const os = require('os');
-  const TRACE_EXT = /\.(bin|bin\.gz)$/;
-  const cacheDir = path.join(TRACE_PATH, '.d9-cache');
+  const cacheDir = path.join(tracePath, '.d9-cache');
   const cacheFiles = fs.readdirSync(cacheDir).filter(f => f.endsWith('.json'));
 
   const accWorkerCandidate = path.resolve(__dirname, 'accumulate_worker.js');
@@ -522,10 +514,8 @@ async function main() {
   const accWorkerScript = fs.existsSync(accWorkerCandidate) ? accWorkerCandidate : accWorkerFallback;
 
   const concurrency = Math.min(os.cpus().length, 32);
-  const acc = createAccumulator();
   let analyzed = 0;
 
-  // Dispatch accumulate workers with concurrency limit
   await new Promise((resolveAll, rejectAll) => {
     let nextIdx = 0;
     let active = 0;
@@ -535,15 +525,13 @@ async function main() {
       while (active < concurrency && nextIdx < cacheFiles.length) {
         const cf = cacheFiles[nextIdx++];
         active++;
-        const cp = path.join(cacheDir, cf);
-        execFile(process.execPath, [accWorkerScript, cp], { maxBuffer: 256 * 1024 * 1024 }, (err, stdout, stderr) => {
+        execFile(process.execPath, [accWorkerScript, path.join(cacheDir, cf)], { maxBuffer: 256 * 1024 * 1024 }, (err, stdout, stderr) => {
           if (failed) return;
           if (err) { failed = true; rejectAll(new Error(`Analysis failed for ${cf}: ${stderr || err.message}`)); return; }
           try {
-            const partial = JSON.parse(stdout);
-            mergePartial(acc, partial);
+            mergePartial(acc, JSON.parse(stdout));
             analyzed++;
-            process.stderr.write(`\r  analyzing: [${analyzed}/${cacheFiles.length}]`);
+            if (opts.onAnalysisProgress) opts.onAnalysisProgress({ done: analyzed, total: cacheFiles.length, file: cf });
           } catch (e) { failed = true; rejectAll(e); return; }
           active--;
           if (analyzed === cacheFiles.length) resolveAll();
@@ -553,9 +541,31 @@ async function main() {
     }
     dispatch();
   });
-  process.stderr.write('\n');
 
-  reportAnalysis(finalizeAccumulator(acc), `${cacheFiles.length} files in ${path.basename(TRACE_PATH)}`);
+  return finalizeAccumulator(acc);
+}
+
+async function main() {
+  const isDir = fs.statSync(TRACE_PATH).isDirectory();
+
+  if (isDir) console.log(`Analyzing directory: ${TRACE_PATH}`);
+  else console.log(`Loading ${TRACE_PATH}...`);
+
+  const result = await analyzeTraces(TRACE_PATH, {
+    force: FORCE,
+    sample: SAMPLE || undefined,
+    onProgress: isDir ? ({ done, total }) => {
+      if (done === 0) console.log(`Found ${total} trace file(s)`);
+      else process.stderr.write(`\r  parsing: [${done}/${total}]`);
+    } : undefined,
+    onAnalysisProgress: isDir ? ({ done, total }) => {
+      process.stderr.write(`\r  analyzing: [${done}/${total}]`);
+    } : undefined,
+  });
+  if (isDir) process.stderr.write('\n');
+
+  const label = isDir ? `${result.files ? result.files.length : ''} files in ${path.basename(TRACE_PATH)}` : path.basename(TRACE_PATH);
+  reportAnalysis(result, label);
 }
 
 /** Merge a partial accumulator (from accumulate_worker) into the main accumulator. */
@@ -636,4 +646,9 @@ function mergePartial(acc, p) {
   }
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+// Run CLI if executed directly, export if required as module
+if (require.main === module) {
+  main().catch(err => { console.error(err); process.exit(1); });
+}
+
+module.exports = { analyzeTraces };
