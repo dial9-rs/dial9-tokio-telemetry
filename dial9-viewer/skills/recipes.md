@@ -33,16 +33,6 @@ for await (const trace of parseTrace('/path/to/traces/')) {
 }
 ```
 
-## Working with large directories
-
-```javascript
-// Sample 100 evenly-spaced files for initial scan
-const result = await analyzeTraces('/path/to/traces/', { sample: 100 });
-
-// Force re-parse, ignoring cache
-const result = await analyzeTraces('/path/to/traces/', { force: true });
-```
-
 ## Which task has the longest poll time?
 
 ```javascript
