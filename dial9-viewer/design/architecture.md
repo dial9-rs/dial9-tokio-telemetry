@@ -17,13 +17,13 @@ The viewer bundles markdown "skills" that teach AI agents how to use the toolkit
 
 The header is the entry point. An agent runs `dial9-viewer agents`, reads the header, discovers available skill segments and the toolkit command, then copies the toolkit and starts analyzing.
 
-Non-`.md` files in `skills/` (like `analyze.js`) are not served as skills but are included in the toolkit via symlinks in `toolkit/`.
-
 ## Agent toolkit architecture
 
 ### Single file
 
 `parseTrace(buffer)` decodes the binary trace format (via `decode.js`, a WASM-based decoder) and returns a `ParsedTrace` with events, CPU samples, symbol tables, and task lifecycle data. Analysis functions in `trace_analysis.js` derive higher-level structures (worker spans, scheduling delays, task timelines) from the parsed trace.
+
+Browser mode is single-file only; directory parsing, caching, and subprocess parallelism are Node.js-only.
 
 ### Directory (multi-file)
 
@@ -33,32 +33,23 @@ Non-`.md` files in `skills/` (like `analyze.js`) are not served as skills but ar
 2. Each subprocess parses the trace and writes the full `ParsedTrace` as NDJSON to `.d9-cache/`
 3. The iterator yields one `ParsedTrace` at a time, keeping memory bounded
 
-`for await (const trace of parseTrace(input))` works for both single files and directories. For buffers (browser), `parseTrace` returns `Promise<ParsedTrace>`.
-
-Warm runs read cached NDJSON directly (no subprocesses needed for cached files).
+`for await (const trace of parseTrace(input))` works for both single files and directories. Warm runs read cached NDJSON directly (no subprocesses needed for cached files).
 
 ### analyzeTraces (aggregated analysis)
 
-`analyzeTraces(path)` returns aggregated results across all files. Two parallel phases:
+`analyzeTraces(path)` returns aggregated results across all files. Use it for summary statistics; use `parseTrace` when you need per-trace raw data (flamegraphs, field filtering, wake chains). Two parallel phases:
 
 1. **Parse phase**: subprocesses populate the NDJSON cache
 2. **Analysis phase**: subprocesses each read one cached file, run the full analysis pipeline, and output a partial accumulator as JSON to stdout
 
-The main process merges partial accumulators in constant memory: summing counts, keeping top-N long polls, feeding delay/duration values into Node's native `createHistogram()` for exact percentiles.
+The main process merges partial accumulators via constant-memory streaming merge: summing counts, keeping top-N findings, and feeding values into native histograms for exact percentiles.
 
-The result includes: worker utilization, top long polls with stack traces, scheduling delay histograms, poll duration histograms by spawn location, span duration histograms, task lifecycle, CPU/scheduling sample groups, and queue depth stats.
+See `agents skill analysis` for the full return schema.
+
+If any file fails to parse or analyze, the entire operation fails immediately rather than skipping the file. This is a known limitation; partial failure tolerance may be added in the future.
 
 ### Cache format
 
-`.d9-cache/<filename>.json` contains NDJSON (one JSON record per line):
-
-| Tag | Content |
-|-----|---------|
-| `m` | Metadata: scalar fields, Maps as `[k,v]` arrays |
-| `e` | Event (one per line) |
-| `c` | CPU sample (one per line) |
-| `x` | Custom event (one per line) |
-
-NDJSON avoids V8's string size limit. The reader splits a Buffer on newlines and parses each line independently.
+`.d9-cache/<filename>.json` contains NDJSON (one JSON record per line, tagged by type) to avoid V8's string size limit. The reader splits a Buffer on newlines and parses each line independently.
 
 Cache invalidation is mtime-based. `--force` bypasses the cache.
