@@ -2,6 +2,40 @@
 
 After parsing, run the analysis pipeline to derive higher-level structures. All functions are in `trace_analysis.js`.
 
+## Quick reference
+
+For aggregated results across all files (recommended):
+
+```javascript
+const { analyzeTraces } = require('./analyze.js');
+const result = await analyzeTraces('/path/to/traces/'); // options: { sample, force }
+// result.longPolls, result.workerSpans, result.schedDelayHist, result.cpuGroups, result.spanStats
+```
+
+For per-trace raw data (flamegraphs, field filtering, wake chains):
+
+```javascript
+const { parseTrace } = require('./trace_parser.js');
+const { buildWorkerSpans, attachCpuSamples } = require('./trace_analysis.js');
+
+for await (const trace of parseTrace('/path/to/traces/')) {
+  // full ParsedTrace with events, cpuSamples, callframeSymbols, etc.
+}
+```
+
+For directories with 1000+ files, `{ sample: 50 }` gives a quick initial overview (a few seconds). Follow up without `sample` for accurate percentiles and tail latency.
+
+For progress on large directories, pass `onParseProgress` and `onAnalysisProgress` callbacks:
+
+```javascript
+const result = await analyzeTraces('/path/to/traces/', {
+  onParseProgress: ({ done, total, cached }) => process.stderr.write(`\rparsing: [${done}/${total}]${cached ? ` (${cached} cached)` : ''}`),
+  onParseComplete: () => process.stderr.write('\n'),
+  onAnalysisProgress: ({ done, total }) => process.stderr.write(`\ranalyzing: [${done}/${total}]`),
+});
+process.stderr.write('\n');
+```
+
 ## Standard pipeline
 
 Use `analyzeTraces(path)` from `analyze.js` to run the full pipeline over a single file or directory. It returns an aggregated result object (see [analyzeTraces return schema](#analyzetraces-return-schema) below). Use it as-is or follow the steps below individually.

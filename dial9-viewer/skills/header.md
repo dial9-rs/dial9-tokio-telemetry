@@ -27,39 +27,7 @@ dial9-viewer agents toolkit /tmp/d9-toolkit
 node /tmp/d9-toolkit/analyze.js <trace.bin or directory>  # options: --sample N, --force
 ```
 
-Run `analyze.js` for a full diagnostic report. For directories with 1000+ files, `--sample 50` gives a quick initial overview (a few seconds). Follow up without `--sample` for accurate percentiles and tail latency.
-
-### Programmatic analysis
-
-For aggregated results across all files (recommended):
-
-```javascript
-const { analyzeTraces } = require('./analyze.js');
-const result = await analyzeTraces('/path/to/traces/'); // options: { sample, force }
-// result.longPolls, result.workerSpans, result.schedDelayHist, result.cpuGroups, result.spanStats
-```
-
-For progress on large directories, pass `onParseProgress` and `onAnalysisProgress` callbacks:
-
-```javascript
-const result = await analyzeTraces('/path/to/traces/', {
-  onParseProgress: ({ done, total, cached }) => process.stderr.write(`\rparsing: [${done}/${total}]${cached ? ` (${cached} cached)` : ''}`),
-  onParseComplete: () => process.stderr.write('\n'),
-  onAnalysisProgress: ({ done, total }) => process.stderr.write(`\ranalyzing: [${done}/${total}]`),
-});
-process.stderr.write('\n');
-```
-
-For per-trace raw data (flamegraphs, field filtering, wake chains):
-
-```javascript
-const { parseTrace } = require('./trace_parser.js');
-const { buildWorkerSpans, attachCpuSamples } = require('./trace_analysis.js');
-
-for await (const trace of parseTrace('/path/to/traces/')) {
-  // full ParsedTrace with events, cpuSamples, callframeSymbols, etc.
-}
-```
+Run `analyze.js` for a full diagnostic report. See `agents skill analysis` for the programmatic API, options (`sample`, `force`, progress callbacks), and the full return schema.
 
 ## Fetching traces from S3
 
