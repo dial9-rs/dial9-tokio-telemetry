@@ -205,7 +205,7 @@ async function redFlagScan(tracePath) {
   }
 }
 
-redFlagScan(process.argv[2] || 'trace.bin');
+await redFlagScan(process.argv[2] || 'trace.bin');
 ```
 
 ## Individual checks explained
