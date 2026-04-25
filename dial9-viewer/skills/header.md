@@ -49,7 +49,7 @@ for await (const trace of parseTrace('/path/to/traces/')) {
 }
 ```
 
-Pass a file path or a directory. For directories, traces are parsed in parallel and cached. Options: `{ force: true }` to ignore cache, `{ sample: 50 }` to parse only 50 evenly-spaced files.
+Pass a file path or a directory. For directories with more than a few hundred files, use `--sample 100` for an initial scan, then run without sampling for the full picture. Options: `{ force: true }` to ignore cache, `{ sample: N }` to parse only N evenly-spaced files.
 
 ## Fetching traces from S3
 
