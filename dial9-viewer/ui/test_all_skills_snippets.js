@@ -184,50 +184,113 @@ async function main() {
       passed++;
     }
 
-    // Deep validation: nested object shapes
+    // Deep validation: parse schema from markdown into a typed skeleton, diff against actual result
     const deepErrors = [];
-    function checkKeys(obj, expected, label) {
-      const actual = new Set(Object.keys(obj));
-      for (const k of expected) { if (!actual.has(k)) deepErrors.push(`${label}: missing '${k}'`); }
-      for (const k of actual) { if (!expected.includes(k)) deepErrors.push(`${label}: undocumented '${k}'`); }
+
+    // Convert a schema type annotation string into a typed marker
+    function typeMarker(typeStr) {
+      const t = typeStr.trim().replace(/\|null$/, '');
+      if (t === 'number' || t === 'number[]' || t === 'string' || t === 'boolean') return t;
+      if (t === 'Histogram') return 'Histogram';
+      return '_unknown_';
     }
-    // workerSpans[w]
-    const w0 = result.workerSpans[result.workerIds[0]];
-    checkKeys(w0, ['utilization', 'avgCpuRatio', 'pollCount', 'parkCount', 'activeCount', 'schedWaits'], 'workerSpans[w]');
-    if (!Array.isArray(w0.schedWaits)) deepErrors.push('workerSpans[w].schedWaits: not an array');
-    // schedDelayStats
-    checkKeys(result.schedDelayStats, ['total', 'highCount', 'worst'], 'schedDelayStats');
-    // queueDepthStats
-    checkKeys(result.queueDepthStats, ['max', 'avg', 'samples'], 'queueDepthStats');
-    // taskTimeline
-    checkKeys(result.taskTimeline, ['activeTaskSamples'], 'taskTimeline');
-    // Maps
-    if (!(result.taskSpawnLocs instanceof Map)) deepErrors.push('taskSpawnLocs: not a Map');
-    if (!(result.taskSpawnTimes instanceof Map)) deepErrors.push('taskSpawnTimes: not a Map');
-    if (!(result.taskTerminateTimes instanceof Map)) deepErrors.push('taskTerminateTimes: not a Map');
-    if (!(result.callframeSymbols instanceof Map)) deepErrors.push('callframeSymbols: not a Map');
-    if (!(result.spanStats instanceof Map)) deepErrors.push('spanStats: not a Map');
-    if (!(result.pollDurationByLoc instanceof Map)) deepErrors.push('pollDurationByLoc: not a Map');
-    // schedDelayHist nullable
-    if (result.schedDelayHist != null && typeof result.schedDelayHist.percentile !== 'function') deepErrors.push('schedDelayHist: not a Histogram');
-    // longPolls shape
-    if (result.longPolls.length > 0) {
-      const lp = result.longPolls[0];
-      if (!('dur' in lp && 'poll' in lp && 'worker' in lp)) deepErrors.push('longPolls[0]: missing dur/poll/worker');
+
+    // Parse the schema pseudo-code into a JS object skeleton with typed leaf markers
+    let schemaJs = schemaMatch[1]
+      .replace(/\/\/.*$/gm, '')                            // strip comments
+      .replace(/\[\w+\]:/g, '_dynamic_:')                  // [workerId]: → _dynamic_:
+      // Map<K, V> → {"_map_": <skeleton of V>}
+      .replace(/:\s*Map<[^,]+,\s*([^>]+)>/g, (_, valType) => {
+        const v = valType.trim();
+        // Object value shape: {a, b, c} or {a, b}|[{a, b}]
+        const objMatch = v.match(/\{([^}]+)\}/);
+        if (objMatch) {
+          const keys = objMatch[1].split(',').map(k => k.trim()).filter(Boolean);
+          return ': {"_map_":{' + keys.map(k => `"${k}":"_any_"`).join(',') + '}}';
+        }
+        return ': {"_map_":"' + typeMarker(v) + '"}';
+      })
+      .replace(/:\s*(Histogram)(\|null)?/g, (_, __, nullable) => ': "Histogram' + (nullable ? '|null' : '') + '"')
+      .replace(/:\s*(number\[\])/g, ': "number[]"')
+      .replace(/:\s*(number)/g, ': "number"')
+      .replace(/:\s*(string)(\|null)?/g, (_, __, nullable) => ': "string' + (nullable ? '|null' : '') + '"')
+      .replace(/:\s*(boolean)/g, ': "boolean"')
+      .replace(/\[\{([^}]+)\}\]/g, (_, inner) => {         // [{a, b, c}] → [{"a":"_any_","b":"_any_","c":"_any_"}]
+        const keys = inner.split(',').map(k => k.trim()).filter(Boolean);
+        return '[{' + keys.map(k => `"${k}":"_any_"`).join(',') + '}]';
+      });
+    let docSkeleton;
+    try {
+      docSkeleton = (new Function('return {' + schemaJs + '}'))();
+    } catch (e) {
+      deepErrors.push(`schema parse failed: ${e.message}`);
     }
-    // schedDelays shape
-    if (result.schedDelays.length > 0) {
-      const sd = result.schedDelays[0];
-      for (const k of ['wakeTime', 'pollTime', 'delay', 'taskId', 'worker']) {
-        if (!(k in sd)) deepErrors.push(`schedDelays[0]: missing '${k}'`);
+
+    // Extract a typed skeleton from the actual result
+    function toSkeleton(val) {
+      if (val === null || val === undefined) return '_null_';
+      if (val instanceof Map) {
+        const first = val.values().next().value;
+        return { '_map_': first !== undefined ? toSkeleton(first) : '_empty_' };
       }
-    }
-    // cpuGroups shape
-    if (result.cpuGroups.length > 0) {
-      const g = result.cpuGroups[0];
-      for (const k of ['count', 'leaf', 'frames']) {
-        if (!(k in g)) deepErrors.push(`cpuGroups[0]: missing '${k}'`);
+      if (typeof val === 'object' && typeof val.percentile === 'function') return 'Histogram';
+      if (Array.isArray(val)) {
+        if (val.length === 0) return '[]';
+        if (typeof val[0] === 'number') return 'number[]';
+        if (typeof val[0] === 'object' && val[0] !== null) return [toSkeleton(val[0])];
+        return 'unknown[]';
       }
+      if (typeof val === 'number') return 'number';
+      if (typeof val === 'string') return 'string';
+      if (typeof val === 'boolean') return 'boolean';
+      const out = {};
+      for (const [k, v] of Object.entries(val)) out[k] = toSkeleton(v);
+      return out;
+    }
+
+    if (docSkeleton) {
+      const actualSkeleton = toSkeleton(result);
+
+      function diff(doc, actual, path) {
+        // Resolve dynamic keys (like [workerId])
+        if (typeof doc === 'object' && doc !== null && !Array.isArray(doc) && '_dynamic_' in doc) {
+          if (typeof actual !== 'object' || actual === null) { deepErrors.push(`${path}: expected object with dynamic keys`); return; }
+          const firstVal = Object.values(actual)[0];
+          if (firstVal !== undefined) diff(doc._dynamic_, firstVal, path + '[*]');
+          return;
+        }
+        // Both are typed leaf strings: compare types
+        if (typeof doc === 'string' && typeof actual === 'string') {
+          // Allow nullable matches: "Histogram|null" matches "Histogram" or "_null_"
+          // Allow "_any_" to match anything
+          if (doc === '_any_' || actual === doc) return;
+          if (doc.endsWith('|null') && (actual === doc.replace('|null', '') || actual === '_null_')) return;
+          if (doc === 'number[]' && actual === '[]') return; // empty array is fine
+          deepErrors.push(`${path}: type mismatch (documented: ${doc}, actual: ${actual})`);
+          return;
+        }
+        // Doc says _any_: skip deeper checking (shorthand element in [{a, b, c}])
+        if (doc === '_any_') return;
+        // Array: compare element shapes
+        if (Array.isArray(doc) && Array.isArray(actual)) {
+          if (doc.length > 0 && actual.length > 0) diff(doc[0], actual[0], path + '[0]');
+          return;
+        }
+        // Both objects: compare keys recursively
+        if (typeof doc === 'object' && doc !== null && typeof actual === 'object' && actual !== null) {
+          const docKeys = new Set(Object.keys(doc));
+          const actKeys = new Set(Object.keys(actual));
+          for (const k of docKeys) { if (!actKeys.has(k)) deepErrors.push(`${path}.${k}: documented but missing from result`); }
+          for (const k of actKeys) { if (!docKeys.has(k)) deepErrors.push(`${path}.${k}: in result but not documented`); }
+          for (const k of docKeys) { if (actKeys.has(k)) diff(doc[k], actual[k], path + '.' + k); }
+          return;
+        }
+        // Mismatch between object/string/array
+        if (typeof doc !== typeof actual) {
+          deepErrors.push(`${path}: shape mismatch (documented: ${typeof doc}, actual: ${typeof actual})`);
+        }
+      }
+      diff(docSkeleton, actualSkeleton, '');
     }
 
     if (deepErrors.length > 0) {

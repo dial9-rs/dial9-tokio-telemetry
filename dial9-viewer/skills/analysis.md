@@ -76,9 +76,9 @@ For directories, `parseTrace` yields one `ParsedTrace` per file. See the `recipe
   taskTerminateTimes: Map<taskId, number>,  // taskId → termination timestamp (ns)
 
   // ── CPU profiling ──
-  callframeSymbols: Map<address, symbol>,   // address → resolved symbol info
-  cpuGroups: [{count, leaf, frames}],       // on-CPU sample groups, sorted by count descending
-  schedGroups: [{count, leaf, frames}],     // off-CPU sample groups, sorted by count descending
+  callframeSymbols: Map<address, {symbol, location}|[{symbol, location}]>, // address → resolved symbol (array for inlined frames)
+  cpuGroups: [{count, leaf, leafRaw, frames}],       // on-CPU sample groups, sorted by count descending
+  schedGroups: [{count, leaf, leafRaw, frames}],     // off-CPU sample groups, sorted by count descending
 
   // ── Histograms ──
   spanStats: Map<spanName, Histogram>,      // tracing span duration histograms (ns)
