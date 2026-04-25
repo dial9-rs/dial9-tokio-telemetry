@@ -1080,7 +1080,7 @@
                 try {
                     const fullOpts = {
                         ...opts,
-                        onProgress: ({ bytesRead, totalBytes, eventCount }) => {
+                        onParseProgress: ({ bytesRead, totalBytes, eventCount }) => {
                             const pct = ((bytesRead / totalBytes) * 100) | 0;
                             updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
                         },
