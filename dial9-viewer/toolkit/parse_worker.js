@@ -1,1 +1,0 @@
-../skills/parse_worker.js

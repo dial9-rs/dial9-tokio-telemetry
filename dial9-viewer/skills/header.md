@@ -30,7 +30,7 @@ node /tmp/d9-toolkit/analyze.js <directory-of-traces/>
 
 Run `analyze.js` for a full diagnostic report.
 
-For directories, use `--force` to re-parse all files without caching, or `--sample N` to analyze only N evenly-spaced files.
+For directories, `--sample N` to analyze only N evenly-spaced files.
 
 ### Parsing traces manually
 

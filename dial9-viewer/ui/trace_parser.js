@@ -584,8 +584,8 @@
     }
 
     const concurrency = (opts.parallel === false) ? 1 : Math.min(os.cpus().length, 32);
-    const workerCandidate = path.resolve(__dirname, 'parse_worker.js');
-    const workerFallback = path.resolve(__dirname, '..', 'skills', 'parse_worker.js');
+    const workerCandidate = path.resolve(__dirname, 'analyze.js');
+    const workerFallback = path.resolve(__dirname, '..', 'skills', 'analyze.js');
     const workerScript = fs.existsSync(workerCandidate) ? workerCandidate : workerFallback;
 
     function cachePathFor(file) {
@@ -609,7 +609,7 @@
       if (isCacheValid(file)) return Promise.resolve(true);
       const tracePath = path.join(dirPath, file);
       const cp = useCache ? cachePathFor(file) : path.join(os.tmpdir(), 'd9-' + process.pid + '-' + file + '.json');
-      const args = [workerScript, tracePath, cp];
+      const args = [workerScript, '--parse-worker', tracePath, cp];
       return new Promise((resolve, reject) => {
         execFile(process.execPath, args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
           if (err) reject(new Error(`Failed to process ${file}: ${stderr || err.message}`));

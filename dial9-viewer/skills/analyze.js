@@ -503,8 +503,8 @@ async function analyzeTraces(tracePath, opts) {
   const cacheDir = path.join(tracePath, '.d9-cache');
   const cacheFiles = fs.readdirSync(cacheDir).filter(f => f.endsWith('.json'));
 
-  const accWorkerCandidate = path.resolve(__dirname, 'accumulate_worker.js');
-  const accWorkerFallback = path.resolve(__dirname, '..', 'skills', 'accumulate_worker.js');
+  const accWorkerCandidate = path.resolve(__dirname, 'analyze.js');
+  const accWorkerFallback = path.resolve(__dirname, '..', 'skills', 'analyze.js');
   const accWorkerScript = fs.existsSync(accWorkerCandidate) ? accWorkerCandidate : accWorkerFallback;
 
   const concurrency = Math.min(os.cpus().length, 32);
@@ -519,7 +519,7 @@ async function analyzeTraces(tracePath, opts) {
       while (active < concurrency && nextIdx < cacheFiles.length) {
         const cf = cacheFiles[nextIdx++];
         active++;
-        execFile(process.execPath, [accWorkerScript, path.join(cacheDir, cf)], { maxBuffer: 256 * 1024 * 1024 }, (err, stdout, stderr) => {
+        execFile(process.execPath, [accWorkerScript, '--analyze-worker', path.join(cacheDir, cf)], { maxBuffer: 256 * 1024 * 1024 }, (err, stdout, stderr) => {
           if (failed) return;
           if (err) { failed = true; rejectAll(new Error(`Analysis failed for ${cf}: ${stderr || err.message}`)); return; }
           try {
@@ -653,8 +653,136 @@ function mergePartial(acc, p) {
 }
 
 // Run CLI if executed directly, export if required as module
+// ── Worker modes (invoked as subprocesses) ──
+
+function mapToEntries(m) { return m instanceof Map ? [...m.entries()] : m; }
+
+async function parseWorkerMain(traceFile, cachePath) {
+  const trace = await parseTrace(fs.readFileSync(traceFile));
+  const tmpPath = cachePath + '.tmp';
+  const stream = fs.createWriteStream(tmpPath);
+  function writeLine(obj) { stream.write(JSON.stringify(obj) + '\n'); }
+
+  writeLine({ t: 'm', d: {
+    magic: trace.magic, version: trace.version,
+    truncated: trace.truncated, timeFiltered: trace.timeFiltered,
+    filterStartTime: trace.filterStartTime, filterEndTime: trace.filterEndTime,
+    hasCpuTime: trace.hasCpuTime, hasSchedWait: trace.hasSchedWait, hasTaskTracking: trace.hasTaskTracking,
+    spawnLocations: mapToEntries(trace.spawnLocations),
+    taskSpawnLocs: mapToEntries(trace.taskSpawnLocs),
+    taskSpawnTimes: mapToEntries(trace.taskSpawnTimes),
+    taskTerminateTimes: mapToEntries(trace.taskTerminateTimes),
+    callframeSymbols: mapToEntries(trace.callframeSymbols),
+    threadNames: mapToEntries(trace.threadNames),
+    runtimeWorkers: mapToEntries(trace.runtimeWorkers),
+    clockSyncAnchors: trace.clockSyncAnchors, clockOffsetNs: trace.clockOffsetNs,
+  }});
+  for (const e of trace.events) writeLine({ t: 'e', d: e });
+  for (const s of trace.cpuSamples) writeLine({ t: 'c', d: s });
+  if (trace.customEvents) for (const x of trace.customEvents) writeLine({ t: 'x', d: x });
+
+  await new Promise((res, rej) => { stream.end(() => { fs.renameSync(tmpPath, cachePath); res(); }); stream.on('error', rej); });
+  process.stdout.write('OK\n');
+}
+
+function loadCacheFile(cachePath) {
+  const buf = fs.readFileSync(cachePath);
+  let pos = 0;
+  function nextLine() {
+    const nl = buf.indexOf(10, pos);
+    if (nl === -1) { if (pos < buf.length) { const s = buf.toString('utf8', pos, buf.length); pos = buf.length; return s; } return null; }
+    const s = buf.toString('utf8', pos, nl); pos = nl + 1; return s;
+  }
+  let raw = null;
+  const events = [], cpuSamples = [], customEvents = [];
+  let line;
+  while ((line = nextLine()) !== null) {
+    if (!line) continue;
+    const rec = JSON.parse(line);
+    switch (rec.t) {
+      case 'm': raw = rec.d;
+        for (const k of ['spawnLocations','taskSpawnLocs','taskSpawnTimes','taskTerminateTimes','callframeSymbols','threadNames','runtimeWorkers'])
+          if (raw[k]) raw[k] = new Map(raw[k]);
+        break;
+      case 'e': events.push(rec.d); break;
+      case 'c': cpuSamples.push(rec.d); break;
+      case 'x': customEvents.push(rec.d); break;
+    }
+  }
+  raw.events = events; raw.cpuSamples = cpuSamples; raw.customEvents = customEvents;
+  return raw;
+}
+
+function analyzeWorkerMain(cachePath) {
+  const trace = loadCacheFile(cachePath);
+  const wids = [...new Set(trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent).map(e => e.workerId))].sort((a, b) => a - b);
+  const minTs = trace.events.reduce((m, e) => Math.min(m, e.timestamp), Infinity);
+  const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
+  const spans = buildWorkerSpans(trace.events, wids, maxTs);
+  attachCpuSamples(trace.cpuSamples, spans.workerSpans);
+  const taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
+  const schedDelays = computeSchedulingDelays(spans.workerSpans, wids, spans.wakesByTask);
+  const onCpu = trace.cpuSamples.filter(s => s.source === 0);
+  const offCpu = trace.cpuSamples.filter(s => s.source === 1);
+
+  const partial = {
+    workerIds: wids, minTs, maxTs,
+    eventCount: trace.events.length, cpuSampleCount: trace.cpuSamples.length,
+    onCpuSampleCount: onCpu.length, offCpuSampleCount: offCpu.length,
+    taskSpawnCount: trace.taskSpawnTimes.size,
+    taskAliveAtEnd: trace.taskSpawnTimes.size - trace.taskTerminateTimes.size,
+    maxLocalQueue: spans.maxLocalQueue,
+    workerStats: {}, longPolls: [],
+    queueMax: 0, queueSum: 0, queueCount: 0,
+    schedDelayTotal: schedDelays.length, schedDelayHighCount: 0, schedDelayWorst: [],
+    schedDelayValues: schedDelays.map(sd => Math.max(1, Math.round(sd.delay))),
+    taskTimelineSamples: taskTimeline.activeTaskSamples,
+    taskSpawnLocs: mapToEntries(trace.taskSpawnLocs),
+    taskSpawnTimes: mapToEntries(trace.taskSpawnTimes),
+    taskTerminateTimes: mapToEntries(trace.taskTerminateTimes),
+    callframeSymbols: mapToEntries(trace.callframeSymbols),
+    cpuGroups: deduplicateSamples(onCpu, trace.callframeSymbols),
+    schedGroups: deduplicateSamples(offCpu, trace.callframeSymbols),
+    pollDurationsByLoc: {}, spanDurations: {},
+  };
+
+  for (const w of wids) {
+    const s = spans.workerSpans[w];
+    const ws = { activeNs: 0, parkNs: 0, ratioSum: 0, activeCount: 0, pollCount: s.polls.length, parkCount: s.parks.length, schedWaits: [] };
+    for (const a of s.actives) { ws.activeNs += a.end - a.start; ws.ratioSum += a.ratio; ws.activeCount++; }
+    for (const p of s.parks) { ws.parkNs += p.end - p.start; if (p.schedWait > 0) ws.schedWaits.push(p.schedWait); }
+    partial.workerStats[w] = ws;
+    for (const p of s.polls) {
+      const dur = p.end - p.start;
+      const loc = p.spawnLoc || '(unknown)';
+      (partial.pollDurationsByLoc[loc] || (partial.pollDurationsByLoc[loc] = [])).push(Math.max(1, Math.round(dur)));
+      if (dur > 1e6) partial.longPolls.push({ dur, poll: p, worker: w });
+    }
+  }
+  partial.longPolls.sort((a, b) => b.dur - a.dur);
+  partial.longPolls.length = Math.min(partial.longPolls.length, 100);
+  for (const q of spans.queueSamples) { if (q.global > partial.queueMax) partial.queueMax = q.global; partial.queueSum += q.global; partial.queueCount++; }
+  for (const sd of schedDelays) { if (sd.delay > 1e6) { partial.schedDelayHighCount++; partial.schedDelayWorst.push(sd); } }
+  partial.schedDelayWorst.sort((a, b) => b.delay - a.delay);
+  partial.schedDelayWorst.length = Math.min(partial.schedDelayWorst.length, 100);
+  if (trace.customEvents && trace.customEvents.length > 0) {
+    const { spansByWorker } = buildSpanData(trace.customEvents);
+    for (const ss of Object.values(spansByWorker)) for (const s of ss)
+      (partial.spanDurations[s.spanName] || (partial.spanDurations[s.spanName] = [])).push(Math.max(1, Math.round(s.end - s.start)));
+  }
+  process.stdout.write(JSON.stringify(partial) + '\n');
+}
+
+// ── Entry point ──
+
 if (require.main === module) {
-  main().catch(err => { console.error(err); process.exit(1); });
+  if (process.argv[2] === '--parse-worker') {
+    parseWorkerMain(process.argv[3], process.argv[4]).catch(err => { process.stderr.write(err.stack + '\n'); process.exit(1); });
+  } else if (process.argv[2] === '--analyze-worker') {
+    analyzeWorkerMain(process.argv[3]);
+  } else {
+    main().catch(err => { console.error(err); process.exit(1); });
+  }
 }
 
 module.exports = { analyzeTraces };

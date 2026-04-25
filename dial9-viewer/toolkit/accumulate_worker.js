@@ -1,1 +1,0 @@
-../skills/accumulate_worker.js
