@@ -27,7 +27,7 @@ dial9-viewer agents toolkit /tmp/d9-toolkit
 node /tmp/d9-toolkit/analyze.js <trace.bin or directory>  # options: --sample N, --force
 ```
 
-Run `analyze.js` for a full diagnostic report. For directories with 500+ files, start with `--sample 50` for a quick scan, then run without `--sample` for accurate tail latency and percentiles.
+Run `analyze.js` for a full diagnostic report. For directories with 1000+ files, `--sample 50` gives a quick initial overview (a few seconds). Follow up without `--sample` for accurate percentiles and tail latency.
 
 ### Programmatic analysis
 
