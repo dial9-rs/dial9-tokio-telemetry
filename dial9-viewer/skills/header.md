@@ -24,36 +24,35 @@ Get the analysis toolkit:
 
 ```bash
 dial9-viewer agents toolkit /tmp/d9-toolkit
-node /tmp/d9-toolkit/analyze.js <trace.bin>
-node /tmp/d9-toolkit/analyze.js <directory-of-traces/>
+node /tmp/d9-toolkit/analyze.js <trace.bin or directory>  # options: --sample N, --force
 ```
 
-Run `analyze.js` for a full diagnostic report.
+Run `analyze.js` for a full diagnostic report. For directories with 500+ files, start with `--sample 50`.
 
-For directories, `--sample N` to analyze only N evenly-spaced files.
+### Programmatic analysis
 
-### Parsing traces manually
+For aggregated results across all files (recommended):
 
 ```javascript
-const { parseTrace, EVENT_TYPES } = require('./trace_parser.js');
+const { analyzeTraces } = require('./analyze.js');
+const result = await analyzeTraces('/path/to/traces/'); // options: { sample, force }
+// result.longPolls, result.workerSpans, result.schedDelayHist, result.cpuGroups, result.spanStats
+```
+
+For per-trace raw data (flamegraphs, field filtering, wake chains):
+
+```javascript
+const { parseTrace } = require('./trace_parser.js');
 const { buildWorkerSpans, attachCpuSamples } = require('./trace_analysis.js');
 
 for await (const trace of parseTrace('/path/to/traces/')) {
-  const workerIds = [...new Set(
-    trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent)
-      .map(e => e.workerId)
-  )].sort((a, b) => a - b);
-  const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
-  const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
-  attachCpuSamples(trace.cpuSamples, spans.workerSpans);
+  // full ParsedTrace with events, cpuSamples, callframeSymbols, etc.
 }
 ```
 
-Pass a file path or a directory. For directories with more than a few hundred files, use `--sample 100` for an initial scan, then run without sampling for the full picture. Options: `{ force: true }` to ignore cache, `{ sample: N }` to parse only N evenly-spaced files.
-
 ## Fetching traces from S3
 
-If `dial9-viewer` is running (e.g. on port 3000), fetch traces via its API:
+Start the viewer (`dial9-viewer --bucket BUCKET`, default port 3000), then fetch traces:
 
 ```javascript
 // List traces matching a prefix

@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "CLI trace viewer and S3 browser for dial9-tokio-telemetry"
 default-run = "dial9-viewer"
-exclude = ["src/bin/dev_server.rs", "evals/", "design/"]
+exclude = ["src/bin/dev_server.rs", "design/"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }"

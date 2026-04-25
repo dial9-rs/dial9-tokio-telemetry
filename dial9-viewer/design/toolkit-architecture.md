@@ -17,7 +17,7 @@ The viewer bundles markdown "skills" that teach AI agents how to use the toolkit
 
 The header is the entry point. An agent runs `dial9-viewer agents`, reads the header, discovers available skill segments and the toolkit command, then copies the toolkit and starts analyzing.
 
-Non-`.md` files in `skills/` (like `analyze.js`, `parse_worker.js`) are not served as skills but are included in the toolkit via symlinks in `toolkit/`.
+Non-`.md` files in `skills/` (like `analyze.js`) are not served as skills but are included in the toolkit via symlinks in `toolkit/`.
 
 ## Agent toolkit architecture
 
@@ -29,8 +29,8 @@ Non-`.md` files in `skills/` (like `analyze.js`, `parse_worker.js`) are not serv
 
 `parseTrace(directoryPath)` returns an async iterable of `ParsedTrace`, one per file:
 
-1. Spawns one `parse_worker.js` subprocess per file (concurrency capped at CPU count)
-2. Each worker parses the trace and writes the full `ParsedTrace` as NDJSON to `.d9-cache/`
+1. Spawns one subprocess per file (concurrency capped at CPU count)
+2. Each subprocess parses the trace and writes the full `ParsedTrace` as NDJSON to `.d9-cache/`
 3. The iterator yields one `ParsedTrace` at a time, keeping memory bounded
 
 `for await (const trace of parseTrace(input))` works for both single files and directories. For buffers (browser), `parseTrace` returns `Promise<ParsedTrace>`.
@@ -41,8 +41,8 @@ Warm runs read cached NDJSON directly (no subprocesses needed for cached files).
 
 `analyzeTraces(path)` returns aggregated results across all files. Two parallel phases:
 
-1. **Parse phase**: `parse_worker.js` subprocesses populate the NDJSON cache (same as above)
-2. **Analysis phase**: `accumulate_worker.js` subprocesses each read one cached file, run the full analysis pipeline (`buildWorkerSpans`, `attachCpuSamples`, `computeSchedulingDelays`, `buildSpanData`), and output a partial accumulator as JSON to stdout
+1. **Parse phase**: subprocesses populate the NDJSON cache
+2. **Analysis phase**: subprocesses each read one cached file, run the full analysis pipeline, and output a partial accumulator as JSON to stdout
 
 The main process merges partial accumulators in constant memory: summing counts, keeping top-N long polls, feeding delay/duration values into Node's native `createHistogram()` for exact percentiles.
 
