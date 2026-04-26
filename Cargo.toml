@@ -8,6 +8,7 @@ members = [
     "dial9-viewer",
     "perf-self-profile",
     "examples/metrics-service",
+    "examples/simple-local",
 ]
 exclude = [
     "dial9-trace-format/fuzz",

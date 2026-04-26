@@ -3888,6 +3888,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
+name = "simple-local"
+version = "0.1.0"
+dependencies = [
+ "dial9-tokio-telemetry",
+ "tokio",
+]
+
+[[package]]
 name = "sketches-ddsketch"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
