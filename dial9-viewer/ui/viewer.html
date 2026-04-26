@@ -1653,6 +1653,18 @@
                 renderSpanPanel(drawW, scrollbarW);
                 renderTaskDetail(scrollbarW);
                 renderQueueChart(drawW, scrollbarW);
+
+                // Keep the selection overlay in sync when sidebar is open
+                if (sidebarSelStart && sidebarSelEnd &&
+                    document.getElementById("stack-sidebar").style.display === "flex") {
+                    regionStartNs = sidebarSelStart;
+                    regionEndNs = sidebarSelEnd;
+                    const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                    selOverlay.style.top = "0px";
+                    selOverlay.style.height = mainRect.height + "px";
+                    selOverlay.style.display = "block";
+                    updateSelOverlay();
+                }
             }
 
             function nsToX(ns, drawW) {
@@ -2932,9 +2944,21 @@
                 const selStart = Math.min(kbSelStartNs, kbCursorNs);
                 const selEnd = Math.max(kbSelStartNs, kbCursorNs);
                 const mode = kbSelMode;
-                cancelKbSelection();
-                if (selEnd - selStart < 100) return; // too small
+                // Reset keyboard selection state but keep overlay visible
+                // for shift mode (sidebar will own the overlay lifecycle)
+                regionStartNs = selStart;
+                regionEndNs = selEnd;
+                kbSelecting = false;
+                kbSelMode = null;
+                kbCursorNs = null;
+                kbSelStartNs = null;
+                renderCrosshair();
+                if (selEnd - selStart < 100) { // too small
+                    selOverlay.style.display = "none";
+                    return;
+                }
                 if (mode === "alt") {
+                    selOverlay.style.display = "none";
                     hideToast("option-drag-hint");
                     viewStart = Math.max(minTs, selStart);
                     viewEnd = Math.min(maxTs, selEnd);
@@ -3010,10 +3034,8 @@
                                 s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
                             );
                             if (hasSched && !hasCpu) {
-                                selOverlay.style.display = "none";
                                 showSchedPanel(selStart, selEnd);
                             } else {
-                                selOverlay.style.display = "none";
                                 showFlamegraph(selStart, selEnd);
                             }
                         }
@@ -3092,6 +3114,10 @@
             });
 
             function showStackPopup(poll, x, y) {
+                // Clear any region-selection overlay (poll detail is not a range selection)
+                sidebarSelStart = 0;
+                sidebarSelEnd = 0;
+                selOverlay.style.display = "none";
                 const sidebar = document.getElementById("stack-sidebar");
                 const title = document.getElementById("stack-sidebar-title");
                 const body = document.getElementById("stack-sidebar-body");
@@ -3502,10 +3528,13 @@
                 const viewDur = viewEnd - viewStart;
 
                 // Keyboard selection: toggle start/complete with Shift or Alt
+                // Don't start a new keyboard selection if the sidebar already
+                // has a retained range selection — the user can Shift+drag instead.
                 if (e.key === "Shift" || e.key === "Alt") {
                     e.preventDefault();
                     const mode = e.key === "Shift" ? "shift" : "alt";
                     if (!kbSelecting) {
+                        if (sidebarSelStart && sidebarSelEnd) return;
                         kbSelecting = true;
                         kbSelMode = mode;
                         kbCursorNs = kbSelStartNs = (mouseNs !== null && mouseNs >= viewStart && mouseNs <= viewEnd) ? mouseNs : (viewStart + viewEnd) / 2;
