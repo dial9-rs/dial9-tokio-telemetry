@@ -84,7 +84,10 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let abs = std::fs::canonicalize(&path)?;
                 eprintln!("Toolkit written to {}", abs.display());
-                eprintln!("Run: node {}/analyze.js <trace.bin>", abs.display());
+                eprintln!(
+                    "Run: node {}/analyze.js <trace.bin or directory>",
+                    abs.display()
+                );
             }
             Some(AgentsAction::Skill { name }) => match skills::get(&name) {
                 Some(content) => print!("{}", content),

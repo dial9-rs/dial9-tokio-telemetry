@@ -111,22 +111,69 @@
   };
 
   /**
-   * Parse a dial9-trace-format binary trace buffer.
-   * Automatically decompresses gzip input.
-   * @param {ArrayBuffer|Uint8Array} buffer - The binary trace data (may be gzipped)
+   * Parse dial9 trace data from a buffer, file path, or directory.
+   *
+   * - Buffer/ArrayBuffer/Uint8Array: returns Promise<ParsedTrace> (browser compatible).
+   * - String (file path): returns AsyncIterable yielding one ParsedTrace (Node.js only).
+   * - String (directory): returns AsyncIterable yielding one ParsedTrace per file,
+   *   with parallel parsing and caching (Node.js only).
+   *
+   * In the browser, fetch trace data via the viewer API and pass the ArrayBuffer.
+   *
+   * @param {ArrayBuffer|Uint8Array|string} input - Binary data, file path, or directory path
    * @param {Object} [options] - Optional parsing options
    * @param {number} [options.maxEvents] - Maximum number of events to parse (default: Infinity)
    * @param {number} [options.startTime] - Start of time range filter (absolute ns, inclusive)
    * @param {number} [options.endTime] - End of time range filter (absolute ns, inclusive)
-   * @param {function} [options.onProgress] - Called with {bytesRead, totalBytes, eventCount} periodically
-   * @returns {Promise<ParsedTrace>}
+   * @param {function} [options.onParseProgress] - Called with {done, total, file} as files complete
+   * @param {boolean} [options.cache] - Enable disk caching for directories (default: true)
+   * @param {boolean} [options.parallel] - Enable parallel parsing for directories (default: true)
+   * @param {boolean} [options.force] - Ignore cached results and re-parse (default: false)
+   * @param {number} [options.sample] - Only parse N evenly-spaced files from a directory
+   * @returns {AsyncIterable<ParsedTrace>}
    */
-  async function parseTrace(buffer, options) {
+  function parseTrace(input, options) {
+    if (typeof input === 'string') {
+      if (typeof require === 'undefined') {
+        throw new Error(
+          'File/directory paths require Node.js. In the browser, fetch trace ' +
+          'data via the viewer API (e.g. /api/trace) and pass the ArrayBuffer ' +
+          'to parseTrace().'
+        );
+      }
+      const fs = require('fs');
+      const stat = fs.statSync(input);
+      if (stat.isDirectory()) {
+        return parseTraceDir(input, options);
+      }
+      // Single file path: async iterable yielding one trace
+      return wrapSingle(parseTraceBuffer(fs.readFileSync(input), options));
+    }
+    // Buffer: return Promise<ParsedTrace> directly (backwards compatible with browser)
+    return parseTraceBuffer(input, options);
+  }
+
+  /** Wrap a Promise<ParsedTrace> as an async iterable that yields once. */
+  function wrapSingle(promise) {
+    return {
+      [Symbol.asyncIterator]() {
+        let done = false;
+        return { async next() {
+          if (done) return { done: true, value: undefined };
+          done = true;
+          return { done: false, value: await promise };
+        }};
+      }
+    };
+  }
+
+  /** @private Parse a binary trace buffer. */
+  async function parseTraceBuffer(buffer, options) {
     buffer = await maybeGunzip(buffer);
     const maxEvents = (options && options.maxEvents != null) ? options.maxEvents : MAX_EVENTS;
     const startTime = (options && options.startTime != null) ? options.startTime : 0;
     const endTime = (options && options.endTime != null) ? options.endTime : Infinity;
-    const onProgress = (options && options.onProgress) || null;
+    const onProgress = (options && options.onParseProgress) || null;
     const YIELD_BYTES = 100 * 1024; // yield to browser every 100KB
     const TD = getTraceDecoder();
     const dec = new TD(
@@ -440,6 +487,185 @@
       customEvents,
       clockSyncAnchors,
       clockOffsetNs,
+    };
+  }
+
+  // ── Directory parsing (Node-only) ──
+
+  /** Reconstruct Maps from [key, value] arrays produced by parse_worker.js. */
+  function entriesToMap(arr) {
+    return new Map(arr);
+  }
+
+  /** Load a cached ParsedTrace from NDJSON, reconstructing Maps. */
+  async function loadCachedTrace(cachePath) {
+    const fs = require('fs');
+    const buf = await fs.promises.readFile(cachePath);
+    let pos = 0;
+    function nextLine() {
+      const nl = buf.indexOf(10, pos);
+      if (nl === -1) {
+        if (pos < buf.length) { const s = buf.toString('utf8', pos, buf.length); pos = buf.length; return s; }
+        return null;
+      }
+      const s = buf.toString('utf8', pos, nl);
+      pos = nl + 1;
+      return s;
+    }
+
+    let raw = null;
+    const events = [];
+    const cpuSamples = [];
+    const customEvents = [];
+
+    let line;
+    while ((line = nextLine()) !== null) {
+      if (!line) continue;
+      const rec = JSON.parse(line);
+      switch (rec.t) {
+        case 'm':
+          raw = rec.d;
+          if (raw.spawnLocations) raw.spawnLocations = entriesToMap(raw.spawnLocations);
+          if (raw.taskSpawnLocs) raw.taskSpawnLocs = entriesToMap(raw.taskSpawnLocs);
+          if (raw.taskSpawnTimes) raw.taskSpawnTimes = entriesToMap(raw.taskSpawnTimes);
+          if (raw.taskTerminateTimes) raw.taskTerminateTimes = entriesToMap(raw.taskTerminateTimes);
+          if (raw.callframeSymbols) raw.callframeSymbols = entriesToMap(raw.callframeSymbols);
+          if (raw.threadNames) raw.threadNames = entriesToMap(raw.threadNames);
+          if (raw.runtimeWorkers) raw.runtimeWorkers = entriesToMap(raw.runtimeWorkers);
+          break;
+        case 'e': events.push(rec.d); break;
+        case 'c': cpuSamples.push(rec.d); break;
+        case 'x': customEvents.push(rec.d); break;
+      }
+    }
+    raw.events = events;
+    raw.cpuSamples = cpuSamples;
+    raw.customEvents = customEvents;
+    return raw;
+  }
+
+  /**
+   * Parse all trace files in a directory with caching and parallelism.
+   * Workers do parse + analysis. Cache holds pre-computed analysis results.
+   * Returns {files, [Symbol.asyncIterator]} where each item is {file, analysis}.
+   * @private
+   */
+  function parseTraceDir(dirPath, options) {
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+    const { execFile } = require('child_process');
+
+    const opts = options || {};
+    const useCache = opts.cache !== false;
+    const force = opts.force === true;
+    const sampleN = opts.sample != null ? opts.sample : null;
+    const onProgress = opts.onParseProgress || null;
+
+    const TRACE_EXT = /\.(bin|bin\.gz)$/;
+    let files = fs.readdirSync(dirPath)
+      .filter(f => TRACE_EXT.test(f))
+      .sort();
+
+    if (files.length === 0) {
+      throw new Error(`No .bin or .bin.gz files found in ${dirPath}`);
+    }
+
+    if (sampleN != null) {
+      if (sampleN < 1) throw new Error('sample must be >= 1');
+      if (sampleN < files.length) {
+        const step = files.length / sampleN;
+        const sampled = [];
+        for (let i = 0; i < sampleN; i++) {
+          sampled.push(files[Math.floor(i * step)]);
+        }
+        files = sampled;
+      }
+    }
+
+    const cacheDir = path.join(dirPath, '.d9-cache');
+    if (useCache) {
+      fs.mkdirSync(cacheDir, { recursive: true });
+    }
+
+    const concurrency = (opts.parallel === false) ? 1 : Math.min(os.cpus().length, 32);
+    const workerCandidate = path.resolve(__dirname, 'analyze.js');
+    const workerFallback = path.resolve(__dirname, '..', 'skills', 'analyze.js');
+    const workerScript = fs.existsSync(workerCandidate) ? workerCandidate : workerFallback;
+
+    function cachePathFor(file) {
+      return path.join(cacheDir, file.replace(TRACE_EXT, '') + '.json');
+    }
+
+    function isCacheValid(file) {
+      if (!useCache || force) return false;
+      const cp = cachePathFor(file);
+      try {
+        const cacheStat = fs.statSync(cp);
+        const srcStat = fs.statSync(path.join(dirPath, file));
+        return cacheStat.mtimeMs > srcStat.mtimeMs;
+      } catch { return false; }
+    }
+
+    // Ensure file is cached (spawn worker if needed). Returns Promise<boolean> (true = cache hit).
+    function ensureCached(file) {
+      if (isCacheValid(file)) return Promise.resolve(true);
+      const tracePath = path.join(dirPath, file);
+      const cp = useCache ? cachePathFor(file) : path.join(os.tmpdir(), 'd9-' + process.pid + '-' + file + '.json');
+      const args = [workerScript, '--parse-worker', tracePath, cp];
+      return new Promise((resolve, reject) => {
+        execFile(process.execPath, args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+          if (err) reject(new Error(`Failed to process ${file}: ${stderr || err.message}`));
+          else resolve(false);
+        });
+      });
+    }
+
+    // Dispatch all workers with concurrency limiting.
+    // Workers run independently of the iterator.
+    if (onProgress) onProgress({ done: 0, total: files.length, file: null });
+
+    let workersCompleted = 0;
+    let cacheHits = 0;
+    const fileReady = [];
+    let active = 0;
+    const waiters = [];
+
+    for (let i = 0; i < files.length; i++) {
+      fileReady.push(new Promise((resolve, reject) => {
+        function go() {
+          active++;
+          ensureCached(files[i]).then((wasCached) => {
+            workersCompleted++;
+            if (wasCached) cacheHits++;
+            active--;
+            if (onProgress) onProgress({ done: workersCompleted, total: files.length, file: files[i], cached: cacheHits });
+            resolve();
+            if (waiters.length > 0) waiters.shift()();
+          }, reject);
+        }
+        if (active < concurrency) go();
+        else waiters.push(go);
+      }));
+    }
+
+    return {
+      files: files,
+      allCached: Promise.all(fileReady),
+      [Symbol.asyncIterator]() {
+        let idx = 0;
+        return {
+          async next() {
+            if (idx >= files.length) return { done: true, value: undefined };
+            const i = idx++;
+            await fileReady[i];
+            const cp = useCache ? cachePathFor(files[i]) : path.join(os.tmpdir(), 'd9-' + process.pid + '-' + files[i] + '.json');
+            const trace = await loadCachedTrace(cp);
+            if (!useCache) try { fs.unlinkSync(cp); } catch {}
+            return { done: false, value: trace };
+          }
+        };
+      }
     };
   }
 

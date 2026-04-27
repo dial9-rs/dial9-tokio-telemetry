@@ -108,16 +108,31 @@
 
             #stack-sidebar {
                 width: 400px;
-                min-width: 300px;
-                max-width: 50vw;
+                min-width: 200px;
+                max-width: 70vw;
                 background: #1a1a2e;
-                border-left: 1px solid #6c63ff;
                 display: none;
                 flex-direction: column;
                 flex-shrink: 0;
                 font-size: 0.8em;
                 line-height: 1.6;
                 z-index: 5;
+                position: relative;
+            }
+            #stack-sidebar .sidebar-resize {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 4px;
+                height: 100%;
+                cursor: col-resize;
+                background: #6c63ff;
+                z-index: 10;
+                transition: background 0.15s;
+            }
+            #stack-sidebar .sidebar-resize:hover,
+            #stack-sidebar .sidebar-resize.active {
+                background: #8a82ff;
             }
             #stack-sidebar .sidebar-header {
                 display: flex;
@@ -152,6 +167,29 @@
                 font-family: monospace;
                 font-size: 0.9em;
             }
+            #stack-sidebar .sidebar-tabs {
+                display: flex;
+                gap: 0;
+                padding: 0 12px;
+                background: #16213e;
+                flex-shrink: 0;
+                border-bottom: 1px solid #333;
+            }
+            #stack-sidebar .sidebar-tabs .tab {
+                padding: 6px 14px;
+                font-size: 0.85em;
+                cursor: pointer;
+                color: #888;
+                border-bottom: 2px solid transparent;
+                transition: color 0.15s, border-color 0.15s;
+            }
+            #stack-sidebar .sidebar-tabs .tab:hover {
+                color: #ccc;
+            }
+            #stack-sidebar .sidebar-tabs .tab.active {
+                color: #fff;
+                border-bottom-color: #6c63ff;
+            }
 
             #toolbar {
                 display: flex;
@@ -165,10 +203,9 @@
             #toolbar .toolbar-row {
                 display: flex;
                 align-items: center;
-                gap: 12px;
+                flex-wrap: wrap;
+                gap: 6px 12px;
                 min-height: 36px;
-                overflow-x: auto;
-                overflow-y: hidden;
             }
             #toolbar .tb-info {
                 display: flex;
@@ -432,31 +469,7 @@
 
             #flamegraph-panel {
                 display: none;
-                position: absolute;
-                top: 0;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                background: #1a1a2e;
-                z-index: 50;
-                flex-direction: column;
             }
-            #flamegraph-panel .fg-header {
-                display: flex;
-                align-items: center;
-                gap: 12px;
-                padding: 6px 12px;
-                background: #16213e;
-                border-bottom: 1px solid #333;
-                font-size: 0.8em;
-                flex-shrink: 0;
-            }
-            #flamegraph-panel .fg-header .fg-title { color: #6c63ff; font-weight: 600; }
-            #flamegraph-panel .fg-header .fg-stats { color: #888; }
-            #flamegraph-panel .fg-header .fg-popout { cursor: pointer; color: #888; padding: 0 4px; }
-            #flamegraph-panel .fg-header .fg-popout:hover { color: #fff; }
-            #flamegraph-panel .fg-header .fg-close { cursor: pointer; color: #888; margin-left: auto; padding: 0 4px; }
-            #flamegraph-panel .fg-header .fg-close:hover { color: #fff; }
             @keyframes toast-in {
                 from { opacity: 0; transform: translateY(-8px); }
                 to { opacity: 1; transform: translateY(0); }
@@ -654,34 +667,20 @@
                     <canvas id="queue-canvas"></canvas>
                 </div>
                 <div id="flamegraph-panel">
-                    <div class="fg-header">
-                        <span class="fg-title" id="fg-title">Flamegraph</span>
-                        <span class="fg-stats" id="fg-stats"></span>
-                        <span class="fg-popout" id="fg-popout" tabindex="0" role="button" title="Open in new tab">&#8599; Pop Out</span>
-                        <span class="fg-close" id="fg-close" tabindex="0" role="button">&#10005; Close (Esc)</span>
-                    </div>
                     <div id="fg-container" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>
                 </div>
-                <div id="sched-panel" style="display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:#1a1a2e;z-index:50;flex-direction:column">
-                    <div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16213e;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0">
-                        <span style="color:#ff4444;font-weight:600" id="sched-panel-title">⚠ Scheduling Events</span>
-                        <span style="color:#888" id="sched-panel-stats"></span>
-                        <select id="sched-group-by" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em">
-                            <option value="leaf">Group by blocking call</option>
-                            <option value="full">Group by full stack</option>
-                        </select>
-                        <span style="flex:1"></span>
-                        <span id="sched-panel-close" style="cursor:pointer;color:#888;padding:0 4px" tabindex="0" role="button">✕ Close (Esc)</span>
-                    </div>
-                    <div id="sched-panel-body" style="flex:1;overflow-y:auto;padding:8px 12px;font-family:monospace;font-size:0.82em;line-height:1.5"></div>
-                </div>
-
                 <div id="uninstrumented-popup" style="display:none;position:fixed;background:#1a1a2e;border:1px solid #6c63ff;border-radius:8px;padding:12px 16px;z-index:200;max-width:700px;max-height:400px;overflow-y:auto;font-size:0.82em;line-height:1.6;box-shadow:0 4px 20px rgba(0,0,0,0.5);font-family:monospace"></div>
             </div>
             <div id="stack-sidebar">
+                <div class="sidebar-resize" id="sidebar-resize-handle"></div>
                 <div class="sidebar-header">
                     <span class="sidebar-title" id="stack-sidebar-title"></span>
                     <span class="sidebar-close" id="stack-sidebar-close">&times;</span>
+                </div>
+                <div class="sidebar-tabs" id="sidebar-tabs" style="display:none">
+                    <span class="tab" id="tab-poll-detail" data-tab="poll-detail" style="display:none">Poll Detail</span>
+                    <span class="tab" id="tab-flamegraph" data-tab="flamegraph">Flamegraph</span>
+                    <span class="tab" id="tab-blocking" data-tab="blocking">Blocking Calls</span>
                 </div>
                 <div class="sidebar-body" id="stack-sidebar-body"></div>
             </div>
@@ -709,6 +708,7 @@
                     <tr><td>Shift</td><td>Toggle region selection (analysis). Press once to start, ← → to extend, press again or Enter to confirm</td></tr>
                     <tr><td>Option / Alt</td><td>Toggle region selection (zoom). Press once to start, ← → to extend, press again or Enter to confirm</td></tr>
                     <tr><td>Esc</td><td>Cancel selection / close panels</td></tr>
+                    <tr><td>?</td><td>Toggle this help</td></tr>
                 </table>
                 <div class="close-hint">Press Esc or click outside to close</div>
             </div>
@@ -987,7 +987,6 @@
             const dragOverlay = document.getElementById("drag-overlay");
             const fileInput = document.getElementById("file-input");
             const viewer = document.getElementById("viewer");
-            const fgPanel = document.getElementById("flamegraph-panel");
             const taskDetailPanel = document.getElementById("task-detail");
             const clearRangeBtn = document.getElementById("btn-clear-range");
             const tooltip = document.getElementById("tooltip");
@@ -1058,7 +1057,7 @@
             function resetTraceState({ clearUrlRange } = {}) {
                 selectedTaskId = null;
                 hoveredWakerTaskId = null;
-                fgPanel.style.display = "none";
+                hideStackPopup();
                 taskDetailPanel.style.display = "none";
                 schedPanelTimeRange = null;
 
@@ -1083,7 +1082,7 @@
                 try {
                     const fullOpts = {
                         ...opts,
-                        onProgress: ({ bytesRead, totalBytes, eventCount }) => {
+                        onParseProgress: ({ bytesRead, totalBytes, eventCount }) => {
                             const pct = ((bytesRead / totalBytes) * 100) | 0;
                             updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
                         },
@@ -1682,6 +1681,18 @@
                 renderSpanPanel(drawW, scrollbarW);
                 renderTaskDetail(scrollbarW);
                 renderQueueChart(drawW, scrollbarW);
+
+                // Keep the selection overlay in sync when sidebar is open
+                if (sidebarSelStart && sidebarSelEnd &&
+                    document.getElementById("stack-sidebar").style.display === "flex") {
+                    regionStartNs = sidebarSelStart;
+                    regionEndNs = sidebarSelEnd;
+                    const mainRect = document.getElementById("main-area").getBoundingClientRect();
+                    selOverlay.style.top = "0px";
+                    selOverlay.style.height = mainRect.height + "px";
+                    selOverlay.style.display = "block";
+                    updateSelOverlay();
+                }
             }
 
             function nsToX(ns, drawW) {
@@ -2854,7 +2865,6 @@
             document.getElementById("main-area").addEventListener(
                 "wheel",
                 (e) => {
-                    if (document.getElementById("flamegraph-panel").style.display === "flex") return;
                     if (e.ctrlKey || e.metaKey) {
                         e.preventDefault();
                         const rect = lanesContainer.getBoundingClientRect();
@@ -2980,9 +2990,21 @@
                 const selStart = Math.min(kbSelStartNs, kbCursorNs);
                 const selEnd = Math.max(kbSelStartNs, kbCursorNs);
                 const mode = kbSelMode;
-                cancelKbSelection();
-                if (selEnd - selStart < 100) return; // too small
+                // Reset keyboard selection state but keep overlay visible
+                // for shift mode (sidebar will own the overlay lifecycle)
+                regionStartNs = selStart;
+                regionEndNs = selEnd;
+                kbSelecting = false;
+                kbSelMode = null;
+                kbCursorNs = null;
+                kbSelStartNs = null;
+                renderCrosshair();
+                if (selEnd - selStart < 100) { // too small
+                    selOverlay.style.display = "none";
+                    return;
+                }
                 if (mode === "alt") {
+                    selOverlay.style.display = "none";
                     hideToast("option-drag-hint");
                     viewStart = Math.max(minTs, selStart);
                     viewEnd = Math.min(maxTs, selEnd);
@@ -2996,8 +3018,6 @@
                     );
                     if (hasSched && !hasCpu) {
                         showSchedPanel(selStart, selEnd);
-                    } else if (hasSched) {
-                        showSelectionPicker(selStart, selEnd);
                     } else {
                         showFlamegraph(selStart, selEnd);
                     }
@@ -3060,13 +3080,8 @@
                                 s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
                             );
                             if (hasSched && !hasCpu) {
-                                selOverlay.style.display = "none";
                                 showSchedPanel(selStart, selEnd);
-                            } else if (hasSched) {
-                                // Keep overlay visible while picker is shown
-                                showSelectionPicker(selStart, selEnd);
                             } else {
-                                selOverlay.style.display = "none";
                                 showFlamegraph(selStart, selEnd);
                             }
                         }
@@ -3145,6 +3160,10 @@
             });
 
             function showStackPopup(poll, x, y) {
+                // Clear any region-selection overlay (poll detail is not a range selection)
+                sidebarSelStart = 0;
+                sidebarSelEnd = 0;
+                selOverlay.style.display = "none";
                 const sidebar = document.getElementById("stack-sidebar");
                 const title = document.getElementById("stack-sidebar-title");
                 const body = document.getElementById("stack-sidebar-body");
@@ -3178,8 +3197,8 @@
                         }
                         if (g.frames.length > 3) {
                             const id = 'sched-expand-' + Math.random().toString(36).slice(2);
-                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:16px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▶ ${g.frames.length - 3} more frames</div>`;
-                            html += `<div id="${id}" style="display:none">`;
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:16px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▼ collapse</div>`;
+                            html += `<div id="${id}">`;
                             for (let i = 3; i < g.frames.length; i++) {
                                 html += `<div style="color:#666;padding-left:24px;font-size:0.85em;word-break:break-all">${renderFrame(g.frames[i])}</div>`;
                             }
@@ -3207,8 +3226,8 @@
                         }
                         if (g.frames.length > 3) {
                             const id = 'cpu-expand-' + Math.random().toString(36).slice(2);
-                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:8px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▶ ${g.frames.length - 3} more frames</div>`;
-                            html += `<div id="${id}" style="display:none">`;
+                            html += `<div id="${id}-toggle" style="color:#6c63ff;cursor:pointer;font-size:0.85em;padding-left:8px" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none';this.textContent=this.textContent.startsWith('▶')?'▼ collapse':'▶ ${g.frames.length - 3} more frames'">▼ collapse</div>`;
+                            html += `<div id="${id}">`;
                             for (let i = 3; i < g.frames.length; i++) {
                                 html += `<div style="color:#666;padding-left:16px;font-size:0.85em;word-break:break-all">${renderFrame(g.frames[i])}</div>`;
                             }
@@ -3219,15 +3238,29 @@
                 }
 
                 body.innerHTML = html;
+                showSidebarTabs("poll-detail");
                 const wasHidden = sidebar.style.display !== "flex";
                 sidebar.style.display = "flex";
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
             }
+            let sidebarSelStart = 0, sidebarSelEnd = 0;
 
             function hideStackPopup() {
+                // If flamegraph was in the sidebar, move its container back
+                if (fgActive) {
+                    fgActive = false;
+                    document.getElementById("flamegraph-panel").appendChild(fgContainer);
+                }
+                schedActive = false;
+                sidebarSelStart = 0;
+                sidebarSelEnd = 0;
                 const sidebar = document.getElementById("stack-sidebar");
+                const body = document.getElementById("stack-sidebar-body");
                 const wasVisible = sidebar.style.display === "flex";
                 sidebar.style.display = "none";
+                document.getElementById("sidebar-tabs").style.display = "none";
+                body.style.display = "";
+                body.style.flexDirection = "";
                 selOverlay.style.display = "none";
                 if (wasVisible && trace) requestAnimationFrame(renderAll);
             }
@@ -3309,8 +3342,94 @@
                 }
             });
 
+            // ── Sidebar view tabs (poll-detail | flamegraph <-> blocking calls) ──
+            function showSidebarTabs(activeTab) {
+                const tabs = document.getElementById("sidebar-tabs");
+                tabs.style.display = "flex";
+                const pollDetail = tabs.querySelector("#tab-poll-detail");
+                const flamegraph = tabs.querySelector("#tab-flamegraph");
+                const blocking = tabs.querySelector("#tab-blocking");
+
+                if (activeTab === "poll-detail") {
+                    pollDetail.style.display = "";
+                    flamegraph.style.display = "none";
+                    blocking.style.display = "none";
+                } else {
+                    pollDetail.style.display = "none";
+                    flamegraph.style.display = "";
+                    blocking.style.display = "";
+                }
+
+                pollDetail.classList.toggle("active", activeTab === "poll-detail");
+                flamegraph.classList.toggle("active", activeTab === "flamegraph");
+                blocking.classList.toggle("active", activeTab === "blocking");
+            }
+
+            document.getElementById("tab-flamegraph").addEventListener("click", () => {
+                if (fgActive) return; // already showing
+                // Clean up current view before switching
+                schedActive = false;
+                showFlamegraph(sidebarSelStart, sidebarSelEnd);
+            });
+            document.getElementById("tab-blocking").addEventListener("click", () => {
+                if (schedActive) return; // already showing
+                // Clean up flamegraph before switching
+                if (fgActive) {
+                    fgActive = false;
+                    document.getElementById("flamegraph-panel").appendChild(fgContainer);
+                }
+                showSchedPanel(sidebarSelStart, sidebarSelEnd);
+            });
+
+            // ── Sidebar resize drag ──
+            (function initSidebarResize() {
+                const handle = document.getElementById("sidebar-resize-handle");
+                const sidebar = document.getElementById("stack-sidebar");
+                let resizing = false;
+                let startX = 0;
+                let startW = 0;
+                let resizeRafId = 0;
+
+                handle.addEventListener("mousedown", (e) => {
+                    e.preventDefault();
+                    resizing = true;
+                    startX = e.clientX;
+                    startW = sidebar.offsetWidth;
+                    handle.classList.add("active");
+                    document.body.style.cursor = "col-resize";
+                    document.body.style.userSelect = "none";
+                });
+
+                window.addEventListener("mousemove", (e) => {
+                    if (!resizing) return;
+                    const dx = startX - e.clientX; // dragging left = wider
+                    const newW = Math.min(
+                        Math.max(200, startW + dx),
+                        window.innerWidth * 0.7
+                    );
+                    sidebar.style.width = newW + "px";
+                    if (trace && !resizeRafId) {
+                        resizeRafId = requestAnimationFrame(() => {
+                            resizeRafId = 0;
+                            renderAll();
+                        });
+                    }
+                });
+
+                window.addEventListener("mouseup", () => {
+                    if (!resizing) return;
+                    resizing = false;
+                    handle.classList.remove("active");
+                    document.body.style.cursor = "";
+                    document.body.style.userSelect = "";
+                    if (fgActive) fgInstance.resize();
+                    if (trace) requestAnimationFrame(renderAll);
+                });
+            })();
+
             // ── Sched Events Panel (global view of all blocking operations) ──
             let schedPanelTimeRange = null; // {start, end} or null for full trace
+            let schedActive = false;
 
             function showSchedPanel(startNs, endNs) {
                 schedPanelTimeRange = (startNs != null && endNs != null) ? { start: startNs, end: endNs } : null;
@@ -3319,10 +3438,42 @@
                     showToast("no-sched-events", "No scheduling events found" + (schedPanelTimeRange ? " in selected range" : " in trace"), "error", 4000);
                     return;
                 }
+                // Clean up flamegraph if switching from it
+                if (fgActive) {
+                    fgActive = false;
+                    document.getElementById("flamegraph-panel").appendChild(fgContainer);
+                }
+                schedActive = true;
+                const sidebar = document.getElementById("stack-sidebar");
+                const title = document.getElementById("stack-sidebar-title");
+                const body = document.getElementById("stack-sidebar-body");
+                body.style.display = "";
+                body.style.flexDirection = "";
+
+                if (startNs != null && endNs != null) {
+                    sidebarSelStart = startNs;
+                    sidebarSelEnd = endNs;
+                    const durMs = ((endNs - startNs) / 1e6).toFixed(2);
+                    title.textContent = `${durMs}ms selected`;
+                    // Show tabs if CPU samples exist in range
+                    const hasCpu = trace.cpuSamples.some(s =>
+                        s.timestamp >= startNs && s.timestamp <= endNs && s.callchain.length > 0 && s.source !== 1
+                    );
+                    if (hasCpu) {
+                        showSidebarTabs("blocking");
+                    } else {
+                        document.getElementById("sidebar-tabs").style.display = "none";
+                    }
+                } else {
+                    title.textContent = `Blocking Calls \u00b7 ${allSched.length} events`;
+                    document.getElementById("sidebar-tabs").style.display = "none";
+                }
+
                 renderSchedPanel(allSched);
                 clearToasts();
-                document.getElementById("sched-panel").style.display = "flex";
-                document.getElementById("sched-panel-close").focus();
+                const wasHidden = sidebar.style.display !== "flex";
+                sidebar.style.display = "flex";
+                if (wasHidden && trace) requestAnimationFrame(renderAll);
             }
 
             function collectSchedSamples(range) {
@@ -3341,14 +3492,11 @@
             }
 
             function renderSchedPanel(allSched) {
-                const groupBy = document.getElementById("sched-group-by").value;
-                const body = document.getElementById("sched-panel-body");
+                const groupBy = schedActive
+                    ? (document.getElementById("sched-group-by-sb") || {}).value || "leaf"
+                    : "leaf";
+                const body = document.getElementById("stack-sidebar-body");
                 const total = allSched.length;
-                const rangeLabel = schedPanelTimeRange
-                    ? ` in ${formatHumanDuration(schedPanelTimeRange.end - schedPanelTimeRange.start)} selection`
-                    : " (full trace)";
-                document.getElementById("sched-panel-stats").textContent =
-                    `${total} events across ${workerIds.length} workers${rangeLabel}`;
 
                 // Group by leaf frame or full stack
                 const groups = new Map();
@@ -3373,9 +3521,14 @@
 
                 const sorted = [...groups.values()].sort((a, b) => b.count - a.count);
 
-                let html = `<div style="margin-bottom:12px;color:#aaa;font-size:0.9em">
+                let html = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                    <select id="sched-group-by-sb" style="background:#2a2a4a;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:4px;font-size:0.9em">
+                        <option value="leaf"${groupBy === "leaf" ? " selected" : ""}>Group by blocking call</option>
+                        <option value="full"${groupBy === "full" ? " selected" : ""}>Group by full stack</option>
+                    </select>
+                </div>`;
+                html += `<div style="margin-bottom:10px;color:#aaa;font-size:0.9em">
                     Blocking calls that caused the kernel to deschedule a tokio worker thread during a poll.
-                    These indicate synchronous/blocking operations on the async runtime.
                 </div>`;
 
                 // Summary bar chart
@@ -3405,14 +3558,14 @@
                     const gid = 'sg-' + Math.random().toString(36).slice(2);
 
                     html += `<div style="border:1px solid #333;border-radius:6px;margin-bottom:8px;overflow:hidden">`;
-                    html += `<div style="padding:8px 12px;background:#16213e;display:flex;align-items:center;gap:8px;cursor:pointer" onclick="document.getElementById('${gid}').style.display=document.getElementById('${gid}').style.display==='none'?'block':'none'">`;
+                    html += `<div style="padding:8px 12px;background:#16213e;display:flex;align-items:center;gap:8px;cursor:pointer" onclick="var d=document.getElementById('${gid}');d.style.display=d.style.display==='none'?'block':'none';this.querySelector('.sg-toggle').textContent=d.style.display==='none'?'▶ details':'▼ collapse'">`;
                     html += `<span style="color:${color};font-weight:700;font-size:1.1em">${g.count}×</span>`;
                     html += `<span style="color:#fff;font-weight:600">${g.leaf}</span>`;
                     html += `<span style="color:#888">(${pct}% of all sched events)</span>`;
-                    html += `<span style="color:#6c63ff;margin-left:auto;font-size:0.9em">▼ details</span>`;
+                    html += `<span class="sg-toggle" style="color:#6c63ff;margin-left:auto;font-size:0.9em">▼ collapse</span>`;
                     html += `</div>`;
 
-                    html += `<div id="${gid}" style="display:none;padding:8px 12px">`;
+                    html += `<div id="${gid}" style="padding:8px 12px">`;
 
                     // Show unique stacks within this group
                     const subStacks = [...g.stacks.values()].sort((a, b) => b.count - a.count);
@@ -3449,6 +3602,15 @@
 
                 body.innerHTML = html;
 
+                // Wire up group-by dropdown
+                const groupByEl = document.getElementById("sched-group-by-sb");
+                if (groupByEl) {
+                    groupByEl.addEventListener("change", () => {
+                        const allSched = collectSchedSamples(schedPanelTimeRange);
+                        renderSchedPanel(allSched);
+                    });
+                }
+
                 // Wire up jump-to-poll links
                 body.querySelectorAll('.sched-jump').forEach(el => {
                     el.addEventListener('click', (e) => {
@@ -3459,7 +3621,7 @@
                         const pad = Math.max(dur * 5, 1e6);
                         viewStart = Math.max(minTs, t - pad * 0.3);
                         viewEnd = Math.min(maxTs, viewStart + pad);
-                        document.getElementById("sched-panel").style.display = "none";
+                        hideStackPopup();
                         // Scroll to worker lane
                         const laneIdx = workerIds.indexOf(w);
                         if (laneIdx >= 0) lanesContainer.scrollTop = laneIdx * LANE_H;
@@ -3467,15 +3629,6 @@
                     });
                 });
             }
-
-            document.getElementById("sched-group-by").addEventListener("change", () => {
-                const allSched = collectSchedSamples(schedPanelTimeRange);
-                renderSchedPanel(allSched);
-            });
-
-            document.getElementById("sched-panel-close").addEventListener("click", () => {
-                document.getElementById("sched-panel").style.display = "none";
-            });
 
             // Enter activates role="button" elements and toggles checkboxes
             document.addEventListener("keydown", (e) => {
@@ -3496,10 +3649,13 @@
                 const viewDur = viewEnd - viewStart;
 
                 // Keyboard selection: toggle start/complete with Shift or Alt
+                // Don't start a new keyboard selection if the sidebar already
+                // has a retained range selection — the user can Shift+drag instead.
                 if (e.key === "Shift" || e.key === "Alt") {
                     e.preventDefault();
                     const mode = e.key === "Shift" ? "shift" : "alt";
                     if (!kbSelecting) {
+                        if (sidebarSelStart && sidebarSelEnd) return;
                         kbSelecting = true;
                         kbSelMode = mode;
                         kbCursorNs = kbSelStartNs = (mouseNs !== null && mouseNs >= viewStart && mouseNs <= viewEnd) ? mouseNs : (viewStart + viewEnd) / 2;
@@ -3546,17 +3702,14 @@
                             break;
                         }
                         clearToasts();
-                        if (document.getElementById("stack-sidebar").style.display === "flex") {
-                            hideStackPopup();
-                        } else if (document.getElementById("sched-panel").style.display === "flex") {
-                            document.getElementById("sched-panel").style.display = "none";
-                        } else if (document.getElementById("uninstrumented-popup").style.display !== "none") {
+                        if (document.getElementById("uninstrumented-popup").style.display !== "none") {
                             document.getElementById("uninstrumented-popup").style.display = "none";
-                        } else if (document.getElementById("flamegraph-panel").style.display === "flex") {
-                            // Let the flamegraph module handle Escape first (search clear / zoom reset)
-                            if (!fgInstance.handleEscape()) {
-                                document.getElementById("flamegraph-panel").style.display = "none";
+                        } else if (document.getElementById("stack-sidebar").style.display === "flex") {
+                            // If flamegraph is in the sidebar, let it handle Escape first
+                            if (fgActive && fgInstance.handleEscape()) {
+                                break;
                             }
+                            hideStackPopup();
                         }
                         selectedTaskId = null;
                         document.getElementById("main-area").focus();
@@ -3594,6 +3747,11 @@
                         renderAll();
                         break;
                     }
+                    case "?":
+                        e.preventDefault();
+                        if (kbSelecting) cancelKbSelection();
+                        document.getElementById("help-overlay").classList.toggle("visible");
+                        break;
                 }
             });
 
@@ -3609,11 +3767,7 @@
                     // Don't override span panel tooltip
                     if (e.target.closest && e.target.closest("#span-panel")) {
                         mouseNs = null;
-                        return;
-                    }
-                    if (document.getElementById("flamegraph-panel").style.display === "flex") {
-                        tooltip.style.display = "none";
-                        mouseNs = null;
+                        lanesContainer.style.cursor = "";
                         return;
                     }
                     const rect = lanesContainer.getBoundingClientRect();
@@ -3623,6 +3777,7 @@
                     if (mouseX < 0 || mouseX > drawW) {
                         tooltip.style.display = "none";
                         mouseNs = null;
+                        lanesContainer.style.cursor = "";
                         return;
                     }
 
@@ -3643,6 +3798,7 @@
                     );
                     if (laneIdx < 0 || laneIdx >= workerIds.length) {
                         tooltip.style.display = "none";
+                        lanesContainer.style.cursor = "";
                         return;
                     }
 
@@ -3677,6 +3833,7 @@
                     }
 
                     let pollInfo = "";
+                    let hasClickableStack = false;
                     {
                         const s = findSpanAt(spans.polls, ns);
                         if (s) {
@@ -3691,9 +3848,11 @@
                             }
                             if (s.cpuSamples && s.cpuSamples.length > 0) {
                                 pollInfo += `<span class="label">CPU samples:</span> <span class="value">🔥 ${s.cpuSamples.length}</span> <span style="color:#666">(click to view)</span><br>`;
+                                hasClickableStack = true;
                             }
                             if (s.schedSamples && s.schedSamples.length > 0) {
                                 pollInfo += `<span class="label">Sched events:</span> <span class="value">⚠️ ${s.schedSamples.length} blocking</span> <span style="color:#666">(click to view)</span><br>`;
+                                hasClickableStack = true;
                             }
                             // Count span events within this poll
                             const wSpans = spansByWorker[w];
@@ -3722,6 +3881,7 @@
                             }
                         }
                     }
+                    lanesContainer.style.cursor = hasClickableStack ? "pointer" : "";
 
                     // Find nearest local queue sample for this worker
                     const nearest = findNearest(workerQueueSamples[w] || [], ns);
@@ -3891,40 +4051,9 @@
 
             // ── Flamegraph ──
             let fgSelStart = 0, fgSelEnd = 0;
-            const fgInstance = FlamegraphRenderer.createFlamegraph(
-                document.getElementById("fg-container")
-            );
-
-            // Selection picker: shown after shift+drag when both flamegraph and sched data exist
-            function showSelectionPicker(selStart, selEnd) {
-                const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
-                const schedCount = collectSchedSamples({ start: selStart, end: selEnd }).length;
-                const sidebar = document.getElementById("stack-sidebar");
-                const title = document.getElementById("stack-sidebar-title");
-                const body = document.getElementById("stack-sidebar-body");
-                title.textContent = `${durMs}ms selected`;
-                body.innerHTML = `
-                    <div style="display:flex;flex-direction:column;gap:8px">
-                        <div style="padding:8px 12px;background:#2a2a4a;border:1px solid #444;border-radius:6px;cursor:pointer;transition:background 0.15s"
-                             onmouseover="this.style.background='#3a3a5a'" onmouseout="this.style.background='#2a2a4a'"
-                             id="pick-flamegraph" tabindex="0" role="button">
-                            <div style="color:#ff8c00;font-weight:600">CPU Flamegraph</div>
-                            <div style="color:#888;font-size:0.9em">Profile where CPU time is spent</div>
-                        </div>
-                        <div style="padding:8px 12px;background:#2a2a4a;border:1px solid #444;border-radius:6px;cursor:pointer;transition:background 0.15s"
-                             onmouseover="this.style.background='#3a3a5a'" onmouseout="this.style.background='#2a2a4a'"
-                             id="pick-sched" tabindex="0" role="button">
-                            <div style="color:#ff4444;font-weight:600">Blocking Calls <span style="color:#888;font-weight:400">(${schedCount})</span></div>
-                            <div style="color:#888;font-size:0.9em">Analyze what's blocking the runtime</div>
-                        </div>
-                    </div>`;
-                const wasHidden = sidebar.style.display !== "flex";
-                sidebar.style.display = "flex";
-                if (wasHidden && trace) requestAnimationFrame(renderAll);
-                document.getElementById("pick-flamegraph").onclick = () => { hideStackPopup(); showFlamegraph(selStart, selEnd); };
-                document.getElementById("pick-sched").onclick = () => { hideStackPopup(); showSchedPanel(selStart, selEnd); };
-                document.getElementById("pick-flamegraph").focus();
-            }
+            let fgActive = false;
+            const fgContainer = document.getElementById("fg-container");
+            const fgInstance = FlamegraphRenderer.createFlamegraph(fgContainer);
 
             function showFlamegraph(selStart, selEnd) {
                 const samples = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, selStart, selEnd);
@@ -3935,22 +4064,54 @@
 
                 fgSelStart = selStart;
                 fgSelEnd = selEnd;
+                fgActive = true;
+                schedActive = false;
+                sidebarSelStart = selStart;
+                sidebarSelEnd = selEnd;
                 const durMs = ((selEnd - selStart) / 1e6).toFixed(2);
-                document.getElementById("fg-title").textContent = "Flamegraph";
-                document.getElementById("fg-stats").textContent =
-                    `${samples.length} samples \u00b7 ${durMs}ms selected`;
+
+                const sidebar = document.getElementById("stack-sidebar");
+                const title = document.getElementById("stack-sidebar-title");
+                const body = document.getElementById("stack-sidebar-body");
+                title.textContent = `${durMs}ms selected`;
+
+                // Show tabs if both data types exist
+                const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
+                if (hasSched) {
+                    showSidebarTabs("flamegraph");
+                } else {
+                    document.getElementById("sidebar-tabs").style.display = "none";
+                }
+
+                body.innerHTML = "";
+                body.style.display = "flex";
+                body.style.flexDirection = "column";
+                // Add pop-out button above the flamegraph
+                const actions = document.createElement("div");
+                actions.style.cssText = "display:flex;gap:8px;margin-bottom:6px;flex-shrink:0;align-items:center";
+                actions.innerHTML = `<span style="color:#888;font-size:0.85em">${samples.length} samples</span><span id="fg-popout-sb" tabindex="0" role="button" title="Open in new tab" style="cursor:pointer;color:#6c63ff;font-size:0.9em">&#8599; Pop Out</span>`;
+                body.appendChild(actions);
+                // Move fg-container into sidebar body
+                fgContainer.style.flex = "1";
+                fgContainer.style.minHeight = "0";
+                body.appendChild(fgContainer);
 
                 clearToasts();
-                document.getElementById("flamegraph-panel").style.display = "flex";
-                document.getElementById("fg-close").focus();
-                fgInstance.setData(samples, trace.callframeSymbols);
+                const wasHidden = sidebar.style.display !== "flex";
+                sidebar.style.display = "flex";
+                if (wasHidden && trace) requestAnimationFrame(renderAll);
+
+                // Give the container a frame to get its layout, then render
+                requestAnimationFrame(() => {
+                    fgInstance.setData(samples, trace.callframeSymbols);
+                    fgInstance.resize();
+                });
+
+                // Wire pop-out
+                document.getElementById("fg-popout-sb").onclick = handleFgPopout;
             }
 
-            document.getElementById("fg-close").addEventListener("click", () => {
-                document.getElementById("flamegraph-panel").style.display = "none";
-            });
-
-            document.getElementById("fg-popout").addEventListener("click", () => {
+            function handleFgPopout() {
                 const params = new URLSearchParams(window.location.search);
                 let traceUrl = params.get("trace");
                 let isBlobUrl = false;
@@ -3971,7 +4132,7 @@
                 if (isBlobUrl) {
                     showToast("popout-blob", "Pop-out linked to this tab \u2014 keep it open", "info", 5000);
                 }
-            });
+            }
 
             // ── Queue chart drag-select: show tasks spawned in time range ──
             let qcDragging = false, qcDragStartX = 0, qcDragStartNs = 0, qcDragEndNs = 0, qcDragMoved = false;
@@ -4101,7 +4262,7 @@
 
             // Re-render flamegraph on resize
             window.addEventListener("resize", () => {
-                if (document.getElementById("flamegraph-panel").style.display === "flex") {
+                if (fgActive) {
                     fgInstance.resize();
                 }
             });

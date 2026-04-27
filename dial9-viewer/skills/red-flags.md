@@ -5,13 +5,12 @@ Run these checks against any trace to surface common Tokio runtime problems. Eac
 ## Complete red-flag scan
 
 ```javascript
-const fs = require('fs');
 const { parseTrace, EVENT_TYPES, deduplicateSamples } = require('./trace_parser.js');
 const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
         computeSchedulingDelays, buildSpanData } = require('./trace_analysis.js');
 
 async function redFlagScan(tracePath) {
-  const trace = await parseTrace(fs.readFileSync(tracePath));
+  for await (const trace of parseTrace(tracePath)) {
   const workerIds = [...new Set(
     trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent)
       .map(e => e.workerId)
@@ -203,9 +202,10 @@ async function redFlagScan(tracePath) {
     }
     console.log(`\n${findings.filter(f => f.severity === 'critical').length} critical, ${findings.filter(f => f.severity === 'warning').length} warnings, ${findings.filter(f => f.severity === 'info').length} info`);
   }
+  }
 }
 
-redFlagScan(process.argv[2] || 'trace.bin');
+await redFlagScan(process.argv[2] || 'trace.bin');
 ```
 
 ## Individual checks explained

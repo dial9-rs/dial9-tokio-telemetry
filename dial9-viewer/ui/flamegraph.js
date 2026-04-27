@@ -25,16 +25,36 @@
 
   // Like flattenFlamegraph in trace_analysis.js but attaches treeNode refs
   // for click-to-zoom. Filters out nodes < 0.1% of total.
-  function flattenFromNode(root, total, includeRoot) {
+  // `ancestors` is an optional array of tree nodes forming the parent chain
+  // from the tree root down to (but not including) `root`. When provided,
+  // they are rendered as full-width context bars below the zoom target.
+  function flattenFromNode(root, total, ancestors) {
+    ancestors = ancestors || [];
     const nodes = [];
     let maxD = 0;
-    const startDepth = includeRoot ? 1 : 0;
-    if (includeRoot) {
+    const depthOffset = ancestors.length;
+    const zoomed = depthOffset > 0;
+
+    // Ancestor chain: full-width context bars at depths 0..N-1
+    for (let i = 0; i < ancestors.length; i++) {
       nodes.push({
-        name: root.name, depth: 0, x: 0, w: 1,
+        name: ancestors[i].name, depth: i, x: 0, w: 1,
+        count: ancestors[i].count, self: ancestors[i].self,
+        treeNode: ancestors[i], isAncestor: true,
+      });
+      if (i > maxD) maxD = i;
+    }
+
+    // Zoom target itself at depth N (full-width)
+    if (zoomed) {
+      nodes.push({
+        name: root.name, depth: depthOffset, x: 0, w: 1,
         count: root.count, self: root.self, treeNode: root,
       });
+      if (depthOffset > maxD) maxD = depthOffset;
     }
+
+    const startDepth = zoomed ? depthOffset + 1 : 0;
     function walk(treeNode, depth, xStart) {
       const w = treeNode.count / total;
       if (w < 0.001) return;
@@ -223,13 +243,17 @@
         const y = baseY - (node.depth + 1) * FG_ROW_H;
         if (w < 0.5) continue;
 
+        const isAncestor = !!node.isAncestor;
         const searchMatch = !searching || node.name.toLowerCase().includes(qLower);
         const highlighted = highlightName != null && node.name === highlightName;
         const dimmed = (searching && !searchMatch) || (highlightName != null && !highlighted);
-        ctx.globalAlpha = dimmed ? 0.25 : 1.0;
+        let alpha = 1.0;
+        if (dimmed) alpha = 0.25;
+        else if (isAncestor) alpha = 0.6;
+        ctx.globalAlpha = alpha;
         ctx.fillStyle = flamegraphColor(node.name);
         ctx.fillRect(x, y, Math.max(w - 0.5, 0.5), FG_ROW_H - 1);
-        regions.push({ x1: x, x2: x + w, y, node, totalSamples: data.totalSamples });
+        regions.push({ x1: x, x2: x + w, y, node, totalSamples: data.totalSamples, rootTotal: data.rootTotal });
 
         if (w > 30) {
           ctx.fillStyle = "#fff";
@@ -254,11 +278,20 @@
       if (!tree) return null;
       const zoomed = stack.length > 0;
       const zoomNode = zoomed ? stack[stack.length - 1] : tree;
-      const flat = flattenFromNode(zoomNode, zoomNode.count, zoomed);
+
+      // Find ancestor chain for zoomed view
+      let ancestors = [];
+      if (zoomed) {
+        const path = findAncestorPath(tree, zoomNode);
+        if (path) ancestors = path.slice(0, -1); // everything before the zoom target
+      }
+
+      const flat = flattenFromNode(zoomNode, zoomNode.count, ancestors);
       return {
         nodes: flat.nodes,
         maxDepth: flat.maxDepth,
         totalSamples: zoomNode.count,
+        rootTotal: tree.count,
       };
     }
 
@@ -421,7 +454,9 @@
     function buildTooltipHtml(hit, pinned) {
       const node = hit.node;
       const tn = node.treeNode || {};
-      const total = hit.totalSamples || 1;
+      const isAncestor = !!node.isAncestor;
+      // Ancestors belong to the full tree; show their % relative to the root total
+      const total = isAncestor ? (hit.rootTotal || hit.totalSamples || 1) : (hit.totalSamples || 1);
       const pct = ((node.count / total) * 100).toFixed(1);
       const selfPct = ((node.self / total) * 100).toFixed(1);
       const nameElt = document.createElement("b");
@@ -543,7 +578,15 @@
       } else {
         unpinTooltip();
         if (tn.children && tn.children.size > 0) {
-          zoomTo(hitKey, tn);
+          if (hit.node.isAncestor) {
+            // Clicking an ancestor: zoom to that frame
+            if (hitKey === "worker") workerZoomStack = [tn];
+            else offworkerZoomStack = [tn];
+            renderAll();
+            onZoomChange();
+          } else {
+            zoomTo(hitKey, tn);
+          }
         }
       }
     }
@@ -716,6 +759,24 @@
       function dfs(node) {
         path.push(node);
         if (node.name === name) return true;
+        for (const child of node.children.values()) {
+          if (dfs(child)) return true;
+        }
+        path.pop();
+        return false;
+      }
+      for (const child of tree.children.values()) {
+        if (dfs(child)) return path;
+      }
+      return null;
+    }
+
+    // Like findNodePath but uses object identity instead of name matching.
+    function findAncestorPath(tree, target) {
+      const path = [];
+      function dfs(node) {
+        path.push(node);
+        if (node === target) return true;
         for (const child of node.children.values()) {
           if (dfs(child)) return true;
         }

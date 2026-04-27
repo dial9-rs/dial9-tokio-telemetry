@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.4...dial9-tokio-telemetry-v0.3.5) - 2026-04-24
+
+### Added
+
+- *(viewer)* resizable sidebar and slightly improved ux ([#290](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/290))
+
+### Fixed
+
+- *(ci)* use single cargo package invocation for cross-crate verification
+
+### Other
+
+- lower expected sample threshold in ctimer cpu load test ([#292](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/292))
+- Restore collect_files safety limits lost by merge-queue bug ([#276](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/276)) ([#295](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/295))
+- restore ([#286](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/286))
+- Fix stack overflow on large profiles ([#285](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/285))
+
 ## [0.3.4](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.3...dial9-tokio-telemetry-v0.3.4) - 2026-04-23
 
 ### Added
