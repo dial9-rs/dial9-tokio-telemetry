@@ -1769,8 +1769,7 @@
 
                     // If we have scheduling delay info, split the park visually
                     if (trace.hasSchedWait && s.schedWait > 0) {
-                        const schedWaitNs = s.schedWait * 1000; // convert µs to ns
-                        const wakeupShouldBe = s.end - schedWaitNs;
+                        const wakeupShouldBe = s.end - s.schedWait;
 
                         // Normal park portion (before wakeup should have happened)
                         if (wakeupShouldBe > s.start) {
@@ -3702,9 +3701,9 @@
                             stateDetail = ` for <span class="value">${formatHumanDuration(parkNs)}</span>`;
                             schedInfo = "";
                             if (trace.hasSchedWait && s.schedWait != null) {
-                                const swUs = s.schedWait;
-                                const icon = swUs < 100 ? "🟢" : swUs < 1000 ? "🟡" : "🔴";
-                                stateDetail += `<br><span class="label">Kernel sched delay:</span> <span class="value">${icon} ${formatHumanDuration(swUs * 1000)}</span>`;
+                                const sw = s.schedWait;
+                                const icon = sw < 100_000 ? "🟢" : sw < 1_000_000 ? "🟡" : "🔴";
+                                stateDetail += `<br><span class="label">Kernel sched delay:</span> <span class="value">${icon} ${formatHumanDuration(sw)}</span>`;
                             }
                         }
                     }
