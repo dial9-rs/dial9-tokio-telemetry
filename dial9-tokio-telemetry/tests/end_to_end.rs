@@ -251,7 +251,7 @@ fn spawn_audit_detects_uninstrumented_spawns() {
             matches!(
                 e,
                 TelemetryEvent::TaskSpawn {
-                    instrumented: true,
+                    instrumented: Some(true),
                     ..
                 }
             )
@@ -263,7 +263,7 @@ fn spawn_audit_detects_uninstrumented_spawns() {
             matches!(
                 e,
                 TelemetryEvent::TaskSpawn {
-                    instrumented: false,
+                    instrumented: Some(false),
                     ..
                 }
             )
@@ -283,7 +283,7 @@ fn spawn_audit_detects_uninstrumented_spawns() {
     for event in events {
         if let TelemetryEvent::TaskSpawn {
             spawn_loc,
-            instrumented: false,
+            instrumented: Some(false),
             ..
         } = event
         {

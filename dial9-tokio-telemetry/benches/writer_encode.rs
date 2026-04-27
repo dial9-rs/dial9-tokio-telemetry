@@ -56,7 +56,7 @@ fn make_encoded_batch(worker: usize) -> Batch {
                 timestamp_ns: base + 2000,
                 task_id: task,
                 spawn_loc: loc,
-                instrumented: Some(true),
+                instrumented: true,
             });
         }
         for _ in 0..5 {

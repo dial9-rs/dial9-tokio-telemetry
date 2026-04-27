@@ -224,7 +224,7 @@ impl Encodable for RawEvent {
                     timestamp_ns: *timestamp_nanos,
                     task_id: *task_id,
                     spawn_loc,
-                    instrumented: Some(*instrumented),
+                    instrumented: *instrumented,
                 });
             }
             RawEvent::TaskTerminate {
