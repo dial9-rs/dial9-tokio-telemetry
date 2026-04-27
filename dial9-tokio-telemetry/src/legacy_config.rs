@@ -1,17 +1,16 @@
-//! Deprecated legacy configuration for the `#[dial9_tokio_telemetry::main]`
-//! macro. Kept for back-compat only — prefer the new builder in
-//! [`crate::current_config`].
+//! Positional-argument config API for the
+//! `#[dial9_tokio_telemetry::main]` macro.
 //!
-//! Migration:
-//! - [`Dial9ConfigBuilder::new`] → [`crate::Dial9Config::builder`] with
-//!   `.base_path(..).max_file_size(..).max_total_size(..)`.
-//! - [`Dial9ConfigBuilder::disabled`] → [`crate::Dial9Config::builder`]
-//!   with `.enabled(false)`.
-//! - `.with_tokio()` / `.with_runtime()` behave the same way on the new
-//!   builder; see [`crate::Dial9ConfigBuilder`].
-
-// The types in this module are themselves deprecated
-#![allow(deprecated)]
+//! The fluent builder re-exported at the crate root
+//! (see [`crate::Dial9Config::builder`]) is a more ergonomic alternative
+//! and tends to read more clearly when there are several knobs to set.
+//!
+//! Equivalent calls on the fluent builder, we encourage you to migrate to:
+//! - `Dial9ConfigBuilder::new(..)` →
+//!   `Dial9Config::builder().base_path(..).max_file_size(..).max_total_size(..)`.
+//! - `Dial9ConfigBuilder::disabled()` →
+//!   `Dial9Config::builder().enabled(false)`.
+//! - `.with_tokio()` / `.with_runtime()` are unchanged.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,9 +28,6 @@ use crate::telemetry::writer::RotatingWriter;
 ///
 /// Constructed via [`Dial9ConfigBuilder::build`] or
 /// [`DisabledDial9ConfigBuilder::build`].
-#[deprecated(
-    note = "use `dial9_tokio_telemetry::Dial9Config` instead — see module docs for migration"
-)]
 #[allow(missing_debug_implementations)]
 pub struct Dial9Config(Inner);
 
@@ -90,9 +86,6 @@ impl Dial9Config {
 ///
 /// Created via [`Dial9ConfigBuilder::new`]. Exposes both tokio and dial9
 /// runtime knobs. Call [`.build()`](Self::build) to produce a [`Dial9Config`].
-#[deprecated(
-    note = "use `dial9_tokio_telemetry::Dial9Config::builder()` instead — see module docs for migration`"
-)]
 #[derive(Debug)]
 pub struct Dial9ConfigBuilder {
     base_path: PathBuf,
@@ -191,9 +184,6 @@ impl Dial9ConfigBuilder {
 ///
 /// Created via [`Dial9ConfigBuilder::disabled()`]. Only exposes tokio
 /// runtime knobs — telemetry methods like `with_runtime` are not available.
-#[deprecated(
-    note = "use `dial9_tokio_telemetry::Dial9Config::builder().enabled(false)` instead — see module docs for migration"
-)]
 #[derive(Debug)]
 pub struct DisabledDial9ConfigBuilder {
     tokio_builder: tokio::runtime::Builder,

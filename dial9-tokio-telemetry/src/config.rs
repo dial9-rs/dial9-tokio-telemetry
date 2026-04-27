@@ -2,7 +2,8 @@
 //!
 //! Start with [`Dial9Config::builder()`] and chain setters to produce a
 //! [`Dial9Config`] that the macro consumes. The builder stages a
-//! [`tokio::runtime::Builder`] and accumulates [`TracedRuntimeBuilder`]
+//! [`tokio::runtime::Builder`] and accumulates
+//! [`TracedRuntimeBuilder`](crate::telemetry::recorder::TracedRuntimeBuilder)
 //! configurators eagerly; use [`Dial9ConfigBuilder::with_tokio`] and
 //! [`Dial9ConfigBuilder::with_runtime`] to reach any knob those builders
 //! expose.
@@ -92,10 +93,11 @@ impl std::error::Error for Dial9ConfigBuilderError {
 /// Finalized configuration consumed by the `#[main]` macro.
 ///
 /// Constructed via [`Dial9Config::builder()`].
-#[allow(missing_debug_implementations)]
+#[derive(Debug)]
 pub struct Dial9Config(Inner);
 
 #[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
 enum Inner {
     Enabled {
         base_path: PathBuf,
