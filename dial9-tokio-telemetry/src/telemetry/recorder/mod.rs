@@ -20,8 +20,6 @@ use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::panic::Location;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -200,10 +198,6 @@ fn register_hooks(
                 location,
                 instrumented,
             });
-
-            if !instrumented {
-                s5.uninstrumented_spawn_locs.push(location);
-            }
         });
         let s6 = shared.clone();
         builder.on_task_terminate(move |meta| {
@@ -608,35 +602,6 @@ impl TelemetryGuard {
 
         Ok(())
     }
-
-    fn summarize_spawn_audit(&self) {
-        use std::fmt::Write;
-
-        let mut by_location = HashMap::<&'static Location<'static>, u64>::new();
-        let mut total = 0u64;
-        while let Some(loc) = self.handle.shared.uninstrumented_spawn_locs.pop() {
-            *by_location.entry(loc).or_default() += 1;
-            total += 1;
-        }
-        if total == 0 {
-            return;
-        }
-
-        let mut sites: Vec<_> = by_location.into_iter().collect();
-        sites.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-
-        let mut summary = format!(
-            "{total} uninstrumented spawn(s) at {} site(s):\n",
-            sites.len()
-        );
-        for (loc, count) in &sites {
-            let _ = writeln!(summary, "  {count:>6} × {loc}");
-        }
-        summary.push_str(
-            "  → use TelemetryHandle::spawn(): https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/telemetry/struct.TelemetryHandle.html#method.spawn",
-        );
-        tracing::debug!(target: "dial9_telemetry", "{summary}");
-    }
 }
 
 impl Drop for TelemetryGuard {
@@ -644,7 +609,6 @@ impl Drop for TelemetryGuard {
         // 1. Stop the flush thread (flushes + finalizes)
         self.stop_flush_thread();
 
-        self.summarize_spawn_audit();
         // 2. Hard shutdown: drop the sender without sending — worker sees
         // RecvError and exits without draining. No need to join the thread.
         // For graceful drain, use graceful_shutdown() instead.
