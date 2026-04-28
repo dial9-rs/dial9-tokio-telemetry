@@ -95,23 +95,8 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     Ok(quote! {
         #(#attrs)*
         #vis fn #name() #ret {
-            let (__tokio_runtime, __maybe_guard) = #config_call
-                .build()
-                .expect("failed to initialize runtime");
-            if let Some(__dial9_guard) = __maybe_guard {
-                let __dial9_handle = __dial9_guard.handle();
-                __tokio_runtime.block_on(async move {
-                    match __dial9_handle.spawn(async move { #(#body_stmts)* }).await {
-                        Ok(output) => output,
-                        Err(err) if err.is_panic() => {
-                            ::std::panic::resume_unwind(err.into_panic())
-                        }
-                        Err(_) => unreachable!("task cannot be cancelled inside block_on"),
-                    }
-                })
-            } else {
-                __tokio_runtime.block_on(async move { #(#body_stmts)* })
-            }
+            let __dial9_rt = ::dial9_tokio_telemetry::TelemetryRuntime::from_config(#config_call);
+            __dial9_rt.block_on(async move { #(#body_stmts)* })
         }
     })
 }
