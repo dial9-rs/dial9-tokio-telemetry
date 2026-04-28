@@ -2,7 +2,9 @@
 
 use std::future::Future;
 
+use crate::current_config::Inner;
 use crate::telemetry::TelemetryGuard;
+use crate::telemetry::writer::RotatingWriter;
 use crate::{Dial9Config, Dial9ConfigBuilderError};
 
 /// A tokio runtime paired with its (optional) dial9 telemetry guard.
@@ -64,7 +66,34 @@ impl TryFrom<Dial9Config> for TelemetryRuntime {
     type Error = Dial9ConfigBuilderError;
 
     fn try_from(config: Dial9Config) -> Result<Self, Self::Error> {
-        let (runtime, guard) = config.build()?;
+        let (runtime, guard) = match config.0 {
+            Inner::Enabled {
+                base_path,
+                max_file_size,
+                max_total_size,
+                rotation_period,
+                tokio_builder,
+                runtime_builder,
+            } => {
+                let writer = RotatingWriter::builder()
+                    .base_path(base_path)
+                    .max_file_size(max_file_size)
+                    .max_total_size(max_total_size)
+                    .maybe_rotation_period(rotation_period)
+                    .build()
+                    .map_err(Dial9ConfigBuilderError::RotatingWriter)?;
+                let (runtime, guard) = runtime_builder
+                    .build_and_start(tokio_builder, writer)
+                    .map_err(Dial9ConfigBuilderError::TelemetryCore)?;
+                (runtime, Some(guard))
+            }
+            Inner::Disabled { mut tokio_builder } => {
+                let runtime = tokio_builder
+                    .build()
+                    .map_err(Dial9ConfigBuilderError::TokioRuntimeBuilder)?;
+                (runtime, None)
+            }
+        };
         Ok(Self { runtime, guard })
     }
 }

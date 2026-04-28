@@ -2,8 +2,7 @@
 //!
 //! Start with [`Dial9Config::builder()`] and chain setters to produce a
 //! [`Dial9Config`] that the macro consumes. The builder stages a
-//! [`tokio::runtime::Builder`] and accumulates
-//! [`TracedRuntimeBuilder`](crate::telemetry::recorder::TracedRuntimeBuilder)
+//! [`tokio::runtime::Builder`] and accumulates [`TracedRuntimeBuilder`]
 //! configurators eagerly; use [`Dial9ConfigBuilder::with_tokio`] and
 //! [`Dial9ConfigBuilder::with_runtime`] to reach any knob those builders
 //! expose.
@@ -18,7 +17,6 @@ use std::time::Duration;
 use crate::telemetry::recorder::{
     HasTracePath, TelemetryGuard, TracedRuntime, TracedRuntimeBuilder,
 };
-use crate::telemetry::writer::RotatingWriter;
 
 // ---------------------------------------------------------------------------
 // Dial9ConfigBuilderError — unified error for builder validation and runtime construction
@@ -94,11 +92,11 @@ impl std::error::Error for Dial9ConfigBuilderError {
 ///
 /// Constructed via [`Dial9Config::builder()`].
 #[derive(Debug)]
-pub struct Dial9Config(Inner);
+pub struct Dial9Config(pub(crate) Inner);
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
-enum Inner {
+pub(crate) enum Inner {
     Enabled {
         base_path: PathBuf,
         max_file_size: u64,
@@ -112,44 +110,7 @@ enum Inner {
     },
 }
 
-impl Dial9Config {
-    /// Build the tokio runtime, optionally with dial9 telemetry installed.
-    ///
-    /// Returns `Some(guard)` when telemetry is enabled, `None` when the
-    /// config was built with `.enabled(false)`.
-    pub fn build(
-        self,
-    ) -> Result<(tokio::runtime::Runtime, Option<TelemetryGuard>), Dial9ConfigBuilderError> {
-        match self.0 {
-            Inner::Enabled {
-                base_path,
-                max_file_size,
-                max_total_size,
-                rotation_period,
-                tokio_builder,
-                runtime_builder,
-            } => {
-                let writer = RotatingWriter::builder()
-                    .base_path(base_path)
-                    .max_file_size(max_file_size)
-                    .max_total_size(max_total_size)
-                    .maybe_rotation_period(rotation_period)
-                    .build()
-                    .map_err(Dial9ConfigBuilderError::RotatingWriter)?;
-                let (runtime, guard) = runtime_builder
-                    .build_and_start(tokio_builder, writer)
-                    .map_err(Dial9ConfigBuilderError::TelemetryCore)?;
-                Ok((runtime, Some(guard)))
-            }
-            Inner::Disabled { mut tokio_builder } => {
-                let runtime = tokio_builder
-                    .build()
-                    .map_err(Dial9ConfigBuilderError::TokioRuntimeBuilder)?;
-                Ok((runtime, None))
-            }
-        }
-    }
-}
+impl Dial9Config {}
 
 // ---------------------------------------------------------------------------
 // Dial9ConfigBuilder — single bon-generated fluent entry point
@@ -300,134 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn build_creates_working_runtime() {
-        let config = Dial9Config::builder()
-            .base_path(tmp_base_path())
-            .max_file_size(1024 * 1024)
-            .max_total_size(4 * 1024 * 1024)
-            .build()
-            .expect("config build failed");
-        let (runtime, guard) = config.build().expect("runtime build failed");
-        let guard = guard.expect("guard should be Some for enabled config");
-        let handle = guard.handle();
-        let result = runtime.block_on(async { handle.spawn(async { 42 }).await.unwrap() });
-        assert_eq!(result, 42);
-    }
-
-    #[test]
-    fn with_runtime_install_false() {
-        let config = Dial9Config::builder()
-            .base_path(tmp_base_path())
-            .max_file_size(1024)
-            .max_total_size(4096)
-            .with_runtime(|r| r.install(false))
-            .build()
-            .expect("config build failed");
-        let (runtime, guard) = config.build().expect("runtime build failed");
-        let guard = guard.expect("guard should be Some");
-        let handle = guard.handle();
-        let result = runtime.block_on(async { handle.spawn(async { 7 }).await.unwrap() });
-        assert_eq!(result, 7);
-    }
-
-    #[test]
-    fn with_tokio_current_thread() {
-        let config = Dial9Config::builder()
-            .base_path(tmp_base_path())
-            .max_file_size(1024)
-            .max_total_size(4096)
-            .with_tokio(|t| {
-                *t = tokio::runtime::Builder::new_current_thread();
-                t.enable_all();
-            })
-            .build()
-            .expect("config build failed");
-        let (runtime, guard) = config.build().expect("runtime build failed");
-        let guard = guard.expect("guard should be Some");
-        let handle = guard.handle();
-        let result = runtime.block_on(async { handle.spawn(async { 99 }).await.unwrap() });
-        assert_eq!(result, 99);
-    }
-
-    #[test]
-    fn with_tokio_worker_threads() {
-        let config = Dial9Config::builder()
-            .base_path(tmp_base_path())
-            .max_file_size(1024)
-            .max_total_size(4096)
-            .with_tokio(|t| {
-                t.worker_threads(2);
-            })
-            .build()
-            .expect("config build failed");
-        let (runtime, guard) = config.build().expect("runtime build failed");
-        let guard = guard.expect("guard should be Some");
-        let handle = guard.handle();
-        let result = runtime.block_on(async { handle.spawn(async { 3 }).await.unwrap() });
-        assert_eq!(result, 3);
-    }
-
-    #[test]
-    fn with_runtime_chained_knobs() {
-        let config = Dial9Config::builder()
-            .base_path(tmp_base_path())
-            .max_file_size(1024)
-            .max_total_size(4096)
-            .with_runtime(|r| r.with_runtime_name("test-rt").with_task_tracking(true))
-            .build()
-            .expect("config build failed");
-        let (runtime, guard) = config.build().expect("runtime build failed");
-        let guard = guard.expect("guard should be Some");
-        let handle = guard.handle();
-        let result = runtime.block_on(async { handle.spawn(async { 1 }).await.unwrap() });
-        assert_eq!(result, 1);
-    }
-
-    #[test]
-    fn multiple_with_runtime_calls_all_apply() {
-        let config = Dial9Config::builder()
-            .base_path(tmp_base_path())
-            .max_file_size(1024)
-            .max_total_size(4096)
-            .with_runtime(|r| r.with_runtime_name("first"))
-            .with_runtime(|r| r.with_task_tracking(true))
-            .build()
-            .expect("config build failed");
-        let (runtime, guard) = config.build().expect("runtime build failed");
-        let guard = guard.expect("guard should be Some");
-        let handle = guard.handle();
-        let result = runtime.block_on(async { handle.spawn(async { 11 }).await.unwrap() });
-        assert_eq!(result, 11);
-    }
-
-    #[test]
-    fn disabled_builds_plain_runtime() {
-        let config = Dial9Config::builder()
-            .enabled(false)
-            .with_tokio(|t| {
-                t.worker_threads(2);
-            })
-            .build()
-            .expect("config build failed");
-        let (runtime, guard) = config.build().expect("runtime build failed");
-        assert!(guard.is_none(), "guard should be None for disabled config");
-        let result = runtime.block_on(async { tokio::spawn(async { 55 }).await.unwrap() });
-        assert_eq!(result, 55);
-    }
-
-    #[test]
-    fn disabled_needs_no_required_fields() {
-        let config = Dial9Config::builder()
-            .enabled(false)
-            .build()
-            .expect("config build failed");
-        let (runtime, guard) = config.build().expect("runtime build failed");
-        assert!(guard.is_none());
-        let result = runtime.block_on(async { tokio::spawn(async { 77 }).await.unwrap() });
-        assert_eq!(result, 77);
-    }
-
-    #[test]
     fn missing_required_fields_errors_with_all_missing_names() {
         match Dial9Config::builder().build() {
             Err(Dial9ConfigBuilderError::MissingFields(m)) => {
@@ -456,21 +289,5 @@ mod tests {
             Err(other) => panic!("expected MissingFields, got {other:?}"),
             Ok(_) => panic!("expected MissingFields error, got Ok"),
         }
-    }
-
-    #[test]
-    fn with_runtime_before_base_path_still_builds() {
-        let config = Dial9Config::builder()
-            .with_runtime(|r| r.with_runtime_name("early"))
-            .base_path(tmp_base_path())
-            .max_file_size(1024)
-            .max_total_size(4096)
-            .build()
-            .expect("config build failed");
-        let (runtime, guard) = config.build().expect("runtime build failed");
-        let guard = guard.expect("guard should be Some");
-        let handle = guard.handle();
-        let result = runtime.block_on(async { handle.spawn(async { 5 }).await.unwrap() });
-        assert_eq!(result, 5);
     }
 }
