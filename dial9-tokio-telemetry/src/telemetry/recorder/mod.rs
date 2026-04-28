@@ -10,6 +10,8 @@ use event_writer::EventWriter;
 use runtime_context::{make_poll_end, make_poll_start, make_worker_park, make_worker_unpark};
 
 use crate::metrics::{FlushMetrics, Operation, TlDrainMetrics};
+use crate::primitives::sync::Arc;
+use crate::primitives::sync::atomic::Ordering;
 use crate::rate_limit::rate_limited;
 use crate::telemetry::buffer;
 use crate::telemetry::events::RawEvent;
@@ -18,14 +20,13 @@ use crate::telemetry::writer::{RotatingWriter, TraceWriter};
 use metrique::timers::Timer;
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
+use metrique_timesource::time_source;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-thread_local! {
+crate::primitives::thread_local! {
     /// Per-thread [`TelemetryHandle`], populated in `on_thread_start` and
     /// cleared in `on_thread_stop`. Enables [`TelemetryHandle::current`].
     static CURRENT_HANDLE: RefCell<Option<TelemetryHandle>> = const { RefCell::new(None) };
@@ -42,7 +43,7 @@ thread_local! {
 /// Commands sent to the flush thread from TelemetryHandle / TelemetryGuard.
 enum ControlCommand {
     /// Flush, finalize (seal segment), then exit the thread.
-    FinalizeAndStop(std::sync::mpsc::SyncSender<()>),
+    FinalizeAndStop(crate::primitives::sync::mpsc::SyncSender<()>),
 }
 
 /// Tracks the drain coordination state between the flush loop and the writer.
@@ -85,7 +86,7 @@ fn flush_once(
     drain_self: bool,
 ) -> FlushStats {
     let events_before = event_writer.events_written();
-    let cpu_events_time = Instant::now();
+    let cpu_events_time = std::time::Instant::now();
     #[cfg(feature = "cpu-profiling")]
     {
         if shared.enabled.load(Ordering::Relaxed) {
@@ -153,7 +154,7 @@ fn register_hooks(
     builder: &mut tokio::runtime::Builder,
     ctx: &Arc<RuntimeContext>,
     shared: &Arc<SharedState>,
-    control_tx: &std::sync::mpsc::SyncSender<ControlCommand>,
+    control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
 ) {
     let c1 = ctx.clone();
@@ -277,7 +278,7 @@ fn attach_runtime(
     shared: &Arc<SharedState>,
     mut builder: tokio::runtime::Builder,
     runtime_name: Option<String>,
-    control_tx: &std::sync::mpsc::SyncSender<ControlCommand>,
+    control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
 ) -> std::io::Result<tokio::runtime::Runtime> {
     let ctx = Arc::new(RuntimeContext::new(runtime_name));
@@ -328,7 +329,7 @@ fn attach_runtime(
 #[derive(Clone)]
 pub struct TelemetryHandle {
     shared: Arc<SharedState>,
-    control_tx: std::sync::mpsc::SyncSender<ControlCommand>,
+    control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
 }
 
 impl std::fmt::Debug for TelemetryHandle {
@@ -421,14 +422,14 @@ struct InstrumentedSpawnGuard;
 
 impl InstrumentedSpawnGuard {
     fn set() -> Self {
-        INSTRUMENTED_SPAWN.set(true);
+        INSTRUMENTED_SPAWN.with(|c| c.set(true));
         Self
     }
 }
 
 impl Drop for InstrumentedSpawnGuard {
     fn drop(&mut self) {
-        INSTRUMENTED_SPAWN.set(false);
+        INSTRUMENTED_SPAWN.with(|c| c.set(false));
     }
 }
 
@@ -471,7 +472,7 @@ struct WorkerHandle {
 /// RAII guard returned by [`TracedRuntimeBuilder::build`].
 pub struct TelemetryGuard {
     handle: TelemetryHandle,
-    flush_thread: Option<std::thread::JoinHandle<()>>,
+    flush_thread: Option<crate::primitives::thread::JoinHandle<()>>,
     worker: Option<WorkerHandle>,
 }
 
@@ -543,7 +544,7 @@ impl TelemetryGuard {
         buffer::drain_to_collector(&self.handle.shared.collector);
 
         // Tell the flush thread to do a final flush + finalize, then exit.
-        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(0);
+        let (ack_tx, ack_rx) = crate::primitives::sync::mpsc::sync_channel(0);
         if self
             .handle
             .control_tx
@@ -1029,7 +1030,8 @@ impl TelemetryCore {
         }
 
         // Channel for TelemetryHandle/Guard → flush thread communication.
-        let (control_tx, control_rx) = std::sync::mpsc::sync_channel::<ControlCommand>(1);
+        let (control_tx, control_rx) =
+            crate::primitives::sync::mpsc::sync_channel::<ControlCommand>(1);
 
         let flush_metrics_sink = worker_metrics_sink
             .clone()
@@ -1037,24 +1039,21 @@ impl TelemetryCore {
 
         let flush_thread = {
             let shared = shared.clone();
-            std::thread::Builder::new()
-                .name("dial9-flush".into())
-                .spawn(move || {
-                    #[cfg(target_os = "linux")]
-                    // SAFETY: nice() is a simple syscall with no memory safety
-                    // implications. Increasing the nice value (lowering priority)
-                    // is always permitted for unprivileged processes.
-                    unsafe {
-                        let _ = libc::nice(10);
-                    }
+            crate::primitives::thread::spawn_named("dial9-flush", move || {
+                #[cfg(target_os = "linux")]
+                // SAFETY: nice() is a simple syscall with no memory safety
+                // implications. Increasing the nice value (lowering priority)
+                // is always permitted for unprivileged processes.
+                unsafe {
+                    let _ = libc::nice(10);
+                }
 
-                    #[cfg(feature = "cpu-profiling")]
-                    let _ = dial9_perf_self_profile::register_current_thread();
-                    run_flush_loop(control_rx, &shared, &flush_metrics_sink, event_writer);
-                    #[cfg(feature = "cpu-profiling")]
-                    dial9_perf_self_profile::unregister_current_thread();
-                })
-                .expect("failed to spawn telemetry-flush thread")
+                #[cfg(feature = "cpu-profiling")]
+                let _ = dial9_perf_self_profile::register_current_thread();
+                run_flush_loop(control_rx, &shared, &flush_metrics_sink, event_writer);
+                #[cfg(feature = "cpu-profiling")]
+                dial9_perf_self_profile::unregister_current_thread();
+            })
         };
 
         // Auto-construct worker config when we have a trace path and
@@ -1127,7 +1126,7 @@ impl TelemetryCore {
 
 /// The flush thread main loop. Extracted so `TelemetryCore::builder` stays readable.
 fn run_flush_loop(
-    control_rx: std::sync::mpsc::Receiver<ControlCommand>,
+    control_rx: crate::primitives::sync::mpsc::Receiver<ControlCommand>,
     shared: &SharedState,
     flush_metrics_sink: &metrique_writer::BoxEntrySink,
     mut event_writer: EventWriter,
@@ -1139,7 +1138,7 @@ fn run_flush_loop(
     const SELF_DRAIN_INTERVAL: u64 = 200;
 
     let sample_interval = Duration::from_millis(10);
-    let mut last_sample = Instant::now();
+    let mut last_sample = time_source().instant();
     // Snapshot the user-provided segment metadata so we can
     // merge it with runtime→worker entries on each flush cycle.
     let static_metadata = event_writer.segment_metadata().to_vec();
@@ -1155,11 +1154,11 @@ fn run_flush_loop(
                 ack_tx = Some(ack);
                 exit = true;
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(crate::primitives::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 // All senders dropped — do a best-effort finalize.
                 exit = true;
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(crate::primitives::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
 
         // When disabled, skip all recording work (queue sampling, metadata
@@ -1169,9 +1168,8 @@ fn run_flush_loop(
             continue;
         }
 
-        let now = Instant::now();
-        if now.duration_since(last_sample) >= sample_interval {
-            last_sample = now;
+        if last_sample.elapsed() >= sample_interval {
+            last_sample = time_source().instant();
             let contexts = shared.contexts.lock().unwrap().clone();
             let total_global_queue: usize = contexts.iter().map(|c| c.global_queue_depth()).sum();
             if !contexts.is_empty() {
@@ -1330,7 +1328,7 @@ impl TracedRuntime {
         ));
         // Create a dummy channel — nothing listens on the other end, so
         // disable() sends will fail silently (which is correct for disabled).
-        let (control_tx, _control_rx) = std::sync::mpsc::sync_channel(1);
+        let (control_tx, _control_rx) = crate::primitives::sync::mpsc::sync_channel(1);
         let guard = TelemetryGuard {
             handle: TelemetryHandle { shared, control_tx },
             flush_thread: None,
@@ -1356,7 +1354,7 @@ impl TracedRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(shuttle)))]
 mod tests {
     use super::*;
     use crate::telemetry::NullWriter;

@@ -1,5 +1,5 @@
-use crossbeam_queue::ArrayQueue;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::primitives::BoundedQueue;
+use crate::primitives::sync::atomic::{AtomicUsize, Ordering};
 
 /// Maximum number of encoded batches that can be buffered.
 /// Beyond this, the oldest batch is evicted — the queue acts as a ring buffer
@@ -37,7 +37,7 @@ impl Batch {
 }
 
 pub(crate) struct CentralCollector {
-    queue: ArrayQueue<Batch>,
+    queue: BoundedQueue<Batch>,
     dropped_batches: AtomicUsize,
 }
 
@@ -54,7 +54,7 @@ impl CentralCollector {
 
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
-            queue: ArrayQueue::new(capacity),
+            queue: BoundedQueue::new(capacity),
             dropped_batches: AtomicUsize::new(0),
         }
     }

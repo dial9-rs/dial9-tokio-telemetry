@@ -6,14 +6,14 @@
 //!
 //! Each buffer is wrapped in `Arc<Mutex<…>>` so the flush thread can intrusively
 //! drain idle/silent threads via [`TlBufferHandle`]s registered in `SharedState`.
+use crate::primitives::sync::atomic::{AtomicU64, Ordering};
+use crate::primitives::sync::{Arc, Mutex, Weak};
 use crate::telemetry::collector::CentralCollector;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::format::*;
 use dial9_trace_format::InternedString;
 use dial9_trace_format::encoder::{Encoder, FxHashMap};
 use std::panic::Location;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // ── Public API types ────────────────────────────────────────────────────────
@@ -400,11 +400,11 @@ impl Drop for ThreadLocalBuffer {
 /// A handle to a thread-local buffer, held by `SharedState` so the flush
 /// thread can intrusively drain idle/silent buffers.
 pub(crate) struct TlBufferHandle {
-    pub(crate) buffer: std::sync::Weak<Mutex<ThreadLocalBuffer>>,
+    pub(crate) buffer: Weak<Mutex<ThreadLocalBuffer>>,
     pub(crate) flush_epoch: FlushEpoch,
 }
 
-thread_local! {
+crate::primitives::thread_local! {
     static BUFFER: Arc<Mutex<ThreadLocalBuffer>> = Arc::new(Mutex::new(ThreadLocalBuffer::new()));
 }
 
