@@ -1007,6 +1007,15 @@ impl TelemetryCore {
         let shared = Arc::new(SharedState::new(start_mono_ns));
         #[allow(unused_mut)]
         let mut event_writer = EventWriter::new(Box::new(writer));
+        #[cfg(feature = "worker-s3")]
+        if let Some(s3_config) = s3_config.as_ref() {
+            event_writer.update_segment_metadata(
+                s3_config
+                    .as_metadata()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            )
+        }
 
         #[cfg(feature = "cpu-profiling")]
         {

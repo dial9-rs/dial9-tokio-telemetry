@@ -125,6 +125,17 @@ impl S3Config {
         &self.bucket
     }
 
+    pub(crate) fn as_metadata(&self) -> impl Iterator<Item = (&str, &str)> {
+        [
+            ("bucket", self.bucket.as_str()),
+            ("service_name", self.service_name.as_str()),
+            ("instance_path", self.instance_path.as_str()),
+            ("boot_id", self.boot_id.as_str()),
+        ]
+        .into_iter()
+        .chain(self.prefix.as_ref().map(|p| ("prefix", p.as_str())))
+    }
+
     /// Optional region override for the S3 client.
     pub(crate) fn region(&self) -> Option<&str> {
         self.region.as_deref()

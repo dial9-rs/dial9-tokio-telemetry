@@ -32,7 +32,7 @@ pub trait TraceWriter: Send {
     fn segment_metadata(&self) -> &[(String, String)] {
         &[]
     }
-    /// Replace the segment metadata entries that will be written into the next
+    /// Merge the segment metadata entries that will be written into the next
     /// rotated segment (e.g. merged static + runtime names). Default is a no-op.
     fn update_segment_metadata(&mut self, _entries: Vec<(String, String)>) {}
     /// Write a `SegmentMetadataEvent` into the current segment. Called before
@@ -83,6 +83,34 @@ impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
     }
     fn drained(&mut self) -> std::io::Result<bool> {
         (**self).drained()
+    }
+}
+
+#[derive(Default, Clone)]
+struct SegmentMetadata {
+    entries: Vec<(String, String)>,
+}
+
+impl SegmentMetadata {
+    fn new(entries: Vec<(String, String)>) -> Self {
+        Self { entries }
+    }
+
+    /// Merge incoming entries with existing ones. Incoming entries take priority
+    /// on key conflict; existing entries with keys not in the incoming set are preserved.
+    /// Returns `true` if the resulting entries differ from the previous state.
+    fn merge(&mut self, entries: impl Iterator<Item = (String, String)>) -> bool {
+        let mut merged: Vec<(String, String)> = entries.collect();
+        for (k, v) in &self.entries {
+            if !merged.iter().any(|(mk, _)| mk == k) {
+                merged.push((k.clone(), v.clone()));
+            }
+        }
+        if merged == self.entries {
+            return false;
+        }
+        self.entries = merged;
+        true
     }
 }
 
@@ -147,7 +175,7 @@ pub struct RotatingWriter {
     did_rotate: bool,
     /// Metadata written at the start of each segment. Updated by the flush
     /// thread to include runtime names alongside any user-provided entries.
-    segment_metadata: Vec<(String, String)>,
+    segment_metadata: SegmentMetadata,
     /// Events silently dropped because the writer was finished/stopped.
     dropped_events: usize,
     /// Whether any real (non-metadata) events have been written to the current segment.
@@ -174,7 +202,12 @@ impl std::fmt::Debug for RotatingWriter {
 // but we don't want to force going through a pointer every time we want to write.
 #[allow(clippy::large_enum_variant)]
 enum WriterState {
-    Active(RawEncoder<BufWriter<File>>),
+    /// Writer is open and events can be written
+    Active {
+        writer: RawEncoder<BufWriter<File>>,
+        need_metadata: bool,
+    },
+
     /// Writer has been finalized or stopped — no encoder, no fd, no writes.
     Finished,
 }
@@ -193,7 +226,7 @@ impl RotatingWriter {
             max_file_size,
             max_total_size,
             DEFAULT_ROTATION_PERIOD,
-            Vec::new(),
+            SegmentMetadata::default(),
         )
     }
 
@@ -214,7 +247,9 @@ impl RotatingWriter {
             max_file_size,
             max_total_size,
             rotation_period.unwrap_or(DEFAULT_ROTATION_PERIOD),
-            segment_metadata.unwrap_or_default(),
+            segment_metadata
+                .map(SegmentMetadata::new)
+                .unwrap_or_default(),
         )
     }
 
@@ -223,7 +258,7 @@ impl RotatingWriter {
         max_file_size: u64,
         max_total_size: u64,
         rotation_period: Duration,
-        segment_metadata: Vec<(String, String)>,
+        segment_metadata: SegmentMetadata,
     ) -> std::io::Result<Self> {
         if rotation_period == Duration::from_secs(0) {
             return Err(std::io::Error::other("Rotation period must not be zero"));
@@ -235,7 +270,7 @@ impl RotatingWriter {
         let first_path = Self::active_path(&base_path, 0);
         let file = File::create(&first_path)?;
         let writer = BufWriter::new(file);
-        let raw = Self::write_header_and_metadata(writer, &segment_metadata)?;
+        let state = Self::prepare_segment(writer)?;
         let now = time_source().system_time().as_std();
         let drain_interval = rotation_period.min(DEFAULT_DRAIN_INTERVAL);
 
@@ -247,7 +282,7 @@ impl RotatingWriter {
             next_rotation_time: Self::next_boundary(now, rotation_period),
             closed_files: VecDeque::new(),
             active_path: first_path,
-            state: WriterState::Active(raw),
+            state,
             next_index: 1,
             did_rotate: false,
             segment_metadata,
@@ -273,7 +308,7 @@ impl RotatingWriter {
         let active_path = Self::active_path(&path, 0);
         let file = File::create(&active_path)?;
         let writer = BufWriter::new(file);
-        let raw = Self::write_header_and_metadata(writer, &Vec::new())?;
+        let state = Self::prepare_segment(writer)?;
         let now = time_source().system_time().as_std();
 
         Ok(Self {
@@ -284,10 +319,10 @@ impl RotatingWriter {
             next_rotation_time: Self::next_boundary(now, Duration::MAX),
             closed_files: VecDeque::new(),
             active_path,
-            state: WriterState::Active(raw),
+            state,
             next_index: 1,
             did_rotate: false,
-            segment_metadata: Vec::new(),
+            segment_metadata: SegmentMetadata::default(),
             dropped_events: 0,
             has_real_events: false,
             drain_interval: DEFAULT_DRAIN_INTERVAL,
@@ -308,32 +343,43 @@ impl RotatingWriter {
     /// Create an encoder, write the file header, segment metadata, and a
     /// clock-sync anchor, then convert to a [`RawEncoder`] for the
     /// remainder of the file's lifetime.
-    fn write_header_and_metadata(
-        writer: BufWriter<File>,
-        segment_metadata: &[(String, String)],
-    ) -> std::io::Result<RawEncoder<BufWriter<File>>> {
+    fn prepare_segment(writer: BufWriter<File>) -> std::io::Result<WriterState> {
         let mut encoder = Encoder::new_to(writer)?;
-        let entries = segment_metadata.to_vec();
         let (mono, real) = clock_pair();
-        encoder.write(&SegmentMetadataEvent {
-            timestamp_ns: mono,
-            entries,
-        })?;
         encoder.write(&ClockSyncEvent {
             timestamp_ns: mono,
             realtime_ns: real,
         })?;
-        Ok(encoder.into_raw_encoder())
+        Ok(WriterState::Active {
+            writer: encoder.into_raw_encoder(),
+            need_metadata: true,
+        })
+    }
+
+    fn write_metadata_if_needed(&mut self) -> std::io::Result<()> {
+        match &mut self.state {
+            WriterState::Active {
+                writer,
+                need_metadata,
+            } => {
+                if *need_metadata {
+                    Self::write_segment_metadata(writer, &self.segment_metadata.entries)?;
+                }
+                *need_metadata = false;
+                Ok(())
+            }
+            WriterState::Finished => Ok(()),
+        }
     }
 
     /// Write a `SegmentMetadataEvent` and a fresh `ClockSyncEvent` into
     /// the current active segment.
-    fn write_segment_metadata(&mut self) -> std::io::Result<()> {
-        let WriterState::Active(raw) = &mut self.state else {
-            return Ok(());
-        };
-        let entries = self.segment_metadata.clone();
+    fn write_segment_metadata(
+        writer: &mut RawEncoder<BufWriter<File>>,
+        entries: &[(String, String)],
+    ) -> std::io::Result<()> {
         let mut enc = Encoder::new();
+        let entries = entries.to_vec();
         let (mono, real) = clock_pair();
         enc.write(&SegmentMetadataEvent {
             timestamp_ns: mono,
@@ -343,7 +389,7 @@ impl RotatingWriter {
             timestamp_ns: mono,
             realtime_ns: real,
         })?;
-        raw.write_raw(&enc.finish())?;
+        writer.write_raw(&enc.finish())?;
         Ok(())
     }
 
@@ -383,7 +429,7 @@ impl RotatingWriter {
     }
 
     fn rotate(&mut self) -> std::io::Result<()> {
-        let WriterState::Active(raw) = &mut self.state else {
+        let WriterState::Active { writer: raw, .. } = &mut self.state else {
             return Ok(());
         };
         raw.flush()?;
@@ -397,10 +443,7 @@ impl RotatingWriter {
         self.next_index += 1;
         let file = File::create(&new_path)?;
         let writer = BufWriter::new(file);
-        self.state = WriterState::Active(Self::write_header_and_metadata(
-            writer,
-            &self.segment_metadata,
-        )?);
+        self.state = Self::prepare_segment(writer)?;
         self.active_path = new_path;
         self.did_rotate = true;
         self.has_real_events = false;
@@ -420,7 +463,7 @@ impl RotatingWriter {
     fn total_size(&self) -> u64 {
         let closed: u64 = self.closed_files.iter().map(|(_, s)| s).sum();
         let active = match &self.state {
-            WriterState::Active(raw) => raw.bytes_written(),
+            WriterState::Active { writer, .. } => writer.bytes_written(),
             WriterState::Finished => 0,
         };
         closed + active
@@ -485,7 +528,7 @@ impl RotatingWriter {
     /// Rotate if the current file exceeds max_file_size.
     /// Called after writing a complete logical unit (def + event).
     fn maybe_rotate(&mut self) -> std::io::Result<()> {
-        let WriterState::Active(raw) = &self.state else {
+        let WriterState::Active { writer: raw, .. } = &self.state else {
             return Ok(());
         };
         if raw.bytes_written() > self.max_file_size {
@@ -497,7 +540,7 @@ impl RotatingWriter {
 
 impl TraceWriter for RotatingWriter {
     fn flush(&mut self) -> std::io::Result<()> {
-        if let WriterState::Active(raw) = &mut self.state {
+        if let WriterState::Active { writer: raw, .. } = &mut self.state {
             raw.flush()?;
         }
         Ok(())
@@ -508,15 +551,20 @@ impl TraceWriter for RotatingWriter {
     }
 
     fn segment_metadata(&self) -> &[(String, String)] {
-        &self.segment_metadata
+        &self.segment_metadata.entries
     }
 
     fn update_segment_metadata(&mut self, entries: Vec<(String, String)>) {
-        self.segment_metadata = entries;
+        if self.segment_metadata.merge(entries.into_iter()) {
+            match &mut self.state {
+                WriterState::Active { need_metadata, .. } => *need_metadata = true,
+                WriterState::Finished => {}
+            }
+        }
     }
 
     fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
-        self.write_segment_metadata()
+        self.write_metadata_if_needed()
     }
 
     fn should_drain(&self) -> bool {
@@ -573,7 +621,8 @@ impl TraceWriter for RotatingWriter {
     }
 
     fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
-        let WriterState::Active(raw) = &mut self.state else {
+        self.write_metadata_if_needed()?;
+        let WriterState::Active { writer: raw, .. } = &mut self.state else {
             self.dropped_events += batch.event_count as usize;
             return Ok(());
         };
@@ -1840,6 +1889,141 @@ mod tests {
         assert!(
             diff < 5_000_000_000,
             "reconstructed wall clock {reconstructed_wall_ns} diverges from now {now_ns} by {diff}ns"
+        );
+    }
+
+    /// S3-style metadata set via `update_segment_metadata` before any events
+    /// are written must appear in the segment's SegmentMetadata event.
+    #[test]
+    fn test_update_segment_metadata_appears_in_trace() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let mut writer = RotatingWriter::new(&base, 100_000, 100_000).unwrap();
+
+        // Simulate TelemetryCore::new setting S3 metadata
+        writer.update_segment_metadata(vec![
+            ("bucket".into(), "my-bucket".into()),
+            ("service_name".into(), "my-svc".into()),
+        ]);
+
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let all = format::decode_events(&std::fs::read(rotating_file(&base, 0)).unwrap()).unwrap();
+        let metadata: Vec<_> = all
+            .iter()
+            .filter_map(|e| match e {
+                TelemetryEvent::SegmentMetadata { entries, .. } => Some(entries.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!metadata.is_empty(), "expected SegmentMetadata event");
+        assert!(
+            metadata
+                .last()
+                .unwrap()
+                .contains(&("bucket".to_string(), "my-bucket".to_string())),
+            "S3 metadata should be in segment"
+        );
+        assert!(
+            metadata
+                .last()
+                .unwrap()
+                .contains(&("service_name".to_string(), "my-svc".to_string())),
+            "S3 metadata should be in segment"
+        );
+    }
+
+    /// Simulates the flush loop pattern: S3 metadata is set once, then
+    /// runtime entries are merged repeatedly. S3 metadata must survive.
+    #[test]
+    fn test_merge_preserves_s3_metadata_across_runtime_updates() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let one_event = single_event_file_size();
+        let mut writer = RotatingWriter::new(&base, one_event, 100_000).unwrap();
+
+        // Step 1: S3 metadata set (like TelemetryCore::new)
+        writer.update_segment_metadata(vec![
+            ("bucket".into(), "my-bucket".into()),
+            ("service_name".into(), "my-svc".into()),
+        ]);
+
+        // Step 2: flush loop merges static + runtime entries (like recorder/mod.rs)
+        let static_metadata = writer.segment_metadata().to_vec();
+        let mut merged = static_metadata.clone();
+        merged.push(("runtime.main".into(), "0,1".into()));
+        writer.update_segment_metadata(merged);
+
+        // Write enough to trigger rotation
+        for _ in 0..4 {
+            writer.write_encoded_batch(&test_batch()).unwrap();
+        }
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let mut files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
+            .collect();
+        files.sort();
+        assert!(files.len() >= 2, "expected rotation");
+
+        // Rotated segments should contain both S3 and runtime metadata
+        for file in &files[1..] {
+            let all = format::decode_events(&std::fs::read(file).unwrap()).unwrap();
+            let meta: Vec<_> = all
+                .iter()
+                .filter_map(|e| match e {
+                    TelemetryEvent::SegmentMetadata { entries, .. } => Some(entries.clone()),
+                    _ => None,
+                })
+                .collect();
+            let last = meta.last().expect("expected SegmentMetadata");
+            assert!(
+                last.contains(&("bucket".to_string(), "my-bucket".to_string())),
+                "{}: S3 metadata lost after merge",
+                file.display()
+            );
+            assert!(
+                last.contains(&("runtime.main".to_string(), "0,1".to_string())),
+                "{}: runtime metadata missing",
+                file.display()
+            );
+        }
+    }
+
+    /// Repeated calls to `update_segment_metadata` with identical entries
+    /// should not set `need_metadata`, avoiding redundant writes.
+    #[test]
+    fn test_update_segment_metadata_no_op_when_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let mut writer = RotatingWriter::new(&base, 100_000, 100_000).unwrap();
+
+        let entries = vec![("k".into(), "v".into())];
+        writer.update_segment_metadata(entries.clone());
+        // First batch writes metadata
+        writer.write_encoded_batch(&test_batch()).unwrap();
+
+        // Same entries again — should be a no-op
+        writer.update_segment_metadata(entries.clone());
+        // Second batch should NOT write another metadata event
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let all = format::decode_events(&std::fs::read(rotating_file(&base, 0)).unwrap()).unwrap();
+        let metadata_count = all
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::SegmentMetadata { .. }))
+            .count();
+        assert_eq!(
+            metadata_count, 1,
+            "identical update_segment_metadata should not trigger another write"
         );
     }
 }
