@@ -2,10 +2,45 @@
 
 use std::future::Future;
 
+use crate::Dial9Config;
 use crate::current_config::Inner;
 use crate::telemetry::TelemetryGuard;
 use crate::telemetry::writer::RotatingWriter;
-use crate::{Dial9Config, Dial9ConfigBuilderError};
+
+/// Errors produced while constructing a [`TelemetryRuntime`] from a
+/// [`Dial9Config`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum TelemetryRuntimeError {
+    /// Failure from [`tokio::runtime::Builder::build`].
+    TokioRuntimeBuilder(std::io::Error),
+    /// Failure from [`RotatingWriter`] construction.
+    RotatingWriter(std::io::Error),
+    /// Failure from telemetry core setup (traced runtime + background worker).
+    TelemetryCore(std::io::Error),
+}
+
+impl std::fmt::Display for TelemetryRuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TelemetryRuntimeError::TokioRuntimeBuilder(e) => {
+                write!(f, "tokio runtime builder: {e}")
+            }
+            TelemetryRuntimeError::RotatingWriter(e) => write!(f, "rotating writer: {e}"),
+            TelemetryRuntimeError::TelemetryCore(e) => write!(f, "telemetry core: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for TelemetryRuntimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TelemetryRuntimeError::TokioRuntimeBuilder(e)
+            | TelemetryRuntimeError::RotatingWriter(e)
+            | TelemetryRuntimeError::TelemetryCore(e) => Some(e),
+        }
+    }
+}
 
 /// A tokio runtime paired with its (optional) dial9 telemetry guard.
 ///
@@ -63,7 +98,7 @@ impl TelemetryRuntime {
 }
 
 impl TryFrom<Dial9Config> for TelemetryRuntime {
-    type Error = Dial9ConfigBuilderError;
+    type Error = TelemetryRuntimeError;
 
     fn try_from(config: Dial9Config) -> Result<Self, Self::Error> {
         let (runtime, guard) = match config.0 {
@@ -81,16 +116,16 @@ impl TryFrom<Dial9Config> for TelemetryRuntime {
                     .max_total_size(max_total_size)
                     .maybe_rotation_period(rotation_period)
                     .build()
-                    .map_err(Dial9ConfigBuilderError::RotatingWriter)?;
+                    .map_err(TelemetryRuntimeError::RotatingWriter)?;
                 let (runtime, guard) = runtime_builder
                     .build_and_start(tokio_builder, writer)
-                    .map_err(Dial9ConfigBuilderError::TelemetryCore)?;
+                    .map_err(TelemetryRuntimeError::TelemetryCore)?;
                 (runtime, Some(guard))
             }
             Inner::Disabled { mut tokio_builder } => {
                 let runtime = tokio_builder
                     .build()
-                    .map_err(Dial9ConfigBuilderError::TokioRuntimeBuilder)?;
+                    .map_err(TelemetryRuntimeError::TokioRuntimeBuilder)?;
                 (runtime, None)
             }
         };

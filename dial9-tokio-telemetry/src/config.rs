@@ -14,27 +14,19 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::telemetry::recorder::{
-    HasTracePath, TelemetryGuard, TracedRuntime, TracedRuntimeBuilder,
-};
+use crate::telemetry::recorder::{HasTracePath, TracedRuntime, TracedRuntimeBuilder};
 
 // ---------------------------------------------------------------------------
 // Dial9ConfigBuilderError — unified error for builder validation and runtime construction
 // ---------------------------------------------------------------------------
 
-/// Errors produced while building a [`Dial9Config`] or its tokio runtime.
+/// Errors produced while building a [`Dial9Config`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Dial9ConfigBuilderError {
     /// Telemetry is enabled (the default) but one or more required writer
     /// fields were never set on the builder.
     MissingFields(MissingFields),
-    /// Failure from [`tokio::runtime::Builder::build`].
-    TokioRuntimeBuilder(std::io::Error),
-    /// Failure from [`RotatingWriter`] construction.
-    RotatingWriter(std::io::Error),
-    /// Failure from telemetry core setup (traced runtime + background worker).
-    TelemetryCore(std::io::Error),
 }
 
 /// Opaque payload for [`Dial9ConfigBuilderError::MissingFields`].
@@ -64,25 +56,11 @@ impl std::fmt::Display for Dial9ConfigBuilderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Dial9ConfigBuilderError::MissingFields(m) => write!(f, "{m}"),
-            Dial9ConfigBuilderError::TokioRuntimeBuilder(e) => {
-                write!(f, "tokio runtime builder: {e}")
-            }
-            Dial9ConfigBuilderError::RotatingWriter(e) => write!(f, "rotating writer: {e}"),
-            Dial9ConfigBuilderError::TelemetryCore(e) => write!(f, "telemetry core: {e}"),
         }
     }
 }
 
-impl std::error::Error for Dial9ConfigBuilderError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Dial9ConfigBuilderError::TokioRuntimeBuilder(e)
-            | Dial9ConfigBuilderError::RotatingWriter(e)
-            | Dial9ConfigBuilderError::TelemetryCore(e) => Some(e),
-            Dial9ConfigBuilderError::MissingFields(_) => None,
-        }
-    }
-}
+impl std::error::Error for Dial9ConfigBuilderError {}
 
 // ---------------------------------------------------------------------------
 // Dial9Config — opaque value the macro consumes
