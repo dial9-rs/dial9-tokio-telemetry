@@ -3,12 +3,16 @@
 use std::future::Future;
 
 use crate::Dial9Config;
-use crate::current_config::Inner;
+use crate::current_config::{Dial9ConfigFallback, Inner, materialize_tokio_builder};
 use crate::telemetry::TelemetryGuard;
 use crate::telemetry::writer::RotatingWriter;
 
 /// Errors produced while constructing a [`TelemetryRuntime`] from a
-/// [`Dial9Config`].
+/// strict [`Dial9Config`].
+///
+/// The lenient counterpart [`Dial9ConfigFallback`] narrows its
+/// `TryFrom::Error` to [`std::io::Error`]; this enum is the wider error
+/// shape returned only from the strict [`Dial9Config`] conversion.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum TelemetryRuntimeError {
@@ -47,7 +51,7 @@ impl std::error::Error for TelemetryRuntimeError {
 /// The guard, when present, must outlive the runtime so traces are flushed on
 /// drop - keeping both inside one struct enforces that ordering at the type
 /// level. Construct one via [`TelemetryRuntime::try_from`] from a
-/// [`Dial9Config`].
+/// [`Dial9Config`] (strict) or [`Dial9ConfigFallback`] (lenient).
 #[derive(Debug)]
 pub struct TelemetryRuntime {
     runtime: tokio::runtime::Runtime,
@@ -55,10 +59,21 @@ pub struct TelemetryRuntime {
 }
 
 impl TelemetryRuntime {
-    /// Build from a [`Dial9Config`], panicking with the underlying error if
-    /// construction fails. Used by the `#[dial9_tokio_telemetry::main]` macro.
-    pub fn from_config(config: Dial9Config) -> Self {
-        Self::try_from(config).expect("failed to initialize runtime")
+    /// Build from a config, panicking with the underlying error if
+    /// construction fails. Used by the `#[dial9_tokio_telemetry::main]`
+    /// macro.
+    ///
+    /// Generic over any input that converts into a [`TelemetryRuntime`],
+    /// so it accepts both strict ([`Dial9Config`]) and lenient
+    /// ([`Dial9ConfigFallback`]) configs transparently.
+    pub fn from_config<C>(config: C) -> Self
+    where
+        C: TryInto<TelemetryRuntime>,
+        <C as TryInto<TelemetryRuntime>>::Error: std::fmt::Display,
+    {
+        config
+            .try_into()
+            .unwrap_or_else(|e| panic!("failed to initialize runtime: {e}"))
     }
 
     /// Borrow the underlying tokio runtime.
@@ -97,38 +112,101 @@ impl TelemetryRuntime {
     }
 }
 
+/// Drive an [`Inner`] to a tokio runtime + (optional) guard.
+///
+/// Shared body of both `TryFrom<Dial9Config>` (where every error
+/// propagates verbatim) and `TryFrom<Dial9ConfigFallback>` (which catches
+/// `RotatingWriter` and `TelemetryCore` errors and replays the
+/// configurators into a plain tokio runtime).
+fn try_assemble(
+    inner: Inner,
+) -> Result<(tokio::runtime::Runtime, Option<TelemetryGuard>), TelemetryRuntimeError> {
+    match inner {
+        Inner::Enabled {
+            base_path,
+            max_file_size,
+            max_total_size,
+            rotation_period,
+            tokio_configurators,
+            runtime_builder,
+        } => {
+            let writer = RotatingWriter::builder()
+                .base_path(base_path)
+                .max_file_size(max_file_size)
+                .max_total_size(max_total_size)
+                .maybe_rotation_period(rotation_period)
+                .build()
+                .map_err(TelemetryRuntimeError::RotatingWriter)?;
+            let tokio_builder = materialize_tokio_builder(&tokio_configurators);
+            let (runtime, guard) = runtime_builder
+                .build_and_start(tokio_builder, writer)
+                .map_err(TelemetryRuntimeError::TelemetryCore)?;
+            Ok((runtime, Some(guard)))
+        }
+        Inner::Disabled {
+            tokio_configurators,
+        } => {
+            let runtime = materialize_tokio_builder(&tokio_configurators)
+                .build()
+                .map_err(TelemetryRuntimeError::TokioRuntimeBuilder)?;
+            Ok((runtime, None))
+        }
+    }
+}
+
 impl TryFrom<Dial9Config> for TelemetryRuntime {
     type Error = TelemetryRuntimeError;
 
     fn try_from(config: Dial9Config) -> Result<Self, Self::Error> {
-        let (runtime, guard) = match config.0 {
-            Inner::Enabled {
-                base_path,
-                max_file_size,
-                max_total_size,
-                rotation_period,
-                tokio_builder,
-                runtime_builder,
-            } => {
-                let writer = RotatingWriter::builder()
-                    .base_path(base_path)
-                    .max_file_size(max_file_size)
-                    .max_total_size(max_total_size)
-                    .maybe_rotation_period(rotation_period)
-                    .build()
-                    .map_err(TelemetryRuntimeError::RotatingWriter)?;
-                let (runtime, guard) = runtime_builder
-                    .build_and_start(tokio_builder, writer)
-                    .map_err(TelemetryRuntimeError::TelemetryCore)?;
-                (runtime, Some(guard))
-            }
-            Inner::Disabled { mut tokio_builder } => {
-                let runtime = tokio_builder
-                    .build()
-                    .map_err(TelemetryRuntimeError::TokioRuntimeBuilder)?;
-                (runtime, None)
-            }
-        };
+        let (runtime, guard) = try_assemble(config.0)?;
         Ok(Self { runtime, guard })
+    }
+}
+
+/// Bridge for the deprecated positional config API at
+/// [`crate::config::Dial9Config`] so that it remains compatible with
+/// [`TelemetryRuntime::from_config`] (and therefore the
+/// `#[dial9_tokio_telemetry::main]` macro).
+impl TryFrom<crate::config::Dial9Config> for TelemetryRuntime {
+    type Error = std::io::Error;
+
+    fn try_from(config: crate::config::Dial9Config) -> Result<Self, Self::Error> {
+        let (runtime, guard) = config.build()?;
+        Ok(Self { runtime, guard })
+    }
+}
+
+impl TryFrom<Dial9ConfigFallback> for TelemetryRuntime {
+    type Error = std::io::Error;
+
+    fn try_from(config: Dial9ConfigFallback) -> Result<Self, Self::Error> {
+        // Snapshot the configurators up-front: try_assemble consumes the
+        // Inner::Enabled variant on the primary attempt, and the cascade
+        // path needs to replay them onto a fresh tokio::runtime::Builder.
+        let configurators_for_fallback = match &config.0 {
+            Inner::Enabled {
+                tokio_configurators,
+                ..
+            }
+            | Inner::Disabled {
+                tokio_configurators,
+            } => tokio_configurators.clone(),
+        };
+
+        match try_assemble(config.0) {
+            Ok((runtime, guard)) => Ok(Self { runtime, guard }),
+            // Tokio builder failure has nowhere to fall back to — propagate.
+            Err(TelemetryRuntimeError::TokioRuntimeBuilder(e)) => Err(e),
+            // Cascade RotatingWriter / TelemetryCore failures to a plain
+            // tokio runtime built from the replayed configurators.
+            Err(TelemetryRuntimeError::RotatingWriter(_))
+            | Err(TelemetryRuntimeError::TelemetryCore(_)) => {
+                let runtime = materialize_tokio_builder(&configurators_for_fallback).build()?;
+                Ok(Self {
+                    runtime,
+                    guard: None,
+                })
+            }
+        }
     }
 }
