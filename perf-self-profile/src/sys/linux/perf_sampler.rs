@@ -279,7 +279,11 @@ impl super::sampler::SamplerBackend for PerfSamplerImpl {
     // Per-thread mode: call from the thread you want to monitor.
     // This opens an event fd scoped to the calling tid with cpu=-1.
     fn track_current_thread(&mut self) -> io::Result<()> {
-        let ev = open_perf_event(&mut self.attr, 0, -1)?;
+        let mut ev = open_perf_event(&mut self.attr, 0, -1)?;
+        // open_perf_event stores tid=0 (the "current thread" sentinel passed to
+        // perf_event_open). Resolve to the real tid so stop_tracking_current_thread
+        // can find this event later.
+        ev.tid = gettid() as i32;
         self.events.push(ev);
         Ok(())
     }
