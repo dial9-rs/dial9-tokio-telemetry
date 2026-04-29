@@ -195,6 +195,14 @@ impl From<aws_sdk_s3_transfer_manager::error::Error> for ProcessErrorKind {
 ///
 /// Implementations handle one concern: compress, symbolize, upload, etc.
 /// The worker calls processors in sequence for each segment.
+///
+/// # Panic safety
+///
+/// The worker loop catches panics from [`process()`](Self::process) and
+/// skips the panicking segment. The same processor instance is reused for
+/// subsequent segments, so implementations **must** remain in a valid state
+/// after a panic (i.e., no partially-updated invariants that would cause
+/// incorrect behavior on the next call).
 pub(crate) trait SegmentProcessor: Send {
     /// Human-readable name for this processor (used in metrics).
     fn name(&self) -> &'static str;
@@ -566,6 +574,8 @@ impl WorkerLoop {
                 uncompressed_size,
                 compressed_size: None,
                 invalid_file_header: !header_valid,
+                panicked: false,
+                panic_message: None,
                 pipeline: PipelineMetrics::default(),
             }
             .append_on_drop(self.metrics_sink.clone());
@@ -584,14 +594,27 @@ impl WorkerLoop {
                 let mut stage = StageMetrics::start();
                 let proc_start = std::time::Instant::now();
                 tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, "running processor");
-                match processor.process(data).await {
-                    Ok(next) => {
+                // Catch panics in both the synchronous `process()` call
+                // (which builds the future) and during `.await` (polling).
+                // AssertUnwindSafe: current processors are stateless or have
+                // trivially-recoverable state, so reuse after panic is safe.
+                let process_result = {
+                    use futures_util::FutureExt;
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        processor.process(data)
+                    })) {
+                        Ok(fut) => std::panic::AssertUnwindSafe(fut).catch_unwind().await,
+                        Err(panic_payload) => Err(panic_payload),
+                    }
+                };
+                match process_result {
+                    Ok(Ok(next)) => {
                         tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, "processor succeeded");
                         data = next;
                         stage.succeed();
                         data.metrics.pipeline.push(processor.name(), stage);
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, error = %e.kind, "processor failed");
                         data = e.data;
                         stage.fail();
@@ -610,6 +633,45 @@ impl WorkerLoop {
                             rate_limited!(Duration::from_secs(60), {
                                 tracing::warn!(target: "dial9_worker", error = %e.kind, cause = ?e.kind, path = %segment.path.display(), "processor failed, removing segment");
                             });
+                        }
+                        continue 'next_segment;
+                    }
+                    Err(panic_payload) => {
+                        let panic_msg = panic_payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.as_str()))
+                            .unwrap_or("unknown panic");
+                        tracing::error!(
+                            target: "dial9_worker",
+                            processor = processor.name(),
+                            segment = seg_idx + 1,
+                            path = %segment.path.display(),
+                            panic = panic_msg,
+                            "processor panicked, skipping segment"
+                        );
+                        // The original metrics guard was consumed by the
+                        // panicking future. Emit a new one so panics are
+                        // visible in operational metrics.
+                        drop(
+                            SegmentProcessMetrics {
+                                operation: Operation::ProcessSegment,
+                                total_time: Timer::start_now(),
+                                status: Some(MetriqueResult::Failure),
+                                segment_index: segment.index,
+                                uncompressed_size,
+                                compressed_size: None,
+                                invalid_file_header: !header_valid,
+                                panicked: true,
+                                panic_message: Some(panic_msg.to_owned()),
+                                pipeline: PipelineMetrics::default(),
+                            }
+                            .append_on_drop(self.metrics_sink.clone()),
+                        );
+                        if let Err(remove_err) = std::fs::remove_file(&segment.path)
+                            && remove_err.kind() != std::io::ErrorKind::NotFound
+                        {
+                            tracing::warn!(target: "dial9_worker", error = %remove_err, path = %segment.path.display(), "failed to remove segment after panic");
                         }
                         continue 'next_segment;
                     }
@@ -881,6 +943,8 @@ mod tests {
             uncompressed_size: data.len() as u64,
             compressed_size: None,
             invalid_file_header: false,
+            panicked: false,
+            panic_message: None,
             pipeline: PipelineMetrics::default(),
         }
         .append_on_drop(sink);
@@ -1269,6 +1333,8 @@ mod worker_pipeline_tests {
             uncompressed_size: 7,
             compressed_size: None,
             invalid_file_header: false,
+            panicked: false,
+            panic_message: None,
             pipeline: PipelineMetrics::default(),
         }
         .append_on_drop(metrique_writer::sink::DevNullSink::boxed());
@@ -1312,6 +1378,8 @@ mod worker_pipeline_tests {
             uncompressed_size: 3,
             compressed_size: None,
             invalid_file_header: false,
+            panicked: false,
+            panic_message: None,
             pipeline: PipelineMetrics::default(),
         }
         .append_on_drop(metrique_writer::sink::DevNullSink::boxed());
@@ -1360,5 +1428,132 @@ mod worker_pipeline_tests {
         // A subsequent scan should find no sealed segments.
         let segments = sealed::find_sealed_segments(dir.path(), "trace").unwrap();
         check!(segments.is_empty());
+    }
+
+    /// A processor that panics must not kill the worker loop. The panicking
+    /// segment is skipped and subsequent segments are still processed.
+    #[tokio::test]
+    async fn processor_panic_does_not_kill_worker_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("trace.0.bin"), b"panic me").unwrap();
+        std::fs::write(dir.path().join("trace.1.bin"), b"process me").unwrap();
+
+        let processed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        struct PanicFirstProcessor {
+            counter: Arc<std::sync::atomic::AtomicUsize>,
+            calls: usize,
+        }
+        impl SegmentProcessor for PanicFirstProcessor {
+            fn name(&self) -> &'static str {
+                "PanicFirst"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.calls += 1;
+                let should_panic = self.calls == 1;
+                let counter = self.counter.clone();
+                Box::pin(async move {
+                    if should_panic {
+                        panic!("processor panic on first segment");
+                    }
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(data)
+                })
+            }
+        }
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(PanicFirstProcessor {
+            counter: processed.clone(),
+            calls: 0,
+        })];
+
+        use metrique_writer::AnyEntrySink;
+        use metrique_writer::test_util::Inspector;
+        let inspector = Inspector::default();
+
+        let mut worker = WorkerLoop::new(
+            config_for(dir.path()),
+            processors,
+            stop,
+            inspector.clone().boxed(),
+        );
+        worker.run().await;
+
+        // The worker must have processed at least one segment (the non-panicking one)
+        // despite the first processor call panicking.
+        check!(processed.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        // The panicking segment's file should have been removed.
+        check!(!dir.path().join("trace.0.bin").exists());
+
+        // Verify metrics: we should have entries for both segments, and the
+        // panicking one should have Panicked=true.
+        let entries = inspector.entries();
+        let panicked_entries: Vec<_> = entries
+            .iter()
+            .filter(|e| e.metrics.get("Panicked").is_some_and(|m| m.as_bool()))
+            .collect();
+        check!(
+            panicked_entries.len() == 1,
+            "expected exactly one panicked metric entry, got {}",
+            panicked_entries.len()
+        );
+        check!(panicked_entries[0].metrics["Failure"] == true);
+        // The panic message should be captured.
+        check!(panicked_entries[0].values["PanicMessage"] == "processor panic on first segment");
+    }
+
+    /// A processor that hangs must not prevent the worker from shutting down.
+    /// The drain timeout in `run_background_task` handles this, but at the
+    /// WorkerLoop level, cancellation should interrupt a hung processor.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn processor_hang_respects_shutdown_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("trace.0.bin"), b"hang me").unwrap();
+
+        struct HangingProcessor;
+        impl SegmentProcessor for HangingProcessor {
+            fn name(&self) -> &'static str {
+                "Hanging"
+            }
+            fn process(
+                &mut self,
+                _data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                Box::pin(async {
+                    // Hang forever
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                })
+            }
+        }
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(HangingProcessor)];
+
+        let mut worker = WorkerLoop::new(
+            config_for(dir.path()),
+            processors,
+            stop.clone(),
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+
+        let run_fut = worker.run();
+
+        // Simulate the shutdown path from run_background_task:
+        // cancel the stop token, then timeout the run future.
+        let drain_timeout = Duration::from_secs(2);
+        stop.cancel();
+        let result = tokio::time::timeout(drain_timeout, run_fut).await;
+
+        // The timeout should fire because the processor is hung.
+        check!(result.is_err(), "expected timeout, but worker completed");
     }
 }
