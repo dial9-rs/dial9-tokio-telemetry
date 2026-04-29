@@ -317,6 +317,16 @@ fn attach_runtime(
             });
         });
 
+    // Eagerly populate worker_ids so segment metadata is complete from the
+    // first flush cycle, rather than waiting for each worker thread to lazily
+    // register on its first poll/park event.
+    {
+        let mut ids = ctx.worker_ids.write().unwrap();
+        for i in 0..num_workers {
+            ids.insert(i as usize, base + i);
+        }
+    }
+
     shared.contexts.lock().unwrap().push(ctx);
 
     Ok(runtime)
