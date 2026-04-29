@@ -26,7 +26,12 @@ pub struct FxHasher(u64);
 
 impl Hasher for FxHasher {
     #[inline]
-    fn write(&mut self, bytes: &[u8]) {
+    fn write(&mut self, mut bytes: &[u8]) {
+        while bytes.len() >= 8 {
+            let v = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+            self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517cc1b727220a95);
+            bytes = &bytes[8..];
+        }
         for &b in bytes {
             self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x517cc1b727220a95);
         }
