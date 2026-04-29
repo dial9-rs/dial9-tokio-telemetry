@@ -216,6 +216,7 @@ mod tests {
             sampling: SamplingMode::Period(1),
             event_source: EventSource::SwCpuClock,
             include_kernel: false,
+            max_tracked_threads: 256,
         };
         let err = CtimerSampler::start(&config).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
