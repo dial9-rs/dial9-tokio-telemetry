@@ -13,7 +13,13 @@ mod common;
 
 use dial9_tokio_telemetry::telemetry::TracedRuntime;
 use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
+use std::sync::Mutex;
 use std::time::Duration;
+
+/// Serialize tests that inspect process-wide perf_event fd counts.
+/// `cargo test` runs tests in the same binary in parallel (threads),
+/// so concurrent tests would see each other's fds.
+static PERF_FD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Count the number of open file descriptors for the current process.
 fn count_open_fds() -> usize {
@@ -41,6 +47,7 @@ fn count_perf_fds() -> usize {
 /// After the fix, only worker threads (a fixed, small number) get perf fds.
 #[test]
 fn sched_profiler_fds_bounded_with_many_blocking_threads() {
+    let _lock = PERF_FD_TEST_LOCK.lock().unwrap();
     let (writer, _events) = common::CapturingWriter::new();
 
     let num_workers = 2;
@@ -101,6 +108,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
 /// the event to remove because `open_perf_event` stored tid=0 instead of the real tid.
 #[test]
 fn sched_profiler_fds_cleaned_up_on_shutdown() {
+    let _lock = PERF_FD_TEST_LOCK.lock().unwrap();
     assert_eq!(count_perf_fds(), 0, "no perf fds should exist before test");
 
     {
