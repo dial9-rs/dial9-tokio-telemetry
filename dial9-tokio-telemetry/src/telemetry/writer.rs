@@ -1950,11 +1950,9 @@ mod tests {
             ("service_name".into(), "my-svc".into()),
         ]);
 
-        // Step 2: flush loop merges static + runtime entries (like recorder/mod.rs)
-        let static_metadata = writer.segment_metadata().to_vec();
-        let mut merged = static_metadata.clone();
-        merged.push(("runtime.main".into(), "0,1".into()));
-        writer.update_segment_metadata(merged);
+        // Step 2: flush loop merges only runtime entries — S3 metadata
+        // set in step 1 must be preserved by the merge logic.
+        writer.update_segment_metadata(vec![("runtime.main".into(), "0,1".into())]);
 
         // Write enough to trigger rotation
         for _ in 0..4 {

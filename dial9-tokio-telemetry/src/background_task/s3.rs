@@ -134,6 +134,7 @@ impl S3Config {
         ]
         .into_iter()
         .chain(self.prefix.as_ref().map(|p| ("prefix", p.as_str())))
+        .chain(self.region.as_ref().map(|r| ("region", r.as_str())))
     }
 
     /// Optional region override for the S3 client.
