@@ -21,13 +21,6 @@ use std::time::Duration;
 /// so concurrent tests would see each other's fds.
 static PERF_FD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-/// Count the number of open file descriptors for the current process.
-fn count_open_fds() -> usize {
-    std::fs::read_dir("/proc/self/fd")
-        .expect("failed to read /proc/self/fd")
-        .count()
-}
-
 /// Count open perf_event fds specifically.
 fn count_perf_fds() -> usize {
     std::fs::read_dir("/proc/self/fd")
@@ -66,7 +59,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    let fds_before = count_open_fds();
+    let perf_fds_before = count_perf_fds();
 
     // Spawn many blocking tasks. Each one creates a new blocking pool thread.
     // Use std::thread::sleep to ensure they actually block and force new threads.
@@ -84,20 +77,18 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
-    let fds_after = count_open_fds();
+    let perf_fds_after = count_perf_fds();
 
     drop(runtime);
     drop(guard);
 
-    // The fd growth should be small (a few fds for misc runtime work).
-    // Before the fix, we'd see ~50 new fds (one per blocking thread) that
-    // are never cleaned up. After the fix, blocking threads don't open
-    // sched profiler fds at all.
-    let fd_growth = fds_after.saturating_sub(fds_before);
-    assert!(
-        fd_growth < 10,
-        "fd count grew by {fd_growth} after spawning {num_blocking_tasks} blocking tasks \
-         (before={fds_before}, after={fds_after}). \
+    // Only worker threads should have perf fds. Before the fix, we'd see
+    // ~50 new perf fds (one per blocking thread). After the fix, the count
+    // should stay at exactly num_workers.
+    assert_eq!(
+        perf_fds_before, perf_fds_after,
+        "perf fd count changed from {perf_fds_before} to {perf_fds_after} after \
+         spawning {num_blocking_tasks} blocking tasks. \
          Sched profiler is likely opening fds for blocking pool threads."
     );
 }
