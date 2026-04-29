@@ -25,6 +25,37 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+/// Guard that cleans up per-thread telemetry state when dropped.
+///
+/// Stored in a thread-local so cleanup happens automatically when the thread
+/// exits — even if Tokio's `on_thread_stop` doesn't fire or panics before
+/// reaching cleanup code. This also covers the calling thread (which never
+/// gets an `on_thread_stop` callback).
+struct ThreadCleanupGuard {
+    shared: Arc<SharedState>,
+}
+
+impl Drop for ThreadCleanupGuard {
+    fn drop(&mut self) {
+        // Clear the per-thread handle so the Arc<SharedState> it holds is released.
+        CURRENT_HANDLE.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+
+        #[cfg(feature = "cpu-profiling")]
+        {
+            let tid = crate::telemetry::events::current_tid();
+            self.shared.thread_roles.lock().unwrap().remove(&tid);
+            if let Ok(mut prof) = self.shared.sched_profiler.lock()
+                && let Some(ref mut p) = *prof
+            {
+                p.stop_tracking_current_thread();
+            }
+            dial9_perf_self_profile::unregister_current_thread();
+        }
+    }
+}
+
 thread_local! {
     /// Per-thread [`TelemetryHandle`], populated in `on_thread_start` and
     /// cleared in `on_thread_stop`. Enables [`TelemetryHandle::current`].
@@ -33,6 +64,12 @@ thread_local! {
     /// Set by `TelemetryHandle::spawn()` before calling `tokio::spawn()`,
     /// so the `on_task_spawn` hook can distinguish instrumented from raw spawns.
     static INSTRUMENTED_SPAWN: Cell<bool> = const { Cell::new(false) };
+
+    /// Per-thread cleanup guard. Its `Drop` impl handles all teardown:
+    /// clearing CURRENT_HANDLE, removing thread roles, stopping sched
+    /// profiling, and unregistering ctimer. Fires when the thread exits
+    /// or when explicitly cleared (e.g. during TelemetryGuard drop).
+    static CLEANUP_GUARD: RefCell<Option<ThreadCleanupGuard>> = const { RefCell::new(None) };
 }
 
 // ---------------------------------------------------------------------------
@@ -216,10 +253,9 @@ fn register_hooks(
         shared: shared.clone(),
         control_tx: control_tx.clone(),
     };
+    let shared_for_guard = shared.clone();
     #[cfg(feature = "cpu-profiling")]
     let s_start = shared.clone();
-    #[cfg(feature = "cpu-profiling")]
-    let s_stop = shared.clone();
 
     builder
         .on_thread_start(move || {
@@ -227,6 +263,14 @@ fn register_hooks(
             // `TelemetryHandle::current()` from anywhere on this thread.
             CURRENT_HANDLE.with(|cell| {
                 *cell.borrow_mut() = Some(handle_for_tl.clone());
+            });
+
+            // Install the cleanup guard. Its Drop impl handles all teardown
+            // (clearing CURRENT_HANDLE, thread roles, sched profiler, ctimer).
+            CLEANUP_GUARD.with(|cell| {
+                *cell.borrow_mut() = Some(ThreadCleanupGuard {
+                    shared: shared_for_guard.clone(),
+                });
             });
 
             #[cfg(feature = "cpu-profiling")]
@@ -251,21 +295,13 @@ fn register_hooks(
             }
         })
         .on_thread_stop(move || {
-            CURRENT_HANDLE.with(|cell| {
-                *cell.borrow_mut() = None;
+            // Cleanup is handled by ThreadCleanupGuard's Drop impl, which
+            // fires when the thread exits. Explicitly drop it here so cleanup
+            // happens at on_thread_stop time (before Tokio joins the thread)
+            // rather than during thread-local destruction (unspecified order).
+            CLEANUP_GUARD.with(|cell| {
+                cell.borrow_mut().take();
             });
-
-            #[cfg(feature = "cpu-profiling")]
-            {
-                let tid = crate::telemetry::events::current_tid();
-                s_stop.thread_roles.lock().unwrap().remove(&tid);
-                if let Ok(mut prof) = s_stop.sched_profiler.lock()
-                    && let Some(ref mut p) = *prof
-                {
-                    p.stop_tracking_current_thread();
-                }
-                dial9_perf_self_profile::unregister_current_thread();
-            }
         });
 }
 
@@ -296,6 +332,16 @@ fn attach_runtime(
         *cell.borrow_mut() = Some(TelemetryHandle {
             shared: shared.clone(),
             control_tx: control_tx.clone(),
+        });
+    });
+
+    // Install the cleanup guard on the calling thread so that
+    // CURRENT_HANDLE (and its Arc<SharedState>) is released when the
+    // guard is dropped — either explicitly in stop_flush_thread or
+    // when the thread exits.
+    CLEANUP_GUARD.with(|cell| {
+        *cell.borrow_mut() = Some(ThreadCleanupGuard {
+            shared: shared.clone(),
         });
     });
 
@@ -553,6 +599,15 @@ impl TelemetryGuard {
         if let Some(t) = self.flush_thread.take() {
             let _ = t.join();
         }
+
+        // Drop the calling thread's cleanup guard. This releases the
+        // Arc<SharedState> held by CURRENT_HANDLE and performs cpu-profiling
+        // cleanup. Without this, the calling thread's thread-local keeps
+        // SharedState (and any perf_event fds in the SchedProfiler) alive
+        // until the thread exits.
+        CLEANUP_GUARD.with(|cell| {
+            cell.borrow_mut().take();
+        });
     }
 
     /// Flush remaining events, seal the final segment, and wait for the
