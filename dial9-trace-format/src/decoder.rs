@@ -7,10 +7,11 @@
 //! allocation-free processing.
 
 use crate::codec::{
-    self, Frame, FrameRef, HEADER_SIZE, PoolEntry, PoolEntryRef, SchemaInfo, WireTypeId,
+    self, Frame, FrameRef, HEADER_SIZE, PoolEntry, PoolEntryRef, SchemaInfo, StackPoolEntry,
+    StackPoolEntryRef, WireTypeId,
 };
 use crate::schema::{SchemaEntry, SchemaRegistry};
-use crate::types::{FieldType, FieldValueRef, InternedString};
+use crate::types::{FieldType, FieldValueRef, InternedStackFrames, InternedString};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -61,6 +62,7 @@ pub struct RawEvent<'a, 'f> {
     pub fields: &'f [FieldValueRef<'a>],
     pub schema: &'f SchemaEntry,
     pub string_pool: &'f StringPool,
+    pub stack_pool: &'f StackPool,
 }
 
 impl<'a, 'f> RawEvent<'a, 'f> {
@@ -105,6 +107,39 @@ impl StringPool {
     }
 }
 
+/// A map from interned stack-frame IDs to their resolved address vectors.
+///
+/// Populated automatically by the [`Decoder`] as it processes `StackPool` frames.
+#[derive(Debug, Default)]
+pub struct StackPool(pub(crate) HashMap<InternedStackFrames, Vec<u64>>);
+
+impl StackPool {
+    pub(crate) fn new() -> Self {
+        Self(HashMap::default())
+    }
+
+    pub(crate) fn insert(&mut self, id: InternedStackFrames, frames: Vec<u64>) {
+        self.0.insert(id, frames);
+    }
+
+    pub fn get(&self, id: InternedStackFrames) -> Option<&[u64]> {
+        self.0.get(&id).map(|v| v.as_slice())
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Iterate over all interned stack frames as `(id, frames)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (InternedStackFrames, &[u64])> {
+        self.0.iter().map(|(&id, v)| (id, v.as_slice()))
+    }
+}
+
 /// Decoded events yielded by the decoder.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedFrame {
@@ -116,6 +151,7 @@ pub enum DecodedFrame {
         values: Vec<crate::types::FieldValue>,
     },
     StringPool(Vec<PoolEntry>),
+    StackPool(Vec<StackPoolEntry>),
 }
 
 /// Zero-copy decoded frame that borrows from the input buffer.
@@ -128,6 +164,7 @@ pub enum DecodedFrameRef<'a> {
         values: Vec<FieldValueRef<'a>>,
     },
     StringPool(Vec<PoolEntryRef<'a>>),
+    StackPool(Vec<StackPoolEntryRef<'a>>),
 }
 
 struct SchemaCache {
@@ -146,6 +183,7 @@ pub struct Decoder<'a> {
     registry: SchemaRegistry,
     schema_cache: Vec<Option<SchemaCache>>,
     string_pool: StringPool,
+    stack_pool: StackPool,
     version: u8,
     timestamp_base_ns: u64,
 }
@@ -159,6 +197,7 @@ impl<'a> Decoder<'a> {
             registry: SchemaRegistry::new(),
             schema_cache: Vec::new(),
             string_pool: StringPool::new(),
+            stack_pool: StackPool::new(),
             version,
             timestamp_base_ns: 0,
         })
@@ -176,6 +215,10 @@ impl<'a> Decoder<'a> {
         &self.string_pool
     }
 
+    pub fn stack_pool(&self) -> &StackPool {
+        &self.stack_pool
+    }
+
     /// Reset decoder state (schemas, string pool, timestamp base) as if
     /// starting a fresh stream. Used when a mid-stream header is encountered
     /// (the "reset frame" pattern for concatenated thread-local batches).
@@ -183,6 +226,7 @@ impl<'a> Decoder<'a> {
         self.registry = SchemaRegistry::new();
         self.schema_cache.clear();
         self.string_pool = StringPool::new();
+        self.stack_pool = StackPool::new();
         self.timestamp_base_ns = 0;
     }
 
@@ -210,6 +254,7 @@ impl<'a> Decoder<'a> {
         crate::encoder::Encoder::from_decoder(
             self.registry,
             self.string_pool,
+            self.stack_pool,
             self.timestamp_base_ns,
             writer,
         )
@@ -287,6 +332,13 @@ impl<'a> Decoder<'a> {
                 }
                 Ok(Some(DecodedFrame::StringPool(entries)))
             }
+            Frame::StackPool(entries) => {
+                for e in &entries {
+                    self.stack_pool
+                        .insert(InternedStackFrames(e.pool_id), e.frames.clone());
+                }
+                Ok(Some(DecodedFrame::StackPool(entries)))
+            }
             Frame::TimestampReset(ts) => {
                 self.timestamp_base_ns = ts;
                 self.next_frame() // consume silently, return next real frame
@@ -352,6 +404,13 @@ impl<'a> Decoder<'a> {
                     }
                 }
                 Ok(Some(DecodedFrameRef::StringPool(entries)))
+            }
+            FrameRef::StackPool(entries) => {
+                for e in &entries {
+                    self.stack_pool
+                        .insert(InternedStackFrames(e.pool_id), e.to_vec());
+                }
+                Ok(Some(DecodedFrameRef::StackPool(entries)))
             }
             FrameRef::TimestampReset(ts) => {
                 self.timestamp_base_ns = ts;
@@ -528,6 +587,7 @@ impl<'a> Decoder<'a> {
                         fields: &values_buf,
                         schema: &cache.entry,
                         string_pool: &self.string_pool,
+                        stack_pool: &self.stack_pool,
                     })
                     .map_err(TryForEachError::User)?;
                 }

@@ -26,6 +26,7 @@ pub(crate) const TAG_EVENT: u8 = 0x02;
 pub(crate) const TAG_STRING_POOL: u8 = 0x03;
 // Tags 0x04 and 0x06 are reserved (formerly SymbolTable and ProcMaps, now schema-based events).
 pub(crate) const TAG_TIMESTAMP_RESET: u8 = 0x05;
+pub(crate) const TAG_STACK_POOL: u8 = 0x07;
 
 /// Maximum nanosecond delta that fits in a u24 (3 bytes).
 pub(crate) const MAX_TIMESTAMP_DELTA_NS: u64 = 0xFF_FFFF; // 16,777,215
@@ -53,6 +54,15 @@ pub struct PoolEntry {
     pub data: Vec<u8>,
 }
 
+/// An owned stack-frame pool entry. Frames are leaf-first u64 addresses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackPoolEntry {
+    /// Pool ID assigned by the encoder.
+    pub pool_id: u32,
+    /// Stack frame addresses (leaf-first).
+    pub frames: Vec<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Frame {
     Schema {
@@ -66,6 +76,7 @@ pub(crate) enum Frame {
         values: Vec<FieldValue>,
     },
     StringPool(Vec<PoolEntry>),
+    StackPool(Vec<StackPoolEntry>),
     TimestampReset(u64),
 }
 
@@ -77,6 +88,33 @@ pub struct PoolEntryRef<'a> {
     pub pool_id: u32,
     /// Raw string data borrowed from the decode buffer.
     pub data: &'a [u8],
+}
+
+/// Zero-copy stack-frame pool entry borrowing from the input buffer.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackPoolEntryRef<'a> {
+    /// Pool ID assigned by the encoder.
+    pub pool_id: u32,
+    /// Raw u64-LE bytes borrowed from the decode buffer.
+    pub frames_le: &'a [u8],
+}
+
+impl<'a> StackPoolEntryRef<'a> {
+    /// Number of frames in the entry.
+    pub fn frame_count(&self) -> u32 {
+        (self.frames_le.len() / 8) as u32
+    }
+
+    /// Iterate the stack frame addresses.
+    pub fn iter(&self) -> crate::types::StackFrameIter<'a> {
+        crate::types::StackFrameIter::new(self.frames_le, self.frame_count())
+    }
+
+    /// Collect into an owned `Vec<u64>`.
+    pub fn to_vec(&self) -> Vec<u64> {
+        self.iter().collect()
+    }
 }
 
 /// Zero-copy frame that borrows from the input buffer.
@@ -92,6 +130,7 @@ pub(crate) enum FrameRef<'a> {
         values: Vec<FieldValueRef<'a>>,
     },
     StringPool(Vec<PoolEntryRef<'a>>),
+    StackPool(Vec<StackPoolEntryRef<'a>>),
     TimestampReset(u64),
 }
 
@@ -161,6 +200,19 @@ pub(crate) fn encode_string_pool(entries: &[PoolEntry], w: &mut impl Write) -> i
     Ok(())
 }
 
+pub(crate) fn encode_stack_pool(entries: &[StackPoolEntry], w: &mut impl Write) -> io::Result<()> {
+    w.write_all(&[TAG_STACK_POOL])?;
+    w.write_all(&(entries.len() as u32).to_le_bytes())?;
+    for e in entries {
+        w.write_all(&e.pool_id.to_le_bytes())?;
+        w.write_all(&(e.frames.len() as u32).to_le_bytes())?;
+        for &addr in &e.frames {
+            w.write_all(&addr.to_le_bytes())?;
+        }
+    }
+    Ok(())
+}
+
 // --- Decoding ---
 
 pub(crate) fn decode_header(data: &[u8]) -> Option<u8> {
@@ -182,6 +234,7 @@ pub(crate) fn decode_frame<'s>(
         TAG_SCHEMA => decode_schema_frame(data),
         TAG_EVENT => decode_event_frame(data, schema_lookup, timestamp_base_ns),
         TAG_STRING_POOL => decode_string_pool_frame(data),
+        TAG_STACK_POOL => decode_stack_pool_frame(data),
         TAG_TIMESTAMP_RESET => {
             let ts = u64::from_le_bytes(data.get(1..9)?.try_into().ok()?);
             Some((Frame::TimestampReset(ts), 9))
@@ -295,6 +348,29 @@ fn decode_string_pool_frame(data: &[u8]) -> Option<(Frame, usize)> {
     Some((Frame::StringPool(entries), pos))
 }
 
+fn decode_stack_pool_frame(data: &[u8]) -> Option<(Frame, usize)> {
+    let mut pos = 1;
+    let count = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
+    pos += 4;
+    let mut entries = Vec::with_capacity(count.min((data.len() - pos) / 16));
+    for _ in 0..count {
+        let pool_id = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?);
+        pos += 4;
+        let frame_count = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
+        pos += 4;
+        let bytes = frame_count.checked_mul(8)?;
+        let mut frames = Vec::with_capacity(frame_count);
+        for i in 0..frame_count {
+            let off = pos + i * 8;
+            let addr = u64::from_le_bytes(data.get(off..off + 8)?.try_into().ok()?);
+            frames.push(addr);
+        }
+        pos += bytes;
+        entries.push(StackPoolEntry { pool_id, frames });
+    }
+    Some((Frame::StackPool(entries), pos))
+}
+
 // --- Zero-copy decoding ---
 
 /// Decode a single frame without allocating owned data for field values.
@@ -316,6 +392,7 @@ pub(crate) fn decode_frame_ref<'a, 's>(
         }
         TAG_EVENT => decode_event_frame_ref(data, schema_lookup, timestamp_base_ns),
         TAG_STRING_POOL => decode_string_pool_frame_ref(data),
+        TAG_STACK_POOL => decode_stack_pool_frame_ref(data),
         TAG_TIMESTAMP_RESET => {
             let ts = u64::from_le_bytes(data.get(1..9)?.try_into().ok()?);
             Some((FrameRef::TimestampReset(ts), 9))
@@ -386,6 +463,24 @@ fn decode_string_pool_frame_ref<'a>(data: &'a [u8]) -> Option<(FrameRef<'a>, usi
         entries.push(PoolEntryRef { pool_id, data: d });
     }
     Some((FrameRef::StringPool(entries), pos))
+}
+
+fn decode_stack_pool_frame_ref<'a>(data: &'a [u8]) -> Option<(FrameRef<'a>, usize)> {
+    let mut pos = 1;
+    let count = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
+    pos += 4;
+    let mut entries = Vec::with_capacity(count.min((data.len() - pos) / 16));
+    for _ in 0..count {
+        let pool_id = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?);
+        pos += 4;
+        let frame_count = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
+        pos += 4;
+        let bytes = frame_count.checked_mul(8)?;
+        let frames_le = data.get(pos..pos + bytes)?;
+        pos += bytes;
+        entries.push(StackPoolEntryRef { pool_id, frames_le });
+    }
+    Some((FrameRef::StackPool(entries), pos))
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@
 //! (with a `StringPool` frame for symbol names).
 
 use dial9_trace_format::{
-    decoder::Decoder,
+    decoder::{Decoder, StackPool},
     types::{FieldValueRef, InternedString},
 };
 use std::collections::BTreeSet;
@@ -55,7 +55,7 @@ pub fn symbolize_trace_with_maps(
 
     decoder
         .for_each_event(|event| {
-            collect_stack_frame_addresses(event.fields, &mut addresses);
+            collect_stack_frame_addresses(event.fields, event.stack_pool, &mut addresses);
         })
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
@@ -66,14 +66,30 @@ pub fn symbolize_trace_with_maps(
     crate::sys::write_symbol_data(decoder, &addresses, maps, output)
 }
 
-fn collect_stack_frame_addresses(values: &[FieldValueRef<'_>], addresses: &mut BTreeSet<u64>) {
+fn collect_stack_frame_addresses(
+    values: &[FieldValueRef<'_>],
+    stack_pool: &StackPool,
+    addresses: &mut BTreeSet<u64>,
+) {
     for field in values {
-        if let FieldValueRef::StackFrames(frames) = field {
-            for addr in frames.iter() {
-                if addr != 0 {
-                    addresses.insert(addr);
+        match field {
+            FieldValueRef::StackFrames(frames) => {
+                for addr in frames.iter() {
+                    if addr != 0 {
+                        addresses.insert(addr);
+                    }
                 }
             }
+            FieldValueRef::PooledStackFrames(id) => {
+                if let Some(frames) = stack_pool.get(*id) {
+                    for &addr in frames {
+                        if addr != 0 {
+                            addresses.insert(addr);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
