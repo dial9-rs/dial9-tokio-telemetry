@@ -49,7 +49,7 @@ tracing-layer = ["dep:tracing-subscriber"]
 worker-s3 = ["dep:aws-sdk-s3-transfer-manager", "dep:aws-sdk-s3", "dep:aws-config", "dep:time"]
 
 [dev-dependencies]
-dial9-tokio-telemetry = { path = ".", features = ["analysis", "tracing-layer"] }
+dial9-tokio-telemetry = { path = ".", features = ["analysis", "tracing-layer", "worker-s3"] }
 assert2 = { workspace = true }
 criterion = "0.5"
 clap = { version = "4", features = ["derive"] }

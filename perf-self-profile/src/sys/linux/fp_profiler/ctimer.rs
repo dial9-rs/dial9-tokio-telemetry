@@ -242,8 +242,28 @@ mod tests {
 
     static SAMPLE_COUNT: AtomicU64 = AtomicU64::new(0);
 
+    // `timer_getoverrun` is POSIX but not exposed in libc as a direct fn; declare it.
+    // It is async-signal-safe and returns the number of *additional* expirations
+    // that occurred between the previous signal delivery and this one.
+    unsafe extern "C" {
+        fn timer_getoverrun(timerid: libc::timer_t) -> libc::c_int;
+    }
+
+    /// Counting handler that accounts for timer coalescing.
+    ///
+    /// On kernels with low `CONFIG_HZ` (e.g. 100) and/or when the process is
+    /// already handling SIGPROF, multiple timer expirations coalesce into a
+    /// single signal delivery. `timer_getoverrun` reports how many extra
+    /// expirations were absorbed, so the "effective" sample count is
+    /// `1 + overruns` per delivery. This matches what the real sampler does
+    /// (`ctimer_sampler.rs` uses the same scheme for the `period` weight).
     extern "C" fn counting_handler(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {
-        SAMPLE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let overruns = current_thread_timer_id()
+            // SAFETY: `timer_getoverrun` is POSIX async-signal-safe; `t` is this
+            // thread's live timer handle.
+            .map(|t| unsafe { timer_getoverrun(t) }.max(0) as u64)
+            .unwrap_or(0);
+        SAMPLE_COUNT.fetch_add(1 + overruns, Ordering::Relaxed);
     }
 
     fn thread_cpu_time_ns() -> u64 {
@@ -275,7 +295,9 @@ mod tests {
         unsafe { start(1_000_000, counting_handler) }.expect("start");
         register_thread().expect("should register thread");
 
-        // 200ms of CPU => theoretically expected ~200 samples.
+        // 200ms of CPU => expect ~200 effective samples at 1kHz (after
+        // accounting for timer overruns). Threshold kept low for CI runners
+        // where CPU contention can drop the observed count significantly.
         burn_cpu(200_000_000);
 
         let count = SAMPLE_COUNT.load(Ordering::Relaxed);
@@ -285,10 +307,9 @@ mod tests {
         RUNNING.store(false, Ordering::Release);
         DISARM_REQUESTED.store(false, Ordering::Release);
 
-        // lower threshold to account for runtime variance.
         assert!(
             count >= 50,
-            "expected >=50 samples from 200ms of CPU at 1kHz, got {count}"
+            "expected >=50 effective samples from 200ms of CPU at 1kHz, got {count}"
         );
     }
 }

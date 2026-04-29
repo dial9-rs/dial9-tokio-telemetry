@@ -317,6 +317,16 @@ fn attach_runtime(
             });
         });
 
+    // Eagerly populate worker_ids so segment metadata is complete from the
+    // first flush cycle, rather than waiting for each worker thread to lazily
+    // register on its first poll/park event.
+    {
+        let mut ids = ctx.worker_ids.write().unwrap();
+        for i in 0..num_workers {
+            ids.insert(i as usize, base + i);
+        }
+    }
+
     shared.contexts.lock().unwrap().push(ctx);
 
     Ok(runtime)
@@ -1007,6 +1017,15 @@ impl TelemetryCore {
         let shared = Arc::new(SharedState::new(start_mono_ns));
         #[allow(unused_mut)]
         let mut event_writer = EventWriter::new(Box::new(writer));
+        #[cfg(feature = "worker-s3")]
+        if let Some(s3_config) = s3_config.as_ref() {
+            event_writer.update_segment_metadata(
+                s3_config
+                    .as_metadata()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            )
+        }
 
         #[cfg(feature = "cpu-profiling")]
         {
@@ -1757,15 +1776,18 @@ mod tests {
             "expected at least one SegmentMetadata event in trace files"
         );
 
-        // At least one segment's metadata should contain both runtime mappings.
+        // At least one segment's metadata should contain both runtime mappings
+        // with the exact worker IDs (eagerly populated at attach time).
         let has_both = all_metadata.iter().any(|entries| {
-            let has_main = entries.iter().any(|(k, _)| k == "runtime.main");
-            let has_io = entries.iter().any(|(k, _)| k == "runtime.io");
+            let has_main = entries
+                .iter()
+                .any(|(k, v)| k == "runtime.main" && v == "0,1");
+            let has_io = entries.iter().any(|(k, v)| k == "runtime.io" && v == "2,3");
             has_main && has_io
         });
         assert!(
             has_both,
-            "expected segment metadata to contain both runtime.main and runtime.io, \
+            "expected segment metadata to contain runtime.main=0,1 and runtime.io=2,3, \
              got: {all_metadata:?}"
         );
     }

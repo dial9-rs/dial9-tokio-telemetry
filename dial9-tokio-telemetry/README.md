@@ -229,7 +229,7 @@ Core telemetry (poll timing, park/unpark, queue depth, wake events) works on all
 
 On Linux, you get additional data for free:
 
-- **Thread CPU time** in park/unpark events via `CLOCK_THREAD_CPUTIME_ID` (vDSO, ~20–40 ns)
+- **Thread CPU time** in park/unpark events via `CLOCK_THREAD_CPUTIME_ID` (syscall, ~850ns)
 - **Scheduler wait time** via `/proc/self/task/<tid>/schedstat` — shows when the Tokio worker was not scheduled by the OS when it was ready.
 
 On non-Linux platforms these fields are zero.
