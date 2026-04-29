@@ -202,7 +202,10 @@ fn end_to_end_trace_to_s3_roundtrip() {
         .collect::<HashMap<String, String>>();
     assert_eq!(metadata["bucket"], "test-bucket");
     assert_eq!(metadata["service_name"], "test-svc");
-    assert_eq!(metadata["runtime.test-runtime"], "0,1");
+    assert_eq!(
+        metadata["runtime.test-runtime"], "0,1",
+        "expected eagerly populated worker IDs"
+    );
     assert_eq!(metadata["custom-metadata"], "value");
     let events = &reader.runtime_events;
     assert!(
