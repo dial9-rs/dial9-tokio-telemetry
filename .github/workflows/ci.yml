@@ -181,7 +181,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run shuttle tests
-        run: cargo test -p dial9-tokio-telemetry --lib --features _shuttle -- shuttle
+        run: scripts/test-shuttle.sh
 
   package:
     name: Cargo package
