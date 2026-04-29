@@ -60,6 +60,61 @@ async fn main() {
 
 The macro automatically spawns your function body as a task, so top-level code is visible in traces (unlike plain `#[tokio::main]` where `block_on` work is invisible — see [below](#the-root-future-is-not-instrumented)). dial9 installs a `TelemetryHandle` on every runtime-owned thread via `on_thread_start`. Call `TelemetryHandle::current()` to get it for spawning wake-tracked sub-tasks.
 
+### Optional telemetry on I/O failure
+
+`build()` is strict: missing required writer fields, or an unwritable `base_path`, will surface as an error (panicking through the macro). When telemetry is best-effort — e.g. you'd rather start the service than fail on a misconfigured trace path — finish with `build_or_disabled()` instead. It returns a `Dial9ConfigFallback` that:
+
+- silently uses a disabled runtime if required builder fields are missing, and
+- silently cascades any `RotatingWriter` / telemetry-core I/O failure during runtime construction into a plain tokio runtime carrying your `with_tokio` configurators (worker count, thread names, etc. are preserved).
+
+Only the tokio builder's own `std::io::Error` can still escape — there is no fallback for "cannot build a tokio runtime at all".
+
+```rust,no_run
+use dial9_tokio_telemetry::{Dial9Config, Dial9ConfigFallback};
+
+fn my_config() -> Dial9ConfigFallback {
+    Dial9Config::builder()
+        .base_path("/tmp/my_traces/trace.bin")
+        .max_file_size(1024 * 1024)
+        .max_total_size(5 * 1024 * 1024)
+        .with_tokio(|t| { t.worker_threads(4); })
+        .build_or_disabled()
+}
+
+#[dial9_tokio_telemetry::main(config = my_config)]
+async fn main() {
+    // Telemetry may or may not be active; check with try_current().
+    use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+    if TelemetryHandle::try_current().is_some() {
+        // wake-event-tracked spawn
+    } else {
+        // plain tokio fallback path
+    }
+}
+```
+
+See [`examples/optional_telemetry.rs`](/dial9-tokio-telemetry/examples/optional_telemetry.rs) for an end-to-end run including a `DIAL9_TRACE_PATH=/unwritable/...` mode that exercises the cascade.
+
+### Without the macro
+
+The macro expands to `TelemetryRuntime::from_config(...).block_on(...)`. If you'd rather drive that yourself — for tests, libraries that build their own runtime, or any code that doesn't own `main` — `TelemetryRuntime` is a public type that accepts the same configs (strict `Dial9Config`, lenient `Dial9ConfigFallback`):
+
+```rust,no_run
+use dial9_tokio_telemetry::{Dial9Config, TelemetryRuntime};
+
+let cfg = Dial9Config::builder()
+    .base_path("/tmp/my_traces/trace.bin")
+    .max_file_size(1024 * 1024)
+    .max_total_size(5 * 1024 * 1024)
+    .build()
+    .expect("config build failed");
+
+let rt = TelemetryRuntime::try_from(cfg).expect("runtime build failed");
+rt.block_on(async {
+    // body runs as a spawned, instrumented task — same as under #[main]
+});
+```
+
 ### Manual setup
 
 ```rust
@@ -449,6 +504,7 @@ The worker uses a circuit breaker with exponential backoff if S3 is unreachable.
 
 ```bash
 cargo run --example simple_workload        # macro-based setup (start here)
+cargo run --example optional_telemetry     # build_or_disabled: best-effort telemetry, plain-tokio fallback
 cargo run --example conditionally_enable   # toggle telemetry via ENABLE_DIAL9 env var
 cargo run --example realistic_workload     # mixed CPU/IO workload
 cargo run --example long_workload          # longer run for trace analysis

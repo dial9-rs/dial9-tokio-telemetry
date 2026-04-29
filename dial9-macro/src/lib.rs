@@ -116,8 +116,19 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// # Arguments
 ///
 /// * `config` — a zero-argument function path or a zero-argument closure
-///   returning [`Dial9Config`]. Build one with [`Dial9Config::builder()`].
-///   Use `.enabled(false)` on the builder to run without telemetry.
+///   returning any value convertible into a `TelemetryRuntime`. In
+///   practice that means one of:
+///     - [`Dial9Config`] (strict): construction I/O failure panics.
+///     - `Dial9ConfigFallback` (lenient): RotatingWriter / telemetry-core
+///       I/O failure silently downgrades to a plain tokio runtime
+///       carrying the user's `with_tokio` configurators. Build one with
+///       `Dial9Config::builder().build_or_disabled()`.
+///     - The deprecated positional `dial9_tokio_telemetry::config::Dial9Config`,
+///       kept compatible via a bridge impl.
+///
+///   Build the strict variant with [`Dial9Config::builder()`]. Use
+///   `.enabled(false)` on the builder to run without telemetry while
+///   keeping your `with_tokio` configurators.
 ///
 /// # Examples
 ///
@@ -155,6 +166,22 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
 ///         .expect("config build failed")
+/// })]
+/// async fn main() {
+///     /* ... */
+/// }
+/// ```
+///
+/// Lenient (telemetry is best-effort; falls back to a plain tokio
+/// runtime if writer setup fails):
+///
+/// ```rust,ignore
+/// #[dial9_tokio_telemetry::main(config = || {
+///     Dial9Config::builder()
+///         .base_path("/tmp/trace.bin")
+///         .max_file_size(1024 * 1024)
+///         .max_total_size(16 * 1024 * 1024)
+///         .build_or_disabled()
 /// })]
 /// async fn main() {
 ///     /* ... */

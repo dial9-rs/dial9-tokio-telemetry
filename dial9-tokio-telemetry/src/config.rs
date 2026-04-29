@@ -1,11 +1,27 @@
 //! Unified configuration for the `#[dial9_tokio_telemetry::main]` macro.
 //!
 //! Start with [`Dial9Config::builder()`] and chain setters to produce a
-//! [`Dial9Config`] that the macro consumes. The builder stages a
-//! [`tokio::runtime::Builder`] and accumulates [`TracedRuntimeBuilder`]
-//! configurators eagerly; use [`Dial9ConfigBuilder::with_tokio`] and
+//! config that the macro (or [`crate::TelemetryRuntime`]) consumes. The
+//! builder stages a [`tokio::runtime::Builder`] and accumulates
+//! [`TracedRuntimeBuilder`] configurators eagerly; use
+//! [`Dial9ConfigBuilder::with_tokio`] and
 //! [`Dial9ConfigBuilder::with_runtime`] to reach any knob those builders
 //! expose.
+//!
+//! Two finish functions cover the strict / lenient axis:
+//!
+//! - [`Dial9ConfigBuilder::build`] — strict. Returns a [`Dial9Config`].
+//!   Missing required writer fields surface as
+//!   [`Dial9ConfigBuilderError::MissingFields`], and runtime-time
+//!   `RotatingWriter` / telemetry-core I/O failures bubble out of the
+//!   conversion into [`crate::TelemetryRuntime`] as
+//!   [`crate::TelemetryRuntimeError`].
+//! - [`Dial9ConfigBuilder::build_or_disabled`] — lenient. Returns a
+//!   [`Dial9ConfigFallback`] that is *infallible at build time* and
+//!   silently cascades runtime-time `RotatingWriter` / telemetry-core
+//!   I/O failures into a plain tokio runtime carrying the user's
+//!   `with_tokio` configurators. Use this when telemetry is
+//!   best-effort.
 //!
 //! To run without telemetry while preserving tokio knobs, call
 //! `.enabled(false)` — the builder then skips required-field validation
@@ -313,8 +329,8 @@ impl<S: dial9_config_builder::IsComplete> Dial9ConfigBuilder<S> {
     /// error.
     ///
     /// On builder validation failure (e.g. missing required writer fields),
-    /// emits a [`Dial9ConfigFallback`] wrapping [`Inner::Disabled`] with
-    /// the user's `with_tokio` configurators preserved. The resulting
+    /// emits a [`Dial9ConfigFallback`] in its disabled state with the
+    /// user's `with_tokio` configurators preserved. The resulting
     /// config also opts into a runtime-time cascade: any
     /// `RotatingWriter` / telemetry-core I/O failure during
     /// [`crate::TelemetryRuntime::try_from`] silently downgrades to a

@@ -1,4 +1,20 @@
-//! [`TelemetryRuntime`] - a tokio runtime paired with its dial9 telemetry guard.
+//! [`TelemetryRuntime`] — a tokio runtime paired with its dial9 telemetry guard.
+//!
+//! This is the construction glue that the
+//! `#[dial9_tokio_telemetry::main]` macro expands into. It is also a
+//! standalone public type for callers who want the same
+//! macro-equivalent setup without the attribute (e.g. tests, custom
+//! `main` functions, or libraries that build their own runtime).
+//!
+//! Construct one via [`TelemetryRuntime::from_config`] (panics on
+//! failure, used by the macro) or directly via the [`TryFrom`] impls:
+//!
+//! - `TryFrom<`[`crate::Dial9Config`]`>` — strict. Returns
+//!   [`TelemetryRuntimeError`].
+//! - `TryFrom<`[`crate::Dial9ConfigFallback`]`>` — lenient. Returns
+//!   [`std::io::Error`]; only the tokio builder's own error can escape.
+//! - `TryFrom<`[`crate::config::Dial9Config`]`>` — bridge for the
+//!   deprecated positional config. Returns [`std::io::Error`].
 
 use std::future::Future;
 
@@ -64,8 +80,11 @@ impl TelemetryRuntime {
     /// macro.
     ///
     /// Generic over any input that converts into a [`TelemetryRuntime`],
-    /// so it accepts both strict ([`Dial9Config`]) and lenient
-    /// ([`Dial9ConfigFallback`]) configs transparently.
+    /// so it accepts strict ([`Dial9Config`]), lenient
+    /// ([`Dial9ConfigFallback`]), and the deprecated positional
+    /// [`crate::config::Dial9Config`] configs transparently. The
+    /// generic shape is what keeps the macro source-compatible across
+    /// these three input types.
     pub fn from_config<C>(config: C) -> Self
     where
         C: TryInto<TelemetryRuntime>,
@@ -176,6 +195,12 @@ impl TryFrom<crate::config::Dial9Config> for TelemetryRuntime {
     }
 }
 
+/// Lenient construction path: `RotatingWriter` and telemetry-core I/O
+/// failures silently cascade to a plain tokio runtime built from the
+/// user's `with_tokio` configurators (replayed onto a fresh
+/// [`tokio::runtime::Builder`]). Only the tokio builder's own
+/// [`std::io::Error`] can still escape — there is no fallback for
+/// "cannot build a tokio runtime at all".
 impl TryFrom<Dial9ConfigFallback> for TelemetryRuntime {
     type Error = std::io::Error;
 
