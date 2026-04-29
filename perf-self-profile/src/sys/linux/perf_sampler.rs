@@ -92,6 +92,7 @@ pub(super) struct PerfSamplerImpl {
     parse_config: ParseConfig<Little>,
     attr: perf_event_attr,
     include_kernel: bool,
+    max_tracked_threads: usize,
 }
 
 impl PerfSamplerImpl {
@@ -122,6 +123,7 @@ impl PerfSamplerImpl {
             parse_config: ParseConfig::from(attr),
             attr,
             include_kernel: config.include_kernel,
+            max_tracked_threads: config.max_tracked_threads,
         })
     }
 
@@ -150,6 +152,7 @@ impl PerfSamplerImpl {
             parse_config: ParseConfig::from(attr),
             attr,
             include_kernel: config.include_kernel,
+            max_tracked_threads: config.max_tracked_threads,
         })
     }
 
@@ -279,6 +282,13 @@ impl super::sampler::SamplerBackend for PerfSamplerImpl {
     // Per-thread mode: call from the thread you want to monitor.
     // This opens an event fd scoped to the calling tid with cpu=-1.
     fn track_current_thread(&mut self) -> io::Result<()> {
+        if self.events.len() >= self.max_tracked_threads {
+            return Err(io::Error::other(format!(
+                "perf sampler: max tracked threads ({}) reached, \
+                 refusing to open another fd",
+                self.max_tracked_threads
+            )));
+        }
         let mut ev = open_perf_event(&mut self.attr, 0, -1)?;
         // open_perf_event stores tid=0 (the "current thread" sentinel passed to
         // perf_event_open). Resolve to the real tid so stop_tracking_current_thread
