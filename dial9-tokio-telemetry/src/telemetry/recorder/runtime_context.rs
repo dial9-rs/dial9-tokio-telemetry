@@ -147,12 +147,32 @@ pub fn current_worker_id() -> WorkerId {
 
 // ── Event construction helpers ───────────────────────────────────────────────
 
+#[cfg(test)]
+static EVENT_CONSTRUCTION_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Return the number of times a `make_*` event-construction helper has been
+/// called. Test-only; used to verify that the early-disable check in hook
+/// closures prevents expensive syscalls when telemetry is disabled.
+#[cfg(test)]
+pub(crate) fn event_construction_count() -> usize {
+    EVENT_CONSTRUCTION_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Reset the event-construction counter to zero.
+#[cfg(test)]
+pub(crate) fn reset_event_construction_count() {
+    EVENT_CONSTRUCTION_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(super) fn make_poll_start(
     ctx: &RuntimeContext,
     shared: &SharedState,
     location: &'static std::panic::Location<'static>,
     task_id: TaskId,
 ) -> RawEvent {
+    #[cfg(test)]
+    EVENT_CONSTRUCTION_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let resolved = ctx.resolve_worker(shared);
     let worker_local_queue_depth = resolved
         .map(|(_, idx)| ctx.local_queue_depth(idx))
@@ -167,6 +187,8 @@ pub(super) fn make_poll_start(
 }
 
 pub(super) fn make_poll_end(ctx: &RuntimeContext, shared: &SharedState) -> RawEvent {
+    #[cfg(test)]
+    EVENT_CONSTRUCTION_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let resolved = ctx.resolve_worker(shared);
     RawEvent::PollEnd {
         timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
@@ -175,6 +197,8 @@ pub(super) fn make_poll_end(ctx: &RuntimeContext, shared: &SharedState) -> RawEv
 }
 
 pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> RawEvent {
+    #[cfg(test)]
+    EVENT_CONSTRUCTION_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let resolved = ctx.resolve_worker(shared);
     let worker_local_queue_depth = resolved
         .map(|(_, idx)| ctx.local_queue_depth(idx))
@@ -192,6 +216,8 @@ pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> Ra
 }
 
 pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> RawEvent {
+    #[cfg(test)]
+    EVENT_CONSTRUCTION_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let resolved = ctx.resolve_worker(shared);
     let worker_local_queue_depth = resolved
         .map(|(_, idx)| ctx.local_queue_depth(idx))

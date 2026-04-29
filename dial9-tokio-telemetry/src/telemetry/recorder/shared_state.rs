@@ -83,6 +83,27 @@ impl SharedState {
         }
     }
 
+    /// Check whether recording is currently enabled.
+    ///
+    /// Prefer [`enabled`](Self::enabled) for event-recording paths — it
+    /// provides an [`EventBuffer`] that makes it structurally impossible to
+    /// record without checking first. Use `is_enabled()` only for
+    /// control-flow decisions that don't directly record events (e.g.
+    /// deciding whether to wrap a waker in `Traced::poll`).
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Run `f` only when recording is enabled, passing an [`EventBuffer`]
+    /// that provides `record_event` / `record_encodable_event`. Returns
+    /// `None` when disabled (no work is done).
+    pub(crate) fn if_enabled<R>(&self, f: impl FnOnce(&EventBuffer<'_>) -> R) -> Option<R> {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(f(&EventBuffer(self)))
+    }
+
     pub(crate) fn record_queue_sample(&self, global_queue_depth: usize) {
         self.record_event(RawEvent::QueueSample {
             timestamp_nanos: self.timestamp_nanos(),
@@ -90,28 +111,18 @@ impl SharedState {
         });
     }
 
-    pub(crate) fn record_event(&self, event: RawEvent) {
+    fn record_event(&self, event: RawEvent) {
         self.record_encodable_event(&event);
     }
 
     /// Record a user-defined [`Encodable`](crate::telemetry::buffer::Encodable) event.
-    pub(crate) fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
-        if !self.enabled.load(Ordering::Relaxed) {
-            return;
-        }
+    ///
+    /// Callers must ensure recording is enabled (via [`enabled`](Self::enabled)
+    /// or [`is_enabled`](Self::is_enabled)) before calling this method.
+    fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
         if let Some(handle) =
             buffer::record_encodable_event(event, &self.collector, &self.drain_epoch)
         {
-            self.tl_buffers.lock().unwrap().push(handle);
-        }
-    }
-
-    /// Run a closure with direct access to the thread-local encoder.
-    pub(crate) fn with_encoder(&self, f: impl FnOnce(&mut buffer::ThreadLocalEncoder<'_>)) {
-        if !self.enabled.load(Ordering::Relaxed) {
-            return;
-        }
-        if let Some(handle) = buffer::with_encoder(f, &self.collector, &self.drain_epoch) {
             self.tl_buffers.lock().unwrap().push(handle);
         }
     }
@@ -191,6 +202,31 @@ impl SharedState {
     /// drain path.
     pub(crate) fn bump_drain_epoch(&self) {
         self.drain_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Handle provided by [`SharedState::enabled`] that proves recording is
+/// active. All event-recording calls should go through this type so that
+/// callers cannot accidentally emit events without an enabled check.
+pub(crate) struct EventBuffer<'a>(&'a SharedState);
+
+impl EventBuffer<'_> {
+    pub(crate) fn record_event(&self, event: RawEvent) {
+        self.record_encodable_event(&event);
+    }
+
+    pub(crate) fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
+        if let Some(handle) =
+            buffer::record_encodable_event(event, &self.0.collector, &self.0.drain_epoch)
+        {
+            self.0.tl_buffers.lock().unwrap().push(handle);
+        }
+    }
+
+    pub(crate) fn with_encoder(&self, f: impl FnOnce(&mut buffer::ThreadLocalEncoder<'_>)) {
+        if let Some(handle) = buffer::with_encoder(f, &self.0.collector, &self.0.drain_epoch) {
+            self.0.tl_buffers.lock().unwrap().push(handle);
+        }
     }
 }
 

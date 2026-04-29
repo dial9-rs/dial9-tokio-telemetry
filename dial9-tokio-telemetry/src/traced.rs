@@ -7,7 +7,6 @@ use pin_project_lite::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Waker};
 
 /// Handle used by `Traced<F>` to emit events into the telemetry system.
@@ -71,20 +70,22 @@ impl ArcWake for TracedWakerData {
 }
 
 fn record_wake_event(data: &TracedWakerData) {
-    // The worker issuing the wake — not the worker that will execute the woken task
-    // (which is unknowable at wake time). Stored in the event as `target_worker`.
-    let waking_worker_id = crate::telemetry::recorder::current_worker_id();
-    // TODO: cleanly handle more than 255 global workers in the wake event wire format.
-    // Wake event wire format uses u8; clamp large worker IDs to UNKNOWN (255).
-    let waking_worker_u8 = if waking_worker_id.as_u64() <= 254 {
-        waking_worker_id.as_u64() as u8
-    } else {
-        255
-    };
-    let event = data
-        .shared
-        .create_wake_event(data.woken_task_id, waking_worker_u8);
-    data.shared.record_event(event);
+    data.shared.if_enabled(|buf| {
+        // The worker issuing the wake — not the worker that will execute the woken task
+        // (which is unknowable at wake time). Stored in the event as `target_worker`.
+        let waking_worker_id = crate::telemetry::recorder::current_worker_id();
+        // TODO: cleanly handle more than 255 global workers in the wake event wire format.
+        // Wake event wire format uses u8; clamp large worker IDs to UNKNOWN (255).
+        let waking_worker_u8 = if waking_worker_id.as_u64() <= 254 {
+            waking_worker_id.as_u64() as u8
+        } else {
+            255
+        };
+        let event = data
+            .shared
+            .create_wake_event(data.woken_task_id, waking_worker_u8);
+        buf.record_event(event);
+    });
 }
 
 fn make_traced_waker(data: Arc<TracedWakerData>) -> Waker {
@@ -96,7 +97,7 @@ impl<F: Future> Future for Traced<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        if !this.handle.shared.enabled.load(Ordering::Relaxed) {
+        if !this.handle.shared.is_enabled() {
             return this.inner.poll(cx);
         }
 
