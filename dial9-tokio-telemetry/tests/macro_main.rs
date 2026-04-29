@@ -245,6 +245,72 @@ mod fluent_builder {
 }
 
 // ===========================================================================
+// Fluent builder fallback API - `Dial9Config::builder().build_or_disabled()`
+// (lenient: cascades RotatingWriter / telemetry-core I/O failures into a
+// plain tokio runtime). Exercises the macro with `Dial9ConfigFallback` path.
+// ===========================================================================
+mod fluent_builder_fallback {
+    use std::path::PathBuf;
+
+    use dial9_tokio_telemetry::Dial9Config;
+    use dial9_tokio_telemetry::Dial9ConfigFallback;
+    use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+
+    use super::tmp_base_path;
+
+    fn fallback_config() -> Dial9ConfigFallback {
+        Dial9Config::builder()
+            .base_path(tmp_base_path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(4 * 1024 * 1024)
+            .build_or_disabled()
+    }
+
+    fn unwritable_base_path() -> PathBuf {
+        PathBuf::from("/this/dir/does/not/exist/dial9_macro_fallback_trace.bin")
+    }
+
+    fn cascading_fallback_config() -> Dial9ConfigFallback {
+        Dial9Config::builder()
+            .base_path(unwritable_base_path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(4 * 1024 * 1024)
+            .build_or_disabled()
+    }
+
+    #[dial9_tokio_telemetry::main(config = fallback_config)]
+    async fn fallback_runs_async_body() -> bool {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        TelemetryHandle::try_current().is_some()
+    }
+
+    #[test]
+    fn fallback_config_runs_async_body() {
+        let telemetry_active = fallback_runs_async_body();
+        assert!(
+            telemetry_active,
+            "writable base_path should keep telemetry enabled through the macro"
+        );
+    }
+
+    #[dial9_tokio_telemetry::main(config = cascading_fallback_config)]
+    async fn cascade_runs_async_body() -> bool {
+        let result = tokio::spawn(async { 21 + 21 }).await.unwrap();
+        assert_eq!(result, 42);
+        TelemetryHandle::try_current().is_none()
+    }
+
+    #[test]
+    fn fallback_cascade_runs_without_telemetry() {
+        let telemetry_disabled = cascade_runs_async_body();
+        assert!(
+            telemetry_disabled,
+            "unwritable base_path must cascade to a plain tokio runtime with no telemetry"
+        );
+    }
+}
+
+// ===========================================================================
 // Legacy positional builder API — `dial9_tokio_telemetry::config::Dial9ConfigBuilder`
 // (deprecated; kept here so we keep covering the path until it is removed).
 // ===========================================================================

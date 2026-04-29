@@ -497,4 +497,102 @@ mod tests {
             "strict path must propagate RotatingWriter error, got {result:?}"
         );
     }
+
+    // ---------------------------------------------------------------
+    // Strict-path configurators
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn strict_build_runs_with_tokio_configurator_on_success() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_for_closure = Arc::clone(&counter);
+        let cfg = Dial9Config::builder()
+            .base_path(tmp_base_path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(4 * 1024 * 1024)
+            .with_tokio(move |b| {
+                counter_for_closure.fetch_add(1, Ordering::SeqCst);
+                b.worker_threads(2);
+            })
+            .build()
+            .expect("strict build should succeed");
+        let _rt = TelemetryRuntime::try_from(cfg).expect("runtime should build");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "with_tokio configurator must run exactly once on strict success path"
+        );
+    }
+
+    #[test]
+    fn strict_build_runs_with_runtime_configurator_on_success() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_for_closure = Arc::clone(&counter);
+        let cfg = Dial9Config::builder()
+            .base_path(tmp_base_path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(4 * 1024 * 1024)
+            .with_runtime(move |r| {
+                counter_for_closure.fetch_add(1, Ordering::SeqCst);
+                r
+            })
+            .build()
+            .expect("strict build should succeed");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "with_runtime configurator must run exactly once during build()"
+        );
+        let _rt = TelemetryRuntime::try_from(cfg).expect("runtime should build");
+    }
+
+    #[test]
+    fn enabled_false_drops_with_runtime_configurators() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_for_closure = Arc::clone(&counter);
+        let cfg = Dial9Config::builder()
+            .enabled(false)
+            .with_runtime(move |r| {
+                counter_for_closure.fetch_add(1, Ordering::SeqCst);
+                r
+            })
+            .build()
+            .expect("disabled build should succeed without required fields");
+        let rt = TelemetryRuntime::try_from(cfg).expect("disabled runtime should build");
+        assert!(
+            rt.guard().is_none(),
+            "disabled config must not install a guard"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "with_runtime configurators must be ignored when enabled(false)"
+        );
+    }
+
+    #[test]
+    fn multiple_with_tokio_applied_in_declared_order() {
+        let order: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order_first = Arc::clone(&order);
+        let order_second = Arc::clone(&order);
+        let cfg = Dial9Config::builder()
+            .base_path(tmp_base_path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(4 * 1024 * 1024)
+            .with_tokio(move |_b| {
+                order_first.lock().unwrap().push(1);
+            })
+            .with_tokio(move |_b| {
+                order_second.lock().unwrap().push(2);
+            })
+            .build()
+            .expect("strict build should succeed");
+        let _rt = TelemetryRuntime::try_from(cfg).expect("runtime should build");
+        let recorded = order.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![1, 2],
+            "with_tokio configurators must run in declared order"
+        );
+    }
 }

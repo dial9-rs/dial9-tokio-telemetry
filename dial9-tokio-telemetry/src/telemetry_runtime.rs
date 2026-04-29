@@ -235,3 +235,92 @@ impl TryFrom<Dial9ConfigFallback> for TelemetryRuntime {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn tmp_base_path() -> PathBuf {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Leak the TempDir so it isn't deleted while the test runs.
+        let path = dir.path().join("trace.bin");
+        std::mem::forget(dir);
+        path
+    }
+
+    fn unwritable_base_path() -> PathBuf {
+        PathBuf::from("/this/dir/does/not/exist/dial9_test_trace.bin")
+    }
+
+    #[test]
+    fn from_config_panics_on_strict_io_failure() {
+        let cfg = Dial9Config::builder()
+            .base_path(unwritable_base_path())
+            .max_file_size(1024)
+            .max_total_size(4096)
+            .build()
+            .expect("validation passes; only runtime I/O should fail");
+        let result = catch_unwind(AssertUnwindSafe(move || TelemetryRuntime::from_config(cfg)));
+        let payload = result.expect_err("from_config should panic on strict I/O failure");
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .expect("panic payload should be &str or String");
+        assert!(
+            msg.contains("failed to initialize runtime"),
+            "panic message should mention initialization failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn direct_block_on_enabled_path_returns_value_and_exposes_guard() {
+        let cfg = Dial9Config::builder()
+            .base_path(tmp_base_path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(4 * 1024 * 1024)
+            .build()
+            .expect("strict build should succeed");
+        let rt = TelemetryRuntime::try_from(cfg).expect("runtime should build");
+        assert!(rt.guard().is_some(), "enabled config must install a guard");
+        // Smoke-test the runtime accessor — exists and is usable.
+        let _ = rt.runtime().handle();
+        let value = rt.block_on(async { 5u32 });
+        assert_eq!(value, 5);
+    }
+
+    #[test]
+    fn direct_block_on_disabled_path_returns_value_no_guard() {
+        let cfg = Dial9Config::builder()
+            .enabled(false)
+            .build()
+            .expect("disabled build should succeed");
+        let rt = TelemetryRuntime::try_from(cfg).expect("disabled runtime should build");
+        assert!(
+            rt.guard().is_none(),
+            "disabled config must not install a guard"
+        );
+        let value = rt.block_on(async { 11u32 });
+        assert_eq!(value, 11);
+    }
+
+    #[test]
+    fn telemetry_runtime_error_display_and_source_chain() {
+        let inner = std::io::Error::other("boom");
+        let err = TelemetryRuntimeError::RotatingWriter(inner);
+        let display = format!("{err}");
+        assert!(
+            display.contains("rotating writer:"),
+            "Display should label the variant, got: {display}"
+        );
+        assert!(
+            display.contains("boom"),
+            "Display should include the inner io::Error message, got: {display}"
+        );
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some(), "source() must return the inner io::Error");
+    }
+}
