@@ -1776,15 +1776,18 @@ mod tests {
             "expected at least one SegmentMetadata event in trace files"
         );
 
-        // At least one segment's metadata should contain both runtime mappings.
+        // At least one segment's metadata should contain both runtime mappings
+        // with the exact worker IDs (eagerly populated at attach time).
         let has_both = all_metadata.iter().any(|entries| {
-            let has_main = entries.iter().any(|(k, _)| k == "runtime.main");
-            let has_io = entries.iter().any(|(k, _)| k == "runtime.io");
+            let has_main = entries
+                .iter()
+                .any(|(k, v)| k == "runtime.main" && v == "0,1");
+            let has_io = entries.iter().any(|(k, v)| k == "runtime.io" && v == "2,3");
             has_main && has_io
         });
         assert!(
             has_both,
-            "expected segment metadata to contain both runtime.main and runtime.io, \
+            "expected segment metadata to contain runtime.main=0,1 and runtime.io=2,3, \
              got: {all_metadata:?}"
         );
     }
