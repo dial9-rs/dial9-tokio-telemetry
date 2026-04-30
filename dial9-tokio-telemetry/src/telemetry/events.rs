@@ -1,7 +1,7 @@
 use crate::telemetry::{format::WorkerId, task_metadata::TaskId};
 use dial9_trace_format::{FieldValue, InternedString};
 use serde::Serialize;
-use std::sync::Arc;
+use std::{os::fd::RawFd, sync::Arc};
 
 /// Role of a thread known to the telemetry system.
 #[cfg(feature = "cpu-profiling")]
@@ -449,6 +449,9 @@ pub(crate) fn clock_pair() -> (u64, u64) {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SchedStat {
     pub wait_time_ns: u64,
+    /// Raw fd backing this read, exposed for FD-lifecycle tests. Not used in production.
+    #[allow(dead_code)]
+    fd: RawFd,
 }
 
 #[cfg(target_os = "linux")]
@@ -457,19 +460,17 @@ impl SchedStat {
     /// Opening `/proc/self/task/<tid>/schedstat` is done once per thread; subsequent reads
     /// use `pread(fd, buf, 0)` which is ~2-3x cheaper than open+read+close.
     pub(crate) fn read_current() -> std::io::Result<Self> {
-        use std::os::unix::io::RawFd;
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
         thread_local! {
-            // -1 means not yet opened
-            static SCHED_FD: std::cell::Cell<RawFd> = const { std::cell::Cell::new(-1) };
+            static SCHED_FD: std::cell::RefCell<Option<OwnedFd>> = const { std::cell::RefCell::new(None) };
         }
 
-        let fd = SCHED_FD.with(|cell| {
-            let fd = cell.get();
-            if fd >= 0 {
-                return fd;
+        let fd = SCHED_FD.with(|cell| -> std::io::Result<RawFd> {
+            if let Some(fd) = cell.borrow().as_ref() {
+                return Ok(fd.as_raw_fd());
             }
-            // First call on this thread: open the file
+            // First call on this thread: open the file.
             // SAFETY: SYS_gettid takes no arguments and always succeeds; unsafe is
             // required because syscall() is a raw FFI function with no type checking.
             let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
@@ -482,15 +483,16 @@ impl SchedStat {
                     libc::O_RDONLY | libc::O_CLOEXEC,
                 )
             };
-            if new_fd >= 0 {
-                cell.set(new_fd);
+            if new_fd < 0 {
+                return Err(std::io::Error::last_os_error());
             }
-            new_fd
-        });
-
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+            // SAFETY: new_fd was just returned by open() and is owned by us. OwnedFd
+            // takes ownership and will close it on drop (including on thread exit).
+            let owned = unsafe { OwnedFd::from_raw_fd(new_fd) };
+            let raw = owned.as_raw_fd();
+            *cell.borrow_mut() = Some(owned);
+            Ok(raw)
+        })?;
 
         let mut buf = [0u8; 64];
         // SAFETY: `fd` is a valid open file descriptor (checked above). `buf` is a
@@ -503,15 +505,15 @@ impl SchedStat {
         let s = std::str::from_utf8(&buf[..n as usize]).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "bad schedstat utf8")
         })?;
-        Self::parse(s)
+        Self::parse(s, fd)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad schedstat"))
     }
 
-    fn parse(s: &str) -> Option<Self> {
+    fn parse(s: &str, fd: RawFd) -> Option<Self> {
         let mut parts = s.split_whitespace();
         let _run_time_ns: u64 = parts.next()?.parse().ok()?;
         let wait_time_ns: u64 = parts.next()?.parse().ok()?;
-        Some(SchedStat { wait_time_ns })
+        Some(SchedStat { wait_time_ns, fd })
     }
 }
 
@@ -623,5 +625,24 @@ mod tests {
         };
         let cloned = event.clone();
         assert_eq!(event, cloned);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_schedstat_fd_closed_on_thread_exit() {
+        // fcntl(fd, F_GETFD) returns -1 with errno=EBADF for closed fds.
+        // SAFETY: F_GETFD with a raw fd is side-effect free.
+        fn fd_is_open(fd: std::os::fd::RawFd) -> bool {
+            unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
+        }
+
+        let fd = std::thread::spawn(|| SchedStat::read_current().unwrap().fd)
+            .join()
+            .unwrap();
+
+        assert!(
+            !fd_is_open(fd),
+            "schedstat fd {fd} leaked after thread exit"
+        );
     }
 }
