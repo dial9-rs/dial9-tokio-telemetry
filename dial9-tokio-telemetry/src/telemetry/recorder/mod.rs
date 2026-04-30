@@ -1253,9 +1253,28 @@ fn run_flush_loop(
     }
 }
 
-/// Entry point for setting up a traced Tokio runtime.
+/// A tokio runtime paired with its (optional) dial9 telemetry guard.
+///
+/// The guard, when present, must outlive the runtime so traces are flushed
+/// on drop — keeping both inside one struct enforces that ordering at the
+/// type level (fields drop top-to-bottom, so `runtime` drops before `guard`).
+///
+/// Construct one of two ways:
+///
+/// - **High-level**: from a [`crate::Dial9Config`] via [`TracedRuntime::new`]
+///   (panicking, used by the `#[dial9_tokio_telemetry::main]` macro) or
+///   [`TracedRuntime::try_new`] (fallible).
+/// - **Low-level**: via [`TracedRuntime::builder`] →
+///   [`TracedRuntimeBuilder::build_and_start`] for direct control over the
+///   raw [`tokio::runtime::Builder`] and [`crate::telemetry::TraceWriter`].
+///   This is the path used by example code, benchmarks, and integration
+///   tests that want to wire a [`crate::telemetry::NullWriter`] or other
+///   custom writer.
 #[derive(Debug)]
-pub struct TracedRuntime;
+pub struct TracedRuntime {
+    pub(crate) runtime: tokio::runtime::Runtime,
+    pub(crate) guard: Option<TelemetryGuard>,
+}
 
 impl TracedRuntime {
     /// Create a new [`TracedRuntimeBuilder`].
@@ -1312,6 +1331,221 @@ impl TracedRuntime {
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         Self::builder().build_and_start_with_writer(builder, writer)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// High-level construction: TracedRuntime::new / try_new from Dial9Config
+// ---------------------------------------------------------------------------
+//
+// These are the entry points the `#[dial9_tokio_telemetry::main]` macro and
+// hand-written `main` functions reach for. The low-level
+// `TracedRuntime::builder()` / `build_and_start()` above stay available for
+// callers (benches, integration tests, custom-writer setups) that need to
+// drive the [`tokio::runtime::Builder`] directly.
+
+/// Errors produced while constructing a [`TracedRuntime`] from a
+/// [`Dial9Config`].
+///
+/// Writer-transport I/O has already been validated by
+/// [`crate::Dial9ConfigBuilder::build`], so the only remaining failure
+/// modes here come from the tokio runtime builder and the telemetry
+/// background worker startup.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum TelemetryRuntimeError {
+    /// Failure from [`tokio::runtime::Builder::build`].
+    TokioRuntimeBuilder(std::io::Error),
+    /// Failure from telemetry core setup (traced runtime + background worker).
+    TelemetryCore(std::io::Error),
+}
+
+impl std::fmt::Display for TelemetryRuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TelemetryRuntimeError::TokioRuntimeBuilder(e) => {
+                write!(f, "tokio runtime builder: {e}")
+            }
+            TelemetryRuntimeError::TelemetryCore(e) => write!(f, "telemetry core: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for TelemetryRuntimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TelemetryRuntimeError::TokioRuntimeBuilder(e)
+            | TelemetryRuntimeError::TelemetryCore(e) => Some(e),
+        }
+    }
+}
+
+/// Drive a [`crate::current_config::Inner`] to a tokio runtime + (optional) guard.
+///
+/// `Inner::Enabled` already carries a built [`RotatingWriter`], so this
+/// only needs to materialize the tokio builder and hand both off to
+/// [`TracedRuntimeBuilder::build_and_start`].
+fn try_assemble_dial9_config(
+    inner: crate::current_config::Inner,
+) -> Result<(tokio::runtime::Runtime, Option<TelemetryGuard>), TelemetryRuntimeError> {
+    use crate::current_config::{Inner, materialize_tokio_builder};
+
+    match inner {
+        Inner::Enabled {
+            writer,
+            tokio_configurators,
+            runtime_builder,
+        } => {
+            let tokio_builder = materialize_tokio_builder(&tokio_configurators);
+            let (runtime, guard) = runtime_builder
+                .build_and_start(tokio_builder, writer)
+                .map_err(TelemetryRuntimeError::TelemetryCore)?;
+            Ok((runtime, Some(guard)))
+        }
+        Inner::Disabled {
+            tokio_configurators,
+        } => {
+            let runtime = materialize_tokio_builder(&tokio_configurators)
+                .build()
+                .map_err(TelemetryRuntimeError::TokioRuntimeBuilder)?;
+            Ok((runtime, None))
+        }
+    }
+}
+
+impl TracedRuntime {
+    /// Build a [`TracedRuntime`] from a config, panicking with the
+    /// underlying error on failure. Used by the
+    /// `#[dial9_tokio_telemetry::main]` macro.
+    ///
+    /// Reach for this directly when the macro doesn't fit — e.g. when an
+    /// application owns multiple tokio runtimes, when you need to control
+    /// runtime lifetime explicitly, or when you want to drive
+    /// [`TelemetryGuard::graceful_shutdown`] before the runtime drops.
+    ///
+    /// Generic over any input that converts into a [`TracedRuntime`]: in
+    /// practice that means either the fluent
+    /// [`crate::Dial9Config`] (returned by
+    /// [`Dial9Config::builder`](crate::Dial9Config::builder)) or the
+    /// deprecated positional [`crate::config::Dial9Config`]. The generic
+    /// shape is what keeps the macro source-compatible across these
+    /// input types.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying conversion fails — i.e. if the tokio
+    /// runtime cannot be built or the telemetry background worker fails
+    /// to start. When constructing from the fluent
+    /// [`crate::Dial9Config`], writer-transport I/O has already been
+    /// validated by
+    /// [`Dial9ConfigBuilder::build`](crate::Dial9ConfigBuilder::build),
+    /// so the only remaining failure modes are tokio-builder and
+    /// telemetry-core startup I/O.
+    ///
+    /// For fallible construction, use [`try_new`](Self::try_new).
+    ///
+    /// ```no_run
+    /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
+    /// let cfg = Dial9Config::builder()
+    ///     .base_path("trace.bin")
+    ///     .max_file_size(64 * 1024 * 1024)
+    ///     .max_total_size(1024 * 1024 * 1024)
+    ///     .build()?;
+    /// let rt = TracedRuntime::new(cfg);
+    /// rt.block_on(async { /* ... */ });
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn new<C>(config: C) -> Self
+    where
+        C: TryInto<TracedRuntime>,
+        <C as TryInto<TracedRuntime>>::Error: std::fmt::Display,
+    {
+        config
+            .try_into()
+            .unwrap_or_else(|e| panic!("failed to initialize runtime: {e}"))
+    }
+
+    /// Fallible counterpart to [`new`](Self::new).
+    ///
+    /// Returns the conversion error directly: when constructing from
+    /// [`crate::Dial9Config`] that's a [`TelemetryRuntimeError`]; when
+    /// constructing from the deprecated [`crate::config::Dial9Config`]
+    /// it's a [`std::io::Error`]. Use this when you want to handle
+    /// runtime construction failure rather than panic.
+    ///
+    /// ```no_run
+    /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
+    /// let cfg = Dial9Config::builder()
+    ///     .base_path("trace.bin")
+    ///     .max_file_size(64 * 1024 * 1024)
+    ///     .max_total_size(1024 * 1024 * 1024)
+    ///     .build()?;
+    /// let rt = TracedRuntime::try_new(cfg)?;
+    /// rt.block_on(async { /* ... */ });
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn try_new<C>(config: C) -> Result<Self, <C as TryInto<TracedRuntime>>::Error>
+    where
+        C: TryInto<TracedRuntime>,
+    {
+        config.try_into()
+    }
+
+    /// Borrow the underlying tokio runtime.
+    pub fn runtime(&self) -> &tokio::runtime::Runtime {
+        &self.runtime
+    }
+
+    /// Borrow the telemetry guard, if telemetry was enabled.
+    pub fn guard(&self) -> Option<&TelemetryGuard> {
+        self.guard.as_ref()
+    }
+
+    /// Run `fut` to completion on the runtime.
+    ///
+    /// When telemetry is enabled, the future is spawned through the
+    /// [`TelemetryHandle`] so its poll and wake events are recorded. When
+    /// telemetry is disabled, this is just a passthrough to
+    /// [`tokio::runtime::Runtime::block_on`].
+    pub fn block_on<F>(&self, fut: F) -> F::Output
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        if let Some(guard) = &self.guard {
+            let handle = guard.handle();
+            self.runtime.block_on(async move {
+                match handle.spawn(fut).await {
+                    Ok(output) => output,
+                    Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+                    Err(_) => unreachable!("task cannot be cancelled inside block_on"),
+                }
+            })
+        } else {
+            self.runtime.block_on(fut)
+        }
+    }
+}
+
+impl TryFrom<crate::Dial9Config> for TracedRuntime {
+    type Error = TelemetryRuntimeError;
+
+    fn try_from(config: crate::Dial9Config) -> Result<Self, Self::Error> {
+        let (runtime, guard) = try_assemble_dial9_config(config.0)?;
+        Ok(Self { runtime, guard })
+    }
+}
+
+/// Bridge for the deprecated positional config API at
+/// [`crate::config::Dial9Config`] so that it remains compatible with
+/// [`TracedRuntime::new`] (and therefore the
+/// `#[dial9_tokio_telemetry::main]` macro).
+impl TryFrom<crate::config::Dial9Config> for TracedRuntime {
+    type Error = std::io::Error;
+
+    fn try_from(config: crate::config::Dial9Config) -> Result<Self, Self::Error> {
+        let (runtime, guard) = config.build()?;
+        Ok(Self { runtime, guard })
     }
 }
 
@@ -2220,5 +2454,83 @@ mod tests {
         drop(rt_a);
         drop(rt_b);
         let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
+    }
+
+    // ---------------------------------------------------------------
+    // High-level construction tests (TracedRuntime::new / try_new)
+    // ---------------------------------------------------------------
+
+    fn dial9_config_tmp_base_path() -> std::path::PathBuf {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Leak the TempDir so it isn't deleted while the test runs.
+        let path = dir.path().join("trace.bin");
+        std::mem::forget(dir);
+        path
+    }
+
+    #[test]
+    fn try_new_enabled_path_returns_value_and_exposes_guard() {
+        let cfg = crate::Dial9Config::builder()
+            .base_path(dial9_config_tmp_base_path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(4 * 1024 * 1024)
+            .build()
+            .expect("strict build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        assert!(rt.guard().is_some(), "enabled config must install a guard");
+        // Smoke-test the runtime accessor — exists and is usable.
+        let _ = rt.runtime().handle();
+        let value = rt.block_on(async { 5u32 });
+        assert_eq!(value, 5);
+    }
+
+    #[test]
+    fn try_new_disabled_path_returns_value_no_guard() {
+        let cfg = crate::Dial9Config::builder()
+            .enabled(false)
+            .build()
+            .expect("disabled build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
+        assert!(
+            rt.guard().is_none(),
+            "disabled config must not install a guard"
+        );
+        let value = rt.block_on(async { 11u32 });
+        assert_eq!(value, 11);
+    }
+
+    #[test]
+    fn new_returns_runtime_for_valid_disabled_config() {
+        // Happy-path counterpart to the strict-I/O panic story: when the
+        // config is valid `TracedRuntime::new` returns a usable runtime
+        // without panicking. The matching panic path is covered by hand at
+        // the type level — `new` is a thin wrapper around `try_into()` that
+        // calls `unwrap_or_else(|e| panic!(...))`, and the surrounding
+        // tests assert that the inner `TelemetryRuntimeError` formats
+        // through `Display` correctly.
+        let cfg = crate::Dial9Config::builder()
+            .enabled(false)
+            .build()
+            .expect("disabled build should succeed");
+        let rt = TracedRuntime::new(cfg);
+        let value = rt.block_on(async { 13u32 });
+        assert_eq!(value, 13);
+    }
+
+    #[test]
+    fn telemetry_runtime_error_display_and_source_chain() {
+        let inner = std::io::Error::other("boom");
+        let err = TelemetryRuntimeError::TelemetryCore(inner);
+        let display = format!("{err}");
+        assert!(
+            display.contains("telemetry core:"),
+            "Display should label the variant, got: {display}"
+        );
+        assert!(
+            display.contains("boom"),
+            "Display should include the inner io::Error message, got: {display}"
+        );
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some(), "source() must return the inner io::Error");
     }
 }

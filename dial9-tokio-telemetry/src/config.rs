@@ -1,7 +1,7 @@
 //! Unified configuration for the `#[dial9_tokio_telemetry::main]` macro.
 //!
 //! Start with [`Dial9Config::builder()`] and chain setters to produce a
-//! config that the macro (or [`crate::TelemetryRuntime`]) consumes. The
+//! config that the macro (or [`crate::TracedRuntime`]) consumes. The
 //! builder stages a [`tokio::runtime::Builder`] and accumulates
 //! [`TracedRuntimeBuilder`] configurators eagerly; use
 //! [`Dial9ConfigBuilder::with_tokio`] and
@@ -341,7 +341,7 @@ impl<S: dial9_config_builder::IsComplete> Dial9ConfigBuilder<S> {
     /// `dial9_telemetry` target and returns a [`Dial9Config`] in its
     /// disabled state with the user's `with_tokio` configurators
     /// preserved. The resulting config builds a plain tokio runtime
-    /// when handed to [`crate::TelemetryRuntime::try_from`].
+    /// when handed to [`crate::TracedRuntime::try_new`].
     ///
     /// Lenient counterpart to [`build`](Self::build). Use
     /// [`build`](Self::build) instead when you want validation and
@@ -370,7 +370,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::TelemetryRuntime;
+    use crate::TracedRuntime;
 
     use super::*;
 
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn build_or_disabled_from_incomplete_builder_yields_disabled_runtime() {
         let cfg = Dial9Config::builder().build_or_disabled();
-        let rt = TelemetryRuntime::try_from(cfg).expect("fallback runtime should build");
+        let rt = TracedRuntime::try_new(cfg).expect("fallback runtime should build");
         assert!(
             rt.guard().is_none(),
             "fallback path must not install a guard"
@@ -466,7 +466,7 @@ mod tests {
             .max_file_size(1024)
             .max_total_size(4096)
             .build_or_disabled();
-        let rt = TelemetryRuntime::try_from(cfg).expect("enabled runtime should build");
+        let rt = TracedRuntime::try_new(cfg).expect("enabled runtime should build");
         assert!(
             rt.guard().is_some(),
             "valid config must keep telemetry enabled"
@@ -480,8 +480,8 @@ mod tests {
             .max_file_size(1024)
             .max_total_size(4096)
             .build_or_disabled();
-        let rt = TelemetryRuntime::try_from(cfg)
-            .expect("writer I/O failure should downgrade to disabled");
+        let rt =
+            TracedRuntime::try_new(cfg).expect("writer I/O failure should downgrade to disabled");
         assert!(
             rt.guard().is_none(),
             "downgrade path must not install a guard"
@@ -503,7 +503,7 @@ mod tests {
                 b.worker_threads(1);
             })
             .build_or_disabled();
-        let rt = TelemetryRuntime::try_from(cfg).expect("downgrade should produce a runtime");
+        let rt = TracedRuntime::try_new(cfg).expect("downgrade should produce a runtime");
         assert!(rt.guard().is_none());
         let calls = counter.load(Ordering::SeqCst);
         assert!(
@@ -530,7 +530,7 @@ mod tests {
             })
             .build()
             .expect("strict build should succeed");
-        let _rt = TelemetryRuntime::try_from(cfg).expect("runtime should build");
+        let _rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -557,7 +557,7 @@ mod tests {
             1,
             "with_runtime configurator must run exactly once during build()"
         );
-        let _rt = TelemetryRuntime::try_from(cfg).expect("runtime should build");
+        let _rt = TracedRuntime::try_new(cfg).expect("runtime should build");
     }
 
     #[test]
@@ -572,7 +572,7 @@ mod tests {
             })
             .build()
             .expect("disabled build should succeed without required fields");
-        let rt = TelemetryRuntime::try_from(cfg).expect("disabled runtime should build");
+        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
         assert!(
             rt.guard().is_none(),
             "disabled config must not install a guard"
@@ -601,7 +601,7 @@ mod tests {
             })
             .build()
             .expect("strict build should succeed");
-        let _rt = TelemetryRuntime::try_from(cfg).expect("runtime should build");
+        let _rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         let recorded = order.lock().unwrap().clone();
         assert_eq!(
             recorded,

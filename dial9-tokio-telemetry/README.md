@@ -95,10 +95,10 @@ See [`examples/optional_telemetry.rs`](/dial9-tokio-telemetry/examples/optional_
 
 ### Without the macro
 
-The macro expands to `TelemetryRuntime::from_config(...).block_on(...)`. If you'd rather drive that yourself — for tests, libraries that build their own runtime, or any code that doesn't own `main` — `TelemetryRuntime` is a public type that accepts a `Dial9Config`:
+The macro expands to `TracedRuntime::new(...).block_on(...)`. If you'd rather drive that yourself — for tests, libraries that build their own runtime, or any code that doesn't own `main` — `TracedRuntime` is a public type that accepts a `Dial9Config`:
 
 ```rust,no_run
-use dial9_tokio_telemetry::{Dial9Config, TelemetryRuntime};
+use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
 
 let cfg = Dial9Config::builder()
     .base_path("/tmp/my_traces/trace.bin")
@@ -107,7 +107,7 @@ let cfg = Dial9Config::builder()
     .build()
     .expect("config build failed");
 
-let rt = TelemetryRuntime::try_from(cfg).expect("runtime build failed");
+let rt = TracedRuntime::try_new(cfg).expect("runtime build failed");
 rt.block_on(async {
     // body runs as a spawned, instrumented task — same as under #[main]
 });

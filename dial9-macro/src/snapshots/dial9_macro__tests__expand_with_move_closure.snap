@@ -3,7 +3,7 @@ source: dial9-macro/src/lib.rs
 expression: output
 ---
 fn main() {
-    let __dial9_rt = ::dial9_tokio_telemetry::TelemetryRuntime::from_config(
+    let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new(
         (move || my_config())(),
     );
     __dial9_rt

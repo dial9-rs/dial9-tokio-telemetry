@@ -34,10 +34,8 @@ pub mod config;
 #[path = "config.rs"]
 mod current_config;
 
-mod telemetry_runtime;
-
 pub use current_config::{
     Dial9Config, Dial9ConfigBuilder, Dial9ConfigBuilderError, ValidationError,
 };
 pub use dial9_macro::main;
-pub use telemetry_runtime::{TelemetryRuntime, TelemetryRuntimeError};
+pub use telemetry::{TelemetryRuntimeError, TracedRuntime};

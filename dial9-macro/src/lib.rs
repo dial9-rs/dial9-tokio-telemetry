@@ -95,7 +95,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     Ok(quote! {
         #(#attrs)*
         #vis fn #name() #ret {
-            let __dial9_rt = ::dial9_tokio_telemetry::TelemetryRuntime::from_config(#config_call);
+            let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new(#config_call);
             __dial9_rt.block_on(async move { #(#body_stmts)* })
         }
     })
@@ -116,7 +116,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// # Arguments
 ///
 /// * `config` — a zero-argument function path or a zero-argument closure
-///   returning any value convertible into a `TelemetryRuntime`. In
+///   returning any value convertible into a `TracedRuntime`. In
 ///   practice that means one of:
 ///     - [`Dial9Config`] from `Dial9Config::builder().build()` (strict):
 ///       any builder validation or writer-I/O failure surfaces from
