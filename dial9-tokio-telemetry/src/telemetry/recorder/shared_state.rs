@@ -85,7 +85,7 @@ impl SharedState {
 
     /// Check whether recording is currently enabled.
     ///
-    /// Prefer [`enabled`](Self::enabled) for event-recording paths — it
+    /// Prefer [`if_enabled`](Self::if_enabled) for event-recording paths — it
     /// provides an [`EventBuffer`] that makes it structurally impossible to
     /// record without checking first. Use `is_enabled()` only for
     /// control-flow decisions that don't directly record events (e.g.
@@ -117,7 +117,7 @@ impl SharedState {
 
     /// Record a user-defined [`Encodable`](crate::telemetry::buffer::Encodable) event.
     ///
-    /// Callers must ensure recording is enabled (via [`enabled`](Self::enabled)
+    /// Callers must ensure recording is enabled (via [`if_enabled`](Self::if_enabled)
     /// or [`is_enabled`](Self::is_enabled)) before calling this method.
     fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
         if let Some(handle) =
@@ -205,7 +205,7 @@ impl SharedState {
     }
 }
 
-/// Handle provided by [`SharedState::enabled`] that proves recording is
+/// Handle provided by [`SharedState::if_enabled`] that proves recording is
 /// active. All event-recording calls should go through this type so that
 /// callers cannot accidentally emit events without an enabled check.
 pub(crate) struct EventBuffer<'a>(&'a SharedState);

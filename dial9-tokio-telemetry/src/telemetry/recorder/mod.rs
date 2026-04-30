@@ -89,9 +89,9 @@ fn flush_once(
     let cpu_events_time = std::time::Instant::now();
     #[cfg(feature = "cpu-profiling")]
     {
-        shared.if_enabled(|_buf| {
+        if shared.is_enabled() {
             event_writer.flush_cpu(shared);
-        });
+        }
     }
     let cpu_flush_duration = cpu_events_time.elapsed();
 
