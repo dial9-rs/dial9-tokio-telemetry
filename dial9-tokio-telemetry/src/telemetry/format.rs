@@ -412,8 +412,8 @@ pub(crate) fn to_owned_event(
             source: e.source,
             callchain: stack_pool
                 .get(e.callchain)
-                .map(|s| s.to_vec())
-                .unwrap_or_default(),
+                .expect("stack pool entry must exist for CpuSample callchain")
+                .to_vec(),
         },
         TelemetryEventRef::WakeEvent(e) => TelemetryEvent::WakeEvent {
             timestamp_nanos: e.timestamp_ns,
