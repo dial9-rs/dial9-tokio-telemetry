@@ -4,18 +4,40 @@ on:
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - '.github/workflows/audit.yml'
+  pull_request:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/workflows/audit.yml'
   schedule:
     - cron: "0 0 * * *"
   workflow_dispatch:
+
 permissions:
-  checks: write
   contents: read
 
 jobs:
   security_audit:
+    name: cargo audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
+
+      # Install a prebuilt cargo-audit binary (fast; avoids a source build).
+      - uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+
+      # Run cargo audit directly so the full advisory output (crate, version,
+      # dependency tree, solution) is visible in the workflow logs rather than
+      # hidden behind the Checks API.
+      #
+      # Ignored advisories (with justification):
+      #   RUSTSEC-2026-0104  rustls-webpki 0.101.7 — panic reachable only when
+      #     parsing certificate revocation lists (CRLs). Pulled in transitively
+      #     by the AWS SDK's legacy hyper-0.14 connector. We don't use CRLs,
+      #     and rustls 0.21.x has no patched release (fix is in 0.103.13+).
+      #     Revisit when the AWS SDK drops the legacy-rustls-ring feature.
+      - name: Run cargo audit
+        run: cargo audit --ignore RUSTSEC-2026-0104
