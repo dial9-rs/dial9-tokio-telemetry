@@ -187,6 +187,21 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///     /* ... */
 /// }
 /// ```
+///
+/// Disabled (no telemetry, plain tokio runtime — useful for toggling
+/// dial9 off via a feature flag or env var without removing the macro):
+///
+/// ```rust,ignore
+/// #[dial9_tokio_telemetry::main(config = || {
+///     Dial9Config::builder()
+///         .enabled(false)
+///         .build()
+///         .expect("config build failed")
+/// })]
+/// async fn main() {
+///     /* ... */
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as MainArgs);

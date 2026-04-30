@@ -79,12 +79,37 @@ impl TelemetryRuntime {
     /// construction fails. Used by the `#[dial9_tokio_telemetry::main]`
     /// macro.
     ///
+    /// You will also reach for this directly when the macro doesn't fit —
+    /// e.g. when an application owns multiple tokio runtimes, when you
+    /// need to control runtime lifetime explicitly, or when you want to
+    /// drive graceful shutdown via [`guard()`](Self::guard) before the
+    /// runtime drops.
+    ///
     /// Generic over any input that converts into a [`TelemetryRuntime`],
     /// so it accepts strict ([`Dial9Config`]), lenient
     /// ([`Dial9ConfigFallback`]), and the deprecated positional
     /// [`crate::config::Dial9Config`] configs transparently. The
     /// generic shape is what keeps the macro source-compatible across
     /// these three input types.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying conversion fails — i.e. if the tokio
+    /// runtime cannot be built, or (when called with the strict
+    /// [`Dial9Config`]) if the writer's I/O setup fails.
+    ///
+    /// For fallible construction, use the [`TryFrom`] impl directly:
+    ///
+    /// ```no_run
+    /// # use dial9_tokio_telemetry::{Dial9Config, TelemetryRuntime};
+    /// let cfg = Dial9Config::builder()
+    ///     .base_path("trace.bin")
+    ///     .max_file_size(64 * 1024 * 1024)
+    ///     .max_total_size(1024 * 1024 * 1024)
+    ///     .build()?;
+    /// let rt = TelemetryRuntime::try_from(cfg)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn from_config<C>(config: C) -> Self
     where
         C: TryInto<TelemetryRuntime>,

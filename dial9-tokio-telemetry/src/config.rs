@@ -215,7 +215,7 @@ impl Dial9Config {
         /// Wall-clock rotation period for the writer.
         rotation_period: Option<Duration>,
     ) -> Result<Dial9Config, Dial9ConfigBuilderError> {
-        assemble(
+        assemble(AssembleArgs {
             tokio_configurators,
             runtime_configurators,
             enabled,
@@ -223,17 +223,12 @@ impl Dial9Config {
             max_file_size,
             max_total_size,
             rotation_period,
-        )
+        })
         .map(Dial9Config)
     }
 }
 
-/// Shared finish-fn body: builder-staged fields > [`Inner`].
-///
-/// Used by both `build()` (which propagates the error) and
-/// `build_or_disabled()` (which substitutes [`Inner::Disabled`] on error).
-#[allow(clippy::too_many_arguments)]
-fn assemble(
+struct AssembleArgs {
     tokio_configurators: Vec<TokioConfigurator>,
     runtime_configurators: Vec<RuntimeConfigurator>,
     enabled: bool,
@@ -241,7 +236,23 @@ fn assemble(
     max_file_size: Option<u64>,
     max_total_size: Option<u64>,
     rotation_period: Option<Duration>,
-) -> Result<Inner, Dial9ConfigBuilderError> {
+}
+
+/// Shared finish-fn body: builder-staged fields > [`Inner`].
+///
+/// Used by both `build()` (which propagates the error) and
+/// `build_or_disabled()` (which substitutes [`Inner::Disabled`] on error).
+fn assemble(args: AssembleArgs) -> Result<Inner, Dial9ConfigBuilderError> {
+    let AssembleArgs {
+        tokio_configurators,
+        runtime_configurators,
+        enabled,
+        base_path,
+        max_file_size,
+        max_total_size,
+        rotation_period,
+    } = args;
+
     if !enabled {
         return Ok(Inner::Disabled {
             tokio_configurators,
@@ -338,9 +349,10 @@ impl<S: dial9_config_builder::IsComplete> Dial9ConfigBuilder<S> {
     /// [`std::io::Error`] (from the tokio builder itself) can still
     /// escape that conversion.
     ///
-    /// Counterpart to [`build`](Self::build), which preserves today's
-    /// strict behavior — RotatingWriter / telemetry-core I/O failures
-    /// propagate as [`crate::TelemetryRuntimeError`] from the strict path.
+    /// Lenient counterpart to [`build`](Self::build). Use
+    /// [`build`](Self::build) instead when you want builder validation
+    /// errors and downstream RotatingWriter / telemetry-core I/O failures
+    /// to surface as [`crate::TelemetryRuntimeError`].
     pub fn build_or_disabled(self) -> Dial9ConfigFallback {
         let cfgs_for_fallback = self.tokio_configurators.clone();
         match self.build() {

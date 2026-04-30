@@ -17,32 +17,20 @@
 
 use std::time::Duration;
 
-use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::{Dial9Config, Dial9ConfigFallback};
 
-fn configure_tokio(t: &mut tokio::runtime::Builder) {
-    t.worker_threads(4);
-    // other tokio configuration...
-}
-
-fn telemetry_disabled_config() -> Dial9Config {
-    Dial9Config::builder()
-        .enabled(false)
-        .with_tokio(configure_tokio)
-        .build()
-        .expect("tokio runtime builder failed")
-}
-
-fn my_config() -> Dial9Config {
+fn my_config() -> Dial9ConfigFallback {
     Dial9Config::builder()
         .enabled(std::env::var("ENABLE_DIAL9").is_ok())
         .base_path("conditionally_enable_trace.bin")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
-        .with_tokio(configure_tokio)
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
         .with_runtime(|r| r.with_task_tracking(true))
-        .build()
-        .unwrap_or_else(|_| telemetry_disabled_config())
+        .build_or_disabled()
 }
 
 async fn cpu_work(iterations: u64) -> u64 {
