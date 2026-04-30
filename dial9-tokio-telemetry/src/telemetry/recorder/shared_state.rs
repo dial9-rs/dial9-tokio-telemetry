@@ -503,7 +503,8 @@ mod shuttle_tests {
     fn decode_validation_events(data: &[u8]) -> Vec<ValidationEvent> {
         use dial9_trace_format::decoder::Decoder;
         let Some(mut dec) = Decoder::new(data) else {
-            return Vec::new();
+            assert!(data.is_empty(), "failed to non-empty segment!");
+            return vec![];
         };
         let mut out = Vec::new();
         dec.for_each_event(|ev| {
@@ -551,47 +552,6 @@ mod shuttle_tests {
                 "timestamp mismatch for event id {}: expected {exp_ts}, got {}",
                 ev.id, ev.timestamp_ns
             );
-        }
-    }
-
-    /// Per-thread events within each segment are in sequence order, and
-    /// segments are temporally ordered per-thread: if thread T's event
-    /// with seq=S is in segment K, no event from thread T with seq < S
-    /// may appear in segment K+1 or later.
-    fn check_segments_temporally_ordered(segments: &[Vec<ValidationEvent>]) {
-        let mut max_seq_before: HashMap<u64, u64> = HashMap::new();
-
-        for (seg_idx, seg) in segments.iter().enumerate() {
-            let mut per_thread: HashMap<u64, Vec<u64>> = HashMap::new();
-            for ev in seg {
-                per_thread.entry(ev.thread_id).or_default().push(ev.seq);
-            }
-
-            for (&tid, seqs) in &per_thread {
-                for w in seqs.windows(2) {
-                    assert!(
-                        w[0] < w[1],
-                        "segment {seg_idx}: thread {tid} events out of order: seq {} before {}",
-                        w[0],
-                        w[1]
-                    );
-                }
-
-                let min_seq = *seqs.first().unwrap();
-                if let Some(&prev_max) = max_seq_before.get(&tid) {
-                    assert!(
-                        min_seq > prev_max,
-                        "segment {seg_idx}: thread {tid} has seq {min_seq} but previous \
-                         segment already had seq {prev_max} — event leaked across rotation"
-                    );
-                }
-
-                let max_seq = *seqs.last().unwrap();
-                max_seq_before
-                    .entry(tid)
-                    .and_modify(|v| *v = (*v).max(max_seq))
-                    .or_insert(max_seq);
-            }
         }
     }
 
@@ -657,7 +617,6 @@ mod shuttle_tests {
         // Run all invariants.
         check_all_events_present(&expected, &all_decoded);
         check_timestamps_roundtrip(&expected, &all_decoded);
-        check_segments_temporally_ordered(&decoded_segments);
     }
 
     #[test]

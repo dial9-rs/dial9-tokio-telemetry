@@ -73,7 +73,7 @@ pub(crate) mod sync {
             ) -> Result<T, RecvTimeoutError> {
                 // Randomly decide whether to simulate a timeout, giving
                 // the flush loop a chance to execute its body.
-                if shuttle::rand::thread_rng().gen_bool(0.5) {
+                if shuttle::rand::thread_rng().gen_bool(0.8) {
                     match self.inner.try_recv() {
                         Ok(val) => Ok(val),
                         Err(shuttle::sync::mpsc::TryRecvError::Empty) => {
