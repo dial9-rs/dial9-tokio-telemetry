@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.5...dial9-tokio-telemetry-v0.3.6) - 2026-04-30
+
+### Added
+
+- Store S3 metadata into segement metadata ([#311](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/311))
+- detect uninstrumented task spawns and surface in viewer ([#293](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/293))
+- Add simple example for local execution ([#306](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/306)) — thanks @mox692!
+
+### Fixed
+
+- Don't register sched events on blocking pool threads ([#316](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/316))
+- *(viewer)* correct schedWait unit from µs to ns ([#308](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/308))
+
+### Other
+
+- Fix thread CPU time measurement details in README ([#312](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/312))
+- Fix ctimer test on AL2 ([#317](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/317))
+- Allow opening .gz trace files in the file picker ([#315](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/315))
+- [dial9-viewer] Toolkit: parallel multi-file trace analysis with caching ([#298](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/298))
+- Retain parent stack trace when zooming into flamegraph frames ([#305](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/305))
+- Retain selection overlay while sidebar is open ([#304](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/304))
+- (viewer) Move flamegraph into sidebar instead of full-screen overlay ([#291](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/291))
+
 ## [0.3.5](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.4...dial9-tokio-telemetry-v0.3.5) - 2026-04-24
 
 ### Added
