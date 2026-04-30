@@ -164,7 +164,7 @@ runtime.block_on(async {
 
 ## Wake event tracking (opt-in)
 
-To understand when Tokio itself is delaying your code (scheduler delay), you need to know when your future was _ready_ to run. Wake events, which fire at the moment your future is read to be polled, are _not_ captured automatically. Tokio's runtime hooks don't currently allow instrumenting wakes: capturing wakes requires wrapping the future. The simplest way is to use `handle.spawn` instead of `tokio::spawn`.
+To understand when Tokio itself is delaying your code (scheduler delay), you need to know when your future was _ready_ to run. Wake events, which fire at the moment your future is ready to be polled, are _not_ captured automatically. Tokio's runtime hooks don't currently allow instrumenting wakes: capturing wakes requires wrapping the future. The simplest way is to use `handle.spawn` instead of `tokio::spawn`.
 
 Use `handle.spawn()` instead of `tokio::spawn()`:
 

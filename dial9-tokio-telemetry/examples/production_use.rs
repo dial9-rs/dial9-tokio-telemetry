@@ -2,11 +2,11 @@
 //!
 //! It also provides an opinionated set of knobs and environment variables to configure your application.
 //!
-//! Many applications can run with dial9 enabled all the time. Some applications will have worse performance, especially applications that perform a
+//! Many applications can run with dial9 enabled all the time. Some applications will have worse performance, especially applications that perform
 //! a very small amount of "useful work" per poll. Applications that use an extremely large number of worker threads will experience higher memory usage.
 //! For an average production service, Dial9 produces 50-100GB / day.
 //!
-//! Since dial9 is recording an even on each poll (~50ns), if your polls are very short then this fix cost of overhead will impact your application performance.
+//! Since dial9 is recording an event on each poll (~50ns), if your polls are very short then this fix cost of overhead will impact your application performance.
 //!
 //! ### Enabling and Disabling
 //! - If you use `Dial9ConfigBuilder::disabled()` dial9 is fully unused in your application and you have a normal, unmodified Tokio runtime.
@@ -51,7 +51,7 @@
 //!
 //! | Name                              | Default                         | Meaning                                                       |
 //! | --------------------------------- | ------------------------------- | ------------------------------------------------------------- |
-//! | `DIAL9_ENABLED`                   | `false`                         | Master switch. `true`/`1`/`yes` enables telemetry.            |
+//! | `DIAL9_ENABLED`                   | `false`                         | Master switch. `true`/`false` only (Rust `bool::from_str`).   |
 //! | `DIAL9_TRACE_DIR`                 | `/tmp/dial9-traces`             | Directory to write rotated trace segments into.               |
 //! | `DIAL9_ROTATION_SECS`             | `60`                            | Wall-clock rotation period in seconds.                        |
 //! | `DIAL9_MAX_DISK_USAGE_MB`         | `1024`                          | Upper bound on total on-disk bytes (old files evicted).       |
