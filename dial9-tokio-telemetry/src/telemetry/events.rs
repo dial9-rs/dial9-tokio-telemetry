@@ -1,7 +1,7 @@
 use crate::telemetry::{format::WorkerId, task_metadata::TaskId};
 use dial9_trace_format::{FieldValue, InternedString};
 use serde::Serialize;
-use std::{os::fd::RawFd, sync::Arc};
+use std::sync::Arc;
 
 /// Role of a thread known to the telemetry system.
 #[cfg(feature = "cpu-profiling")]
@@ -446,12 +446,12 @@ pub(crate) fn clock_pair() -> (u64, u64) {
 
 /// Per-thread scheduler stats from `/proc/<pid>/task/<tid>/schedstat`.
 /// Fields: run_time_ns wait_time_ns timeslices
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct SchedStat {
     pub wait_time_ns: u64,
     /// Raw fd backing this read, exposed for FD-lifecycle tests. Not used in production.
-    #[allow(dead_code)]
-    fd: RawFd,
+    #[cfg(test)]
+    fd: std::os::fd::RawFd,
 }
 
 #[cfg(target_os = "linux")]
@@ -505,15 +505,19 @@ impl SchedStat {
         let s = std::str::from_utf8(&buf[..n as usize]).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "bad schedstat utf8")
         })?;
-        Self::parse(s, fd)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad schedstat"))
+        let wait_time_ns = Self::parse_wait_time_ns(s)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad schedstat"))?;
+        Ok(Self {
+            wait_time_ns,
+            #[cfg(test)]
+            fd,
+        })
     }
 
-    fn parse(s: &str, fd: RawFd) -> Option<Self> {
+    fn parse_wait_time_ns(s: &str) -> Option<u64> {
         let mut parts = s.split_whitespace();
         let _run_time_ns: u64 = parts.next()?.parse().ok()?;
-        let wait_time_ns: u64 = parts.next()?.parse().ok()?;
-        Some(SchedStat { wait_time_ns, fd })
+        parts.next()?.parse().ok()
     }
 }
 
