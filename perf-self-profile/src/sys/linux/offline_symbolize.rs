@@ -2,7 +2,7 @@
 
 use blazesym::symbolize::{Input, Symbolized, Symbolizer, source};
 use dial9_trace_format::{decoder::Decoder, encoder::Encoder};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
 use super::USER_ADDR_LIMIT;
@@ -11,7 +11,7 @@ use crate::offline_symbolize::SymbolTableEntry;
 
 pub(crate) fn write_symbol_data(
     decoder: Decoder<'_>,
-    addresses: &BTreeSet<u64>,
+    addresses: &HashSet<u64>,
     maps: &[MapsEntry],
     output: &mut impl Write,
 ) -> io::Result<()> {

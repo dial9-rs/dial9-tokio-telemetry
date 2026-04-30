@@ -9,7 +9,7 @@ use dial9_trace_format::{
     decoder::{Decoder, StackPool},
     types::{FieldValueRef, InternedString},
 };
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::io::{self, Write};
 
 use crate::MapsEntry;
@@ -48,7 +48,7 @@ pub fn symbolize_trace_with_maps(
     maps: &[MapsEntry],
     output: &mut impl Write,
 ) -> io::Result<()> {
-    let mut addresses: BTreeSet<u64> = BTreeSet::new();
+    let mut addresses: HashSet<u64> = HashSet::new();
 
     let mut decoder = Decoder::new(input)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
@@ -69,7 +69,7 @@ pub fn symbolize_trace_with_maps(
 fn collect_stack_frame_addresses(
     values: &[FieldValueRef<'_>],
     stack_pool: &StackPool,
-    addresses: &mut BTreeSet<u64>,
+    addresses: &mut HashSet<u64>,
 ) {
     for field in values {
         match field {
