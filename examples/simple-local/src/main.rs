@@ -1,6 +1,6 @@
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryHandle, TracedRuntime};
+use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
+use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 use std::time::Duration;
-use tokio::runtime::Builder;
 
 const TRACE_DIR: &str = "/tmp/simple-local-traces";
 
@@ -17,64 +17,39 @@ async fn do_some_work() {
     fibonacci_recursive(25);
 }
 
-fn main() -> std::io::Result<()> {
-    // Configure the trace writer
+fn my_config() -> Dial9Config {
     let trace_path = format!("{}/trace.bin", TRACE_DIR);
-    let writer = RotatingWriter::builder()
-        .base_path(&trace_path)
-        .max_file_size(10_000_000) // 10MB per file
-        .max_total_size(50_000_000) // 50MB total
-        .segment_metadata(vec![
-            ("service".into(), "simple-local".into()),
-            ("example".into(), "basic".into()),
-        ])
-        .build()?;
+    Dial9ConfigBuilder::new(
+        &trace_path,
+        10_000_000, // 10MB per file
+        50_000_000, // 50MB total
+    )
+    .with_runtime(|r| r.with_task_tracking(true))
+    .with_tokio(|t| {
+        t.worker_threads(2);
+    })
+    .build()
+}
 
-    // Build the traced runtime
-    let mut builder = Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
+#[dial9_tokio_telemetry::main(config = my_config)]
+async fn main() {
+    let handle = TelemetryHandle::current();
+    let mut handles = vec![];
 
-    let traced_builder = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
-        .with_task_tracking(true);
+    for _ in 0..100 {
+        handles.push(handle.spawn(do_some_work()));
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
 
-    let (runtime, guard) = traced_builder.build(builder, writer)?;
-    guard.enable();
-    let handle = guard.handle();
+    for h in handles {
+        h.await.unwrap();
+    }
 
-    // Run the async code
-    runtime.block_on(async {
-        handle
-            .spawn(async move {
-                let telemetry_handle = TelemetryHandle::current();
-                let mut handles = vec![];
-
-                // Run some concurrent work
-                for _ in 0..100 {
-                    handles.push(telemetry_handle.spawn(do_some_work()));
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-
-                // Wait for all tasks to complete
-                for handle in handles {
-                    handle.await.unwrap()
-                }
-            })
-            .await
-            .unwrap();
-    });
-
-    // Clean shutdown
-    drop(runtime);
-
-    guard.graceful_shutdown(Duration::from_secs(1))?;
-
+    let trace_path = format!("{}/trace.bin", TRACE_DIR);
     println!("\n✓ Trace files written to: {}", trace_path);
     println!(
         "  You can view them with: cargo run --package dial9-viewer -- --local-dir {}",
         TRACE_DIR
     );
     println!("  Then open http://localhost:3000 in your browser");
-
-    Ok(())
 }
