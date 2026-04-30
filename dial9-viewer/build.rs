@@ -130,7 +130,7 @@ const SETUP_SECTIONS: &[&str] = &[
     "Quick start",
     "The root future is not instrumented",
     "Tracing span events (opt-in)",
-    "Wake event tracking",
+    "Wake event tracking (opt-in)",
 ];
 
 /// Extract sections from the crate README and write them as `setup.md` in the
