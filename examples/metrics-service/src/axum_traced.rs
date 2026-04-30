@@ -170,12 +170,8 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    match TelemetryHandle::try_current() {
-        Some(handle) => {
-            handle.spawn(fut);
-        }
-        None => {
-            tokio::spawn(fut);
-        }
-    }
+    // `TelemetryHandle::current()` always returns a usable handle —
+    // when telemetry is disabled, `spawn` falls through to
+    // `tokio::spawn` without wake tracking.
+    TelemetryHandle::current().spawn(fut);
 }

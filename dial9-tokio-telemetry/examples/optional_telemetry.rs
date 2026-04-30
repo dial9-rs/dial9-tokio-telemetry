@@ -39,9 +39,10 @@ fn config() -> Dial9Config {
 
 #[dial9_tokio_telemetry::main(config = config)]
 async fn main() {
-    match TelemetryHandle::try_current() {
-        Some(_) => println!("telemetry: ENABLED (trace will be written)"),
-        None => println!("telemetry: DISABLED (downgraded to a plain tokio runtime)"),
+    if TelemetryHandle::current().is_enabled() {
+        println!("telemetry: ENABLED (trace will be written)");
+    } else {
+        println!("telemetry: DISABLED (downgraded to a plain tokio runtime)");
     }
 
     let tasks: Vec<_> = (0..8)

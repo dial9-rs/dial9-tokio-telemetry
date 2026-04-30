@@ -452,8 +452,8 @@ mod tests {
         let cfg = Dial9Config::builder().build_or_disabled();
         let rt = TracedRuntime::try_new(cfg).expect("fallback runtime should build");
         assert!(
-            rt.guard().is_none(),
-            "fallback path must not install a guard"
+            !rt.guard().is_enabled(),
+            "fallback path must yield an inert guard"
         );
         let v = rt.block_on(async { 7u32 });
         assert_eq!(v, 7);
@@ -468,7 +468,7 @@ mod tests {
             .build_or_disabled();
         let rt = TracedRuntime::try_new(cfg).expect("enabled runtime should build");
         assert!(
-            rt.guard().is_some(),
+            rt.guard().is_enabled(),
             "valid config must keep telemetry enabled"
         );
     }
@@ -483,8 +483,8 @@ mod tests {
         let rt =
             TracedRuntime::try_new(cfg).expect("writer I/O failure should downgrade to disabled");
         assert!(
-            rt.guard().is_none(),
-            "downgrade path must not install a guard"
+            !rt.guard().is_enabled(),
+            "downgrade path must yield an inert guard"
         );
         let v = rt.block_on(async { 42u32 });
         assert_eq!(v, 42);
@@ -504,7 +504,7 @@ mod tests {
             })
             .build_or_disabled();
         let rt = TracedRuntime::try_new(cfg).expect("downgrade should produce a runtime");
-        assert!(rt.guard().is_none());
+        assert!(!rt.guard().is_enabled());
         let calls = counter.load(Ordering::SeqCst);
         assert!(
             calls >= 1,
@@ -574,8 +574,8 @@ mod tests {
             .expect("disabled build should succeed without required fields");
         let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
         assert!(
-            rt.guard().is_none(),
-            "disabled config must not install a guard"
+            !rt.guard().is_enabled(),
+            "disabled config must yield an inert guard"
         );
         assert_eq!(
             counter.load(Ordering::SeqCst),

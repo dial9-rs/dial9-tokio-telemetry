@@ -55,7 +55,8 @@ async fn mixed_task(id: usize) {
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
-    let telemetry_enabled = TelemetryHandle::try_current().is_some();
+    let handle = TelemetryHandle::current();
+    let telemetry_enabled = handle.is_enabled();
     println!(
         "Running workload (telemetry {})...",
         if telemetry_enabled {
@@ -65,12 +66,9 @@ async fn main() {
         }
     );
 
-    let tasks: Vec<_> = (0..50)
-        .map(|i| match TelemetryHandle::try_current() {
-            Some(handle) => handle.spawn(mixed_task(i)),
-            None => tokio::spawn(mixed_task(i)),
-        })
-        .collect();
+    // `handle.spawn` records wake events when telemetry is enabled and
+    // falls through to plain `tokio::spawn` when it is disabled.
+    let tasks: Vec<_> = (0..50).map(|i| handle.spawn(mixed_task(i))).collect();
 
     for task in tasks {
         let _ = task.await;

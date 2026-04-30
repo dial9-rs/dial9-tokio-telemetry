@@ -81,12 +81,15 @@ fn my_config() -> Dial9Config {
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
-    // Telemetry may or may not be active; check with try_current().
+    // Telemetry may or may not be active; the returned handle is inert
+    // when the lenient downgrade fired.
     use dial9_tokio_telemetry::telemetry::TelemetryHandle;
-    if TelemetryHandle::try_current().is_some() {
-        // wake-event-tracked spawn
-    } else {
-        // plain tokio fallback path
+    let handle = TelemetryHandle::current();
+    // `handle.spawn` records wake events when telemetry is live and
+    // falls through to plain `tokio::spawn` when it is not.
+    handle.spawn(async { /* ... */ });
+    if handle.is_enabled() {
+        // any code paths specific to "telemetry on"
     }
 }
 ```

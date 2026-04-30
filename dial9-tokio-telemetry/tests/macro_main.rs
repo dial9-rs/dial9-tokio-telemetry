@@ -213,8 +213,8 @@ mod fluent_builder {
 
     #[dial9_tokio_telemetry::main(config = disabled_config)]
     async fn disabled_no_telemetry_handle() -> bool {
-        // TelemetryHandle should not be available when disabled.
-        dial9_tokio_telemetry::telemetry::TelemetryHandle::try_current().is_none()
+        // The current handle should be inert when telemetry is disabled.
+        !dial9_tokio_telemetry::telemetry::TelemetryHandle::current().is_enabled()
     }
 
     #[test]
@@ -281,7 +281,7 @@ mod fluent_builder_fallback {
     #[dial9_tokio_telemetry::main(config = fallback_config)]
     async fn fallback_runs_async_body() -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        TelemetryHandle::try_current().is_some()
+        TelemetryHandle::current().is_enabled()
     }
 
     #[test]
@@ -297,7 +297,7 @@ mod fluent_builder_fallback {
     async fn cascade_runs_async_body() -> bool {
         let result = tokio::spawn(async { 21 + 21 }).await.unwrap();
         assert_eq!(result, 42);
-        TelemetryHandle::try_current().is_none()
+        !TelemetryHandle::current().is_enabled()
     }
 
     #[test]
@@ -470,7 +470,7 @@ mod legacy_builder {
 
     #[dial9_tokio_telemetry::main(config = disabled_config)]
     async fn disabled_no_telemetry_handle() -> bool {
-        dial9_tokio_telemetry::telemetry::TelemetryHandle::try_current().is_none()
+        !dial9_tokio_telemetry::telemetry::TelemetryHandle::current().is_enabled()
     }
 
     #[test]
