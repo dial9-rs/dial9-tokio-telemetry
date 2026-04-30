@@ -26,6 +26,8 @@ Without this flag, compilation will fail with errors about missing methods on `t
 
 There are two ways to set up dial9: the `#[main]` macro (recommended for most apps) or manual `TracedRuntime` setup. The macro handles the boilerplate of building the runtime and spawning your code as an instrumented task. Inside your `main` body, call `TelemetryHandle::current()` to get the handle for wake-event tracking. Use manual setup when you have multiple Tokio runtimes, don't own `main` (e.g., library code or embedded services), or need to integrate with existing runtime-building code.
 
+If you are integrating dial9 into a production service, see the [dial9-in-production example](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/examples/production_use.rs).
+
 ### Using the `#[main]` macro
 
 > **Note:** `#[dial9_tokio_telemetry::main]` is a **replacement** for `#[tokio::main]`, not a complement — do not use both on the same function. The macro builds and configures the Tokio runtime internally.
@@ -113,14 +115,14 @@ Compared to [tokio-console](https://github.com/tokio-rs/console), which is desig
 
 ## What gets recorded automatically
 
-`TracedRuntime` installs hooks on the Tokio runtime. The following events are recorded out of the box:
+`TracedRuntime` installs hooks on the Tokio runtime. The following events are always recorded:
 
 | Event                            | Fields                                                                |
 | -------------------------------- | --------------------------------------------------------------------- |
 | `PollStart` / `PollEnd`          | timestamp, worker, task ID, spawn location, local queue depth         |
 | `WorkerPark` / `WorkerUnpark`    | timestamp, worker, local queue depth, thread CPU time, schedstat wait |
 | `QueueSample`                    | timestamp, global queue depth (sampled every 10 ms)                   |
-| `TaskSpawn` / `SpawnLocationDef` | task→spawn-location mapping (when `task_tracking` is enabled)         |
+| `TaskSpawn`                      | task→spawn-location mapping (when `task_tracking` is enabled)         |
 
 ## The root future is not instrumented
 
@@ -160,9 +162,9 @@ runtime.block_on(async {
 });
 ```
 
-## Wake event tracking
+## Wake event tracking (opt-in)
 
-To understand when Tokio itself is delaying your code (scheduler delay), you need to know when your future was _ready_ to run. Wake events — which task woke which other task — are _not_ captured automatically. Tokio's runtime hooks don't currently allow instrumenting wakes: capturing wakes requires wrapping the future. The simplest way is to use `handle.spawn` instead of `tokio::spawn`.
+To understand when Tokio itself is delaying your code (scheduler delay), you need to know when your future was _ready_ to run. Wake events, which fire at the moment your future is read to be polled, are _not_ captured automatically. Tokio's runtime hooks don't currently allow instrumenting wakes: capturing wakes requires wrapping the future. The simplest way is to use `handle.spawn` instead of `tokio::spawn`.
 
 Use `handle.spawn()` instead of `tokio::spawn()`:
 
