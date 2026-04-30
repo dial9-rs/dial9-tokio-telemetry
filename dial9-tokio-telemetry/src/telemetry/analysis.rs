@@ -66,7 +66,7 @@ impl TraceReader {
                     }
                     _ => {}
                 }
-                let owned = format::to_owned_event(r, ev.string_pool);
+                let owned = format::to_owned_event(r, ev.string_pool, ev.stack_pool);
                 if let TelemetryEvent::CpuSample {
                     tid,
                     thread_name: Some(ref name),
@@ -78,7 +78,8 @@ impl TraceReader {
                 events.push(owned);
             } else {
                 // Unknown event name: capture as Custom, resolving any
-                // PooledString fields to String while the pool is available.
+                // pooled fields to owned data while the segment-local pools
+                // are still available.
                 let fields = ev
                     .field_names()
                     .zip(ev.fields.iter())
@@ -91,6 +92,14 @@ impl TraceReader {
                                     .unwrap_or("<unresolved>")
                                     .to_string();
                                 FieldValue::String(s)
+                            }
+                            dial9_trace_format::types::FieldValueRef::PooledStackFrames(id) => {
+                                let frames = ev
+                                    .stack_pool
+                                    .get(*id)
+                                    .expect("stack pool entry must exist for PooledStackFrames")
+                                    .to_vec();
+                                FieldValue::StackFrames(frames.into())
                             }
                             other => other.to_owned(),
                         };

@@ -5,9 +5,11 @@
 //! point for producing trace data.
 
 use crate::TraceEvent;
-use crate::codec::{self, PoolEntry, WireTypeId};
+use crate::codec::{self, PoolEntry, StackPoolEntry, WireTypeId};
 use crate::schema::{SchemaEntry, SchemaRegistry};
-use crate::types::{CountingWriter, EncodeState, EventEncoder, InternedString};
+use crate::types::{
+    CountingWriter, EncodeState, EventEncoder, InternedStackFrames, InternedString,
+};
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -22,38 +24,58 @@ use std::sync::Arc;
 #[derive(Default)]
 pub struct FxHasher(u64);
 
+impl FxHasher {
+    #[inline]
+    fn hash_word(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517cc1b727220a95);
+    }
+}
+
 impl Hasher for FxHasher {
     #[inline]
-    fn write(&mut self, bytes: &[u8]) {
+    fn write(&mut self, mut bytes: &[u8]) {
+        while bytes.len() >= 8 {
+            self.hash_word(u64::from_ne_bytes(bytes[..8].try_into().unwrap()));
+            bytes = &bytes[8..];
+        }
+        if bytes.len() >= 4 {
+            self.hash_word(u32::from_ne_bytes(bytes[..4].try_into().unwrap()) as u64);
+            bytes = &bytes[4..];
+        }
         for &b in bytes {
-            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x517cc1b727220a95);
+            self.hash_word(b as u64);
         }
     }
 
     #[inline]
-    fn write_u64(&mut self, i: u64) {
-        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517cc1b727220a95);
-    }
-
-    #[inline]
-    fn write_u32(&mut self, i: u32) {
-        self.write_u64(i as u64)
+    fn write_u8(&mut self, i: u8) {
+        self.hash_word(i as u64);
     }
 
     #[inline]
     fn write_u16(&mut self, i: u16) {
-        self.write_u64(i as u64)
+        self.hash_word(i as u64);
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.hash_word(i as u64);
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.hash_word(i);
     }
 
     #[inline]
     fn write_usize(&mut self, i: usize) {
-        self.write_u64(i as u64)
+        self.hash_word(i as u64);
     }
 
     #[inline]
     fn write_u128(&mut self, i: u128) {
-        self.write_u64(i as u64);
-        self.write_u64((i >> 64) as u64);
+        self.hash_word(i as u64);
+        self.hash_word((i >> 64) as u64);
     }
 
     #[inline]
@@ -131,6 +153,8 @@ pub struct Encoder<W: Write = Vec<u8>> {
     registry: SchemaRegistry,
     string_pool: FxHashMap<String, u32>,
     next_pool_id: u32,
+    stack_pool: FxHashMap<Box<[u64]>, u32>,
+    next_stack_pool_id: u32,
     schema_ids: FxHashMap<SchemaKey, WireTypeId>,
 }
 
@@ -149,6 +173,8 @@ impl Encoder<Vec<u8>> {
             registry: SchemaRegistry::new(),
             string_pool: FxHashMap::default(),
             next_pool_id: 0,
+            stack_pool: FxHashMap::default(),
+            next_stack_pool_id: 0,
             schema_ids: FxHashMap::default(),
         }
     }
@@ -169,6 +195,8 @@ impl<W: Write> Encoder<W> {
             registry: SchemaRegistry::new(),
             string_pool: FxHashMap::default(),
             next_pool_id: 0,
+            stack_pool: FxHashMap::default(),
+            next_stack_pool_id: 0,
             schema_ids: FxHashMap::default(),
         })
     }
@@ -178,6 +206,7 @@ impl<W: Write> Encoder<W> {
     pub(crate) fn from_decoder(
         mut registry: SchemaRegistry,
         string_pool: crate::decoder::StringPool,
+        stack_pool: crate::decoder::StackPool,
         timestamp_base_ns: u64,
         writer: W,
     ) -> Self {
@@ -187,6 +216,15 @@ impl<W: Write> Encoder<W> {
             pool.insert(value, id.raw_id());
             if id.raw_id() >= next_pool_id {
                 next_pool_id = id.raw_id() + 1;
+            }
+        }
+
+        let mut new_stack_pool: FxHashMap<Box<[u64]>, u32> = FxHashMap::default();
+        let mut next_stack_pool_id: u32 = 0;
+        for (id, frames) in stack_pool.0.into_iter() {
+            new_stack_pool.insert(frames.into_boxed_slice(), id.raw_id());
+            if id.raw_id() >= next_stack_pool_id {
+                next_stack_pool_id = id.raw_id() + 1;
             }
         }
 
@@ -204,6 +242,8 @@ impl<W: Write> Encoder<W> {
             registry,
             string_pool: pool,
             next_pool_id,
+            stack_pool: new_stack_pool,
+            next_stack_pool_id,
             schema_ids,
         }
     }
@@ -229,6 +269,8 @@ impl<W: Write> Encoder<W> {
         codec::encode_header(&mut new_writer)?;
         self.string_pool.clear();
         self.next_pool_id = 0;
+        self.stack_pool.clear();
+        self.next_stack_pool_id = 0;
         self.registry.clear();
         self.schema_ids.clear();
         // creating a new EncodeState resets the timestamp delta
@@ -385,6 +427,29 @@ impl<W: Write> Encoder<W> {
         codec::encode_string_pool(entries, &mut self.state.writer)
     }
 
+    /// Intern a stack-frame vector, emitting a stack-pool frame if new.
+    /// Returns an [`InternedStackFrames`] handle.
+    pub fn intern_stack_frames(&mut self, frames: &[u64]) -> io::Result<InternedStackFrames> {
+        if let Some(&id) = self.stack_pool.get(frames) {
+            return Ok(InternedStackFrames(id));
+        }
+        let id = self.next_stack_pool_id;
+        self.next_stack_pool_id += 1;
+        self.stack_pool.insert(frames.into(), id);
+        codec::encode_stack_pool(
+            &[StackPoolEntry {
+                pool_id: id,
+                frames: frames.to_vec(),
+            }],
+            &mut self.state.writer,
+        )?;
+        Ok(InternedStackFrames(id))
+    }
+
+    pub fn write_stack_pool(&mut self, entries: &[StackPoolEntry]) -> io::Result<()> {
+        codec::encode_stack_pool(entries, &mut self.state.writer)
+    }
+
     /// Flush the underlying writer.
     pub fn flush(&mut self) -> io::Result<()> {
         self.state.writer.flush()
@@ -443,6 +508,11 @@ impl Encoder<Vec<u8>> {
 
     pub fn intern_string_infallible(&mut self, s: &str) -> InternedString {
         self.intern_string(s)
+            .expect("interning into Vec<u8> is infallible")
+    }
+
+    pub fn intern_stack_frames_infallible(&mut self, frames: &[u64]) -> InternedStackFrames {
+        self.intern_stack_frames(frames)
             .expect("interning into Vec<u8> is infallible")
     }
 
@@ -597,6 +667,156 @@ mod tests {
         let id3 = enc.intern_string("world").unwrap();
         assert_eq!(id1, id2);
         assert_ne!(id1, id3);
+    }
+
+    #[test]
+    fn encoder_intern_stack_frames_deduplicates() {
+        let mut enc = Encoder::new();
+        let stack_a: &[u64] = &[0x1000, 0x2000, 0x3000];
+        let stack_b: &[u64] = &[0x4000, 0x5000];
+        let id1 = enc.intern_stack_frames(stack_a).unwrap();
+        let id2 = enc.intern_stack_frames(stack_a).unwrap();
+        let id3 = enc.intern_stack_frames(stack_b).unwrap();
+        assert_eq!(id1, id2);
+        assert_ne!(id1, id3);
+    }
+
+    #[test]
+    fn stack_pool_round_trip_via_decoder() {
+        use crate::decoder::Decoder;
+        use crate::types::InternedStackFrames;
+
+        let mut enc = Encoder::new();
+        let stack_a: &[u64] = &[0xdead, 0xbeef, 0xcafe];
+        let stack_b: &[u64] = &[0x1, 0x2];
+        let id_a = enc.intern_stack_frames(stack_a).unwrap();
+        let id_b = enc.intern_stack_frames(stack_b).unwrap();
+        let bytes = enc.finish();
+
+        let mut dec = Decoder::new(&bytes).unwrap();
+        let _ = dec.decode_all();
+        assert_eq!(
+            dec.stack_pool().get(InternedStackFrames(id_a.raw_id())),
+            Some(stack_a)
+        );
+        assert_eq!(
+            dec.stack_pool().get(InternedStackFrames(id_b.raw_id())),
+            Some(stack_b)
+        );
+    }
+
+    #[test]
+    fn for_each_event_populates_stack_pool() {
+        use crate::decoder::Decoder;
+        use crate::schema::FieldDef;
+        use crate::types::{FieldType, FieldValue, InternedStackFrames};
+
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema(
+                "CpuSampleEvent",
+                vec![FieldDef {
+                    name: "callchain".into(),
+                    field_type: FieldType::PooledStackFrames,
+                }],
+            )
+            .unwrap();
+        let stack: &[u64] = &[0x1234, 0x5678, 0x9abc];
+        let id = enc.intern_stack_frames(stack).unwrap();
+        enc.write_event(
+            &schema,
+            &[
+                FieldValue::Varint(1_000_000),
+                FieldValue::PooledStackFrames(id),
+            ],
+        )
+        .unwrap();
+        let bytes = enc.finish();
+
+        let mut dec = Decoder::new(&bytes).unwrap();
+        let mut event_count = 0;
+        dec.for_each_event(|_ev| {
+            event_count += 1;
+        })
+        .unwrap();
+        assert_eq!(event_count, 1);
+        assert_eq!(
+            dec.stack_pool().get(InternedStackFrames(id.raw_id())),
+            Some(stack),
+        );
+    }
+
+    #[test]
+    fn encoder_intern_empty_stack_frames() {
+        use crate::decoder::Decoder;
+        use crate::types::InternedStackFrames;
+
+        let mut enc = Encoder::new();
+        let id1 = enc.intern_stack_frames(&[]).unwrap();
+        let id2 = enc.intern_stack_frames(&[]).unwrap();
+        assert_eq!(id1, id2);
+        let bytes = enc.finish();
+
+        let mut dec = Decoder::new(&bytes).unwrap();
+        let _ = dec.decode_all();
+        assert_eq!(
+            dec.stack_pool().get(InternedStackFrames(id1.raw_id())),
+            Some(&[][..])
+        );
+    }
+
+    #[test]
+    fn write_stack_pool_multi_entry_round_trip() {
+        use crate::decoder::Decoder;
+        use crate::types::InternedStackFrames;
+
+        let mut enc = Encoder::new();
+        let entries = vec![
+            StackPoolEntry {
+                pool_id: 0,
+                frames: vec![0xaaaa, 0xbbbb, 0xcccc],
+            },
+            StackPoolEntry {
+                pool_id: 1,
+                frames: vec![0x1111],
+            },
+            StackPoolEntry {
+                pool_id: 2,
+                frames: vec![],
+            },
+        ];
+        enc.write_stack_pool(&entries).unwrap();
+        let bytes = enc.finish();
+
+        let mut dec = Decoder::new(&bytes).unwrap();
+        let _ = dec.decode_all();
+        assert_eq!(
+            dec.stack_pool().get(InternedStackFrames(0)),
+            Some(&[0xaaaa, 0xbbbb, 0xcccc][..])
+        );
+        assert_eq!(
+            dec.stack_pool().get(InternedStackFrames(1)),
+            Some(&[0x1111][..])
+        );
+        assert_eq!(dec.stack_pool().get(InternedStackFrames(2)), Some(&[][..]));
+    }
+
+    #[test]
+    fn decoder_into_encoder_deduplicates_interned_stack_frames() {
+        use crate::decoder::Decoder;
+
+        let mut enc = Encoder::new();
+        let id1 = enc.intern_stack_frames(&[0x10, 0x20]).unwrap();
+        let base = enc.finish();
+
+        let mut decoder = Decoder::new(&base).unwrap();
+        while decoder.next_frame_ref().ok().flatten().is_some() {}
+        let mut output = Vec::new();
+        let mut ext = decoder.into_encoder(&mut output);
+        let id2 = ext.intern_stack_frames(&[0x10, 0x20]).unwrap();
+        let id3 = ext.intern_stack_frames(&[0x30]).unwrap();
+        assert_eq!(id1.raw_id(), id2.raw_id());
+        assert_ne!(id2.raw_id(), id3.raw_id());
     }
 
     #[test]

@@ -56,7 +56,7 @@ fn full_round_trip() {
         &[
             FieldValue::Varint(1_000_100),
             FieldValue::PooledString(thread_id),
-            FieldValue::StackFrames(frames.clone()),
+            FieldValue::StackFrames(frames.clone().into()),
         ],
     )
     .unwrap();
@@ -121,7 +121,7 @@ fn full_round_trip() {
     // Verify cpu sample with stack frames
     if let DecodedFrame::Event { values, .. } = &decoded[4] {
         assert_eq!(values[0], FieldValue::PooledString(thread_id));
-        assert_eq!(values[1], FieldValue::StackFrames(frames));
+        assert_eq!(values[1], FieldValue::StackFrames(frames.into()));
     } else {
         panic!("expected event frame");
     }
@@ -190,7 +190,7 @@ fn round_trip_all_field_types() {
         FieldValue::String("hello".to_string()),
         FieldValue::Bytes(vec![0xDE, 0xAD]),
         FieldValue::PooledString(pool_id),
-        FieldValue::StackFrames(vec![0xAAAA, 0xBBBB, 0xCCCC]),
+        FieldValue::StackFrames(vec![0xAAAA, 0xBBBB, 0xCCCC].into()),
     ];
     enc.write_event(&tid, &values).unwrap();
     let data = enc.finish();

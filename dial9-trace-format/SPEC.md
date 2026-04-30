@@ -4,7 +4,7 @@ Version: 1
 
 ## Overview
 
-A self-describing binary trace format. The stream is a sequence of frames preceded by a header. Schema frames describe event layouts; event frames carry data whose structure is defined by a previously-seen schema. String pool, symbol table, and timestamp reset frames provide auxiliary data.
+A self-describing binary trace format. The stream is a sequence of frames preceded by a header. Schema frames describe event layouts; event frames carry data whose structure is defined by a previously-seen schema. String pool, stack pool, and timestamp reset frames provide auxiliary data.
 
 All multi-byte integers are **little-endian** unless stated otherwise. Variable-length integers use **LEB128** encoding.
 
@@ -36,8 +36,9 @@ Every frame begins with a 1-byte tag:
 | `0x01` | Schema |
 | `0x02` | Event |
 | `0x03` | String Pool |
-| `0x04` | *(reserved)* |
+| `0x04` | Stack Pool |
 | `0x05` | Timestamp Reset |
+| `0x06` | *(reserved)* |
 
 Unknown tags **must** cause the decoder to stop (the stream cannot be advanced without knowing the frame size).
 
@@ -116,6 +117,26 @@ Each **PoolEntry**:
 
 Multiple string pool frames may appear in a stream. A `pool_id` should be defined before it is referenced, but a decoder may choose to resolve references lazily.
 
+### Stack Pool Frame (`0x04`)
+
+Provides stack-frame data that can be referenced by `PooledStackFrames` fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| tag | u8 | `0x04` |
+| count | u32 | Number of entries |
+| entries | [StackPoolEntry; count] | Pool entries (see below) |
+
+Each **StackPoolEntry**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| pool_id | u32 | Identifier referenced by `PooledStackFrames` values |
+| frame_count | u32 | Number of stack frame addresses |
+| frames | [u64; frame_count] | Frame addresses, leaf-first, u64 LE |
+
+Multiple stack pool frames may appear in a stream. A `pool_id` should be defined before it is referenced, but a decoder may choose to resolve references lazily.
+
 ### Timestamp Reset Frame (`0x05`)
 
 Resets the running timestamp base used for packed event timestamps. The encoder emits this frame when the nanosecond delta between the current base and the next event's timestamp exceeds what a u24 can represent (16,777,215 ns ≈ 16.7 ms), or when the next event's timestamp is earlier than the current base.
@@ -138,6 +159,7 @@ After decoding this frame, the decoder sets `timestamp_base_ns = timestamp_ns`. 
 | 3 | Bool | 1 byte (`0x00` = false, nonzero = true) | 1 |
 | 4 | String | u32 length prefix + UTF-8 bytes | 4 + len |
 | 5 | Bytes | u32 length prefix + raw bytes | 4 + len |
+| 6 | PooledStackFrames | u32 pool ID | 4 |
 | 7 | PooledString | u32 pool ID | 4 |
 | 8 | StackFrames | u32 count + count × u64 LE addresses | 4 + 8×count |
 | 9 | Varint | Unsigned LEB128 | 1–10 |
@@ -181,6 +203,12 @@ Stack frame addresses are stored as raw little-endian u64 values:
 1. Write `count` as u32 (number of addresses).
 2. For each address (in order), write the address as **u64 LE** (8 bytes).
 
+### PooledStackFrames Encoding
+
+A `PooledStackFrames` field is encoded as a u32 LE pool ID (4 bytes) referencing a `StackPoolEntry` from a previously-emitted **Stack Pool Frame** (`0x04`). The encoder deduplicates identical stack traces into the pool; the same pool ID may be referenced by many events, which is the primary size win for high-frequency CPU sampling.
+
+Decoders **must** resolve the pool ID against the accumulated stack pool to recover the addresses. A reference to an undefined `pool_id` is a stream error.
+
 ### StringMap Encoding
 
 A string map carries an ordered list of key-value pairs (both UTF-8 strings):
@@ -202,6 +230,8 @@ A string map carries an ordered list of key-value pairs (both UTF-8 strings):
 | string/bytes field length | 0–4,294,967,295 bytes | u32 length prefix |
 | StackFrames count | 0–4,294,967,295 | u32 count |
 | string pool entry count | 0–4,294,967,295 per frame | u32 count |
-| pool_id | 0–4,294,967,295 | u32 |
+| stack pool entry count | 0–4,294,967,295 per frame | u32 count |
+| stack pool frame_count | 0–4,294,967,295 | u32 count per entry |
+| pool_id | 0–4,294,967,295 | u32 (shared range across pools) |
 | Varint | 0–2^64-1 | unsigned LEB128 |
 | Timestamp delta | 0–16,777,215 ns | u24; overflow triggers Timestamp Reset frame |

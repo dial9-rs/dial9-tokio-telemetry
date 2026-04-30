@@ -15,6 +15,9 @@ rustdoc-args = ["--cfg", "tokio_unstable"]
 rustc-args = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 all-features = true
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
+
 [dependencies]
 tokio = { version = "1.51.0", features = ["rt", "macros", "time", "rt-multi-thread", "sync", "net", "io-util"] }
 tokio-util = "0.7"
@@ -41,10 +44,12 @@ metrique-writer = "0.1"
 metrique = { version = "0.1.23", features = ["local-format"] }
 metrique-timesource = "0.1"
 dial9-macro = { workspace = true }
+shuttle = { version = "0.9.1", optional = true }
 
 [features]
 analysis = []
 cpu-profiling = ["dep:dial9-perf-self-profile"]
+_shuttle = ["dep:shuttle", "metrique-timesource/custom-timesource", "metrique-timesource/test-util"]
 tracing-layer = ["dep:tracing-subscriber"]
 worker-s3 = ["dep:aws-sdk-s3-transfer-manager", "dep:aws-sdk-s3", "dep:aws-config", "dep:time"]
 

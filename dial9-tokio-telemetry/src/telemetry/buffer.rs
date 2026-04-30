@@ -6,14 +6,14 @@
 //!
 //! Each buffer is wrapped in `Arc<Mutex<…>>` so the flush thread can intrusively
 //! drain idle/silent threads via [`TlBufferHandle`]s registered in `SharedState`.
+use crate::primitives::sync::atomic::{AtomicU64, Ordering};
+use crate::primitives::sync::{Arc, Mutex, Weak};
 use crate::telemetry::collector::CentralCollector;
 use crate::telemetry::events::RawEvent;
 use crate::telemetry::format::*;
-use dial9_trace_format::InternedString;
 use dial9_trace_format::encoder::{Encoder, FxHashMap};
+use dial9_trace_format::{InternedStackFrames, InternedString};
 use std::panic::Location;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // ── Public API types ────────────────────────────────────────────────────────
@@ -44,6 +44,15 @@ impl ThreadLocalEncoder<'_> {
     /// encoding within this same [`Encodable::encode`] call.
     pub fn intern_string(&mut self, s: &str) -> InternedString {
         self.encoder.intern_string_infallible(s)
+    }
+
+    /// Intern a stack-frame vector into the trace's stack pool, returning a compact handle.
+    ///
+    /// If the stack was already interned in this batch, returns the existing handle
+    /// (no duplicate wire data). The returned [`InternedStackFrames`] is only valid for
+    /// encoding within this same [`Encodable::encode`] call.
+    pub fn intern_stack_frames(&mut self, frames: &[u64]) -> InternedStackFrames {
+        self.encoder.intern_stack_frames_infallible(frames)
     }
 
     /// Encode a [`TraceEvent`](dial9_trace_format::TraceEvent) struct into the buffer.
@@ -250,13 +259,14 @@ impl Encodable for RawEvent {
                     .thread_name
                     .as_ref()
                     .map(|n| enc.intern_string(n.as_str()));
+                let callchain = enc.intern_stack_frames(&data.callchain);
                 enc.encode(&CpuSampleEvent {
                     timestamp_ns: data.timestamp_nanos,
                     worker_id: data.worker_id,
                     tid: data.tid,
                     source: data.source,
                     thread_name,
-                    callchain: dial9_trace_format::StackFrames(data.callchain.clone()),
+                    callchain,
                 });
             }
         }
@@ -400,11 +410,11 @@ impl Drop for ThreadLocalBuffer {
 /// A handle to a thread-local buffer, held by `SharedState` so the flush
 /// thread can intrusively drain idle/silent buffers.
 pub(crate) struct TlBufferHandle {
-    pub(crate) buffer: std::sync::Weak<Mutex<ThreadLocalBuffer>>,
+    pub(crate) buffer: Weak<Mutex<ThreadLocalBuffer>>,
     pub(crate) flush_epoch: FlushEpoch,
 }
 
-thread_local! {
+crate::primitives::thread_local! {
     static BUFFER: Arc<Mutex<ThreadLocalBuffer>> = Arc::new(Mutex::new(ThreadLocalBuffer::new()));
 }
 

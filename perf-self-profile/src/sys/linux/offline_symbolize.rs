@@ -2,7 +2,7 @@
 
 use blazesym::symbolize::{Input, Symbolized, Symbolizer, source};
 use dial9_trace_format::{decoder::Decoder, encoder::Encoder};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
 use super::USER_ADDR_LIMIT;
@@ -11,7 +11,7 @@ use crate::offline_symbolize::SymbolTableEntry;
 
 pub(crate) fn write_symbol_data(
     decoder: Decoder<'_>,
-    addresses: &BTreeSet<u64>,
+    addresses: &HashSet<u64>,
     maps: &[MapsEntry],
     output: &mut impl Write,
 ) -> io::Result<()> {
@@ -181,6 +181,88 @@ mod tests {
         types::{FieldType, FieldValue},
     };
 
+    fn symbol_table_addrs(dec: &Decoder<'_>, frames: &[DecodedFrame]) -> Vec<u64> {
+        let mut out = Vec::new();
+        for frame in frames {
+            if let DecodedFrame::Event {
+                type_id, values, ..
+            } = frame
+                && let Some(entry) = dec.registry().get(*type_id)
+                && entry.name == SymbolTableEntry::event_name()
+                && let Some(FieldValue::Varint(addr)) = values.first()
+            {
+                out.push(*addr);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn symbolize_with_maps_handles_multi_segment_pooled_stacks() {
+        let addr_a = symbolize_with_maps_handles_multi_segment_pooled_stacks as *const () as u64;
+        let addr_b = symbolize_with_maps_produces_symbol_events as *const () as u64;
+        let raw_maps = crate::read_proc_maps();
+
+        // Segment 1: contains addr_a in its pool.
+        let mut enc1 = Encoder::new();
+        let schema1 = enc1
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "frames".into(),
+                    field_type: FieldType::PooledStackFrames,
+                }],
+            )
+            .unwrap();
+        let id_a = enc1.intern_stack_frames(&[addr_a]).unwrap();
+        enc1.write_event(
+            &schema1,
+            &[FieldValue::Varint(0), FieldValue::PooledStackFrames(id_a)],
+        )
+        .unwrap();
+        let seg1 = enc1.finish();
+
+        // Segment 2: contains addr_b.
+        let mut enc2 = Encoder::new();
+        let schema2 = enc2
+            .register_schema(
+                "Ev",
+                vec![FieldDef {
+                    name: "frames".into(),
+                    field_type: FieldType::PooledStackFrames,
+                }],
+            )
+            .unwrap();
+        let id_b = enc2.intern_stack_frames(&[addr_b]).unwrap();
+        enc2.write_event(
+            &schema2,
+            &[FieldValue::Varint(0), FieldValue::PooledStackFrames(id_b)],
+        )
+        .unwrap();
+        let seg2 = enc2.finish();
+
+        let mut concatenated = seg1;
+        concatenated.extend_from_slice(&seg2);
+
+        let mut output = Vec::new();
+        symbolize_trace_with_maps(&concatenated, &raw_maps, &mut output).unwrap();
+
+        let mut combined = concatenated.clone();
+        combined.extend_from_slice(&output);
+        let mut dec = Decoder::new(&combined).unwrap();
+        let frames = dec.decode_all();
+
+        let addrs = symbol_table_addrs(&dec, &frames);
+        assert!(
+            addrs.contains(&addr_a),
+            "missing SymbolTableEntry for first-segment address"
+        );
+        assert!(
+            addrs.contains(&addr_b),
+            "missing SymbolTableEntry for second-segment address"
+        );
+    }
+
     #[test]
     fn symbolize_with_maps_produces_symbol_events() {
         let addr = symbolize_with_maps_produces_symbol_events as *const () as u64;
@@ -198,7 +280,10 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
-            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![addr])],
+            &[
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![addr].into()),
+            ],
         )
         .unwrap();
         let buf = enc.finish();
@@ -251,7 +336,10 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
-            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![addr])],
+            &[
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![addr].into()),
+            ],
         )
         .unwrap();
         let buf = enc.finish();
