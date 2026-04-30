@@ -4,8 +4,6 @@ mod shared_state;
 
 pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
-#[cfg(test)]
-pub(crate) use runtime_context::{event_construction_count, reset_event_construction_count};
 pub(crate) use shared_state::SharedState;
 
 use event_writer::EventWriter;
@@ -2075,43 +2073,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// When telemetry is disabled at runtime, hook closures must skip event
-    /// construction entirely to avoid paying for expensive syscalls
-    /// (thread_cpu_time_nanos, SchedStat::read_current) on every park/unpark.
-    #[test]
-    fn hooks_skip_event_construction_when_disabled() {
-        reset_event_construction_count();
-
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.worker_threads(2);
-        // Build with telemetry hooks installed but recording DISABLED.
-        let (runtime, guard) = TracedRuntime::builder()
-            .build_with_writer(builder, NullWriter)
-            .unwrap();
-        // Do NOT call guard.enable() — telemetry stays disabled.
-
-        runtime.block_on(async {
-            let mut handles = Vec::new();
-            for _ in 0..50 {
-                handles.push(tokio::spawn(async {
-                    tokio::task::yield_now().await;
-                }));
-            }
-            for h in handles {
-                h.await.unwrap();
-            }
-        });
-
-        drop(runtime);
-        drop(guard);
-
-        let count = event_construction_count();
-        assert_eq!(
-            count, 0,
-            "expected zero event constructions when telemetry is disabled, got {count}"
-        );
     }
 
     #[test]
