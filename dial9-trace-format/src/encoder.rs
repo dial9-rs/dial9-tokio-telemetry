@@ -24,43 +24,58 @@ use std::sync::Arc;
 #[derive(Default)]
 pub struct FxHasher(u64);
 
+impl FxHasher {
+    #[inline]
+    fn hash_word(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517cc1b727220a95);
+    }
+}
+
 impl Hasher for FxHasher {
     #[inline]
     fn write(&mut self, mut bytes: &[u8]) {
         while bytes.len() >= 8 {
-            let v = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
-            self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517cc1b727220a95);
+            self.hash_word(u64::from_ne_bytes(bytes[..8].try_into().unwrap()));
             bytes = &bytes[8..];
         }
+        if bytes.len() >= 4 {
+            self.hash_word(u32::from_ne_bytes(bytes[..4].try_into().unwrap()) as u64);
+            bytes = &bytes[4..];
+        }
         for &b in bytes {
-            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x517cc1b727220a95);
+            self.hash_word(b as u64);
         }
     }
 
     #[inline]
-    fn write_u64(&mut self, i: u64) {
-        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517cc1b727220a95);
-    }
-
-    #[inline]
-    fn write_u32(&mut self, i: u32) {
-        self.write_u64(i as u64)
+    fn write_u8(&mut self, i: u8) {
+        self.hash_word(i as u64);
     }
 
     #[inline]
     fn write_u16(&mut self, i: u16) {
-        self.write_u64(i as u64)
+        self.hash_word(i as u64);
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.hash_word(i as u64);
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.hash_word(i);
     }
 
     #[inline]
     fn write_usize(&mut self, i: usize) {
-        self.write_u64(i as u64)
+        self.hash_word(i as u64);
     }
 
     #[inline]
     fn write_u128(&mut self, i: u128) {
-        self.write_u64(i as u64);
-        self.write_u64((i >> 64) as u64);
+        self.hash_word(i as u64);
+        self.hash_word((i >> 64) as u64);
     }
 
     #[inline]
