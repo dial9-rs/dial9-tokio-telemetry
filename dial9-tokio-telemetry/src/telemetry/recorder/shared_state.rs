@@ -1,4 +1,6 @@
 use crate::metrics::TlDrainStats;
+use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::buffer;
 use crate::telemetry::buffer::TlBufferHandle;
 use crate::telemetry::collector::CentralCollector;
@@ -9,14 +11,11 @@ use crate::telemetry::task_metadata::TaskId;
 use std::cell::Cell;
 #[cfg(feature = "cpu-profiling")]
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::RuntimeContext;
 
-thread_local! {
+crate::primitives::thread_local! {
     /// schedstat wait_time_ns captured at park time, used to compute delta on unpark.
     pub(super) static PARKED_SCHED_WAIT: Cell<u64> = const { Cell::new(0) };
 }
@@ -415,5 +414,218 @@ mod tests {
                 "every recorded event must reach the collector exactly once"
             );
         }
+    }
+}
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests {
+    use crate::primitives::sync::atomic::{AtomicU64, Ordering};
+    use crate::primitives::sync::{Arc, Mutex};
+    use crate::telemetry::collector::Batch;
+    use crate::telemetry::recorder::TelemetryCore;
+    use crate::telemetry::writer::TraceWriter;
+    use dial9_trace_format::TraceEvent;
+    use shuttle::rand::Rng;
+    use std::collections::HashMap;
+
+    // ── Event definition ────────────────────────────────────────────────
+
+    /// Custom event for round-trip validation. Each event carries a
+    /// per-thread monotonic `seq`, a `thread_id`, and a `timestamp_ns`
+    /// that is mostly monotonic with occasional backward jumps.
+    #[derive(TraceEvent, Clone, Debug)]
+    struct ValidationEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+        thread_id: u64,
+        seq: u64,
+        id: u64,
+    }
+
+    /// Generate a timestamp that is mostly monotonic with occasional backward
+    /// jumps, driven by shuttle's deterministic RNG.
+    fn next_timestamp(prev: &mut u64) -> u64 {
+        let mut rng = shuttle::rand::thread_rng();
+        if rng.gen_range(0u32..5) == 0 {
+            *prev = prev.saturating_sub(rng.gen_range(1u64..=100));
+        } else {
+            *prev += rng.gen_range(1u64..=1000);
+        }
+        *prev
+    }
+
+    // ── Writer ──────────────────────────────────────────────────────────
+
+    /// A TraceWriter that captures encoded bytes into per-segment buffers
+    /// and randomly triggers rotation via `should_drain`/`drained`.
+    struct InvariantCheckingWriter {
+        segments: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl InvariantCheckingWriter {
+        fn new(segments: Arc<Mutex<Vec<Vec<u8>>>>) -> Self {
+            segments.lock().unwrap().push(Vec::new());
+            Self { segments }
+        }
+    }
+
+    impl TraceWriter for InvariantCheckingWriter {
+        fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
+            self.segments
+                .lock()
+                .unwrap()
+                .last_mut()
+                .unwrap()
+                .extend_from_slice(batch.encoded_bytes());
+            Ok(())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn should_drain(&self) -> bool {
+            shuttle::rand::thread_rng().gen_range(0u32..10) < 3
+        }
+
+        fn drained(&mut self) -> std::io::Result<bool> {
+            if shuttle::rand::thread_rng().gen_range(0u32..2) == 0 {
+                self.segments.lock().unwrap().push(Vec::new());
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+
+    // ── Decoding ────────────────────────────────────────────────────────
+
+    fn decode_validation_events(data: &[u8]) -> Vec<ValidationEvent> {
+        use dial9_trace_format::decoder::Decoder;
+        let Some(mut dec) = Decoder::new(data) else {
+            assert!(data.is_empty(), "failed to non-empty segment!");
+            return vec![];
+        };
+        let mut out = Vec::new();
+        dec.for_each_event(|ev| {
+            if ev.name == "ValidationEvent"
+                && let Some(decoded) =
+                    ValidationEvent::decode(ev.timestamp_ns, ev.fields, &ev.schema.fields)
+            {
+                out.push(ValidationEvent {
+                    timestamp_ns: decoded.timestamp_ns,
+                    thread_id: decoded.thread_id,
+                    seq: decoded.seq,
+                    id: decoded.id,
+                });
+            }
+        })
+        .expect("decode failed");
+        out
+    }
+
+    // ── Invariants ──────────────────────────────────────────────────────
+
+    /// All emitted event IDs appear exactly once in the decoded output.
+    fn check_all_events_present(expected: &[ValidationEvent], decoded: &[ValidationEvent]) {
+        let mut exp_ids: Vec<u64> = expected.iter().map(|e| e.id).collect();
+        let mut dec_ids: Vec<u64> = decoded.iter().map(|e| e.id).collect();
+        exp_ids.sort();
+        dec_ids.sort();
+        assert_eq!(
+            exp_ids,
+            dec_ids,
+            "event ids mismatch: expected {} events, got {}",
+            exp_ids.len(),
+            dec_ids.len()
+        );
+    }
+
+    /// Every event's timestamp round-trips exactly.
+    fn check_timestamps_roundtrip(expected: &[ValidationEvent], decoded: &[ValidationEvent]) {
+        let exp_by_id: HashMap<u64, u64> =
+            expected.iter().map(|e| (e.id, e.timestamp_ns)).collect();
+        for ev in decoded {
+            let exp_ts = exp_by_id[&ev.id];
+            assert_eq!(
+                exp_ts, ev.timestamp_ns,
+                "timestamp mismatch for event id {}: expected {exp_ts}, got {}",
+                ev.id, ev.timestamp_ns
+            );
+        }
+    }
+
+    // ── Test body ───────────────────────────────────────────────────────
+
+    fn test_telemetry_core_pipeline() {
+        let _ts_guard =
+            metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+                metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+            ));
+
+        let num_threads = 3;
+        let next_id = Arc::new(AtomicU64::new(0));
+        let segments: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let guard = TelemetryCore::builder()
+            .writer(InvariantCheckingWriter::new(segments.clone()))
+            .build()
+            .unwrap();
+        guard.enable();
+        let handle = guard.handle();
+
+        let expected: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let writers: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let h = handle.clone();
+                let next_id = next_id.clone();
+                let expected = expected.clone();
+                let thread_id = thread_id as u64;
+                crate::primitives::thread::spawn(move || {
+                    let mut rng = shuttle::rand::thread_rng();
+                    let count = rng.gen_range(3u64..=10);
+                    let mut ts = rng.gen_range(1000u64..2000);
+                    for seq in 0..count {
+                        let id = next_id.fetch_add(1, Ordering::Relaxed);
+                        let timestamp_ns = next_timestamp(&mut ts);
+                        let ev = ValidationEvent {
+                            timestamp_ns,
+                            thread_id,
+                            seq,
+                            id,
+                        };
+                        expected.lock().unwrap().push(ev.clone());
+                        h.record_encodable_event(&ev);
+                    }
+                })
+            })
+            .collect();
+
+        for w in writers {
+            w.join().unwrap();
+        }
+        drop(guard);
+
+        // Decode per-segment.
+        let segs = segments.lock().unwrap();
+        let decoded_segments: Vec<Vec<ValidationEvent>> =
+            segs.iter().map(|s| decode_validation_events(s)).collect();
+        let all_decoded: Vec<ValidationEvent> =
+            decoded_segments.iter().flatten().cloned().collect();
+        let expected = expected.lock().unwrap();
+
+        // Run all invariants.
+        check_all_events_present(&expected, &all_decoded);
+        check_timestamps_roundtrip(&expected, &all_decoded);
+    }
+
+    #[test]
+    fn determinism_check() {
+        shuttle::check_uncontrolled_nondeterminism(test_telemetry_core_pipeline, 10000);
+    }
+
+    #[test]
+    fn pct_real_pipeline() {
+        shuttle::check_pct(test_telemetry_core_pipeline, 10000, 3);
     }
 }
