@@ -36,10 +36,9 @@ Every frame begins with a 1-byte tag:
 | `0x01` | Schema |
 | `0x02` | Event |
 | `0x03` | String Pool |
-| `0x04` | *(reserved)* |
+| `0x04` | Stack Pool |
 | `0x05` | Timestamp Reset |
 | `0x06` | *(reserved)* |
-| `0x07` | Stack Pool |
 
 Unknown tags **must** cause the decoder to stop (the stream cannot be advanced without knowing the frame size).
 
@@ -118,13 +117,13 @@ Each **PoolEntry**:
 
 Multiple string pool frames may appear in a stream. A `pool_id` should be defined before it is referenced, but a decoder may choose to resolve references lazily.
 
-### Stack Pool Frame (`0x07`)
+### Stack Pool Frame (`0x04`)
 
 Provides stack-frame data that can be referenced by `PooledStackFrames` fields.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| tag | u8 | `0x07` |
+| tag | u8 | `0x04` |
 | count | u32 | Number of entries |
 | entries | [StackPoolEntry; count] | Pool entries (see below) |
 
@@ -206,7 +205,7 @@ Stack frame addresses are stored as raw little-endian u64 values:
 
 ### PooledStackFrames Encoding
 
-A `PooledStackFrames` field is encoded as a u32 LE pool ID (4 bytes) referencing a `StackPoolEntry` from a previously-emitted **Stack Pool Frame** (`0x07`). The encoder deduplicates identical stack traces into the pool; the same pool ID may be referenced by many events, which is the primary size win for high-frequency CPU sampling.
+A `PooledStackFrames` field is encoded as a u32 LE pool ID (4 bytes) referencing a `StackPoolEntry` from a previously-emitted **Stack Pool Frame** (`0x04`). The encoder deduplicates identical stack traces into the pool; the same pool ID may be referenced by many events, which is the primary size win for high-frequency CPU sampling.
 
 Decoders **must** resolve the pool ID against the accumulated stack pool to recover the addresses. A reference to an undefined `pool_id` is a stream error.
 

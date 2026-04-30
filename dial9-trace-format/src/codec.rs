@@ -24,9 +24,9 @@ pub(crate) const HEADER_SIZE: usize = 5;
 pub(crate) const TAG_SCHEMA: u8 = 0x01;
 pub(crate) const TAG_EVENT: u8 = 0x02;
 pub(crate) const TAG_STRING_POOL: u8 = 0x03;
-// Tags 0x04 and 0x06 are reserved (formerly SymbolTable and ProcMaps, now schema-based events).
+pub(crate) const TAG_STACK_POOL: u8 = 0x04;
 pub(crate) const TAG_TIMESTAMP_RESET: u8 = 0x05;
-pub(crate) const TAG_STACK_POOL: u8 = 0x07;
+// Tag 0x06 is reserved (formerly ProcMaps, now schema-based events).
 
 /// Maximum nanosecond delta that fits in a u24 (3 bytes).
 pub(crate) const MAX_TIMESTAMP_DELTA_NS: u64 = 0xFF_FFFF; // 16,777,215

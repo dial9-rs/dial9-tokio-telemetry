@@ -5,9 +5,8 @@ const MAGIC = [0x54, 0x52, 0x43, 0x00];
 const TAG_SCHEMA = 0x01;
 const TAG_EVENT = 0x02;
 const TAG_STRING_POOL = 0x03;
-// Tag 0x04 is reserved (formerly SymbolTable, now a schema-based event).
+const TAG_STACK_POOL = 0x04;
 const TAG_TIMESTAMP_RESET = 0x05;
-const TAG_STACK_POOL = 0x07;
 
 const FieldType = {
   I64: 1, F64: 2, Bool: 3, String: 4,
