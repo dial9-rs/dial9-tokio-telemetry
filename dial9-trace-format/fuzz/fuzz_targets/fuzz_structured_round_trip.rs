@@ -72,7 +72,7 @@ fn gen_value(ft: FuzzFieldType, u: &mut Unstructured) -> arbitrary::Result<Field
             for _ in 0..count {
                 addrs.push(u.arbitrary()?);
             }
-            FieldValue::StackFrames(addrs)
+            FieldValue::StackFrames(addrs.into())
         }
         FuzzFieldType::Varint => {
             if u.ratio(1, 4)? {

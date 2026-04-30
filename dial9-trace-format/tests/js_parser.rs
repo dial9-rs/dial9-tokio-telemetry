@@ -82,7 +82,7 @@ fn js_decodes_all_field_types() {
             FieldValue::String("world".to_string()),
             FieldValue::Bytes(vec![0xDE, 0xAD]),
             FieldValue::PooledString(pool_id),
-            FieldValue::StackFrames(vec![0x1000, 0x0F00, 0x0E00]),
+            FieldValue::StackFrames(vec![0x1000, 0x0F00, 0x0E00].into()),
             FieldValue::Varint(999),
         ],
     )

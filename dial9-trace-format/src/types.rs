@@ -50,6 +50,25 @@ pub enum FieldType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StackFrames(pub Vec<u64>);
 
+impl From<Vec<u64>> for StackFrames {
+    fn from(v: Vec<u64>) -> Self {
+        StackFrames(v)
+    }
+}
+
+impl FromIterator<u64> for StackFrames {
+    fn from_iter<I: IntoIterator<Item = u64>>(iter: I) -> Self {
+        StackFrames(iter.into_iter().collect())
+    }
+}
+
+impl std::ops::Deref for StackFrames {
+    type Target = [u64];
+    fn deref(&self) -> &[u64] {
+        &self.0
+    }
+}
+
 /// An interned string reference (pool ID). Created by [`Encoder::intern_string`](crate::encoder::Encoder::intern_string).
 /// On the wire this is a `PooledString` (u32 LE).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,7 +145,7 @@ pub enum FieldValue {
     String(String),
     Bytes(Vec<u8>),
     PooledString(InternedString),
-    StackFrames(Vec<u64>),
+    StackFrames(StackFrames),
     PooledStackFrames(InternedStackFrames),
     Varint(u64),
     StringMap(Vec<(Vec<u8>, Vec<u8>)>),
@@ -144,7 +163,7 @@ impl serde::Serialize for FieldValue {
             FieldValue::String(v) => serializer.serialize_str(v),
             FieldValue::Bytes(v) => serializer.serialize_bytes(v),
             FieldValue::PooledString(id) => id.serialize(serializer),
-            FieldValue::StackFrames(v) => v.serialize(serializer),
+            FieldValue::StackFrames(v) => v.0.serialize(serializer),
             FieldValue::PooledStackFrames(id) => id.serialize(serializer),
             FieldValue::Varint(v) => serializer.serialize_u64(*v),
             FieldValue::StringMap(pairs) => {
@@ -237,7 +256,7 @@ impl FieldValue {
             FieldValue::Varint(v) => crate::leb128::encode_unsigned(*v, w),
             FieldValue::StackFrames(addrs) => {
                 w.write_all(&(addrs.len() as u32).to_le_bytes())?;
-                for &addr in addrs {
+                for &addr in addrs.iter() {
                     w.write_all(&addr.to_le_bytes())?;
                 }
                 Ok(())
@@ -321,7 +340,7 @@ impl FieldValue {
                     addrs.push(addr);
                     pos += 8;
                 }
-                Some((FieldValue::StackFrames(addrs), &data[pos..]))
+                Some((FieldValue::StackFrames(addrs.into()), &data[pos..]))
             }
             FieldType::StringMap => {
                 let count = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
@@ -764,8 +783,8 @@ impl<'a, W: Write> EventEncoder<'a, W> {
     pub fn write_stack_frames(&mut self, v: &StackFrames) -> io::Result<()> {
         self.state
             .writer
-            .write_all(&(v.0.len() as u32).to_le_bytes())?;
-        for &addr in &v.0 {
+            .write_all(&(v.len() as u32).to_le_bytes())?;
+        for &addr in v.iter() {
             self.state.writer.write_all(&addr.to_le_bytes())?;
         }
         Ok(())
@@ -1188,7 +1207,7 @@ mod tests {
             0x5555_5555_0800,
             0x5555_5555_0100,
         ];
-        let val = FieldValue::StackFrames(addrs.clone());
+        let val = FieldValue::StackFrames(addrs.clone().into());
         let mut buf = Vec::new();
         val.encode(&mut buf).unwrap();
         assert_eq!(buf.len(), 4 + 4 * 8); // count(4) + 4 raw u64s

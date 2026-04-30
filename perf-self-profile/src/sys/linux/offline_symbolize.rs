@@ -280,7 +280,10 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
-            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![addr])],
+            &[
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![addr].into()),
+            ],
         )
         .unwrap();
         let buf = enc.finish();
@@ -333,7 +336,10 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
-            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![addr])],
+            &[
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![addr].into()),
+            ],
         )
         .unwrap();
         let buf = enc.finish();

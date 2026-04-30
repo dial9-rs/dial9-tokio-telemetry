@@ -111,8 +111,8 @@ impl<'a> StackPoolEntryRef<'a> {
         crate::types::StackFrameIter::new(self.frames_le, self.frame_count())
     }
 
-    /// Collect into an owned `Vec<u64>`.
-    pub fn to_vec(&self) -> Vec<u64> {
+    /// Collect into an owned [`StackFrames`](crate::types::StackFrames).
+    pub fn to_stack_frames(&self) -> crate::types::StackFrames {
         self.iter().collect()
     }
 }

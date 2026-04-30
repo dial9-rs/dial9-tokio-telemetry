@@ -196,7 +196,10 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
-            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![0x1000])],
+            &[
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![0x1000].into()),
+            ],
         )
         .unwrap();
         let buf = enc.finish();

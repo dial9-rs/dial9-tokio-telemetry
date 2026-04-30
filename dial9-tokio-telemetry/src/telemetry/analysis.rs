@@ -97,9 +97,9 @@ impl TraceReader {
                                 let frames = ev
                                     .stack_pool
                                     .get(*id)
-                                    .map(|s| s.to_vec())
-                                    .unwrap_or_default();
-                                FieldValue::StackFrames(frames)
+                                    .expect("stack pool entry must exist for PooledStackFrames")
+                                    .to_vec();
+                                FieldValue::StackFrames(frames.into())
                             }
                             other => other.to_owned(),
                         };

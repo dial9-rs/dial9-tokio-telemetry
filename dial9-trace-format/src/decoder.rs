@@ -11,7 +11,7 @@ use crate::codec::{
     StackPoolEntryRef, WireTypeId,
 };
 use crate::schema::{SchemaEntry, SchemaRegistry};
-use crate::types::{FieldType, FieldValueRef, InternedStackFrames, InternedString};
+use crate::types::{FieldType, FieldValueRef, InternedStackFrames, InternedString, StackFrames};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -118,8 +118,8 @@ impl StackPool {
         Self(HashMap::default())
     }
 
-    pub(crate) fn insert(&mut self, id: InternedStackFrames, frames: Vec<u64>) {
-        self.0.insert(id, frames);
+    pub(crate) fn insert(&mut self, id: InternedStackFrames, frames: StackFrames) {
+        self.0.insert(id, frames.0);
     }
 
     pub fn get(&self, id: InternedStackFrames) -> Option<&[u64]> {
@@ -335,7 +335,7 @@ impl<'a> Decoder<'a> {
             Frame::StackPool(entries) => {
                 for e in &entries {
                     self.stack_pool
-                        .insert(InternedStackFrames(e.pool_id), e.frames.clone());
+                        .insert(InternedStackFrames(e.pool_id), e.frames.clone().into());
                 }
                 Ok(Some(DecodedFrame::StackPool(entries)))
             }
@@ -408,7 +408,7 @@ impl<'a> Decoder<'a> {
             FrameRef::StackPool(entries) => {
                 for e in &entries {
                     self.stack_pool
-                        .insert(InternedStackFrames(e.pool_id), e.to_vec());
+                        .insert(InternedStackFrames(e.pool_id), e.to_stack_frames());
                 }
                 Ok(Some(DecodedFrameRef::StackPool(entries)))
             }
