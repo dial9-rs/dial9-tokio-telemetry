@@ -56,8 +56,9 @@ async fn mixed_task(id: usize) {
 async fn main() {
     println!("Running workload...");
 
-    let handle = TelemetryHandle::current();
-    let tasks: Vec<_> = (0..200).map(|i| handle.spawn(mixed_task(i))).collect();
+    let tasks: Vec<_> = (0..200)
+        .map(|i| TelemetryHandle::instrumented_spawn(mixed_task(i)))
+        .collect();
 
     for task in tasks {
         let _ = task.await;

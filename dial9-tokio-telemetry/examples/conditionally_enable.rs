@@ -73,11 +73,10 @@ async fn main() {
         }
     );
 
+    // TelemetryHandle::spawn automatically falls back to tokio::spawn
+    // when telemetry is disabled, so no conditional logic needed.
     let tasks: Vec<_> = (0..50)
-        .map(|i| match TelemetryHandle::try_current() {
-            Some(handle) => handle.spawn(mixed_task(i)),
-            None => tokio::spawn(mixed_task(i)),
-        })
+        .map(|i| TelemetryHandle::instrumented_spawn(mixed_task(i)))
         .collect();
 
     for task in tasks {

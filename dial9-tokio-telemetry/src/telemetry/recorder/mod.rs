@@ -347,6 +347,28 @@ impl std::fmt::Debug for TelemetryHandle {
 }
 
 impl TelemetryHandle {
+    /// Spawn a future with wake-event tracking if running on a dial9 thread.
+    ///
+    /// Uses [`TelemetryHandle::try_current`] internally. Falls back to
+    /// plain [`tokio::spawn`] when no handle is available (e.g. when
+    /// telemetry is disabled or called from a non-dial9 thread).
+    #[track_caller]
+    pub fn instrumented_spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        if let Some(handle) = TelemetryHandle::try_current() {
+            let _guard = InstrumentedSpawnGuard::set();
+            tokio::spawn(async move {
+                let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
+                crate::traced::Traced::new(future, handle.traced_handle(), task_id).await
+            })
+        } else {
+            let _guard = InstrumentedSpawnGuard::set();
+            tokio::spawn(future)
+        }
+    }
     /// Return the [`TelemetryHandle`] for the current thread.
     ///
     /// The handle is installed on every thread owned by a traced runtime

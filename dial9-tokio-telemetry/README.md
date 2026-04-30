@@ -47,12 +47,8 @@ fn my_config() -> Dial9Config {
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
-    // your async code here
-    // `TelemetryHandle::current()` returns the per-thread handle for
-    // spawning instrumented sub-tasks:
-    let handle = TelemetryHandle::current();
-    handle
-        .spawn(async { /* wake events tracked */ })
+    // if dial9 is disabled, this spawns directly to Tokio
+    TelemetryHandle::instrumented_spawn(async { /* wake events tracked */ })
         .await
         .unwrap();
 }
@@ -162,28 +158,23 @@ runtime.block_on(async {
 
 ## Wake event tracking
 
-To understand when Tokio itself is delaying your code (scheduler delay), you need to know when your future was _ready_ to run. Wake events — which task woke which other task — are _not_ captured automatically. Tokio's runtime hooks don't currently allow instrumenting wakes: capturing wakes requires wrapping the future. The simplest way is to use `handle.spawn` instead of `tokio::spawn`.
+To understand when Tokio itself is delaying your code (scheduler delay), you need to know when your future was _ready_ to run. Wake events — which task woke which other task — are _not_ captured automatically. Tokio's runtime hooks don't currently allow instrumenting wakes: capturing wakes requires wrapping the future. The simplest way is to use `TelemetryHandle::instrumented_spawn` instead of `tokio::spawn`.
 
-Use `handle.spawn()` instead of `tokio::spawn()`:
+Use `TelemetryHandle::instrumented_spawn()` instead of `tokio::spawn()`:
 
 ```rust,no_run
-# use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
-# fn main() -> std::io::Result<()> {
-# let writer = RotatingWriter::new("/tmp/t.bin", 1024, 4096)?;
-# let builder = tokio::runtime::Builder::new_multi_thread();
-let (runtime, guard) = TracedRuntime::build_and_start(builder, writer)?;
-let handle = guard.handle();
+# fn main() {
+use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
-runtime.block_on(async {
-    // wake events / scheduling delay captured
-    handle.spawn(async { /* ... */ });
+// Falls back to plain tokio::spawn when dial9 is disabled
+TelemetryHandle::instrumented_spawn(async { /* wake events captured */ });
 
-    // this task is still tracked, but won't have wake events
-    tokio::spawn(async { /* ... */ });
-});
-# Ok(())
+// this task is still tracked, but won't have wake events
+tokio::spawn(async { /* ... */ });
 # }
 ```
+
+If you already have a `TelemetryHandle` (e.g. from `guard.handle()` in manual setup), you can also call `handle.spawn()` directly — it's the same instrumentation.
 
 For frameworks like Axum where you don't control the spawn call, you need to wrap the accept loop. See [`examples/metrics-service/src/axum_traced.rs`](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/examples/metrics-service/src/axum_traced.rs) for a working example that wraps both the accept loop and per-connection futures.
 
