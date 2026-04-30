@@ -82,7 +82,7 @@ fn js_decodes_all_field_types() {
             FieldValue::String("world".to_string()),
             FieldValue::Bytes(vec![0xDE, 0xAD]),
             FieldValue::PooledString(pool_id),
-            FieldValue::StackFrames(vec![0x1000, 0x0F00, 0x0E00]),
+            FieldValue::StackFrames(vec![0x1000, 0x0F00, 0x0E00].into()),
             FieldValue::Varint(999),
         ],
     )
@@ -295,4 +295,132 @@ fn js_decodes_optional_pooled_string() {
     // Second event: opt_name should be null
     assert!(events[1]["values"]["opt_name"].is_null());
     assert_eq!(events[1]["values"]["required_id"].as_str().unwrap(), "99");
+}
+
+#[test]
+fn js_decodes_pooled_stack_frames() {
+    let mut enc = Encoder::new();
+    let tid = enc
+        .register_schema(
+            "CpuSample",
+            vec![
+                FieldDef {
+                    name: "worker".into(),
+                    field_type: FieldType::Varint,
+                },
+                FieldDef {
+                    name: "callchain".into(),
+                    field_type: FieldType::PooledStackFrames,
+                },
+            ],
+        )
+        .unwrap();
+
+    // Two distinct stacks, then reuse stack_a → exercises dedup.
+    let stack_a = enc.intern_stack_frames(&[0x1000, 0x0F00, 0x0E00]).unwrap();
+    let stack_b = enc.intern_stack_frames(&[0x2000, 0x2100]).unwrap();
+
+    enc.write_event(
+        &tid,
+        &[
+            FieldValue::Varint(1_000_000),
+            FieldValue::Varint(1),
+            FieldValue::PooledStackFrames(stack_a),
+        ],
+    )
+    .unwrap();
+    enc.write_event(
+        &tid,
+        &[
+            FieldValue::Varint(2_000_000),
+            FieldValue::Varint(2),
+            FieldValue::PooledStackFrames(stack_b),
+        ],
+    )
+    .unwrap();
+    enc.write_event(
+        &tid,
+        &[
+            FieldValue::Varint(3_000_000),
+            FieldValue::Varint(3),
+            FieldValue::PooledStackFrames(stack_a),
+        ],
+    )
+    .unwrap();
+
+    let data = enc.finish();
+    let json = js_decode(&data);
+    let frames = json["frames"].as_array().unwrap();
+    let events: Vec<_> = frames.iter().filter(|f| f["type"] == "event").collect();
+    assert_eq!(events.len(), 3);
+
+    // Resolved value matches the inline `StackFrames` shape: array of decimal
+    // address strings. This is what downstream JS consumers expect.
+    assert_eq!(
+        events[0]["values"]["callchain"],
+        serde_json::json!(["4096", "3840", "3584"])
+    );
+    assert_eq!(
+        events[1]["values"]["callchain"],
+        serde_json::json!(["8192", "8448"])
+    );
+    // Reused pool ID resolves to same array as event 0.
+    assert_eq!(
+        events[2]["values"]["callchain"],
+        serde_json::json!(["4096", "3840", "3584"])
+    );
+
+    // Stack pool is exposed in the CLI JSON output.
+    let stack_pool = json["stackPool"].as_object().unwrap();
+    assert_eq!(stack_pool.len(), 2);
+    assert_eq!(
+        stack_pool[&stack_a.raw_id().to_string()],
+        serde_json::json!(["4096", "3840", "3584"])
+    );
+    assert_eq!(
+        stack_pool[&stack_b.raw_id().to_string()],
+        serde_json::json!(["8192", "8448"])
+    );
+}
+
+#[test]
+fn js_decodes_optional_pooled_stack_frames() {
+    let mut enc = Encoder::new();
+    let tid = enc
+        .register_schema(
+            "MaybeStack",
+            vec![FieldDef {
+                name: "callchain".into(),
+                field_type: FieldType::OptionalPooledStackFrames,
+            }],
+        )
+        .unwrap();
+
+    let stack = enc.intern_stack_frames(&[0xAAAA, 0xBBBB]).unwrap();
+    enc.write_event(
+        &tid,
+        &[
+            FieldValue::Varint(1_000_000),
+            FieldValue::PooledStackFrames(stack),
+        ],
+    )
+    .unwrap();
+    enc.write_event(&tid, &[FieldValue::Varint(2_000_000), FieldValue::None])
+        .unwrap();
+
+    let data = enc.finish();
+    let json = js_decode(&data);
+    let events: Vec<_> = json["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["type"] == "event")
+        .collect();
+    assert_eq!(events.len(), 2);
+
+    assert_eq!(
+        events[0]["values"]["callchain"],
+        serde_json::json!(["43690", "48059"])
+    );
+    assert!(events[1]["values"]["callchain"].is_null());
 }

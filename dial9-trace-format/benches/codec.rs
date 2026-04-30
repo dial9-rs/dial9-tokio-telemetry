@@ -1,7 +1,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use dial9_trace_format::decoder::Decoder;
 use dial9_trace_format::encoder::Encoder;
-use dial9_trace_format::{StackFrames, TraceEvent};
+use dial9_trace_format::{InternedStackFrames, TraceEvent};
 
 #[derive(TraceEvent)]
 struct PollStart {
@@ -41,7 +41,7 @@ struct CpuSample {
     worker_id: u64,
     tid: u32,
     source: u8,
-    frames: StackFrames,
+    frames: InternedStackFrames,
 }
 
 const N: u64 = 1_000_000;
@@ -74,17 +74,33 @@ fn encode_events(enc: &mut Encoder, n: u64) {
                 woken_task_id: 1000 + ((i + 1) % 5000),
                 target_worker: i % 8,
             }),
-            _ => enc.write(&CpuSample {
-                timestamp_ns: ts,
-                worker_id: i % 8,
-                tid: 12345 + (i % 4) as u32,
-                source: 0,
-                frames: StackFrames(vec![
+            _ => {
+                let frames = enc.intern_stack_frames_infallible(&[
                     0x5555_5555_0000 + (i % 100) * 0x10,
                     0x5555_5555_1000 + (i % 50) * 0x20,
                     0x5555_5555_2000,
-                ]),
-            }),
+                    0x5555_5555_3000,
+                    0x5555_5555_4000,
+                    0x5555_5555_5000,
+                    0x5555_5555_6000,
+                    0x5555_5555_7000,
+                    0x5555_5555_8000,
+                    0x5555_5555_9000,
+                    0x5555_5555_a000,
+                    0x5555_5555_b000,
+                    0x5555_5555_c000,
+                    0x5555_5555_d000,
+                    0x5555_5555_e000,
+                    0x5555_5555_f000,
+                ]);
+                enc.write(&CpuSample {
+                    timestamp_ns: ts,
+                    worker_id: i % 8,
+                    tid: 12345 + (i % 4) as u32,
+                    source: 0,
+                    frames,
+                })
+            }
         }
         .unwrap()
     }

@@ -5,12 +5,12 @@ const MAGIC = [0x54, 0x52, 0x43, 0x00];
 const TAG_SCHEMA = 0x01;
 const TAG_EVENT = 0x02;
 const TAG_STRING_POOL = 0x03;
-// Tag 0x04 is reserved (formerly SymbolTable, now a schema-based event).
+const TAG_STACK_POOL = 0x04;
 const TAG_TIMESTAMP_RESET = 0x05;
 
 const FieldType = {
   I64: 1, F64: 2, Bool: 3, String: 4,
-  Bytes: 5, PooledString: 7, StackFrames: 8, Varint: 9,
+  Bytes: 5, PooledStackFrames: 6, PooledString: 7, StackFrames: 8, Varint: 9,
   StringMap: 10, U8: 11, U16: 12, U32: 13,
 };
 
@@ -54,6 +54,7 @@ function decodeFieldValue(view, offset, fieldType) {
       return [val.toString(), consumed];
     }
     case FieldType.PooledString: return [view.getUint32(offset, true), 4];
+    case FieldType.PooledStackFrames: return [view.getUint32(offset, true), 4];
     case FieldType.StackFrames: {
       const count = view.getUint32(offset, true);
       let pos = 4;
@@ -97,6 +98,7 @@ class TraceDecoder {
     this._pos = 0;
     this.schemas = new Map();
     this.stringPool = new Map();
+    this.stackPool = new Map();
     this.version = 0;
     this._timestampBaseNs = 0n;
   }
@@ -123,6 +125,7 @@ class TraceDecoder {
         if (isHeader) {
           this.schemas = new Map();
           this.stringPool = new Map();
+          this.stackPool = new Map();
           this._timestampBaseNs = 0n;
           this._pos += 5; // skip header
           return this.nextFrame();
@@ -133,6 +136,7 @@ class TraceDecoder {
         case TAG_SCHEMA: return this._decodeSchema();
         case TAG_EVENT: return this._decodeEvent();
         case TAG_STRING_POOL: return this._decodeStringPool();
+        case TAG_STACK_POOL: return this._decodeStackPool();
         case TAG_TIMESTAMP_RESET: {
           const lo = this._view.getUint32(this._pos, true);
           const hi = this._view.getUint32(this._pos + 4, true);
@@ -203,6 +207,8 @@ class TraceDecoder {
       const innerType = field.fieldType & 0x7F;
       if (innerType === FieldType.PooledString && val !== null) {
         values[field.name] = this.stringPool.get(val) ?? `<unresolved pool#${val}>`;
+      } else if (innerType === FieldType.PooledStackFrames && val !== null) {
+        values[field.name] = this.stackPool.get(val) ?? `<unresolved stack#${val}>`;
       } else {
         values[field.name] = val;
       }
@@ -234,6 +240,25 @@ class TraceDecoder {
     return { type: 'string_pool', entries };
   }
 
+  _decodeStackPool() {
+    const count = this._view.getUint32(this._pos, true); this._pos += 4;
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+      const poolId = this._view.getUint32(this._pos, true); this._pos += 4;
+      const frameCount = this._view.getUint32(this._pos, true); this._pos += 4;
+      const addrs = [];
+      for (let j = 0; j < frameCount; j++) {
+        const lo = this._view.getUint32(this._pos, true);
+        const hi = this._view.getUint32(this._pos + 4, true);
+        addrs.push((BigInt(hi) << 32n | BigInt(lo)).toString());
+        this._pos += 8;
+      }
+      this.stackPool.set(poolId, addrs);
+      entries.push({ poolId, addrs });
+    }
+    return { type: 'stack_pool', entries };
+  }
+
 }
 
 // --- CLI: decode a file and print JSON ---
@@ -249,6 +274,7 @@ if (typeof require !== 'undefined' && require.main === module) {
     version: dec.version,
     frames,
     stringPool: Object.fromEntries(dec.stringPool),
+    stackPool: Object.fromEntries(dec.stackPool),
   }, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2);
   console.log(json);
 }

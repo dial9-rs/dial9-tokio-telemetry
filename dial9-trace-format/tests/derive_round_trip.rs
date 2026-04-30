@@ -6,7 +6,7 @@ use dial9_trace_format::decoder::{DecodedFrame, DecodedFrameRef, Decoder};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::schema::SchemaEntry;
 use dial9_trace_format::types::{FieldType, FieldValueRef};
-use dial9_trace_format::{InternedString, StackFrames, TraceEvent};
+use dial9_trace_format::{InternedStackFrames, InternedString, StackFrames, TraceEvent};
 
 // ── Structs covering every supported field type ─────────────────────────
 
@@ -1124,6 +1124,13 @@ struct WithoutOptional {
     required_id: u32,
 }
 
+#[derive(TraceEvent)]
+struct WithOptionalStack {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
+    optional_callchain: Option<InternedStackFrames>,
+}
+
 #[test]
 fn optional_field_schema_has_optional_flag() {
     let defs = WithOptionalString::field_defs();
@@ -1216,6 +1223,36 @@ fn optional_u64_round_trip() {
     })
     .unwrap();
     assert_eq!(events, vec![(100, Some(200)), (300, None)]);
+}
+
+#[test]
+fn optional_interned_stack_frames_round_trip() {
+    let mut enc = Encoder::new();
+    let stack = enc.intern_stack_frames(&[0xdead, 0xbeef, 0xcafe]).unwrap();
+    enc.write(&WithOptionalStack {
+        timestamp_ns: 1000,
+        optional_callchain: Some(stack),
+    })
+    .unwrap();
+    enc.write(&WithOptionalStack {
+        timestamp_ns: 2000,
+        optional_callchain: None,
+    })
+    .unwrap();
+    let data = enc.finish();
+
+    let mut dec = Decoder::new(&data).unwrap();
+    let mut events = Vec::new();
+    dec.for_each_event(|ev| {
+        let defs = WithOptionalStack::field_defs();
+        let decoded = WithOptionalStack::decode(ev.timestamp_ns, ev.fields, &defs).unwrap();
+        events.push((decoded.timestamp_ns, decoded.optional_callchain));
+    })
+    .unwrap();
+    assert_eq!(events, vec![(1000, Some(stack)), (2000, None)]);
+
+    let defs = WithOptionalStack::field_defs();
+    assert_eq!(defs[0].field_type, FieldType::OptionalPooledStackFrames);
 }
 
 #[test]
