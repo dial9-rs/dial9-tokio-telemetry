@@ -118,17 +118,20 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// * `config` — a zero-argument function path or a zero-argument closure
 ///   returning any value convertible into a `TelemetryRuntime`. In
 ///   practice that means one of:
-///     - [`Dial9Config`] (strict): construction I/O failure panics.
-///     - `Dial9ConfigFallback` (lenient): RotatingWriter / telemetry-core
-///       I/O failure silently downgrades to a plain tokio runtime
-///       carrying the user's `with_tokio` configurators. Build one with
-///       `Dial9Config::builder().build_or_disabled()`.
+///     - [`Dial9Config`] from `Dial9Config::builder().build()` (strict):
+///       any builder validation or writer-I/O failure surfaces from
+///       `.build()` as a `Dial9ConfigBuilderError`; runtime construction
+///       under the macro panics on tokio-builder or telemetry-core I/O.
+///     - [`Dial9Config`] from `Dial9Config::builder().build_or_disabled()`
+///       (lenient): the same `Dial9Config` type, but validation and
+///       writer-I/O failures are logged at `error!` and downgraded to a
+///       disabled config that still preserves your `with_tokio`
+///       configurators.
 ///     - The deprecated positional `dial9_tokio_telemetry::config::Dial9Config`,
 ///       kept compatible via a bridge impl.
 ///
-///   Build the strict variant with [`Dial9Config::builder()`]. Use
-///   `.enabled(false)` on the builder to run without telemetry while
-///   keeping your `with_tokio` configurators.
+///   Use `.enabled(false)` on the builder to run without telemetry
+///   while keeping your `with_tokio` configurators.
 ///
 /// # Examples
 ///

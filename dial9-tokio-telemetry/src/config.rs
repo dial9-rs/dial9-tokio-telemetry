@@ -10,18 +10,15 @@
 //!
 //! Two finish functions cover the strict / lenient axis:
 //!
-//! - [`Dial9ConfigBuilder::build`] — strict. Returns a [`Dial9Config`].
-//!   Missing required writer fields surface as
-//!   [`Dial9ConfigBuilderError::MissingFields`], and runtime-time
-//!   `RotatingWriter` / telemetry-core I/O failures bubble out of the
-//!   conversion into [`crate::TelemetryRuntime`] as
-//!   [`crate::TelemetryRuntimeError`].
+//! - [`Dial9ConfigBuilder::build`] — strict. Returns a
+//!   `Result<Dial9Config, Dial9ConfigBuilderError>`. Both required-field
+//!   validation and the writer's I/O probing happen here, so any error
+//!   surfaces at config-build time before the runtime is touched.
 //! - [`Dial9ConfigBuilder::build_or_disabled`] — lenient. Returns a
-//!   [`Dial9ConfigFallback`] that is *infallible at build time* and
-//!   silently cascades runtime-time `RotatingWriter` / telemetry-core
-//!   I/O failures into a plain tokio runtime carrying the user's
-//!   `with_tokio` configurators. Use this when telemetry is
-//!   best-effort.
+//!   [`Dial9Config`] that is *infallible at build time*: validation or
+//!   I/O failures are logged at `error!` level and downgraded to a
+//!   disabled config that still carries the user's `with_tokio`
+//!   configurators.
 //!
 //! To run without telemetry while preserving tokio knobs, call
 //! `.enabled(false)` — the builder then skips required-field validation
@@ -33,9 +30,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::telemetry::recorder::{HasTracePath, TracedRuntime, TracedRuntimeBuilder};
+use crate::telemetry::writer::RotatingWriter;
 
 // ---------------------------------------------------------------------------
-// Dial9ConfigBuilderError — unified error for builder validation and runtime construction
+// Dial9ConfigBuilderError — unified error for builder validation and writer I/O
 // ---------------------------------------------------------------------------
 
 /// Errors produced while building a [`Dial9Config`].
@@ -44,23 +42,26 @@ use crate::telemetry::recorder::{HasTracePath, TracedRuntime, TracedRuntimeBuild
 pub enum Dial9ConfigBuilderError {
     /// Telemetry is enabled (the default) but one or more required writer
     /// fields were never set on the builder.
-    MissingFields(MissingFields),
+    Validation(ValidationError),
+    /// Failure constructing the [`RotatingWriter`] backing telemetry — for
+    /// example, an unwritable `base_path`.
+    Io(std::io::Error),
 }
 
-/// Opaque payload for [`Dial9ConfigBuilderError::MissingFields`].
+/// Opaque payload for [`Dial9ConfigBuilderError::Validation`].
 #[derive(Debug)]
-pub struct MissingFields {
+pub struct ValidationError {
     fields: Vec<&'static str>,
 }
 
-impl MissingFields {
+impl ValidationError {
     /// The names of the required builder setters that were not called.
     pub fn fields(&self) -> &[&'static str] {
         &self.fields
     }
 }
 
-impl std::fmt::Display for MissingFields {
+impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -73,54 +74,52 @@ impl std::fmt::Display for MissingFields {
 impl std::fmt::Display for Dial9ConfigBuilderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Dial9ConfigBuilderError::MissingFields(m) => write!(f, "{m}"),
+            Dial9ConfigBuilderError::Validation(v) => write!(f, "{v}"),
+            Dial9ConfigBuilderError::Io(e) => write!(f, "rotating writer: {e}"),
         }
     }
 }
 
-impl std::error::Error for Dial9ConfigBuilderError {}
+impl std::error::Error for Dial9ConfigBuilderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Dial9ConfigBuilderError::Validation(_) => None,
+            Dial9ConfigBuilderError::Io(e) => Some(e),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Dial9Config — opaque value the macro consumes
 // ---------------------------------------------------------------------------
 
-/// Finalized strict configuration consumed by the `#[main]` macro.
+/// Finalized configuration consumed by the `#[main]` macro.
 ///
-/// Constructed via [`Dial9Config::builder()`] followed by
-/// [`Dial9ConfigBuilder::build`]. Converting this into a
-/// [`crate::TelemetryRuntime`] propagates any I/O failure as a
-/// [`crate::TelemetryRuntimeError`]; nothing is hidden. For an opt-in
-/// lenient variant that silently downgrades to a plain tokio runtime on
-/// I/O failure, see [`Dial9ConfigFallback`].
+/// Constructed via [`Dial9Config::builder()`] followed by either:
+///
+/// - [`Dial9ConfigBuilder::build`] — strict; returns
+///   `Result<Dial9Config, Dial9ConfigBuilderError>`. The
+///   [`RotatingWriter`] is probed eagerly inside `build`, so any I/O
+///   failure surfaces here rather than later when the runtime is built.
+/// - [`Dial9ConfigBuilder::build_or_disabled`] — lenient; never reports
+///   a build error, downgrades to a disabled config that preserves the
+///   user's `with_tokio` configurators on validation or I/O failure.
 #[derive(Debug)]
 pub struct Dial9Config(pub(crate) Inner);
-
-/// Lenient configuration variant that opts into runtime-time fallback.
-///
-/// Constructed via [`Dial9ConfigBuilder::build_or_disabled`]. Converting
-/// this into a [`crate::TelemetryRuntime`] silently downgrades
-/// `RotatingWriter` and telemetry-core I/O failures to a plain tokio
-/// runtime built from the user's `with_tokio` configurators; only the
-/// tokio builder's own [`std::io::Error`] can still escape.
-#[derive(Debug)]
-pub struct Dial9ConfigFallback(pub(crate) Inner);
 
 /// A configurator closure that customizes a [`tokio::runtime::Builder`].
 ///
 /// Stored as `Arc<dyn Fn ...>` so that the configurator vector is cheaply
-/// cloneable (required for the fallback path's runtime cascade, which
-/// re-materializes the tokio builder after `build_and_start` consumes the
-/// first attempt).
+/// cloneable — the `build_or_disabled` path needs to preserve the
+/// configurators on the disabled-fallback variant when validation or
+/// writer-I/O setup fails.
 pub(crate) type TokioConfigurator =
     Arc<dyn Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static>;
 
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Inner {
     Enabled {
-        base_path: PathBuf,
-        max_file_size: u64,
-        max_total_size: u64,
-        rotation_period: Option<Duration>,
+        writer: RotatingWriter,
         tokio_configurators: Vec<TokioConfigurator>,
         runtime_builder: TracedRuntimeBuilder<HasTracePath>,
     },
@@ -133,18 +132,12 @@ impl fmt::Debug for Inner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Inner::Enabled {
-                base_path,
-                max_file_size,
-                max_total_size,
-                rotation_period,
+                writer,
                 tokio_configurators,
                 runtime_builder,
             } => f
                 .debug_struct("Enabled")
-                .field("base_path", base_path)
-                .field("max_file_size", max_file_size)
-                .field("max_total_size", max_total_size)
-                .field("rotation_period", rotation_period)
+                .field("writer", writer)
                 .field("tokio_configurators", &tokio_configurators.len())
                 .field("runtime_builder", runtime_builder)
                 .finish(),
@@ -271,22 +264,27 @@ fn assemble(args: AssembleArgs) -> Result<Inner, Dial9ConfigBuilderError> {
             .into_iter()
             .filter_map(|(name, missing)| missing.then_some(name))
             .collect();
-            return Err(Dial9ConfigBuilderError::MissingFields(MissingFields {
+            return Err(Dial9ConfigBuilderError::Validation(ValidationError {
                 fields: missing,
             }));
         }
     };
 
-    let mut runtime_builder = TracedRuntime::builder().with_trace_path(base_path.clone());
+    let writer = RotatingWriter::builder()
+        .base_path(base_path.clone())
+        .max_file_size(max_file_size)
+        .max_total_size(max_total_size)
+        .maybe_rotation_period(rotation_period)
+        .build()
+        .map_err(Dial9ConfigBuilderError::Io)?;
+
+    let mut runtime_builder = TracedRuntime::builder().with_trace_path(base_path);
     for configure in runtime_configurators {
         runtime_builder = configure(runtime_builder);
     }
 
     Ok(Inner::Enabled {
-        base_path,
-        max_file_size,
-        max_total_size,
-        rotation_period,
+        writer,
         tokio_configurators,
         runtime_builder,
     })
@@ -305,8 +303,8 @@ impl<S: dial9_config_builder::State> Dial9ConfigBuilder<S> {
     /// Can be called multiple times; configurators are applied in call
     /// order each time the runtime is materialized. The closure must be
     /// `Fn + Send + Sync + 'static` so that
-    /// [`build_or_disabled`](Self::build_or_disabled)'s fallback path can
-    /// re-materialize the builder if the primary attempt's I/O fails.
+    /// [`build_or_disabled`](Self::build_or_disabled) can preserve the
+    /// configurators on the disabled-fallback variant.
     pub fn with_tokio<F>(mut self, f: F) -> Self
     where
         F: Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static,
@@ -336,30 +334,33 @@ impl<S: dial9_config_builder::State> Dial9ConfigBuilder<S> {
 }
 
 impl<S: dial9_config_builder::IsComplete> Dial9ConfigBuilder<S> {
-    /// Finish into a [`Dial9ConfigFallback`] that never reports a build
-    /// error.
+    /// Finish into a [`Dial9Config`] that never reports a build error.
     ///
-    /// On builder validation failure (e.g. missing required writer fields),
-    /// emits a [`Dial9ConfigFallback`] in its disabled state with the
-    /// user's `with_tokio` configurators preserved. The resulting
-    /// config also opts into a runtime-time cascade: any
-    /// `RotatingWriter` / telemetry-core I/O failure during
-    /// [`crate::TelemetryRuntime::try_from`] silently downgrades to a
-    /// plain tokio runtime built from the same configurators. Only
-    /// [`std::io::Error`] (from the tokio builder itself) can still
-    /// escape that conversion.
+    /// On any [`Dial9ConfigBuilderError`] (validation failure or writer
+    /// I/O probe failure) emits an `error!` log on the
+    /// `dial9_telemetry` target and returns a [`Dial9Config`] in its
+    /// disabled state with the user's `with_tokio` configurators
+    /// preserved. The resulting config builds a plain tokio runtime
+    /// when handed to [`crate::TelemetryRuntime::try_from`].
     ///
     /// Lenient counterpart to [`build`](Self::build). Use
-    /// [`build`](Self::build) instead when you want builder validation
-    /// errors and downstream RotatingWriter / telemetry-core I/O failures
-    /// to surface as [`crate::TelemetryRuntimeError`].
-    pub fn build_or_disabled(self) -> Dial9ConfigFallback {
+    /// [`build`](Self::build) instead when you want validation and
+    /// writer-I/O failures to surface as
+    /// [`Dial9ConfigBuilderError`].
+    pub fn build_or_disabled(self) -> Dial9Config {
         let cfgs_for_fallback = self.tokio_configurators.clone();
         match self.build() {
-            Ok(cfg) => Dial9ConfigFallback(cfg.0),
-            Err(_) => Dial9ConfigFallback(Inner::Disabled {
-                tokio_configurators: cfgs_for_fallback,
-            }),
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::error!(
+                    target: "dial9_telemetry",
+                    error = %e,
+                    "telemetry config build failed; falling back to plain tokio runtime",
+                );
+                Dial9Config(Inner::Disabled {
+                    tokio_configurators: cfgs_for_fallback,
+                })
+            }
         }
     }
 }
@@ -370,7 +371,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::TelemetryRuntime;
-    use crate::TelemetryRuntimeError;
 
     use super::*;
 
@@ -401,28 +401,45 @@ mod tests {
     #[test]
     fn missing_required_fields_errors_with_all_missing_names() {
         match Dial9Config::builder().build() {
-            Err(Dial9ConfigBuilderError::MissingFields(m)) => {
-                assert_eq!(m.fields(), ["base_path", "max_file_size", "max_total_size"]);
+            Err(Dial9ConfigBuilderError::Validation(v)) => {
+                assert_eq!(v.fields(), ["base_path", "max_file_size", "max_total_size"]);
             }
-            Ok(_) => panic!("expected MissingFields error, got Ok"),
+            Ok(_) => panic!("expected Validation error, got Ok"),
+            Err(other) => panic!("expected Validation error, got {other:?}"),
         }
     }
 
     #[test]
     fn missing_some_required_fields_lists_only_missing() {
         match Dial9Config::builder().max_file_size(1024).build() {
-            Err(Dial9ConfigBuilderError::MissingFields(m)) => {
-                assert_eq!(m.fields(), ["base_path", "max_total_size"]);
+            Err(Dial9ConfigBuilderError::Validation(v)) => {
+                assert_eq!(v.fields(), ["base_path", "max_total_size"]);
             }
-            Ok(_) => panic!("expected MissingFields error, got Ok"),
+            Ok(_) => panic!("expected Validation error, got Ok"),
+            Err(other) => panic!("expected Validation error, got {other:?}"),
         }
     }
 
     #[test]
     fn explicitly_enabled_still_requires_fields() {
         match Dial9Config::builder().enabled(true).build() {
-            Err(Dial9ConfigBuilderError::MissingFields(_)) => {}
-            Ok(_) => panic!("expected MissingFields error, got Ok"),
+            Err(Dial9ConfigBuilderError::Validation(_)) => {}
+            Ok(_) => panic!("expected Validation error, got Ok"),
+            Err(other) => panic!("expected Validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strict_build_returns_io_error_for_unwritable_base_path() {
+        let result = Dial9Config::builder()
+            .base_path(unwritable_base_path())
+            .max_file_size(1024)
+            .max_total_size(4096)
+            .build();
+        match result {
+            Err(Dial9ConfigBuilderError::Io(_)) => {}
+            Ok(_) => panic!("expected Io error, got Ok"),
+            Err(other) => panic!("expected Io error, got {other:?}"),
         }
     }
 
@@ -457,24 +474,24 @@ mod tests {
     }
 
     #[test]
-    fn build_or_disabled_cascades_runtime_io_failure_to_disabled() {
+    fn build_or_disabled_downgrades_on_writer_io_failure() {
         let cfg = Dial9Config::builder()
             .base_path(unwritable_base_path())
             .max_file_size(1024)
             .max_total_size(4096)
             .build_or_disabled();
         let rt = TelemetryRuntime::try_from(cfg)
-            .expect("RotatingWriter failure should cascade to disabled");
+            .expect("writer I/O failure should downgrade to disabled");
         assert!(
             rt.guard().is_none(),
-            "cascade path must not install a guard"
+            "downgrade path must not install a guard"
         );
         let v = rt.block_on(async { 42u32 });
         assert_eq!(v, 42);
     }
 
     #[test]
-    fn build_or_disabled_replays_with_tokio_configurators_on_cascade() {
+    fn build_or_disabled_preserves_with_tokio_configurators_on_io_failure() {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_closure = Arc::clone(&counter);
         let cfg = Dial9Config::builder()
@@ -486,27 +503,12 @@ mod tests {
                 b.worker_threads(1);
             })
             .build_or_disabled();
-        let rt = TelemetryRuntime::try_from(cfg).expect("cascade should produce a runtime");
+        let rt = TelemetryRuntime::try_from(cfg).expect("downgrade should produce a runtime");
         assert!(rt.guard().is_none());
         let calls = counter.load(Ordering::SeqCst);
         assert!(
             calls >= 1,
-            "with_tokio configurator must run on the fallback runtime build (was {calls})"
-        );
-    }
-
-    #[test]
-    fn strict_build_still_bubbles_rotating_writer_error_on_unwritable_path() {
-        let cfg = Dial9Config::builder()
-            .base_path(unwritable_base_path())
-            .max_file_size(1024)
-            .max_total_size(4096)
-            .build()
-            .expect("validation passes; only runtime I/O should fail");
-        let result = TelemetryRuntime::try_from(cfg);
-        assert!(
-            matches!(result, Err(TelemetryRuntimeError::RotatingWriter(_))),
-            "strict path must propagate RotatingWriter error, got {result:?}"
+            "with_tokio configurator must run on the disabled fallback runtime build (was {calls})"
         );
     }
 
@@ -606,5 +608,22 @@ mod tests {
             vec![1, 2],
             "with_tokio configurators must run in declared order"
         );
+    }
+
+    #[test]
+    fn dial9_config_builder_error_io_display_and_source_chain() {
+        let inner = std::io::Error::other("boom");
+        let err = Dial9ConfigBuilderError::Io(inner);
+        let display = format!("{err}");
+        assert!(
+            display.contains("rotating writer:"),
+            "Display should label the variant, got: {display}"
+        );
+        assert!(
+            display.contains("boom"),
+            "Display should include the inner io::Error message, got: {display}"
+        );
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some(), "source() must return the inner io::Error");
     }
 }

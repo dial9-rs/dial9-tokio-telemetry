@@ -62,17 +62,15 @@ The macro automatically spawns your function body as a task, so top-level code i
 
 ### Optional telemetry on I/O failure
 
-`build()` is strict: missing required writer fields, or an unwritable `base_path`, will surface as an error (panicking through the macro). When telemetry is best-effort — e.g. you'd rather start the service than fail on a misconfigured trace path — finish with `build_or_disabled()` instead. It returns a `Dial9ConfigFallback` that:
+`build()` is strict: missing required writer fields, or an unwritable `base_path`, surface as a `Dial9ConfigBuilderError` (panicking through the macro). When telemetry is best-effort — e.g. you'd rather start the service than fail on a misconfigured trace path — finish with `build_or_disabled()` instead. It returns the same `Dial9Config` type, but:
 
-- silently uses a disabled runtime if required builder fields are missing, and
-- silently cascades any `RotatingWriter` / telemetry-core I/O failure during runtime construction into a plain tokio runtime carrying your `with_tokio` configurators (worker count, thread names, etc. are preserved).
-
-Only the tokio builder's own `std::io::Error` can still escape — there is no fallback for "cannot build a tokio runtime at all".
+- emits a `tracing::error!` log on the `dial9_telemetry` target when validation or writer-I/O probing fails, and
+- downgrades to a disabled config that still carries your `with_tokio` configurators (worker count, thread names, etc. are preserved).
 
 ```rust,no_run
-use dial9_tokio_telemetry::{Dial9Config, Dial9ConfigFallback};
+use dial9_tokio_telemetry::Dial9Config;
 
-fn my_config() -> Dial9ConfigFallback {
+fn my_config() -> Dial9Config {
     Dial9Config::builder()
         .base_path("/tmp/my_traces/trace.bin")
         .max_file_size(1024 * 1024)
@@ -93,11 +91,11 @@ async fn main() {
 }
 ```
 
-See [`examples/optional_telemetry.rs`](/dial9-tokio-telemetry/examples/optional_telemetry.rs) for an end-to-end run including a `DIAL9_TRACE_PATH=/unwritable/...` mode that exercises the cascade.
+See [`examples/optional_telemetry.rs`](/dial9-tokio-telemetry/examples/optional_telemetry.rs) for an end-to-end run including a `DIAL9_TRACE_PATH=/unwritable/...` mode that exercises the downgrade.
 
 ### Without the macro
 
-The macro expands to `TelemetryRuntime::from_config(...).block_on(...)`. If you'd rather drive that yourself — for tests, libraries that build their own runtime, or any code that doesn't own `main` — `TelemetryRuntime` is a public type that accepts the same configs (strict `Dial9Config`, lenient `Dial9ConfigFallback`):
+The macro expands to `TelemetryRuntime::from_config(...).block_on(...)`. If you'd rather drive that yourself — for tests, libraries that build their own runtime, or any code that doesn't own `main` — `TelemetryRuntime` is a public type that accepts a `Dial9Config`:
 
 ```rust,no_run
 use dial9_tokio_telemetry::{Dial9Config, TelemetryRuntime};

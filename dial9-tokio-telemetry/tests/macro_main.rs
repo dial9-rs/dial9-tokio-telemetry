@@ -246,19 +246,19 @@ mod fluent_builder {
 
 // ===========================================================================
 // Fluent builder fallback API - `Dial9Config::builder().build_or_disabled()`
-// (lenient: cascades RotatingWriter / telemetry-core I/O failures into a
-// plain tokio runtime). Exercises the macro with `Dial9ConfigFallback` path.
+// (lenient: writer-I/O probe failures at config-build time downgrade to a
+// disabled config that still preserves the user's `with_tokio`
+// configurators). Exercises the macro through the lenient downgrade path.
 // ===========================================================================
 mod fluent_builder_fallback {
     use std::path::PathBuf;
 
     use dial9_tokio_telemetry::Dial9Config;
-    use dial9_tokio_telemetry::Dial9ConfigFallback;
     use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
     use super::tmp_base_path;
 
-    fn fallback_config() -> Dial9ConfigFallback {
+    fn fallback_config() -> Dial9Config {
         Dial9Config::builder()
             .base_path(tmp_base_path())
             .max_file_size(1024 * 1024)
@@ -270,7 +270,7 @@ mod fluent_builder_fallback {
         PathBuf::from("/this/dir/does/not/exist/dial9_macro_fallback_trace.bin")
     }
 
-    fn cascading_fallback_config() -> Dial9ConfigFallback {
+    fn cascading_fallback_config() -> Dial9Config {
         Dial9Config::builder()
             .base_path(unwritable_base_path())
             .max_file_size(1024 * 1024)
@@ -305,7 +305,7 @@ mod fluent_builder_fallback {
         let telemetry_disabled = cascade_runs_async_body();
         assert!(
             telemetry_disabled,
-            "unwritable base_path must cascade to a plain tokio runtime with no telemetry"
+            "unwritable base_path must downgrade to a plain tokio runtime with no telemetry"
         );
     }
 }

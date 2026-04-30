@@ -17,10 +17,10 @@
 
 use std::time::Duration;
 
+use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
-use dial9_tokio_telemetry::{Dial9Config, Dial9ConfigFallback};
 
-fn my_config() -> Dial9ConfigFallback {
+fn my_config() -> Dial9Config {
     Dial9Config::builder()
         .enabled(std::env::var("ENABLE_DIAL9").is_ok())
         .base_path("conditionally_enable_trace.bin")
