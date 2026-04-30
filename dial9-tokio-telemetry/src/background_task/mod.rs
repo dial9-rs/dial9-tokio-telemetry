@@ -1370,6 +1370,49 @@ mod worker_pipeline_tests {
         );
     }
 
+    /// A permanent, non-retryable IO error deletes the segment.
+    #[tokio::test]
+    async fn permanent_io_error_deletes_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let seg_path = dir.path().join("trace.0.bin");
+        std::fs::write(&seg_path, b"bad data").unwrap();
+
+        struct PermanentFailProcessor;
+        impl SegmentProcessor for PermanentFailProcessor {
+            fn name(&self) -> &'static str {
+                "PermanentFail"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                Box::pin(async {
+                    Err(ProcessError {
+                        data,
+                        kind: ProcessErrorKind::Io(std::io::Error::other("corrupt data")),
+                    })
+                })
+            }
+        }
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(PermanentFailProcessor)];
+
+        let mut worker = WorkerLoop::new(
+            config_for(dir.path()),
+            processors,
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+        worker.process_open_segments().await;
+
+        check!(
+            !seg_path.exists(),
+            "segment should be deleted after permanent IO error"
+        );
+    }
+
     /// Gzip-compressed segments pass through GzipCompressor unchanged.
     #[tokio::test]
     async fn gzip_segment_not_double_compressed() {
