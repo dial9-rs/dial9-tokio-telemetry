@@ -241,12 +241,10 @@ fn register_hooks(
                     .lock()
                     .unwrap()
                     .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
-                if let Ok(mut prof) = s_start.sched_profiler.lock()
-                    && let Some(ref mut p) = *prof
-                {
-                    // Register the current thread for sched event sampling.
-                    let _ = p.track_current_thread();
-                }
+                // Sched event sampling is deferred to register_tid_if_needed(),
+                // which runs only for worker threads on their first poll/park.
+                // This avoids opening perf fds for blocking pool threads.
+
                 // Registers the current thread for the CPU-profiling fallback (ctimer).
                 // No-op when perf is the active backend (perf uses inherit).
                 let _ = dial9_perf_self_profile::register_current_thread();
