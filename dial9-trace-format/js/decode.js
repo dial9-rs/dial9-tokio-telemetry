@@ -11,8 +11,8 @@ const TAG_STACK_POOL = 0x07;
 
 const FieldType = {
   I64: 1, F64: 2, Bool: 3, String: 4,
-  Bytes: 5, PooledString: 7, StackFrames: 8, Varint: 9,
-  StringMap: 10, U8: 11, U16: 12, U32: 13, PooledStackFrames: 14,
+  Bytes: 5, PooledStackFrames: 6, PooledString: 7, StackFrames: 8, Varint: 9,
+  StringMap: 10, U8: 11, U16: 12, U32: 13,
 };
 
 function decodeULEB128(view, offset) {

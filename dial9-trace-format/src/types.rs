@@ -22,7 +22,7 @@ pub enum FieldType {
     Bool = 3,
     String = 4,
     Bytes = 5,
-    // Tag 6 was legacy Timestamp (removed).
+    PooledStackFrames = 6,
     PooledString = 7,
     StackFrames = 8,
     Varint = 9,
@@ -30,14 +30,13 @@ pub enum FieldType {
     U8 = 11,
     U16 = 12,
     U32 = 13,
-    PooledStackFrames = 14,
     // Optional variants (inner tag | 0x80).
     OptionalI64 = 0x81,
     OptionalF64 = 0x82,
     OptionalBool = 0x83,
     OptionalString = 0x84,
     OptionalBytes = 0x85,
-    // Tag 6 was legacy Timestamp (removed).
+    OptionalPooledStackFrames = 0x86,
     OptionalPooledString = 0x87,
     OptionalStackFrames = 0x88,
     OptionalVarint = 0x89,
@@ -45,7 +44,6 @@ pub enum FieldType {
     OptionalU8 = 0x8B,
     OptionalU16 = 0x8C,
     OptionalU32 = 0x8D,
-    OptionalPooledStackFrames = 0x8E,
 }
 
 /// Newtype for stack frame addresses (leaf-first).
@@ -182,6 +180,7 @@ impl FieldType {
             3 => Some(FieldType::Bool),
             4 => Some(FieldType::String),
             5 => Some(FieldType::Bytes),
+            6 => Some(FieldType::PooledStackFrames),
             7 => Some(FieldType::PooledString),
             8 => Some(FieldType::StackFrames),
             9 => Some(FieldType::Varint),
@@ -189,12 +188,12 @@ impl FieldType {
             11 => Some(FieldType::U8),
             12 => Some(FieldType::U16),
             13 => Some(FieldType::U32),
-            14 => Some(FieldType::PooledStackFrames),
             0x81 => Some(FieldType::OptionalI64),
             0x82 => Some(FieldType::OptionalF64),
             0x83 => Some(FieldType::OptionalBool),
             0x84 => Some(FieldType::OptionalString),
             0x85 => Some(FieldType::OptionalBytes),
+            0x86 => Some(FieldType::OptionalPooledStackFrames),
             0x87 => Some(FieldType::OptionalPooledString),
             0x88 => Some(FieldType::OptionalStackFrames),
             0x89 => Some(FieldType::OptionalVarint),
@@ -202,7 +201,6 @@ impl FieldType {
             0x8B => Some(FieldType::OptionalU8),
             0x8C => Some(FieldType::OptionalU16),
             0x8D => Some(FieldType::OptionalU32),
-            0x8E => Some(FieldType::OptionalPooledStackFrames),
             _ => None,
         }
     }
@@ -1113,12 +1111,12 @@ mod tests {
 
     #[test]
     fn field_type_round_trip() {
-        for tag in [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14u8] {
+        for tag in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13u8] {
             let ft = FieldType::from_tag(tag).unwrap();
             assert_eq!(ft as u8, tag);
         }
         assert!(FieldType::from_tag(0).is_none());
-        assert!(FieldType::from_tag(15).is_none());
+        assert!(FieldType::from_tag(14).is_none());
     }
 
     #[test]

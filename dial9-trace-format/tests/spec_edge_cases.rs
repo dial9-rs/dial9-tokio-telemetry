@@ -327,7 +327,7 @@ fn interleaved_pool_and_events() {
 
 #[test]
 fn all_field_type_tags_valid() {
-    for tag in [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13u8] {
+    for tag in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13u8] {
         assert!(
             FieldType::from_tag(tag).is_some(),
             "tag {tag} should be valid"
@@ -341,8 +341,8 @@ fn field_type_tag_0_invalid() {
 }
 
 #[test]
-fn field_type_tag_15_invalid() {
-    assert!(FieldType::from_tag(15).is_none());
+fn field_type_tag_14_invalid() {
+    assert!(FieldType::from_tag(14).is_none());
 }
 
 #[test]
