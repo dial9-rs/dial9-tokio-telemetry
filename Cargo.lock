@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "criterion",
  "dial9-trace-format-derive",
