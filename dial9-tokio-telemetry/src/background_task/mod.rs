@@ -8,6 +8,7 @@ pub(crate) mod sealed;
 
 use crate::metrics::{Operation, SegmentProcessMetrics, SegmentProcessMetricsGuard};
 use crate::rate_limit::rate_limited;
+use futures_util::FutureExt;
 use metrique::timers::Timer;
 use metrique_writer::BoxEntrySink;
 use pipeline_metrics::{MetriqueResult, PipelineMetrics, StageMetrics};
@@ -599,7 +600,6 @@ impl WorkerLoop {
                 // AssertUnwindSafe: current processors are stateless or have
                 // trivially-recoverable state, so reuse after panic is safe.
                 let process_result = {
-                    use futures_util::FutureExt;
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         processor.process(data)
                     })) {
@@ -642,13 +642,16 @@ impl WorkerLoop {
                             .copied()
                             .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.as_str()))
                             .unwrap_or("unknown panic");
-                        tracing::error!(
-                            target: "dial9_worker",
-                            processor = processor.name(),
-                            segment = seg_idx + 1,
-                            path = %segment.path.display(),
-                            panic = panic_msg,
-                            "processor panicked, skipping segment"
+                        rate_limited!(
+                            Duration::from_secs(60),
+                            tracing::error!(
+                                target: "dial9_worker",
+                                processor = processor.name(),
+                                segment = seg_idx + 1,
+                                path = %segment.path.display(),
+                                panic = panic_msg,
+                                "processor panicked, skipping segment"
+                            )
                         );
                         // The original metrics guard was consumed by the
                         // panicking future. Emit a new one so panics are
@@ -671,7 +674,10 @@ impl WorkerLoop {
                         if let Err(remove_err) = std::fs::remove_file(&segment.path)
                             && remove_err.kind() != std::io::ErrorKind::NotFound
                         {
-                            tracing::warn!(target: "dial9_worker", error = %remove_err, path = %segment.path.display(), "failed to remove segment after panic");
+                            rate_limited!(
+                                Duration::from_secs(60),
+                                tracing::warn!(target: "dial9_worker", error = %remove_err, path = %segment.path.display(), "failed to remove segment after panic")
+                            );
                         }
                         continue 'next_segment;
                     }
