@@ -110,6 +110,7 @@ fn register_worker_if_needed(ctx: &RuntimeContext, local_index: usize, global_id
 }
 
 /// Register the current thread's OS tid for CPU profiling (once per thread).
+/// Also starts sched event sampling for this worker thread.
 #[cfg(feature = "cpu-profiling")]
 fn register_tid_if_needed(global_id: u64, shared: &SharedState) {
     TID_REGISTERED.with(|cell| {
@@ -119,6 +120,15 @@ fn register_tid_if_needed(global_id: u64, shared: &SharedState) {
                 os_tid,
                 crate::telemetry::events::ThreadRole::Worker(global_id as usize),
             );
+            // Start sched event sampling for this worker thread. Deferred from
+            // on_thread_start so that only worker threads (not blocking pool
+            // threads) open perf fds.
+            if let Ok(mut prof) = shared.sched_profiler.lock()
+                && let Some(ref mut p) = *prof
+                && let Err(e) = p.track_current_thread()
+            {
+                tracing::warn!("failed to start sched profiling for worker thread: {e}");
+            }
             cell.set(true);
         }
     });

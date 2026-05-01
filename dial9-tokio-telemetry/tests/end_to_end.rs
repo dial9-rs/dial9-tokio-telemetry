@@ -196,3 +196,105 @@ fn custom_event_appears_in_trace() {
         .unwrap();
     assert_eq!(custom_count, 5, "expected 5 MyCustomEvent events in trace");
 }
+
+#[test]
+fn spawn_audit_detects_uninstrumented_spawns() {
+    let dir = tempfile::tempdir().unwrap();
+    let trace_path = dir.path().join("trace.bin");
+
+    const RAW: usize = 5;
+    const INSTRUMENTED: usize = 3;
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let writer = RotatingWriter::single_file(&trace_path).unwrap();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .build_and_start(builder, writer)
+        .unwrap();
+
+    let handle = guard.handle();
+
+    runtime.block_on(async {
+        let mut joins = Vec::new();
+
+        // These go through TelemetryHandle::spawn, should NOT be flagged.
+        for _ in 0..INSTRUMENTED {
+            joins.push(handle.spawn(async {}));
+        }
+
+        // These are raw tokio::spawn, SHOULD be flagged, all at the same line.
+        for _ in 0..RAW {
+            joins.push(tokio::spawn(async {}));
+        }
+
+        for j in joins {
+            j.await.unwrap();
+        }
+
+        // Wait for flush cycle to drain thread-local buffers.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    // Read the trace back from disk and check the instrumented flag.
+    let sealed_path = dir.path().join("trace.0.bin");
+    let reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
+    let events = &reader.all_events;
+
+    let instrumented_count = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                TelemetryEvent::TaskSpawn {
+                    instrumented: Some(true),
+                    ..
+                }
+            )
+        })
+        .count();
+    let uninstrumented_count = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                TelemetryEvent::TaskSpawn {
+                    instrumented: Some(false),
+                    ..
+                }
+            )
+        })
+        .count();
+
+    assert_eq!(
+        instrumented_count, INSTRUMENTED,
+        "expected {INSTRUMENTED} instrumented spawns, got {instrumented_count}"
+    );
+    assert_eq!(
+        uninstrumented_count, RAW,
+        "expected {RAW} uninstrumented spawns, got {uninstrumented_count}"
+    );
+
+    // Verify spawn locations resolve and point to this test file.
+    for event in events {
+        if let TelemetryEvent::TaskSpawn {
+            spawn_loc,
+            instrumented: Some(false),
+            ..
+        } = event
+        {
+            let loc = reader
+                .spawn_locations
+                .get(spawn_loc)
+                .expect("uninstrumented spawn_loc should resolve");
+            assert!(
+                loc.contains("end_to_end.rs"),
+                "uninstrumented spawn should point to this test file, got: {loc}"
+            );
+        }
+    }
+}

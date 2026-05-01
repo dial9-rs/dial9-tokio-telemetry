@@ -136,7 +136,7 @@ The `SchedProfiler` captures context switches on each worker thread:
 
 - Created during `TracedRuntimeBuilder::build()` if `with_sched_events()` was called.
 - Stored in `SharedState.sched_profiler` (behind `Mutex<Option<...>>`).
-- `on_thread_start` hook calls `profiler.track_current_thread()` → opens a perf fd for the calling thread.
+- `on_thread_start` registers the thread as `Blocking`; worker threads re-register as `Worker(i)` in `register_tid_if_needed()` on their first poll/park, which also calls `profiler.track_current_thread()` → opens a perf fd for the calling thread.
 - `on_thread_stop` hook calls `profiler.stop_tracking_current_thread()`.
 - Flush thread drains samples, maps tids, writes `CpuSample` events with `source: SchedEvent`.
 

@@ -144,7 +144,7 @@ fn empty_bytes_field() {
 
 #[test]
 fn empty_stack_frames() {
-    let v = FieldValue::StackFrames(vec![]);
+    let v = FieldValue::StackFrames(vec![].into());
     let mut buf = Vec::new();
     v.encode(&mut buf).unwrap();
     assert_eq!(buf.len(), 4);
@@ -196,7 +196,7 @@ fn varint_leb128_boundary_values() {
 
 #[test]
 fn stack_frames_single_address() {
-    let v = FieldValue::StackFrames(vec![0x7fff_ffff_ffff]);
+    let v = FieldValue::StackFrames(vec![0x7fff_ffff_ffff].into());
     let mut buf = Vec::new();
     v.encode(&mut buf).unwrap();
     let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf).unwrap();
@@ -206,7 +206,7 @@ fn stack_frames_single_address() {
 #[test]
 fn stack_frames_identical_addresses() {
     let addrs = vec![0x1000u64; 5];
-    let v = FieldValue::StackFrames(addrs);
+    let v = FieldValue::StackFrames(addrs.into());
     let mut buf = Vec::new();
     v.encode(&mut buf).unwrap();
     assert_eq!(buf.len(), 4 + 5 * 8); // count + 5 raw u64s
@@ -217,7 +217,7 @@ fn stack_frames_identical_addresses() {
 #[test]
 fn stack_frames_descending_addresses() {
     let addrs = vec![0x5555_5555_5000u64, 0x5555_5555_4000, 0x5555_5555_3000];
-    let v = FieldValue::StackFrames(addrs);
+    let v = FieldValue::StackFrames(addrs.into());
     let mut buf = Vec::new();
     v.encode(&mut buf).unwrap();
     let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf).unwrap();
@@ -327,7 +327,7 @@ fn interleaved_pool_and_events() {
 
 #[test]
 fn all_field_type_tags_valid() {
-    for tag in [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13u8] {
+    for tag in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13u8] {
         assert!(
             FieldType::from_tag(tag).is_some(),
             "tag {tag} should be valid"

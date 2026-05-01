@@ -65,6 +65,11 @@ Dev-dependencies on workspace crates should *not* include a `version` to avoid c
 dial9-tokio-telemetry = { path = ".", features = ["analysis", "tracing-layer"] }
 ```
 
+## Running tests
+Some tests will only run with the `shuttle` cfg enabled. There is a script to run these: `scripts/test-shuttle.sh`.
+
+For other tests, `cargo nextest run` will run all of the normal tests.
+
 ## Doing releases
 
 There is a `.github/workflows/release.yml` workflow that will attempt to use a crates.io release every time the version in the Cargo.toml changes. That is the sanctioned way of doing releases.

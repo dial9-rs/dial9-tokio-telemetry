@@ -1,6 +1,6 @@
 [package]
 name = "dial9-macro"
-version = "0.3.3"
+version = "0.3.5"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

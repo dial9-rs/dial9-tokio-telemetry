@@ -4,7 +4,8 @@
 //!   RUSTFLAGS="-C force-frame-pointers=yes" cargo run --release --example multithread
 
 use dial9_perf_self_profile::{
-    EventSource, PerfSampler, SamplerConfig, SamplingMode, resolve_symbol,
+    EventSource, PerfSampler, SamplerConfig, SamplingMode, register_current_thread, resolve_symbol,
+    unregister_current_thread,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,7 +34,12 @@ fn main() {
             let stop = stop.clone();
             thread::Builder::new()
                 .name(format!("worker-{i}"))
-                .spawn(move || cpu_work(&stop))
+                .spawn(move || {
+                    let _ = register_current_thread();
+                    let result = cpu_work(&stop);
+                    unregister_current_thread();
+                    result
+                })
                 .unwrap()
         })
         .collect();

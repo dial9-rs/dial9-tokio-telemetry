@@ -6,12 +6,13 @@ mod fake_s3;
 use aws_config::Region;
 use aws_sdk_s3::Client;
 use dial9_tokio_telemetry::background_task::s3::S3Config;
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{RotatingWriter, TraceWriter, TracedRuntime};
 use fake_s3::{
     fake_s3_client, fake_s3_client_always_failing, fake_s3_client_flaky, fake_s3_client_hanging,
     fake_s3_client_with_region,
 };
 use flate2::read::GzDecoder;
+use std::collections::HashMap;
 use std::io::Read;
 use std::time::Duration;
 
@@ -106,7 +107,8 @@ fn end_to_end_trace_to_s3_roundtrip() {
     let client = fake_s3_client(s3_root.path());
 
     // Small max_file_size to force rotation quickly
-    let writer = RotatingWriter::new(&trace_path, 512, 50 * 1024).unwrap();
+    let mut writer = RotatingWriter::new(&trace_path, 512, 50 * 1024).unwrap();
+    writer.update_segment_metadata(vec![("custom-metadata".to_string(), "value".to_string())]);
 
     let s3_config = S3Config::builder()
         .bucket("test-bucket")
@@ -122,6 +124,7 @@ fn end_to_end_trace_to_s3_roundtrip() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_trace_path(&trace_path)
+        .with_runtime_name("test-runtime")
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(std::time::Duration::from_millis(50))
@@ -192,6 +195,18 @@ fn end_to_end_trace_to_s3_roundtrip() {
 
     // Parse the downloaded trace with TraceReader
     let reader = TraceReader::new(downloaded_path.to_str().unwrap()).unwrap();
+    let metadata = reader
+        .segment_metadata
+        .clone()
+        .into_iter()
+        .collect::<HashMap<String, String>>();
+    assert_eq!(metadata["bucket"], "test-bucket");
+    assert_eq!(metadata["service_name"], "test-svc");
+    assert_eq!(
+        metadata["runtime.test-runtime"], "0,1",
+        "expected eagerly populated worker IDs"
+    );
+    assert_eq!(metadata["custom-metadata"], "value");
     let events = &reader.runtime_events;
     assert!(
         !events.is_empty(),

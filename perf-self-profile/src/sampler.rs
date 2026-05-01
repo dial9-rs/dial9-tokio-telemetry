@@ -41,6 +41,10 @@ pub struct SamplerConfig {
     pub(crate) event_source: EventSource,
     pub(crate) sampling: SamplingMode,
     pub(crate) include_kernel: bool,
+    /// Maximum number of threads that can be tracked simultaneously in
+    /// per-thread mode. Prevents unbounded fd/mmap growth if cleanup fails.
+    /// Default: 256.
+    pub(crate) max_tracked_threads: usize,
 }
 
 impl Default for SamplerConfig {
@@ -49,6 +53,7 @@ impl Default for SamplerConfig {
             sampling: SamplingMode::FrequencyHz(999),
             event_source: EventSource::SwCpuClock,
             include_kernel: false,
+            max_tracked_threads: 256,
         }
     }
 }
@@ -70,6 +75,14 @@ impl SamplerConfig {
     /// Requires `perf_event_paranoid` <= 1 (or CAP_PERFMON).
     pub fn include_kernel(mut self, yes: bool) -> Self {
         self.include_kernel = yes;
+        self
+    }
+
+    /// Maximum number of threads tracked simultaneously in per-thread mode.
+    /// If the cap is reached, `track_current_thread` returns an error instead
+    /// of opening another fd. Default: 256.
+    pub fn max_tracked_threads(mut self, max: usize) -> Self {
+        self.max_tracked_threads = max;
         self
     }
 }

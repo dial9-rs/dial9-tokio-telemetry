@@ -59,7 +59,7 @@ impl CpuProfilingConfig {
 /// Configuration for per-worker sched event capture (context switches).
 ///
 /// Uses `perf_event_open` with `SwContextSwitches` in per-thread mode,
-/// so each worker thread gets its own perf fd via `on_thread_start`.
+/// so each worker thread gets its own perf fd on first poll/park.
 #[derive(Debug, Clone, Default)]
 pub struct SchedEventConfig {
     sampling_interval: Option<u64>,

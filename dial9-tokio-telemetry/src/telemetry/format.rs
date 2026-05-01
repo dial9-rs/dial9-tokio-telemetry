@@ -3,11 +3,11 @@ use crate::telemetry::events::CpuSampleSource;
 use crate::telemetry::events::TelemetryEvent;
 use crate::telemetry::task_metadata::TaskId;
 #[cfg(any(feature = "analysis", test))]
-use dial9_trace_format::decoder::StringPool;
+use dial9_trace_format::decoder::{StackPool, StringPool};
 #[cfg(any(feature = "analysis", test))]
 use dial9_trace_format::schema::SchemaEntry;
 use dial9_trace_format::types::{EventEncoder, FieldType, FieldValueRef};
-use dial9_trace_format::{InternedString, StackFrames, TraceEvent, TraceField};
+use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};
 use serde::Serialize;
 use std::fmt;
 use std::io::{self, Write};
@@ -176,6 +176,8 @@ pub struct TaskSpawnEvent {
     pub task_id: TaskId,
     /// Interned spawn location.
     pub spawn_loc: InternedString,
+    /// Whether this spawn was instrumented (via `TelemetryHandle::spawn`).
+    pub instrumented: bool,
 }
 
 #[derive(TraceEvent)]
@@ -193,7 +195,7 @@ pub(crate) struct CpuSampleEvent {
     pub tid: u32,
     pub source: CpuSampleSource,
     pub thread_name: Option<InternedString>,
-    pub callchain: StackFrames,
+    pub callchain: InternedStackFrames,
 }
 
 /// Wire-format event for a wake notification.
@@ -246,7 +248,7 @@ pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
 
     dec.for_each_event(|ev| {
         if let Some(r) = decode_ref(ev.name, ev.timestamp_ns, ev.fields, ev.schema) {
-            events.push(to_owned_event(r, ev.string_pool));
+            events.push(to_owned_event(r, ev.string_pool, ev.stack_pool));
         }
     })
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
@@ -353,10 +355,14 @@ pub(crate) fn decode_ref<'a>(
 }
 
 /// Convert a zero-copy `TelemetryEventRef` into an owned `TelemetryEvent`,
-/// resolving any `InternedString` fields (e.g. `thread_name`) via the
-/// string pool that was active when the event was decoded.
+/// resolving any interned fields (e.g. `InternedString` for `thread_name`) via the
+/// corresponding pools that were active when the event was decoded.
 #[cfg(any(feature = "analysis", test))]
-pub(crate) fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> TelemetryEvent {
+pub(crate) fn to_owned_event(
+    r: TelemetryEventRef<'_>,
+    pool: &StringPool,
+    stack_pool: &StackPool,
+) -> TelemetryEvent {
     match r {
         TelemetryEventRef::PollStart(e) => TelemetryEvent::PollStart {
             timestamp_nanos: e.timestamp_ns,
@@ -390,6 +396,7 @@ pub(crate) fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> Tel
             timestamp_nanos: e.timestamp_ns,
             task_id: e.task_id,
             spawn_loc: e.spawn_loc,
+            instrumented: Some(e.instrumented),
         },
         TelemetryEventRef::TaskTerminate(e) => TelemetryEvent::TaskTerminate {
             timestamp_nanos: e.timestamp_ns,
@@ -403,7 +410,10 @@ pub(crate) fn to_owned_event(r: TelemetryEventRef<'_>, pool: &StringPool) -> Tel
                 .thread_name
                 .and_then(|s| pool.get(s).map(|n| n.to_string())),
             source: e.source,
-            callchain: e.callchain.iter().collect(),
+            callchain: stack_pool
+                .get(e.callchain)
+                .expect("stack pool entry must exist for CpuSample callchain")
+                .to_vec(),
         },
         TelemetryEventRef::WakeEvent(e) => TelemetryEvent::WakeEvent {
             timestamp_nanos: e.timestamp_ns,

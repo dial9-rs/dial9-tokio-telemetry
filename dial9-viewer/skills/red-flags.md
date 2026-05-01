@@ -5,13 +5,12 @@ Run these checks against any trace to surface common Tokio runtime problems. Eac
 ## Complete red-flag scan
 
 ```javascript
-const fs = require('fs');
 const { parseTrace, EVENT_TYPES, deduplicateSamples } = require('./trace_parser.js');
 const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
         computeSchedulingDelays, buildSpanData } = require('./trace_analysis.js');
 
 async function redFlagScan(tracePath) {
-  const trace = await parseTrace(fs.readFileSync(tracePath));
+  for await (const trace of parseTrace(tracePath)) {
   const workerIds = [...new Set(
     trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent)
       .map(e => e.workerId)
@@ -51,7 +50,7 @@ async function redFlagScan(tracePath) {
   if (samples.length > 10) {
     const first = samples[0].count;
     const last = samples[samples.length - 1].count;
-    const peak = Math.max(...samples.map(s => s.count));
+    const peak = samples.reduce((m, s) => Math.max(m, s.count), -Infinity);
     if (last > first * 2 && last === peak) {
       findings.push({
         severity: 'warning',
@@ -64,7 +63,7 @@ async function redFlagScan(tracePath) {
   // 3. High scheduling delays (tasks waiting for workers)
   const highDelays = schedDelays.filter(d => d.delay > 5e6); // >5ms
   if (highDelays.length > 0) {
-    const worst = Math.max(...highDelays.map(d => d.delay));
+    const worst = highDelays.reduce((m, d) => Math.max(m, d.delay), -Infinity);
     findings.push({
       severity: worst > 50e6 ? 'critical' : 'warning',
       check: 'sched-delay',
@@ -89,7 +88,7 @@ async function redFlagScan(tracePath) {
   // 5. Global queue buildup
   const highQueue = spans.queueSamples.filter(s => s.global > 100);
   if (highQueue.length > 0) {
-    const maxQueue = Math.max(...spans.queueSamples.map(s => s.global));
+    const maxQueue = spans.queueSamples.reduce((m, s) => Math.max(m, s.global), -Infinity);
     findings.push({
       severity: maxQueue > 1000 ? 'critical' : 'warning',
       check: 'queue-depth',
@@ -100,8 +99,8 @@ async function redFlagScan(tracePath) {
   // 6. Worker imbalance
   if (workerIds.length > 1) {
     const pollCounts = workerIds.map(w => spans.workerSpans[w].polls.length);
-    const max = Math.max(...pollCounts);
-    const min = Math.min(...pollCounts);
+    const max = pollCounts.reduce((m, c) => Math.max(m, c), -Infinity);
+    const min = pollCounts.reduce((m, c) => Math.min(m, c), Infinity);
     if (max > min * 3 && min > 0) {
       findings.push({
         severity: 'info',
@@ -131,7 +130,7 @@ async function redFlagScan(tracePath) {
   for (const w of workerIds) {
     const highSchedWait = spans.workerSpans[w].parks.filter(p => p.schedWait > 1e6); // >1ms in ns
     if (highSchedWait.length > 0) {
-      const worst = Math.max(...highSchedWait.map(p => p.schedWait));
+      const worst = highSchedWait.reduce((m, p) => Math.max(m, p.schedWait), -Infinity);
       findings.push({
         severity: worst > 10e6 ? 'warning' : 'info',
         check: 'kernel-sched-wait',
@@ -203,9 +202,10 @@ async function redFlagScan(tracePath) {
     }
     console.log(`\n${findings.filter(f => f.severity === 'critical').length} critical, ${findings.filter(f => f.severity === 'warning').length} warnings, ${findings.filter(f => f.severity === 'info').length} info`);
   }
+  }
 }
 
-redFlagScan(process.argv[2] || 'trace.bin');
+await redFlagScan(process.argv[2] || 'trace.bin');
 ```
 
 ## Individual checks explained

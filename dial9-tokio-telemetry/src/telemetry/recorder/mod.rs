@@ -10,6 +10,8 @@ use event_writer::EventWriter;
 use runtime_context::{make_poll_end, make_poll_start, make_worker_park, make_worker_unpark};
 
 use crate::metrics::{FlushMetrics, Operation, TlDrainMetrics};
+use crate::primitives::sync::Arc;
+use crate::primitives::sync::atomic::Ordering;
 use crate::rate_limit::rate_limited;
 use crate::telemetry::buffer;
 use crate::telemetry::events::RawEvent;
@@ -18,16 +20,20 @@ use crate::telemetry::writer::{RotatingWriter, TraceWriter};
 use metrique::timers::Timer;
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
+use metrique_timesource::time_source;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-thread_local! {
+crate::primitives::thread_local! {
     /// Per-thread [`TelemetryHandle`], populated in `on_thread_start` and
     /// cleared in `on_thread_stop`. Enables [`TelemetryHandle::current`].
     static CURRENT_HANDLE: RefCell<Option<TelemetryHandle>> = const { RefCell::new(None) };
+
+    /// Set by `TelemetryHandle::spawn()` before calling `tokio::spawn()`,
+    /// so the `on_task_spawn` hook can distinguish instrumented from raw spawns.
+    static INSTRUMENTED_SPAWN: Cell<bool> = const { Cell::new(false) };
 }
 
 // ---------------------------------------------------------------------------
@@ -37,7 +43,7 @@ thread_local! {
 /// Commands sent to the flush thread from TelemetryHandle / TelemetryGuard.
 pub(crate) enum ControlCommand {
     /// Flush, finalize (seal segment), then exit the thread.
-    FinalizeAndStop(std::sync::mpsc::SyncSender<()>),
+    FinalizeAndStop(crate::primitives::sync::mpsc::SyncSender<()>),
 }
 
 /// Tracks the drain coordination state between the flush loop and the writer.
@@ -80,7 +86,7 @@ fn flush_once(
     drain_self: bool,
 ) -> FlushStats {
     let events_before = event_writer.events_written();
-    let cpu_events_time = Instant::now();
+    let cpu_events_time = std::time::Instant::now();
     #[cfg(feature = "cpu-profiling")]
     {
         if shared.enabled.load(Ordering::Relaxed) {
@@ -148,7 +154,7 @@ fn register_hooks(
     builder: &mut tokio::runtime::Builder,
     ctx: &Arc<RuntimeContext>,
     shared: &Arc<SharedState>,
-    control_tx: &std::sync::mpsc::SyncSender<ControlCommand>,
+    control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
 ) {
     let c1 = ctx.clone();
@@ -185,10 +191,13 @@ fn register_hooks(
         builder.on_task_spawn(move |meta| {
             let task_id = TaskId::from(meta.id());
             let location = meta.spawned_at();
+            let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get());
+
             s5.record_event(RawEvent::TaskSpawn {
                 timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
                 task_id,
                 location,
+                instrumented,
             });
         });
         let s6 = shared.clone();
@@ -230,11 +239,13 @@ fn register_hooks(
                     .lock()
                     .unwrap()
                     .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
-                if let Ok(mut prof) = s_start.sched_profiler.lock()
-                    && let Some(ref mut p) = *prof
-                {
-                    let _ = p.track_current_thread();
-                }
+                // Sched event sampling is deferred to register_tid_if_needed(),
+                // which runs only for worker threads on their first poll/park.
+                // This avoids opening perf fds for blocking pool threads.
+
+                // Registers the current thread for the CPU-profiling fallback (ctimer).
+                // No-op when perf is the active backend (perf uses inherit).
+                let _ = dial9_perf_self_profile::register_current_thread();
             }
         })
         .on_thread_stop(move || {
@@ -251,6 +262,7 @@ fn register_hooks(
                 {
                     p.stop_tracking_current_thread();
                 }
+                dial9_perf_self_profile::unregister_current_thread();
             }
         });
 }
@@ -261,7 +273,7 @@ fn attach_runtime(
     shared: &Arc<SharedState>,
     mut builder: tokio::runtime::Builder,
     runtime_name: Option<String>,
-    control_tx: &std::sync::mpsc::SyncSender<ControlCommand>,
+    control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
 ) -> std::io::Result<tokio::runtime::Runtime> {
     let ctx = Arc::new(RuntimeContext::new(runtime_name));
@@ -298,6 +310,16 @@ fn attach_runtime(
             });
         });
 
+    // Eagerly populate worker_ids so segment metadata is complete from the
+    // first flush cycle, rather than waiting for each worker thread to lazily
+    // register on its first poll/park event.
+    {
+        let mut ids = ctx.worker_ids.write().unwrap();
+        for i in 0..num_workers {
+            ids.insert(i as usize, base + i);
+        }
+    }
+
     shared.contexts.lock().unwrap().push(ctx);
 
     Ok(runtime)
@@ -325,7 +347,7 @@ pub struct TelemetryHandle {
 #[derive(Clone)]
 struct HandleInner {
     shared: Arc<SharedState>,
-    control_tx: std::sync::mpsc::SyncSender<ControlCommand>,
+    control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
 }
 
 impl std::fmt::Debug for TelemetryHandle {
@@ -395,9 +417,7 @@ impl TelemetryHandle {
     /// Return the [`TelemetryHandle`] installed for the current thread,
     /// or `None` if no dial9 runtime has claimed this thread.
     ///
-    /// Prefer [`current`](Self::current), which returns an inert handle
-    /// in the same situations and avoids the `Option` ceremony at
-    /// callsites.
+    /// Prefer [`current`](Self::current) instead.
     pub fn try_current() -> Option<Self> {
         CURRENT_HANDLE.with(|cell| cell.borrow().clone())
     }
@@ -462,12 +482,32 @@ impl TelemetryHandle {
         F::Output: Send + 'static,
     {
         match self.traced_handle() {
-            Some(traced_handle) => tokio::spawn(async move {
-                let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-                crate::traced::Traced::new(future, traced_handle, task_id).await
-            }),
+            Some(traced_handle) => {
+                let _guard = InstrumentedSpawnGuard::set();
+                tokio::spawn(async move {
+                    let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
+                    crate::traced::Traced::new(future, traced_handle, task_id).await
+                })
+            }
             None => tokio::spawn(future),
         }
+    }
+}
+
+/// RAII guard that sets `INSTRUMENTED_SPAWN` to `true` on creation and
+/// resets it to `false` on drop, even if `tokio::spawn` panics.
+struct InstrumentedSpawnGuard;
+
+impl InstrumentedSpawnGuard {
+    fn set() -> Self {
+        INSTRUMENTED_SPAWN.with(|c| c.set(true));
+        Self
+    }
+}
+
+impl Drop for InstrumentedSpawnGuard {
+    fn drop(&mut self) {
+        INSTRUMENTED_SPAWN.with(|c| c.set(false));
     }
 }
 
@@ -498,6 +538,7 @@ impl RuntimeTelemetryHandle {
         match &self.traced {
             Some(traced) => {
                 let traced = traced.clone();
+                let _guard = InstrumentedSpawnGuard::set();
                 self.runtime.spawn(async move {
                     let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
                     crate::traced::Traced::new(future, traced, task_id).await
@@ -536,7 +577,7 @@ enum GuardInner {
 
 struct EnabledGuard {
     handle: TelemetryHandle,
-    flush_thread: Option<std::thread::JoinHandle<()>>,
+    flush_thread: Option<crate::primitives::thread::JoinHandle<()>>,
     worker: Option<WorkerHandle>,
 }
 
@@ -735,6 +776,7 @@ impl Drop for TelemetryGuard {
     fn drop(&mut self) {
         // 1. Stop the flush thread (flushes + finalizes). No-op when disabled.
         self.stop_flush_thread();
+
         // 2. Hard shutdown: drop the sender without sending — worker sees
         // RecvError and exits without draining. No need to join the thread.
         // For graceful drain, use graceful_shutdown() instead.
@@ -1161,6 +1203,15 @@ impl TelemetryCore {
         let shared = Arc::new(SharedState::new(start_mono_ns));
         #[allow(unused_mut)]
         let mut event_writer = EventWriter::new(Box::new(writer));
+        #[cfg(feature = "worker-s3")]
+        if let Some(s3_config) = s3_config.as_ref() {
+            event_writer.update_segment_metadata(
+                s3_config
+                    .as_metadata()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            )
+        }
 
         #[cfg(feature = "cpu-profiling")]
         {
@@ -1183,7 +1234,8 @@ impl TelemetryCore {
         }
 
         // Channel for TelemetryHandle/Guard → flush thread communication.
-        let (control_tx, control_rx) = std::sync::mpsc::sync_channel::<ControlCommand>(1);
+        let (control_tx, control_rx) =
+            crate::primitives::sync::mpsc::sync_channel::<ControlCommand>(1);
 
         let flush_metrics_sink = worker_metrics_sink
             .clone()
@@ -1191,20 +1243,21 @@ impl TelemetryCore {
 
         let flush_thread = {
             let shared = shared.clone();
-            std::thread::Builder::new()
-                .name("dial9-flush".into())
-                .spawn(move || {
-                    #[cfg(target_os = "linux")]
-                    // SAFETY: nice() is a simple syscall with no memory safety
-                    // implications. Increasing the nice value (lowering priority)
-                    // is always permitted for unprivileged processes.
-                    unsafe {
-                        let _ = libc::nice(10);
-                    }
+            crate::primitives::thread::spawn_named("dial9-flush", move || {
+                #[cfg(target_os = "linux")]
+                // SAFETY: nice() is a simple syscall with no memory safety
+                // implications. Increasing the nice value (lowering priority)
+                // is always permitted for unprivileged processes.
+                unsafe {
+                    let _ = libc::nice(10);
+                }
 
-                    run_flush_loop(control_rx, &shared, &flush_metrics_sink, event_writer);
-                })
-                .expect("failed to spawn telemetry-flush thread")
+                #[cfg(feature = "cpu-profiling")]
+                let _ = dial9_perf_self_profile::register_current_thread();
+                run_flush_loop(control_rx, &shared, &flush_metrics_sink, event_writer);
+                #[cfg(feature = "cpu-profiling")]
+                dial9_perf_self_profile::unregister_current_thread();
+            })
         };
 
         // Auto-construct worker config when we have a trace path and
@@ -1254,7 +1307,11 @@ impl TelemetryCore {
             let wt = std::thread::Builder::new()
                 .name("dial9-worker".into())
                 .spawn(move || {
+                    #[cfg(feature = "cpu-profiling")]
+                    let _ = dial9_perf_self_profile::register_current_thread();
                     crate::background_task::run_background_task(config, shutdown_rx);
+                    #[cfg(feature = "cpu-profiling")]
+                    dial9_perf_self_profile::unregister_current_thread();
                 })
                 .expect("failed to spawn dial9-worker thread");
             worker = Some(WorkerHandle {
@@ -1273,7 +1330,7 @@ impl TelemetryCore {
 
 /// The flush thread main loop. Extracted so `TelemetryCore::builder` stays readable.
 fn run_flush_loop(
-    control_rx: std::sync::mpsc::Receiver<ControlCommand>,
+    control_rx: crate::primitives::sync::mpsc::Receiver<ControlCommand>,
     shared: &SharedState,
     flush_metrics_sink: &metrique_writer::BoxEntrySink,
     mut event_writer: EventWriter,
@@ -1285,7 +1342,7 @@ fn run_flush_loop(
     const SELF_DRAIN_INTERVAL: u64 = 200;
 
     let sample_interval = Duration::from_millis(10);
-    let mut last_sample = Instant::now();
+    let mut last_sample = time_source().instant();
     // Snapshot the user-provided segment metadata so we can
     // merge it with runtime→worker entries on each flush cycle.
     let static_metadata = event_writer.segment_metadata().to_vec();
@@ -1301,11 +1358,11 @@ fn run_flush_loop(
                 ack_tx = Some(ack);
                 exit = true;
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(crate::primitives::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 // All senders dropped — do a best-effort finalize.
                 exit = true;
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(crate::primitives::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
 
         // When disabled, skip all recording work (queue sampling, metadata
@@ -1315,9 +1372,8 @@ fn run_flush_loop(
             continue;
         }
 
-        let now = Instant::now();
-        if now.duration_since(last_sample) >= sample_interval {
-            last_sample = now;
+        if last_sample.elapsed() >= sample_interval {
+            last_sample = time_source().instant();
             let contexts = shared.contexts.lock().unwrap().clone();
             let total_global_queue: usize = contexts.iter().map(|c| c.global_queue_depth()).sum();
             if !contexts.is_empty() {
@@ -1733,7 +1789,7 @@ impl TryFrom<crate::config::Dial9Config> for TracedRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(shuttle)))]
 mod tests {
     use super::*;
     use crate::telemetry::NullWriter;
@@ -1889,6 +1945,7 @@ mod tests {
                     timestamp_nanos: (i as u64 + 1) * 1000,
                     task_id,
                     location: loc,
+                    instrumented: true,
                 },
                 &collector,
                 &drain_epoch,
@@ -2133,15 +2190,18 @@ mod tests {
             "expected at least one SegmentMetadata event in trace files"
         );
 
-        // At least one segment's metadata should contain both runtime mappings.
+        // At least one segment's metadata should contain both runtime mappings
+        // with the exact worker IDs (eagerly populated at attach time).
         let has_both = all_metadata.iter().any(|entries| {
-            let has_main = entries.iter().any(|(k, _)| k == "runtime.main");
-            let has_io = entries.iter().any(|(k, _)| k == "runtime.io");
+            let has_main = entries
+                .iter()
+                .any(|(k, v)| k == "runtime.main" && v == "0,1");
+            let has_io = entries.iter().any(|(k, v)| k == "runtime.io" && v == "2,3");
             has_main && has_io
         });
         assert!(
             has_both,
-            "expected segment metadata to contain both runtime.main and runtime.io, \
+            "expected segment metadata to contain runtime.main=0,1 and runtime.io=2,3, \
              got: {all_metadata:?}"
         );
     }
