@@ -14,8 +14,7 @@ fn my_config() -> Dial9Config {
             t.worker_threads(4);
         })
         .with_runtime(|r| r.with_task_tracking(true))
-        .build()
-        .expect("config build failed")
+        .build_or_disabled()
 }
 
 async fn cpu_work(iterations: u64) -> u64 {

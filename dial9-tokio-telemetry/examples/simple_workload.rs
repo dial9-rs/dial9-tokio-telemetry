@@ -46,8 +46,7 @@ async fn mixed_task(id: usize) {
         .max_total_size(256 * 1024 * 1024)
         .with_tokio(|t| { t.worker_threads(4); })
         .with_runtime(|r| r.with_task_tracking(true))
-        .build()
-        .expect("config build failed")
+        .build_or_disabled()
 })]
 async fn main() {
     println!("Running workload...");

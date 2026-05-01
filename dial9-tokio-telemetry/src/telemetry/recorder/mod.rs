@@ -395,12 +395,9 @@ impl TelemetryHandle {
     /// Return the [`TelemetryHandle`] installed for the current thread,
     /// or `None` if no dial9 runtime has claimed this thread.
     ///
-    /// Prefer [`current`](Self::current) — it returns an inert handle
+    /// Prefer [`current`](Self::current), which returns an inert handle
     /// in the same situations and avoids the `Option` ceremony at
     /// callsites.
-    #[deprecated(
-        note = "use `TelemetryHandle::current()` instead, which returns an inert handle off-runtime"
-    )]
     pub fn try_current() -> Option<Self> {
         CURRENT_HANDLE.with(|cell| cell.borrow().clone())
     }
@@ -453,6 +450,11 @@ impl TelemetryHandle {
     /// On an enabled handle, the future is wrapped with wake-event
     /// tracking. On a disabled handle, this is a passthrough to
     /// [`tokio::spawn`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from outside a tokio runtime context (same
+    /// as [`tokio::spawn`]).
     #[track_caller]
     pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
     where

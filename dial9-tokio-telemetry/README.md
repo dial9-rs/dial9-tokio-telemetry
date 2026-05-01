@@ -24,7 +24,7 @@ Without this flag, compilation will fail with errors about missing methods on `t
 
 ## Quick start
 
-There are two ways to set up dial9: the `#[main]` macro (recommended for most apps) or manual `TracedRuntime` setup. The macro handles the boilerplate of building the runtime and spawning your code as an instrumented task. Inside your `main` body, call `TelemetryHandle::current()` to get the handle for wake-event tracking. Use manual setup when you have multiple Tokio runtimes, don't own `main` (e.g., library code or embedded services), or need to integrate with existing runtime-building code.
+There are two ways to set up dial9: the `#[main]` macro (recommended for most apps) or `TracedRuntime::new()`/`try_new()` for manual control. Both use `Dial9Config::builder()` to configure telemetry. Inside your `main` body, call `TelemetryHandle::current()` to get the handle for wake-event tracking.
 
 ### Using the `#[main]` macro
 
@@ -41,11 +41,10 @@ fn my_config() -> Dial9Config {
         .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
         .with_runtime(|r| r.with_runtime_name("main").with_task_tracking(true))  // TracedRuntime knobs
         .with_tokio(|t| { t.worker_threads(4); }) // tokio knobs
-        .build()
-        .expect("config build failed")
+        .build_or_disabled() // or use build() to handle config failures explicitly
 }
 
-#[dial9_tokio_telemetry::main(config = my_config)]
+#[dial9_tokio_telemetry::main(config = my_config)] // inline config function is also supported
 async fn main() {
     // your async code here
     // `TelemetryHandle::current()` returns the per-thread handle for
@@ -60,45 +59,11 @@ async fn main() {
 
 The macro automatically spawns your function body as a task, so top-level code is visible in traces (unlike plain `#[tokio::main]` where `block_on` work is invisible — see [below](#the-root-future-is-not-instrumented)). dial9 installs a `TelemetryHandle` on every runtime-owned thread via `on_thread_start`. Call `TelemetryHandle::current()` to get it for spawning wake-tracked sub-tasks.
 
-### Optional telemetry on I/O failure
-
-`build()` is strict: missing required writer fields, or an unwritable `base_path`, surface as a `Dial9ConfigBuilderError` (panicking through the macro). When telemetry is best-effort — e.g. you'd rather start the service than fail on a misconfigured trace path — finish with `build_or_disabled()` instead. It returns the same `Dial9Config` type, but:
-
-- emits a `tracing::error!` log on the `dial9_telemetry` target when validation or writer-I/O probing fails, and
-- downgrades to a disabled config that still carries your `with_tokio` configurators (worker count, thread names, etc. are preserved).
-
-```rust,no_run
-use dial9_tokio_telemetry::Dial9Config;
-
-fn my_config() -> Dial9Config {
-    Dial9Config::builder()
-        .base_path("/tmp/my_traces/trace.bin")
-        .max_file_size(1024 * 1024)
-        .max_total_size(5 * 1024 * 1024)
-        .with_tokio(|t| { t.worker_threads(4); })
-        .build_or_disabled()
-}
-
-#[dial9_tokio_telemetry::main(config = my_config)]
-async fn main() {
-    // Telemetry may or may not be active; the returned handle is inert
-    // when the lenient downgrade fired.
-    use dial9_tokio_telemetry::telemetry::TelemetryHandle;
-    let handle = TelemetryHandle::current();
-    // `handle.spawn` records wake events when telemetry is live and
-    // falls through to plain `tokio::spawn` when it is not.
-    handle.spawn(async { /* ... */ });
-    if handle.is_enabled() {
-        // any code paths specific to "telemetry on"
-    }
-}
-```
-
-See [`examples/optional_telemetry.rs`](/dial9-tokio-telemetry/examples/optional_telemetry.rs) for an end-to-end run including a `DIAL9_TRACE_PATH=/unwritable/...` mode that exercises the downgrade.
+`build_or_disabled()` returns a pass-through config on I/O or validation failure, so the service starts on a plain tokio runtime instead of crashing. `TelemetryHandle::current()` returns an inert handle in that case, and `handle.spawn` falls through to `tokio::spawn`.
 
 ### Without the macro
 
-The macro expands to `TracedRuntime::new(...).block_on(...)`. If you'd rather drive that yourself — for tests, libraries that build their own runtime, or any code that doesn't own `main` — `TracedRuntime` is a public type that accepts a `Dial9Config`:
+The macro expands to `TracedRuntime::new(...).block_on(...)`. If you'd rather drive that yourself (graceful shutdown, multiple runtimes, tests, or any code that doesn't own `main`), `TracedRuntime` is a public type that accepts a `Dial9Config`:
 
 ```rust,no_run
 use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
@@ -107,47 +72,15 @@ let cfg = Dial9Config::builder()
     .base_path("/tmp/my_traces/trace.bin")
     .max_file_size(1024 * 1024)
     .max_total_size(5 * 1024 * 1024)
-    .build()
-    .expect("config build failed");
+    .build_or_disabled();
 
-let rt = TracedRuntime::try_new(cfg).expect("runtime build failed");
+let rt = TracedRuntime::try_new(cfg).expect("tokio runtime failed to start");
 rt.block_on(async {
     // body runs as a spawned, instrumented task — same as under #[main]
 });
 ```
 
-### Manual setup
-
-```rust
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
-
-fn main() -> std::io::Result<()> {
-    let writer = RotatingWriter::builder()
-        .base_path("/tmp/my_traces/trace.bin")
-        .max_file_size(100 * 1024 * 1024) // safety valve at 100 MiB per file
-        .max_total_size(500 * 1024 * 1024) // keep at most 500 MiB on disk
-        // .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
-        .build()?;
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
-    let (runtime, guard) = TracedRuntime::build_and_start(builder, writer)?;
-    let handle = guard.handle();
-
-    runtime.block_on(async {
-        handle.spawn(async {
-            // your async code here will be instrumented
-        }).await.unwrap();
-    });
-
-    Ok(())
-}
-```
-
-Events are 6–16 bytes on the wire, and a typical request generates ~20–35 bytes of trace data (a few poll events plus park/unpark). At 10k requests/sec that's well under 1 MB/s — `RotatingWriter` caps total disk usage so you can leave it running indefinitely. Typical CPU overhead is under 5%.
-
-Segments rotate on size _or_ time, whichever comes first. Time boundaries are wall-clock-aligned (e.g. a 60 s period rotates at the top of each minute), which produces clean S3 key paths when using the `worker-s3` feature.
+For lower-level control (custom `TraceWriter`, multiple runtimes sharing one telemetry session, or direct access to the `TelemetryGuard`), see `TracedRuntime::builder()` and `TelemetryCore::builder()` in the API docs.
 
 ## Can I use this in prod?
 
@@ -223,22 +156,16 @@ To understand when Tokio itself is delaying your code (scheduler delay), you nee
 Use `handle.spawn()` instead of `tokio::spawn()`:
 
 ```rust,no_run
-# use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
-# fn main() -> std::io::Result<()> {
-# let writer = RotatingWriter::new("/tmp/t.bin", 1024, 4096)?;
-# let builder = tokio::runtime::Builder::new_multi_thread();
-let (runtime, guard) = TracedRuntime::build_and_start(builder, writer)?;
-let handle = guard.handle();
+use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
-runtime.block_on(async {
-    // wake events / scheduling delay captured
-    handle.spawn(async { /* ... */ });
+// Inside a dial9 runtime (macro or TracedRuntime):
+let handle = TelemetryHandle::current();
 
-    // this task is still tracked, but won't have wake events
-    tokio::spawn(async { /* ... */ });
-});
-# Ok(())
-# }
+// wake events / scheduling delay captured
+handle.spawn(async { /* ... */ });
+
+// this task is still tracked, but won't have wake events
+tokio::spawn(async { /* ... */ });
 ```
 
 For frameworks like Axum where you don't control the spawn call, you need to wrap the accept loop. See [`examples/metrics-service/src/axum_traced.rs`](/examples/metrics-service/src/axum_traced.rs) for a working example that wraps both the accept loop and per-connection futures.
@@ -301,21 +228,26 @@ Both of these events are tied to the precise instant and thread that they happen
 
 ```rust,no_run
 # #[cfg(feature = "cpu-profiling")]
-# fn main() -> std::io::Result<()> {
-# use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+# mod inner {
+use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
 
-# let writer = RotatingWriter::new("/tmp/t.bin", 1024, 4096)?;
-# let builder = tokio::runtime::Builder::new_multi_thread();
-let (runtime, guard) = TracedRuntime::builder()
-    .with_task_tracking(true)
-    .with_cpu_profiling(CpuProfilingConfig::default())
-    .with_sched_events(SchedEventConfig::default().include_kernel(true))
-    .with_trace_path("/tmp/t.bin")
-    .build_and_start(builder, writer)?;
-# Ok(())
+fn my_config() -> Dial9Config {
+    Dial9Config::builder()
+        .base_path("/tmp/my_traces/trace.bin")
+        .max_file_size(100 * 1024 * 1024)
+        .max_total_size(500 * 1024 * 1024)
+        .with_runtime(|r| {
+            r.with_task_tracking(true)
+             .with_cpu_profiling(CpuProfilingConfig::default())
+             .with_sched_events(SchedEventConfig::default().include_kernel(true))
+        })
+        .build_or_disabled()
+}
+
+#[dial9_tokio_telemetry::main(config = my_config)]
+async fn main() { /* ... */ }
 # }
-# #[cfg(not(feature = "cpu-profiling"))]
 # fn main() {}
 ```
 
@@ -355,37 +287,14 @@ sudo sysctl kernel.kptr_restrict=0
 
 Because CPU samples are tagged with the worker thread they were collected on, and the trace records which task is being polled on each worker at each instant, the viewer can correlate samples with individual polls. When a poll takes an unusually long time (a "long poll"), the CPU samples collected during that poll show you exactly what code was running — expensive serialization, accidental blocking I/O, lock contention, etc. In the trace viewer, click on a long poll to see its flamegraph, or shift+drag to aggregate CPU samples across a time range.
 
-## Getting started
-
-`TracedRuntime::build` returns a `(Runtime, TelemetryGuard)`. The guard owns the flush thread and provides a `TelemetryHandle` for enabling/disabling recording at runtime:
-
-```rust,no_run
-# use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
-# fn main() -> std::io::Result<()> {
-# let writer = RotatingWriter::new("/tmp/t.bin", 1024, 4096)?;
-# let builder = tokio::runtime::Builder::new_multi_thread();
-let (runtime, guard) = TracedRuntime::builder()
-    .with_task_tracking(true)
-    .build(builder, writer)?;
-
-// start disabled, enable later
-guard.enable();
-
-// TelemetryHandle is Clone + Send — pass it around
-let handle = guard.handle();
-handle.disable();
-# Ok(())
-# }
-```
-
-### Multiple runtimes
+## Multiple runtimes
 
 For applications with multiple Tokio runtimes (e.g. thread-per-core, or separate request/IO runtimes), use `TelemetryCore` to create the telemetry session first, then attach each runtime:
 
 ```rust,no_run
 # use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryCore};
 # fn main() -> std::io::Result<()> {
-# let writer = RotatingWriter::new("/tmp/t.bin", 1024, 4096)?;
+# let writer = RotatingWriter::new("/tmp/t.bin", 100 * 1024 * 1024, 500 * 1024 * 1024)?;
 let guard = TelemetryCore::builder()
     .writer(writer)
     .trace_path("/tmp/t.bin")
@@ -411,11 +320,11 @@ See [`examples/thread_per_core.rs`](/dial9-tokio-telemetry/examples/thread_per_c
 
 **Shutdown**: Drop all runtimes before the `TelemetryGuard` so worker threads exit and flush their thread-local buffers. For a clean shutdown that waits for the background worker (e.g. S3 uploads) to drain, call `guard.graceful_shutdown(timeout)` instead of dropping the guard.
 
-### Writers
+## Writers
 
 `RotatingWriter` rotates files based on size and time, and evicts old ones to stay within a total size budget. By default, segments rotate every 60 seconds (wall-clock-aligned) or when they exceed `max_file_size`, whichever comes first. Time-based rotation produces clean segment boundaries (thread-local buffers are drained before sealing), so set `max_file_size` large enough that time-based rotation fires first under normal conditions (100 MiB is a good default). Size-based rotation then acts as a safety valve for unexpected data bursts. For quick experiments, use `RotatingWriter::single_file(path)` to skip rotation entirely.
 
-### Analyzing traces
+## Analyzing traces
 
 [`dial9-viewer`](/dial9-viewer) is an interactive trace viewer and S3 browser. Point it at a local directory or an S3 bucket to browse and visualize traces in the browser. [Here's a demo.](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)
 
@@ -459,39 +368,34 @@ Only `bucket` and `service_name` are required. See `S3Config` for additional opt
 
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
-# fn main() -> std::io::Result<()> {
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+# mod inner {
+use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 
-let trace_path = "/tmp/my_traces/trace.bin";
-let writer = RotatingWriter::builder()
-    .base_path(trace_path)
-    .max_file_size(100 * 1024 * 1024)  // safety valve at 100 MiB per file
-    .max_total_size(500 * 1024 * 1024) // keep at most 500 MiB on disk
-    .build()?;
+fn my_config() -> Dial9Config {
+    let s3_config = S3Config::builder()
+        .bucket("my-trace-bucket")
+        .service_name("my-service")
+        .build();
 
-let s3_config = S3Config::builder()
-    .bucket("my-trace-bucket")
-    .service_name("my-service")
-    .build();
+    Dial9Config::builder()
+        .base_path("/tmp/my_traces/trace.bin")
+        .max_file_size(100 * 1024 * 1024)
+        .max_total_size(500 * 1024 * 1024)
+        .with_tokio(|t| { t.worker_threads(4); })
+        .with_runtime(|r| {
+            r.with_task_tracking(true)
+             .with_s3_uploader(s3_config)
+        })
+        .build_or_disabled()
+}
 
-let mut builder = tokio::runtime::Builder::new_multi_thread();
-builder.worker_threads(4).enable_all();
-
-let (runtime, guard) = TracedRuntime::builder()
-    .with_task_tracking(true)
-    .with_trace_path(trace_path)
-    .with_s3_uploader(s3_config)
-    .build_and_start(builder, writer)?;
-
-runtime.block_on(async {
+#[dial9_tokio_telemetry::main(config = my_config)]
+async fn main() {
     // your async code here
-});
-
-// guard drop: flushes, seals final segment, worker drains remaining to S3
-# Ok(())
+}
+// on shutdown: flushes, seals final segment, worker drains remaining to S3
 # }
-# #[cfg(not(feature = "worker-s3"))]
 # fn main() {}
 ```
 
@@ -505,7 +409,6 @@ The worker uses a circuit breaker with exponential backoff if S3 is unreachable.
 
 ```bash
 cargo run --example simple_workload        # macro-based setup (start here)
-cargo run --example optional_telemetry     # build_or_disabled: best-effort telemetry, plain-tokio fallback
 cargo run --example conditionally_enable   # toggle telemetry via ENABLE_DIAL9 env var
 cargo run --example realistic_workload     # mixed CPU/IO workload
 cargo run --example long_workload          # longer run for trace analysis

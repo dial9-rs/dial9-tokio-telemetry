@@ -337,11 +337,13 @@ impl<S: dial9_config_builder::IsComplete> Dial9ConfigBuilder<S> {
     /// Finish into a [`Dial9Config`] that never reports a build error.
     ///
     /// On any [`Dial9ConfigBuilderError`] (validation failure or writer
-    /// I/O probe failure) emits an `error!` log on the
-    /// `dial9_telemetry` target and returns a [`Dial9Config`] in its
-    /// disabled state with the user's `with_tokio` configurators
+    /// I/O probe failure) logs an error and returns a [`Dial9Config`]
+    /// in its disabled state with the user's `with_tokio` configurators
     /// preserved. The resulting config builds a plain tokio runtime
     /// when handed to [`crate::TracedRuntime::try_new`].
+    ///
+    /// Missing required fields trigger a [`debug_assert!`] so
+    /// misconfigurations surface during development.
     ///
     /// Lenient counterpart to [`build`](Self::build). Use
     /// [`build`](Self::build) instead when you want validation and
@@ -352,11 +354,19 @@ impl<S: dial9_config_builder::IsComplete> Dial9ConfigBuilder<S> {
         match self.build() {
             Ok(cfg) => cfg,
             Err(e) => {
-                tracing::error!(
-                    target: "dial9_telemetry",
-                    error = %e,
-                    "telemetry config build failed; falling back to plain tokio runtime",
+                let is_validation = matches!(e, Dial9ConfigBuilderError::Validation(_));
+
+                debug_assert!(!is_validation, "dial9 config validation failed: {e}");
+
+                let msg = format!(
+                    "dial9: telemetry config build failed; falling back to plain tokio runtime: {e}"
                 );
+                if tracing::dispatcher::has_been_set() {
+                    tracing::error!(target: "dial9_telemetry", "{msg}");
+                } else {
+                    eprintln!("{msg}");
+                }
+
                 Dial9Config(Inner::Disabled {
                     tokio_configurators: cfgs_for_fallback,
                 })
@@ -448,6 +458,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(debug_assertions, should_panic = "dial9 config validation failed")]
     fn build_or_disabled_from_incomplete_builder_yields_disabled_runtime() {
         let cfg = Dial9Config::builder().build_or_disabled();
         let rt = TracedRuntime::try_new(cfg).expect("fallback runtime should build");

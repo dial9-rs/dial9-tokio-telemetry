@@ -9,21 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `Dial9Config::builder()` — a `bon`-generated fluent entry point with named setters for the required writer fields (`base_path`, `max_file_size`, `max_total_size`), stackable `with_tokio` / `with_runtime` closures, and an `.enabled(bool)` toggle that selects the no-telemetry path on the same builder. Re-exported at the crate root as `dial9_tokio_telemetry::Dial9Config` / `Dial9ConfigBuilder`. The original positional-argument API (`Dial9ConfigBuilder::new(..)` / `::disabled()` under `dial9_tokio_telemetry::config`) is unchanged and remains fully supported.
-- `Dial9ConfigBuilder::build()` returns `Result<Dial9Config, Dial9ConfigBuilderError>`. Required-field validation **and** the `RotatingWriter` transport-I/O probe both happen at config-build time, so by the time you have a `Dial9Config` the trace file has already been opened.
-- `Dial9ConfigBuilder::build_or_disabled()` — lenient counterpart to `build()`. Returns the same `Dial9Config` type; on validation or writer-I/O failure it logs at `tracing::error!(target = "dial9_telemetry")` and downgrades to a disabled config that still carries the user's `with_tokio` configurators.
-- `Dial9ConfigBuilderError` enum with `Validation(ValidationError)` and `Io(std::io::Error)` variants, both implementing `std::error::Error`. `ValidationError::fields()` returns the names of the unset required setters.
-- `TracedRuntime::new(config)` / `TracedRuntime::try_new(config)` — high-level constructors used by the `#[dial9_tokio_telemetry::main]` macro. Both accept either the new fluent `Dial9Config` or the deprecated positional `dial9_tokio_telemetry::config::Dial9Config` via `TryInto<TracedRuntime>`. `try_new` returns the conversion error (`TelemetryRuntimeError` for the fluent path, `std::io::Error` for the legacy bridge); `new` panics with that error formatted via `Display`.
-- `TelemetryRuntimeError` enum with `TokioRuntimeBuilder` and `TelemetryCore` variants — the only failure modes left after writer-I/O has been moved into the config builder.
-- `TelemetryHandle::disabled()` — explicit constructor for an inert handle whose `spawn` falls through to `tokio::spawn` and whose control methods are no-ops. `TelemetryHandle::is_enabled()` distinguishes the live and inert modes.
-- `TelemetryGuard::is_enabled()` and a no-op `Disabled` mode: a `TelemetryGuard` is now always present on a `TracedRuntime`, regardless of whether telemetry was installed. `TelemetryGuard::handle()` returns an inert `TelemetryHandle` on a disabled guard, and `graceful_shutdown()` is a successful no-op there.
+- **Inline config in the macro**: `#[dial9_tokio_telemetry::main]` now accepts a closure, so simple setups no longer need a separate config function.
+- **Fluent config builder**: `Dial9Config::builder()` with named setters, `with_tokio`/`with_runtime` closures, and `.enabled(bool)`. The original positional API under `dial9_tokio_telemetry::config` is unchanged.
+- **`build_or_disabled()`**: on config validation or writer I/O failure, logs an error and starts a plain tokio runtime instead of crashing. Use `build()` to handle failures explicitly.
+
+All three in action:
+
+  ```rust
+  #[dial9_tokio_telemetry::main(config = || {
+      Dial9Config::builder()
+          .base_path("/tmp/trace.bin")
+          .max_file_size(64 * 1024 * 1024)
+          .max_total_size(256 * 1024 * 1024)
+          .build_or_disabled()
+  })]
+  async fn main() { /* ... */ }
+  ```
 
 ### Changed
 
-- **Breaking:** `TelemetryHandle::current()` no longer panics off-runtime. It now returns an inert handle when called from a thread that is not owned by a dial9 runtime, mirroring the always-present-guard model. Use `TelemetryHandle::is_enabled()` to branch on whether telemetry is live on the current thread.
-- **Breaking:** `TelemetryHandle::try_current()` is deprecated in favor of `current()`; call sites that relied on the `Option` ceremony can now drop it.
-- **Breaking:** `TracedRuntime::guard()` returns `&TelemetryGuard` (always-present) instead of `Option<&TelemetryGuard>`. Replace `rt.guard().is_some()` with `rt.guard().is_enabled()`.
-- **Breaking:** the high-level `TracedRuntime` type at the crate root supersedes the previous `TelemetryRuntime` (which was renamed). The `#[dial9_tokio_telemetry::main]` macro now expands to `TracedRuntime::new(...)`.
+- `TelemetryHandle::current()` no longer panics off-runtime. It returns an inert handle whose `spawn` falls through to `tokio::spawn`. Use `TelemetryHandle::is_enabled()` to check whether telemetry is live.
 
 ## [0.3.3](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.2...dial9-tokio-telemetry-v0.3.3) - 2026-04-20
 
