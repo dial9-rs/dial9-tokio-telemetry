@@ -522,13 +522,23 @@
    * }}
    */
   function buildSpanData(customEvents) {
-    // Index: spanId+workerId → most recent enter timestamp
-    const openSpans = new Map(); // "spanId:workerId" → {timestamp, spanName, fields, parentSpanId}
-    const spansByWorker = {};
-    const spanMeta = new Map(); // spanId → {spanName, fields, parentSpanId}
+    // Key by span_id only — a span may be polled on different workers.
+    const openEnters = new Map(); // spanId → {timestamp, workerId}
+    // Live span records keyed by spanId. Moved to closedSpans on SpanClose.
+    const spanMap = new Map(); // spanId → {spanName, fields, parentSpanId, segments}
+    const closedSpans = []; // finalized span records (after SpanClose or end-of-trace)
+    const spanMeta = new Map();
 
     const BASE_ENTER_FIELDS = new Set(["worker_id", "span_id", "parent_span_id", "span_name"]);
     const BASE_EXIT_FIELDS = new Set(["worker_id", "span_id", "span_name"]);
+
+    function finalizeSpan(spanId) {
+      const rec = spanMap.get(spanId);
+      if (rec && rec.segments.length > 0) {
+        closedSpans.push({ spanId, ...rec });
+      }
+      spanMap.delete(spanId);
+    }
 
     for (const ev of customEvents) {
       if (ev.name.startsWith("SpanEnter:") || ev.name === "SpanEnterEvent") {
@@ -537,74 +547,88 @@
         const spanId = Number(v.span_id);
         const parentSpanId = v.parent_span_id != null ? Number(v.parent_span_id) : null;
         const spanName = v.span_name || "unknown";
-        // Collect user-defined fields (everything not in the base set)
         const fields = {};
         for (const [k, val] of Object.entries(v)) {
           if (!BASE_ENTER_FIELDS.has(k)) fields[k] = val;
         }
 
-        const key = `${spanId}:${workerId}`;
-        openSpans.set(key, {
-          timestamp: ev.timestamp,
-          spanName,
-          fields,
-          parentSpanId,
-        });
+        openEnters.set(spanId, { timestamp: ev.timestamp, workerId });
 
+        if (!spanMap.has(spanId)) {
+          spanMap.set(spanId, { spanName, fields, parentSpanId, segments: [] });
+        }
         spanMeta.set(spanId, { spanName, fields, parentSpanId });
       } else if (ev.name.startsWith("SpanExit:") || ev.name === "SpanExitEvent") {
         const v = ev.fields;
         const workerId = Number(v.worker_id);
         const spanId = Number(v.span_id);
 
-        const key = `${spanId}:${workerId}`;
-        const enter = openSpans.get(key);
+        const enter = openEnters.get(spanId);
         if (enter) {
-          openSpans.delete(key);
-          // Collect exit fields
+          openEnters.delete(spanId);
           const exitFields = {};
           for (const [k, val] of Object.entries(v)) {
             if (!BASE_EXIT_FIELDS.has(k)) exitFields[k] = val;
           }
-          if (!spansByWorker[workerId]) spansByWorker[workerId] = [];
-          spansByWorker[workerId].push({
-            start: enter.timestamp,
-            end: ev.timestamp,
-            spanId,
-            spanName: enter.spanName,
-            fields: Object.keys(exitFields).length > 0 ? exitFields : enter.fields,
-            parentSpanId: enter.parentSpanId,
-          });
+          let rec = spanMap.get(spanId);
+          if (!rec) {
+            rec = { spanName: v.span_name || "unknown", fields: {}, parentSpanId: null, segments: [] };
+            spanMap.set(spanId, rec);
+          }
+          if (Object.keys(exitFields).length > 0) rec.fields = exitFields;
+          rec.segments.push({ start: enter.timestamp, end: ev.timestamp, workerId });
         }
+      } else if (ev.name === "SpanCloseEvent") {
+        const spanId = Number(ev.fields.span_id);
+        openEnters.delete(spanId);
+        finalizeSpan(spanId);
       }
     }
 
-    // Sort each worker's spans by start time
-    for (const spans of Object.values(spansByWorker)) {
-      spans.sort((a, b) => a.start - b.start);
+    // Finalize any spans still open at end of trace (no SpanClose seen)
+    for (const [spanId] of spanMap) {
+      finalizeSpan(spanId);
     }
 
-    // Collect unmatched spans (enter without exit, e.g. trace ended mid-span)
+    // Build allSpans
+    const allSpans = [];
+    for (const rec of closedSpans) {
+      rec.segments.sort((a, b) => a.start - b.start);
+      const start = rec.segments[0].start;
+      const end = rec.segments[rec.segments.length - 1].end;
+      const activeNs = rec.segments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
+      allSpans.push({
+        start, end,
+        spanId: rec.spanId,
+        spanName: rec.spanName,
+        fields: rec.fields,
+        parentSpanId: rec.parentSpanId,
+        segments: rec.segments,
+        activeNs,
+      });
+    }
+    allSpans.sort((a, b) => a.start - b.start);
+
+    // Unmatched: open enters with no segments
     const unmatchedSpans = [];
-    for (const [key, enter] of openSpans) {
-      const [spanId, workerId] = key.split(":").map(Number);
+    for (const [spanId, enter] of openEnters) {
       unmatchedSpans.push({
         start: enter.timestamp,
         spanId,
-        workerId,
-        spanName: enter.spanName,
-        fields: enter.fields,
-        parentSpanId: enter.parentSpanId,
+        workerId: enter.workerId,
+        spanName: spanMeta.get(spanId)?.spanName || "unknown",
+        fields: spanMeta.get(spanId)?.fields || {},
+        parentSpanId: spanMeta.get(spanId)?.parentSpanId ?? null,
       });
     }
     unmatchedSpans.sort((a, b) => a.start - b.start);
 
-    // Compute depth for each span by walking the parent chain
-    const depthCache = new Map(); // spanId → depth
+    // Compute depth via parent chain
+    const depthCache = new Map();
     function getDepth(spanId, seen) {
       if (spanId == null) return -1;
       if (depthCache.has(spanId)) return depthCache.get(spanId);
-      if (seen && seen.has(spanId)) { depthCache.set(spanId, 0); return 0; } // cycle
+      if (seen && seen.has(spanId)) { depthCache.set(spanId, 0); return 0; }
       const meta = spanMeta.get(spanId);
       if (!meta) { depthCache.set(spanId, 0); return 0; }
       const visited = seen || new Set();
@@ -614,14 +638,12 @@
       return d;
     }
     let maxDepth = 0;
-    for (const spans of Object.values(spansByWorker)) {
-      for (const s of spans) {
-        s.depth = getDepth(s.spanId);
-        if (s.depth > maxDepth) maxDepth = s.depth;
-      }
+    for (const s of allSpans) {
+      s.depth = getDepth(s.spanId);
+      if (s.depth > maxDepth) maxDepth = s.depth;
     }
 
-    return { spansByWorker, spanMeta, maxDepth, unmatchedSpans };
+    return { allSpans, spanMeta, maxDepth, unmatchedSpans };
   }
 
   // Export for both browser and Node.js

@@ -373,20 +373,18 @@ async function main() {
       { name: "SpanExitEvent",  timestamp: 1200, fields: { worker_id: 0, span_id: 2, span_name: "redis_get", fields: { key: "foo" } } },
       { name: "SpanExitEvent",  timestamp: 1300, fields: { worker_id: 0, span_id: 1, span_name: "handle_request", fields: { user_id: "42" } } },
     ];
-    const { spansByWorker, spanMeta } = buildSpanData(customEvents);
-    const w0 = spansByWorker[0] || [];
-    if (w0.length !== 2) fail(`Expected 2 span intervals on worker 0, got ${w0.length}`);
-    if (w0[0].spanName !== "handle_request" && w0[1].spanName !== "handle_request")
-      fail("Missing handle_request span");
-    if (w0[0].spanName !== "redis_get" && w0[1].spanName !== "redis_get")
-      fail("Missing redis_get span");
-    // Verify sorted by start time
-    if (w0[0].start > w0[1].start) fail("Spans not sorted by start time");
-    // Verify enter/exit pairing
-    const redis = w0.find(s => s.spanName === "redis_get");
+    const { allSpans, spanMeta } = buildSpanData(customEvents);
+    if (allSpans.length !== 2) fail(`Expected 2 spans, got ${allSpans.length}`);
+    const redis = allSpans.find(s => s.spanName === "redis_get");
+    const handle = allSpans.find(s => s.spanName === "handle_request");
+    if (!redis || !handle) fail("Missing expected spans");
     if (redis.start !== 1100 || redis.end !== 1200) fail("redis_get timing wrong");
+    if (redis.segments.length !== 1) fail(`Expected 1 segment, got ${redis.segments.length}`);
+    if (redis.segments[0].workerId !== 0) fail("segment workerId wrong");
     if (!spanMeta.has(1) || !spanMeta.has(2)) fail("spanMeta missing entries");
-    pass(`${w0.length} span intervals paired correctly`);
+    // Verify sorted by start time
+    if (allSpans[0].start > allSpans[1].start) fail("Spans not sorted by start time");
+    pass(`${allSpans.length} spans paired correctly`);
   }
 
   function testBuildSpanDataParent() {
@@ -396,17 +394,17 @@ async function main() {
       { name: "SpanExitEvent",  timestamp: 1200, fields: { worker_id: 0, span_id: 20, span_name: "child", fields: {} } },
       { name: "SpanExitEvent",  timestamp: 1300, fields: { worker_id: 0, span_id: 10, span_name: "root", fields: {} } },
     ];
-    const { spansByWorker } = buildSpanData(customEvents);
-    const child = spansByWorker[0].find(s => s.spanName === "child");
+    const { allSpans } = buildSpanData(customEvents);
+    const child = allSpans.find(s => s.spanName === "child");
     if (child.parentSpanId !== 10) fail(`Expected parentSpanId=10, got ${child.parentSpanId}`);
-    const root = spansByWorker[0].find(s => s.spanName === "root");
+    const root = allSpans.find(s => s.spanName === "root");
     if (root.parentSpanId !== null) fail(`Expected root parentSpanId=null, got ${root.parentSpanId}`);
     pass("Parent span IDs preserved correctly");
   }
 
   function testBuildSpanDataEmpty() {
-    const { spansByWorker, spanMeta } = buildSpanData([]);
-    if (Object.keys(spansByWorker).length !== 0) fail("Expected empty spansByWorker");
+    const { allSpans, spanMeta } = buildSpanData([]);
+    if (allSpans.length !== 0) fail("Expected empty allSpans");
     if (spanMeta.size !== 0) fail("Expected empty spanMeta");
     pass("Empty input produces empty output");
   }
@@ -421,11 +419,10 @@ async function main() {
       { name: "SpanExitEvent",  timestamp: 1400, fields: { worker_id: 0, span_id: 2, span_name: "mid", fields: {} } },
       { name: "SpanExitEvent",  timestamp: 1500, fields: { worker_id: 0, span_id: 1, span_name: "root", fields: {} } },
     ];
-    const { spansByWorker, maxDepth } = buildSpanData(customEvents);
-    const spans = spansByWorker[0];
-    const root = spans.find(s => s.spanName === "root");
-    const mid = spans.find(s => s.spanName === "mid");
-    const leaf = spans.find(s => s.spanName === "leaf");
+    const { allSpans, maxDepth } = buildSpanData(customEvents);
+    const root = allSpans.find(s => s.spanName === "root");
+    const mid = allSpans.find(s => s.spanName === "mid");
+    const leaf = allSpans.find(s => s.spanName === "leaf");
     if (root.depth !== 0) fail(`root depth=${root.depth}, expected 0`);
     if (mid.depth !== 1) fail(`mid depth=${mid.depth}, expected 1`);
     if (leaf.depth !== 2) fail(`leaf depth=${leaf.depth}, expected 2`);
@@ -441,31 +438,31 @@ async function main() {
       { name: "SpanExitEvent",  timestamp: 1200, fields: { worker_id: 0, span_id: 2, span_name: "b", fields: {} } },
       { name: "SpanExitEvent",  timestamp: 1300, fields: { worker_id: 0, span_id: 1, span_name: "a", fields: {} } },
     ];
-    const { spansByWorker } = buildSpanData(customEvents);
-    if (!spansByWorker[0] || spansByWorker[0].length !== 2) fail("Expected 2 spans");
+    const { allSpans } = buildSpanData(customEvents);
+    if (allSpans.length !== 2) fail("Expected 2 spans");
     // Just verify it didn't crash; depths may be arbitrary due to cycle
     pass("Cyclic parent chain does not stack overflow");
   }
 
   function testBuildSpanDataRecycledId() {
-    // Span ID 1 used first as "alpha", then recycled as "beta"
+    // Span ID 1 used first as "alpha", closed, then recycled as "beta"
     const customEvents = [
       { name: "SpanEnterEvent", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "alpha", fields: {} } },
       { name: "SpanExitEvent",  timestamp: 1100, fields: { worker_id: 0, span_id: 1, span_name: "alpha", fields: {} } },
+      { name: "SpanCloseEvent", timestamp: 1150, fields: { span_id: 1 } },
       // Same span_id reused with different name
       { name: "SpanEnterEvent", timestamp: 2000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "beta", fields: {} } },
       { name: "SpanExitEvent",  timestamp: 2100, fields: { worker_id: 0, span_id: 1, span_name: "beta", fields: {} } },
+      { name: "SpanCloseEvent", timestamp: 2150, fields: { span_id: 1 } },
       // Child of the recycled span
       { name: "SpanEnterEvent", timestamp: 3000, fields: { worker_id: 0, span_id: 2, parent_span_id: 1, span_name: "child", fields: {} } },
       { name: "SpanExitEvent",  timestamp: 3100, fields: { worker_id: 0, span_id: 2, span_name: "child", fields: {} } },
     ];
-    const { spansByWorker } = buildSpanData(customEvents);
-    const spans = spansByWorker[0];
-    if (spans.length !== 3) fail(`Expected 3 spans, got ${spans.length}`);
-    const alpha = spans.find(s => s.spanName === "alpha");
-    const beta = spans.find(s => s.spanName === "beta");
+    const { allSpans } = buildSpanData(customEvents);
+    if (allSpans.length !== 3) fail(`Expected 3 spans, got ${allSpans.length}`);
+    const alpha = allSpans.find(s => s.spanName === "alpha");
+    const beta = allSpans.find(s => s.spanName === "beta");
     if (!alpha || !beta) fail("Missing alpha or beta span");
-    // Both should exist as separate intervals despite same span_id
     if (alpha.start !== 1000 || beta.start !== 2000) fail("Span intervals not distinct");
     pass("Recycled span IDs produce separate intervals");
   }
@@ -477,14 +474,13 @@ async function main() {
       { name: "SpanEnter:myapp::handle:src/main.rs:10", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "handle", request_id: "abc-123" } },
       { name: "SpanExit:myapp::handle:src/main.rs:10",  timestamp: 1100, fields: { worker_id: 0, span_id: 1, span_name: "handle", request_id: "abc-123" } },
     ];
-    const { spansByWorker } = buildSpanData(customEvents);
-    const spans = spansByWorker[0];
-    if (!spans || spans.length !== 1) fail(`Expected 1 span, got ${spans?.length}`);
-    if (spans[0].spanName !== "handle") fail(`Expected span name 'handle', got '${spans[0].spanName}'`);
-    if (spans[0].fields.request_id !== "abc-123") fail(`Expected request_id='abc-123', got '${spans[0].fields.request_id}'`);
+    const { allSpans } = buildSpanData(customEvents);
+    if (!allSpans || allSpans.length !== 1) fail(`Expected 1 span, got ${allSpans?.length}`);
+    if (allSpans[0].spanName !== "handle") fail(`Expected span name 'handle', got '${allSpans[0].spanName}'`);
+    if (allSpans[0].fields.request_id !== "abc-123") fail(`Expected request_id='abc-123', got '${allSpans[0].fields.request_id}'`);
     // Base fields should NOT appear in the user fields
-    if (spans[0].fields.worker_id) fail("worker_id should not be in user fields");
-    if (spans[0].fields.span_name) fail("span_name should not be in user fields");
+    if (allSpans[0].fields.worker_id) fail("worker_id should not be in user fields");
+    if (allSpans[0].fields.span_name) fail("span_name should not be in user fields");
     pass("Per-callsite schema with typed fields parsed correctly");
   }
 
@@ -495,13 +491,37 @@ async function main() {
       // This enter has no matching exit (trace ended mid-span)
       { name: "SpanEnter:app::b:f:2", timestamp: 1200, fields: { worker_id: 0, span_id: 2, parent_span_id: null, span_name: "b" } },
     ];
-    const { spansByWorker, unmatchedSpans } = buildSpanData(customEvents);
-    const matched = spansByWorker[0] || [];
-    if (matched.length !== 1) fail(`Expected 1 matched span, got ${matched.length}`);
+    const { allSpans, unmatchedSpans } = buildSpanData(customEvents);
+    if (allSpans.length !== 1) fail(`Expected 1 matched span, got ${allSpans.length}`);
     if (!unmatchedSpans || unmatchedSpans.length !== 1) fail(`Expected 1 unmatched span, got ${unmatchedSpans?.length}`);
     if (unmatchedSpans[0].spanName !== "b") fail(`Expected unmatched span 'b', got '${unmatchedSpans[0].spanName}'`);
     if (unmatchedSpans[0].spanId !== 2) fail(`Expected unmatched spanId 2, got ${unmatchedSpans[0].spanId}`);
     pass("Unmatched spans (enter without exit) detected correctly");
+  }
+
+  function testBuildSpanDataMultiplePolls() {
+    // A span entered/exited multiple times (async future polled 3 times with sleep gap)
+    const customEvents = [
+      { name: "SpanEnter:app::f:f:1", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "my_fn" } },
+      { name: "SpanExit:app::f:f:1",  timestamp: 1500, fields: { worker_id: 0, span_id: 1, span_name: "my_fn" } },
+      { name: "SpanEnter:app::f:f:1", timestamp: 100000, fields: { worker_id: 1, span_id: 1, parent_span_id: null, span_name: "my_fn" } },
+      { name: "SpanExit:app::f:f:1",  timestamp: 100200, fields: { worker_id: 1, span_id: 1, span_name: "my_fn" } },
+      { name: "SpanEnter:app::f:f:1", timestamp: 100300, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "my_fn" } },
+      { name: "SpanExit:app::f:f:1",  timestamp: 100400, fields: { worker_id: 0, span_id: 1, span_name: "my_fn" } },
+      { name: "SpanCloseEvent",        timestamp: 100500, fields: { span_id: 1 } },
+    ];
+    const { allSpans } = buildSpanData(customEvents);
+    if (allSpans.length !== 1) fail(`Expected 1 span, got ${allSpans.length}`);
+    const s = allSpans[0];
+    if (s.segments.length !== 3) fail(`Expected 3 segments, got ${s.segments.length}`);
+    if (s.start !== 1000) fail(`Expected start=1000, got ${s.start}`);
+    if (s.end !== 100400) fail(`Expected end=100400, got ${s.end}`);
+    // activeNs = 500 + 200 + 100 = 800
+    if (s.activeNs !== 800) fail(`Expected activeNs=800, got ${s.activeNs}`);
+    // Workers: polled on both 0 and 1
+    const workers = [...new Set(s.segments.map(seg => seg.workerId))].sort();
+    if (workers.length !== 2 || workers[0] !== 0 || workers[1] !== 1) fail(`Expected workers [0,1], got ${workers}`);
+    pass("Multiple polls grouped into single span with segments");
   }
 
   // ── Regression: open PollStart at trace end must not create phantom poll (#194) ──
@@ -576,6 +596,7 @@ async function main() {
   testBuildSpanDataRecycledId();
   testBuildSpanDataPerCallsiteSchema();
   testBuildSpanDataUnmatched();
+  testBuildSpanDataMultiplePolls();
 
   console.log("\n✓ All analysis checks passed!");
 }
