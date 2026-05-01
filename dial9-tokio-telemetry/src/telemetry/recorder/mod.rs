@@ -14,7 +14,7 @@ use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::Ordering;
 use crate::rate_limit::rate_limited;
 use crate::telemetry::buffer;
-use crate::telemetry::events::RawEvent;
+use crate::telemetry::format::TaskTerminateEvent;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::writer::{RotatingWriter, TraceWriter};
 use metrique::timers::Timer;
@@ -157,66 +157,79 @@ fn register_hooks(
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
 ) {
+    // Build one TelemetryHandle up front and clone it into every hook
+    // closure. This lets the hooks go through the public
+    // `record_event(event, &handle)` API rather than reaching into
+    // crate-internal methods on `SharedState`, and matches the long-term
+    // goal of decoupling the tokio hook layer from the recording core.
+    let handle = TelemetryHandle {
+        shared: shared.clone(),
+        control_tx: control_tx.clone(),
+    };
+
     let c1 = ctx.clone();
-    let s1 = shared.clone();
+    let h1 = handle.clone();
     let c2 = ctx.clone();
-    let s2 = shared.clone();
+    let h2 = handle.clone();
     let c3 = ctx.clone();
-    let s3 = shared.clone();
+    let h3 = handle.clone();
     let c4 = ctx.clone();
-    let s4 = shared.clone();
+    let h4 = handle.clone();
 
     builder
         .on_thread_park(move || {
-            let event = make_worker_park(&c1, &s1);
-            s1.record_event(event);
+            let event = make_worker_park(&c1, &h1);
+            crate::telemetry::record_event(event, &h1);
         })
         .on_thread_unpark(move || {
-            let event = make_worker_unpark(&c2, &s2);
-            s2.record_event(event);
+            let event = make_worker_unpark(&c2, &h2);
+            crate::telemetry::record_event(event, &h2);
         })
         .on_before_task_poll(move |meta| {
             let task_id = TaskId::from(meta.id());
             let location = meta.spawned_at();
-            let event = make_poll_start(&c3, &s3, location, task_id);
-            s3.record_event(event);
+            let event = make_poll_start(&c3, &h3, location, task_id);
+            crate::telemetry::record_event(event, &h3);
         })
         .on_after_task_poll(move |_meta| {
-            let event = make_poll_end(&c4, &s4);
-            s4.record_event(event);
+            let event = make_poll_end(&c4, &h4);
+            crate::telemetry::record_event(event, &h4);
         });
 
     if task_tracking_enabled {
-        let s5 = shared.clone();
+        let h5 = handle.clone();
         builder.on_task_spawn(move |meta| {
             let task_id = TaskId::from(meta.id());
             let location = meta.spawned_at();
             let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get());
-
-            s5.record_event(RawEvent::TaskSpawn {
-                timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
-                task_id,
-                location,
-                instrumented,
-            });
+            let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
+            crate::telemetry::record_event(
+                runtime_context::TaskSpawn {
+                    timestamp_ns,
+                    task_id,
+                    location,
+                    instrumented,
+                },
+                &h5,
+            );
         });
-        let s6 = shared.clone();
+        let h6 = handle.clone();
         builder.on_task_terminate(move |meta| {
             let task_id = TaskId::from(meta.id());
-            s6.record_event(RawEvent::TaskTerminate {
-                timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
-                task_id,
-            });
+            crate::telemetry::record_event(
+                TaskTerminateEvent {
+                    timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
+                    task_id,
+                },
+                &h6,
+            );
         });
     }
 
     // Unified on_thread_start / on_thread_stop. Tokio only stores one
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
-    let handle_for_tl = TelemetryHandle {
-        shared: shared.clone(),
-        control_tx: control_tx.clone(),
-    };
+    let handle_for_tl = handle;
     #[cfg(feature = "cpu-profiling")]
     let s_start = shared.clone();
     #[cfg(feature = "cpu-profiling")]
@@ -1522,23 +1535,30 @@ mod tests {
         ];
         for (i, loc) in locations.iter().enumerate() {
             let task_id = crate::telemetry::task_metadata::TaskId::from_u32(i as u32);
-            buffer::record_event(
-                RawEvent::TaskSpawn {
-                    timestamp_nanos: (i as u64 + 1) * 1000,
-                    task_id,
-                    location: loc,
-                    instrumented: true,
+            let ts = (i as u64 + 1) * 1000;
+            buffer::with_encoder(
+                |enc| {
+                    let spawn_loc = enc.intern_location(loc);
+                    enc.encode(&crate::telemetry::format::TaskSpawnEvent {
+                        timestamp_ns: ts,
+                        task_id,
+                        spawn_loc,
+                        instrumented: true,
+                    });
                 },
                 &collector,
                 &drain_epoch,
             );
-            buffer::record_event(
-                RawEvent::PollStart {
-                    timestamp_nanos: (i as u64 + 1) * 1000,
-                    worker_id: WorkerId::from(0usize),
-                    worker_local_queue_depth: 0,
-                    task_id,
-                    location: loc,
+            buffer::with_encoder(
+                |enc| {
+                    let spawn_loc = enc.intern_location(loc);
+                    enc.encode(&crate::telemetry::format::PollStartEvent {
+                        timestamp_ns: ts,
+                        worker_id: WorkerId::from(0usize),
+                        local_queue: 0,
+                        task_id,
+                        spawn_loc,
+                    });
                 },
                 &collector,
                 &drain_epoch,
@@ -1938,8 +1958,7 @@ mod tests {
                         callchain: callchain.clone(),
                     };
                     *timestamp += 1;
-                    ew.write_raw_event(RawEvent::CpuSample(Box::new(data)))
-                        .unwrap();
+                    ew.write_raw_event(&data).unwrap();
                 }
             }
 
@@ -1947,16 +1966,17 @@ mod tests {
                 if let FlushOp::PollStart { location_idx } = op {
                     let loc = locations[*location_idx];
                     let task_id = TaskId::from_u32(*timestamp as u32);
-                    let raw = RawEvent::PollStart {
-                        timestamp_nanos: *timestamp,
-                        worker_id: WorkerId::from(0usize),
-                        worker_local_queue_depth: 0,
-                        task_id,
-                        location: loc,
-                    };
+                    let ts = *timestamp;
                     *timestamp += 1;
 
-                    ew.write_raw_event(raw).unwrap();
+                    ew.write_raw_event(&runtime_context::PollStart {
+                        timestamp_ns: ts,
+                        worker_id: WorkerId::from(0usize),
+                        local_queue: 0,
+                        task_id,
+                        location: loc,
+                    })
+                    .unwrap();
                     *expected_raw += 1;
                 }
             }

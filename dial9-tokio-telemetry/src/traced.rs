@@ -84,7 +84,7 @@ fn record_wake_event(data: &TracedWakerData) {
     let event = data
         .shared
         .create_wake_event(data.woken_task_id, waking_worker_u8);
-    data.shared.record_event(event);
+    data.shared.record_encodable_event(&event);
 }
 
 fn make_traced_waker(data: Arc<TracedWakerData>) -> Waker {

@@ -1,6 +1,10 @@
+use super::TelemetryHandle;
 use super::shared_state::{PARKED_SCHED_WAIT, SharedState};
-use crate::telemetry::events::{RawEvent, SchedStat};
-use crate::telemetry::format::WorkerId;
+use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder};
+use crate::telemetry::events::SchedStat;
+use crate::telemetry::format::{
+    PollEndEvent, PollStartEvent, TaskSpawnEvent, WorkerId, WorkerParkEvent, WorkerUnparkEvent,
+};
 use crate::telemetry::task_metadata::TaskId;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -147,35 +151,84 @@ pub fn current_worker_id() -> WorkerId {
 
 // ── Event construction helpers ───────────────────────────────────────────────
 
+/// Tokio-side intermediate for a `PollStartEvent`. Holds the raw
+/// `&'static Location` so that interning happens lazily inside
+/// [`Encodable::encode`], against the thread-local encoder's string pool.
+///
+/// Going through [`Encodable`] lets the hook closure use the public
+/// [`record_event`](crate::telemetry::record_event) API uniformly for all
+/// event kinds.
+pub(super) struct PollStart {
+    pub timestamp_ns: u64,
+    pub worker_id: WorkerId,
+    pub local_queue: u8,
+    pub task_id: TaskId,
+    pub location: &'static std::panic::Location<'static>,
+}
+
+impl Encodable for PollStart {
+    fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
+        let spawn_loc = enc.intern_location(self.location);
+        enc.encode(&PollStartEvent {
+            timestamp_ns: self.timestamp_ns,
+            worker_id: self.worker_id,
+            local_queue: self.local_queue,
+            task_id: self.task_id,
+            spawn_loc,
+        });
+    }
+}
+
+/// Tokio-side intermediate for a `TaskSpawnEvent`. See [`PollStart`] for
+/// rationale.
+pub(super) struct TaskSpawn {
+    pub timestamp_ns: u64,
+    pub task_id: TaskId,
+    pub location: &'static std::panic::Location<'static>,
+    pub instrumented: bool,
+}
+
+impl Encodable for TaskSpawn {
+    fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
+        let spawn_loc = enc.intern_location(self.location);
+        enc.encode(&TaskSpawnEvent {
+            timestamp_ns: self.timestamp_ns,
+            task_id: self.task_id,
+            spawn_loc,
+            instrumented: self.instrumented,
+        });
+    }
+}
+
 pub(super) fn make_poll_start(
     ctx: &RuntimeContext,
-    shared: &SharedState,
+    handle: &TelemetryHandle,
     location: &'static std::panic::Location<'static>,
     task_id: TaskId,
-) -> RawEvent {
-    let resolved = ctx.resolve_worker(shared);
+) -> PollStart {
+    let resolved = ctx.resolve_worker(&handle.shared);
     let worker_local_queue_depth = resolved
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);
-    RawEvent::PollStart {
-        timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
+    PollStart {
+        timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
         worker_id: resolved.map(|(id, _)| id).unwrap_or(WorkerId::UNKNOWN),
-        worker_local_queue_depth,
+        local_queue: worker_local_queue_depth as u8,
         task_id,
         location,
     }
 }
 
-pub(super) fn make_poll_end(ctx: &RuntimeContext, shared: &SharedState) -> RawEvent {
-    let resolved = ctx.resolve_worker(shared);
-    RawEvent::PollEnd {
-        timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
+pub(super) fn make_poll_end(ctx: &RuntimeContext, handle: &TelemetryHandle) -> PollEndEvent {
+    let resolved = ctx.resolve_worker(&handle.shared);
+    PollEndEvent {
+        timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
         worker_id: resolved.map(|(id, _)| id).unwrap_or(WorkerId::UNKNOWN),
     }
 }
 
-pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> RawEvent {
-    let resolved = ctx.resolve_worker(shared);
+pub(super) fn make_worker_park(ctx: &RuntimeContext, handle: &TelemetryHandle) -> WorkerParkEvent {
+    let resolved = ctx.resolve_worker(&handle.shared);
     let worker_local_queue_depth = resolved
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);
@@ -183,16 +236,19 @@ pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> Ra
     if let Ok(ss) = SchedStat::read_current() {
         PARKED_SCHED_WAIT.with(|c| c.set(ss.wait_time_ns));
     }
-    RawEvent::WorkerPark {
-        timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
+    WorkerParkEvent {
+        timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
         worker_id: resolved.map(|(id, _)| id).unwrap_or(WorkerId::UNKNOWN),
-        worker_local_queue_depth,
-        cpu_time_nanos,
+        local_queue: worker_local_queue_depth as u8,
+        cpu_time_ns: cpu_time_nanos,
     }
 }
 
-pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> RawEvent {
-    let resolved = ctx.resolve_worker(shared);
+pub(super) fn make_worker_unpark(
+    ctx: &RuntimeContext,
+    handle: &TelemetryHandle,
+) -> WorkerUnparkEvent {
+    let resolved = ctx.resolve_worker(&handle.shared);
     let worker_local_queue_depth = resolved
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);
@@ -203,11 +259,11 @@ pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> 
     } else {
         0
     };
-    RawEvent::WorkerUnpark {
-        timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
+    WorkerUnparkEvent {
+        timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
         worker_id: resolved.map(|(id, _)| id).unwrap_or(WorkerId::UNKNOWN),
-        worker_local_queue_depth,
-        cpu_time_nanos,
-        sched_wait_delta_nanos,
+        local_queue: worker_local_queue_depth as u8,
+        cpu_time_ns: cpu_time_nanos,
+        sched_wait_ns: sched_wait_delta_nanos,
     }
 }
