@@ -627,7 +627,7 @@ impl WorkerLoop {
                         if e.kind.already_deleted() {
                             tracing::debug!(target: "dial9_worker", path = %segment.path.display(), "segment evicted during processing, skipping");
                         } else if e.kind.retryable() {
-                            tracing::debug!(target: "dial9_worker", path = %segment.path.display(), err = ?e.kind, "retryable error, this file will be attempted to process again.")
+                            tracing::debug!(target: "dial9_worker", path = %segment.path.display(), err = ?e.kind, "retryable error, this file will be attempted to process again.");
                         } else {
                             if let Err(remove_err) = std::fs::remove_file(&segment.path) {
                                 rate_limited!(Duration::from_secs(60), {
