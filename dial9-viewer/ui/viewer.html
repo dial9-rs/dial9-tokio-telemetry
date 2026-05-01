@@ -2063,7 +2063,11 @@
                 if (panel.style.display === "none") return;
                 const c = document.getElementById("span-panel-canvas");
                 const dpr = devicePixelRatio || 1;
-                const pw = panel.clientWidth;
+                // panel.clientWidth includes the 100px padding-left where the
+                // label sits.  The canvas lives inside that padded area, so its
+                // drawing width must exclude LABEL_W (and the scrollbar
+                // reservation) to match the lane canvases' coordinate system.
+                const pw = panel.clientWidth - LABEL_W - (scrollbarW || 0);
                 const ph = 120;
                 c.width = pw * dpr;
                 c.height = ph * dpr;

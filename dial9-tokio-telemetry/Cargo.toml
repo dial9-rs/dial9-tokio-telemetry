@@ -1,6 +1,6 @@
 [package]
 name = "dial9-tokio-telemetry"
-version = "0.3.5"
+version = "0.3.6"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -24,7 +24,7 @@ tokio-util = "0.7"
 arc-swap = "1"
 crossbeam-queue = "0.3"
 libc.workspace = true
-futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "std"] }
 pin-project-lite = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -3,7 +3,7 @@ source: dial9-macro/src/lib.rs
 expression: output
 ---
 fn main() {
-    let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new(my_config());
+    let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new((|| my_config())());
     __dial9_rt
         .block_on(async move {
             do_work().await;

@@ -2,17 +2,26 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{ItemFn, Path, Token, parse_macro_input};
+use syn::{ExprClosure, ItemFn, Path, Token, parse_macro_input};
 
-struct MainArgs {
-    config: Path,
+enum ConfigSource {
+    Path(Path),
+    Closure(ExprClosure),
 }
 
-const MISSING_CONFIG_HELP: &str = "missing required `config = <fn>` argument, \
-                           e.g. #[dial9_tokio_telemetry::main(config = my_config)]";
+struct MainArgs {
+    config: ConfigSource,
+}
 
-const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a path to a zero-argument function, \
-                           e.g. #[dial9_tokio_telemetry::main(config = my_config)]";
+const MISSING_CONFIG_HELP: &str = "missing required `config` argument, e.g.\n  \
+                           #[dial9_tokio_telemetry::main(config = my_config_fn)]\n\
+                           or with an inline closure:\n  \
+                           #[dial9_tokio_telemetry::main(config = || Dial9Config::builder().base_path(...).max_file_size(...).max_total_size(...).build().unwrap())]";
+
+const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a zero-argument function path or a zero-argument closure, e.g.\n  \
+                           #[dial9_tokio_telemetry::main(config = my_config_fn)]\n\
+                           or with an inline closure:\n  \
+                           #[dial9_tokio_telemetry::main(config = || Dial9Config::builder().base_path(...).max_file_size(...).max_total_size(...).build().unwrap())]";
 impl Parse for MainArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if input.is_empty() {
@@ -23,7 +32,20 @@ impl Parse for MainArgs {
             return Err(syn::Error::new(ident.span(), MISSING_CONFIG_HELP));
         }
         input.parse::<Token![=]>()?;
-        let config: Path = input.parse()?;
+
+        let config = if input.peek(Token![|]) || input.peek(Token![move]) {
+            let closure: ExprClosure = input.parse()?;
+            if !closure.inputs.is_empty() {
+                return Err(syn::Error::new_spanned(
+                    &closure.inputs,
+                    CONFIG_MUST_BE_ZERO_ARG_HELP,
+                ));
+            }
+            ConfigSource::Closure(closure)
+        } else {
+            ConfigSource::Path(input.parse()?)
+        };
+
         if !input.is_empty() {
             return Err(input.error(CONFIG_MUST_BE_ZERO_ARG_HELP));
         }
@@ -60,7 +82,10 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
         ));
     }
 
-    let config_fn = &args.config;
+    let config_call = match &args.config {
+        ConfigSource::Path(p) => quote! { #p() },
+        ConfigSource::Closure(c) => quote! { (#c)() },
+    };
     let attrs = &input.attrs;
     let vis = &input.vis;
     let name = &input.sig.ident;
@@ -70,23 +95,8 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     Ok(quote! {
         #(#attrs)*
         #vis fn #name() #ret {
-            let (__tokio_runtime, __maybe_guard) = #config_fn()
-                .build()
-                .expect("failed to initialize runtime");
-            if let Some(__dial9_guard) = __maybe_guard {
-                let __dial9_handle = __dial9_guard.handle();
-                __tokio_runtime.block_on(async move {
-                    match __dial9_handle.spawn(async move { #(#body_stmts)* }).await {
-                        Ok(output) => output,
-                        Err(err) if err.is_panic() => {
-                            ::std::panic::resume_unwind(err.into_panic())
-                        }
-                        Err(_) => unreachable!("task cannot be cancelled inside block_on"),
-                    }
-                })
-            } else {
-                __tokio_runtime.block_on(async move { #(#body_stmts)* })
-            }
+            let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new(#config_call);
+            __dial9_rt.block_on(async move { #(#body_stmts)* })
         }
     })
 }
@@ -105,18 +115,38 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// # Arguments
 ///
-/// * `config` — path to a zero-argument function returning [`Dial9Config`].
-///   Build one with [`Dial9ConfigBuilder::new`] (telemetry enabled) or
-///   [`Dial9ConfigBuilder::disabled`] (plain tokio, no telemetry).
+/// * `config` — a zero-argument function path or a zero-argument closure
+///   returning any value convertible into a `TracedRuntime`. In
+///   practice that means one of:
+///     - [`Dial9Config`] from `Dial9Config::builder().build()` (strict):
+///       any builder validation or writer-I/O failure surfaces from
+///       `.build()` as a `Dial9ConfigBuilderError`; runtime construction
+///       under the macro panics on tokio-builder or telemetry-core I/O.
+///     - [`Dial9Config`] from `Dial9Config::builder().build_or_disabled()`
+///       (lenient): the same `Dial9Config` type, but validation and
+///       writer-I/O failures are logged at `error!` and downgraded to a
+///       disabled config that still preserves your `with_tokio`
+///       configurators.
+///     - The deprecated positional `dial9_tokio_telemetry::config::Dial9Config`,
+///       kept compatible via a bridge impl.
 ///
-/// # Example
+///   Use `.enabled(false)` on the builder to run without telemetry
+///   while keeping your `with_tokio` configurators.
+///
+/// # Examples
+///
+/// Using a named function:
 ///
 /// ```rust,ignore
-/// use dial9_tokio_telemetry::{main, config::{Dial9Config, Dial9ConfigBuilder}, telemetry::TelemetryHandle};
+/// use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
 ///
 /// fn my_config() -> Dial9Config {
-///     Dial9ConfigBuilder::new("/tmp/trace.bin", 1024 * 1024, 16 * 1024 * 1024)
+///     Dial9Config::builder()
+///         .base_path("/tmp/trace.bin")
+///         .max_file_size(1024 * 1024)
+///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
+///         .expect("config build failed")
 /// }
 ///
 /// #[dial9_tokio_telemetry::main(config = my_config)]
@@ -126,6 +156,53 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///         .spawn(async { /* instrumented sub-task */ })
 ///         .await
 ///         .unwrap();
+/// }
+/// ```
+///
+/// Using an inline closure:
+///
+/// ```rust,ignore
+/// #[dial9_tokio_telemetry::main(config = || {
+///     Dial9Config::builder()
+///         .base_path("/tmp/trace.bin")
+///         .max_file_size(1024 * 1024)
+///         .max_total_size(16 * 1024 * 1024)
+///         .build()
+///         .expect("config build failed")
+/// })]
+/// async fn main() {
+///     /* ... */
+/// }
+/// ```
+///
+/// Lenient (telemetry is best-effort; falls back to a plain tokio
+/// runtime if writer setup fails):
+///
+/// ```rust,ignore
+/// #[dial9_tokio_telemetry::main(config = || {
+///     Dial9Config::builder()
+///         .base_path("/tmp/trace.bin")
+///         .max_file_size(1024 * 1024)
+///         .max_total_size(16 * 1024 * 1024)
+///         .build_or_disabled()
+/// })]
+/// async fn main() {
+///     /* ... */
+/// }
+/// ```
+///
+/// Disabled (no telemetry, plain tokio runtime — useful for toggling
+/// dial9 off via a feature flag or env var without removing the macro):
+///
+/// ```rust,ignore
+/// #[dial9_tokio_telemetry::main(config = || {
+///     Dial9Config::builder()
+///         .enabled(false)
+///         .build()
+///         .expect("config build failed")
+/// })]
+/// async fn main() {
+///     /* ... */
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -235,31 +312,63 @@ mod tests {
     #[test]
     fn error_empty_args() {
         let msg = parse_args_err(quote! {});
-        assert!(msg.contains("config = <fn>"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("missing required `config`"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
     fn error_wrong_arg_name() {
         let msg = parse_args_err(quote! { foo = bar });
-        assert!(msg.contains("config = <fn>"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("missing required `config`"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
     fn error_config_with_args() {
         let msg = parse_args_err(quote! { config = my_config(arg) });
-        assert!(
-            msg.contains("zero-argument function"),
-            "unexpected error: {msg}"
-        );
+        assert!(msg.contains("zero-argument"), "unexpected error: {msg}");
     }
 
     #[test]
     fn error_config_trailing_tokens() {
         let msg = parse_args_err(quote! { config = my_config, extra = stuff });
-        assert!(
-            msg.contains("zero-argument function"),
-            "unexpected error: {msg}"
+        assert!(msg.contains("zero-argument"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn expand_with_inline_closure() {
+        let output = expand(
+            quote! { config = || my_config() },
+            quote! {
+                async fn main() {
+                    do_work().await;
+                }
+            },
         );
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn expand_with_move_closure() {
+        let output = expand(
+            quote! { config = move || my_config() },
+            quote! {
+                async fn main() {
+                    do_work().await;
+                }
+            },
+        );
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn error_closure_with_args() {
+        let msg = parse_args_err(quote! { config = |x| my_config() });
+        assert!(msg.contains("zero-argument"), "unexpected error: {msg}");
     }
 
     #[test]

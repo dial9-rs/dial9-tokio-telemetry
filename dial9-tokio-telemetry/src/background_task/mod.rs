@@ -8,11 +8,13 @@ pub(crate) mod sealed;
 
 use crate::metrics::{Operation, SegmentProcessMetrics, SegmentProcessMetricsGuard};
 use crate::rate_limit::rate_limited;
+use futures_util::FutureExt;
 use metrique::timers::Timer;
 use metrique_writer::BoxEntrySink;
 use pipeline_metrics::{MetriqueResult, PipelineMetrics, StageMetrics};
 use std::collections::HashMap;
 use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
@@ -148,16 +150,32 @@ pub(crate) struct ProcessError {
 #[derive(Debug)]
 pub(crate) enum ProcessErrorKind {
     Io(std::io::Error),
-    #[cfg(feature = "worker-s3")]
-    Transfer(aws_sdk_s3_transfer_manager::error::Error),
+    Transfer {
+        source: Box<dyn std::error::Error + Send + Sync>,
+        retryable: bool,
+    },
+}
+
+impl ProcessErrorKind {
+    fn already_deleted(&self) -> bool {
+        matches!(self, ProcessErrorKind::Io(err) if err.kind() == io::ErrorKind::NotFound)
+    }
+
+    /// Whether this error is transient and the segment should be kept on disk
+    /// for retry.
+    fn retryable(&self) -> bool {
+        match self {
+            ProcessErrorKind::Transfer { retryable, .. } => *retryable,
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Display for ProcessErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "I/O error: {e}"),
-            #[cfg(feature = "worker-s3")]
-            Self::Transfer(e) => write!(f, "S3 transfer error: {e}"),
+            Self::Transfer { source, .. } => write!(f, "S3 transfer error: {source}"),
         }
     }
 }
@@ -172,8 +190,7 @@ impl std::error::Error for ProcessError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.kind {
             ProcessErrorKind::Io(e) => Some(e),
-            #[cfg(feature = "worker-s3")]
-            ProcessErrorKind::Transfer(e) => Some(e),
+            ProcessErrorKind::Transfer { source, .. } => Some(source.as_ref()),
         }
     }
 }
@@ -187,7 +204,17 @@ impl From<std::io::Error> for ProcessErrorKind {
 #[cfg(feature = "worker-s3")]
 impl From<aws_sdk_s3_transfer_manager::error::Error> for ProcessErrorKind {
     fn from(e: aws_sdk_s3_transfer_manager::error::Error) -> Self {
-        Self::Transfer(e)
+        let retryable = matches!(
+            e.kind(),
+            aws_sdk_s3_transfer_manager::error::ErrorKind::IOError
+                | aws_sdk_s3_transfer_manager::error::ErrorKind::RuntimeError
+                | aws_sdk_s3_transfer_manager::error::ErrorKind::ChildOperationFailed
+                | aws_sdk_s3_transfer_manager::error::ErrorKind::ChunkFailed(_)
+        );
+        Self::Transfer {
+            source: Box::new(e),
+            retryable,
+        }
     }
 }
 
@@ -195,6 +222,14 @@ impl From<aws_sdk_s3_transfer_manager::error::Error> for ProcessErrorKind {
 ///
 /// Implementations handle one concern: compress, symbolize, upload, etc.
 /// The worker calls processors in sequence for each segment.
+///
+/// # Panic safety
+///
+/// The worker loop catches panics from [`process()`](Self::process) and
+/// skips the panicking segment. The same processor instance is reused for
+/// subsequent segments, so implementations **must** remain in a valid state
+/// after a panic (i.e., no partially-updated invariants that would cause
+/// incorrect behavior on the next call).
 pub(crate) trait SegmentProcessor: Send {
     /// Human-readable name for this processor (used in metrics).
     fn name(&self) -> &'static str;
@@ -566,6 +601,8 @@ impl WorkerLoop {
                 uncompressed_size,
                 compressed_size: None,
                 invalid_file_header: !header_valid,
+                panicked: false,
+                panic_message: None,
                 pipeline: PipelineMetrics::default(),
             }
             .append_on_drop(self.metrics_sink.clone());
@@ -584,23 +621,36 @@ impl WorkerLoop {
                 let mut stage = StageMetrics::start();
                 let proc_start = std::time::Instant::now();
                 tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, "running processor");
-                match processor.process(data).await {
-                    Ok(next) => {
+                // Catch panics in both the synchronous `process()` call
+                // (which builds the future) and during `.await` (polling).
+                // AssertUnwindSafe: current processors are stateless or have
+                // trivially-recoverable state, so reuse after panic is safe.
+                let process_result = {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        processor.process(data)
+                    })) {
+                        Ok(fut) => std::panic::AssertUnwindSafe(fut).catch_unwind().await,
+                        Err(panic_payload) => Err(panic_payload),
+                    }
+                };
+                match process_result {
+                    Ok(Ok(next)) => {
                         tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, "processor succeeded");
                         data = next;
                         stage.succeed();
                         data.metrics.pipeline.push(processor.name(), stage);
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, error = %e.kind, "processor failed");
                         data = e.data;
                         stage.fail();
                         data.metrics.pipeline.push(processor.name(), stage);
                         data.metrics.status = Some(MetriqueResult::Failure);
                         data.metrics.total_time.stop();
-                        if matches!(&e.kind, ProcessErrorKind::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
-                        {
+                        if e.kind.already_deleted() {
                             tracing::debug!(target: "dial9_worker", path = %segment.path.display(), "segment evicted during processing, skipping");
+                        } else if e.kind.retryable() {
+                            tracing::debug!(target: "dial9_worker", path = %segment.path.display(), err = ?e.kind, "retryable error, this file will be attempted to process again.");
                         } else {
                             if let Err(remove_err) = std::fs::remove_file(&segment.path) {
                                 rate_limited!(Duration::from_secs(60), {
@@ -610,6 +660,51 @@ impl WorkerLoop {
                             rate_limited!(Duration::from_secs(60), {
                                 tracing::warn!(target: "dial9_worker", error = %e.kind, cause = ?e.kind, path = %segment.path.display(), "processor failed, removing segment");
                             });
+                        }
+                        continue 'next_segment;
+                    }
+                    Err(panic_payload) => {
+                        let panic_msg = panic_payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.as_str()))
+                            .unwrap_or("unknown panic");
+                        rate_limited!(
+                            Duration::from_secs(60),
+                            tracing::error!(
+                                target: "dial9_worker",
+                                processor = processor.name(),
+                                segment = seg_idx + 1,
+                                path = %segment.path.display(),
+                                panic = panic_msg,
+                                "processor panicked, skipping segment"
+                            )
+                        );
+                        // The original metrics guard was consumed by the
+                        // panicking future. Emit a new one so panics are
+                        // visible in operational metrics.
+                        drop(
+                            SegmentProcessMetrics {
+                                operation: Operation::ProcessSegment,
+                                total_time: Timer::start_now(),
+                                status: Some(MetriqueResult::Failure),
+                                segment_index: segment.index,
+                                uncompressed_size,
+                                compressed_size: None,
+                                invalid_file_header: !header_valid,
+                                panicked: true,
+                                panic_message: Some(panic_msg.to_owned()),
+                                pipeline: PipelineMetrics::default(),
+                            }
+                            .append_on_drop(self.metrics_sink.clone()),
+                        );
+                        if let Err(remove_err) = std::fs::remove_file(&segment.path)
+                            && remove_err.kind() != std::io::ErrorKind::NotFound
+                        {
+                            rate_limited!(
+                                Duration::from_secs(60),
+                                tracing::warn!(target: "dial9_worker", error = %remove_err, path = %segment.path.display(), "failed to remove segment after panic")
+                            );
                         }
                         continue 'next_segment;
                     }
@@ -688,7 +783,10 @@ impl SegmentProcessor for S3PipelineUploader {
                 tracing::debug!(target: "dial9_worker", path = %data.segment.path.display(), "circuit breaker open, skipping upload");
                 return Err(ProcessError {
                     data,
-                    kind: ProcessErrorKind::Io(std::io::Error::other("circuit breaker open")),
+                    kind: ProcessErrorKind::Transfer {
+                        source: Box::from("circuit breaker open"),
+                        retryable: true,
+                    },
                 });
             }
             let bytes = std::mem::take(&mut data.bytes);
@@ -881,6 +979,8 @@ mod tests {
             uncompressed_size: data.len() as u64,
             compressed_size: None,
             invalid_file_header: false,
+            panicked: false,
+            panic_message: None,
             pipeline: PipelineMetrics::default(),
         }
         .append_on_drop(sink);
@@ -1156,17 +1256,153 @@ mod worker_pipeline_tests {
             .build()
     }
 
-    /// A segment that fails processing is deleted so it is not retried.
+    /// s3s wrapper where every upload returns 500 InternalError.
+    struct AlwaysFailS3<S>(S);
+
+    #[async_trait::async_trait]
+    impl<S: s3s::S3 + Send + Sync> s3s::S3 for AlwaysFailS3<S> {
+        async fn put_object(
+            &self,
+            _req: s3s::S3Request<s3s::dto::PutObjectInput>,
+        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::PutObjectOutput>> {
+            Err(s3s::S3Error::with_message(
+                s3s::S3ErrorCode::InternalError,
+                "injected 500",
+            ))
+        }
+        async fn create_multipart_upload(
+            &self,
+            _req: s3s::S3Request<s3s::dto::CreateMultipartUploadInput>,
+        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CreateMultipartUploadOutput>> {
+            Err(s3s::S3Error::with_message(
+                s3s::S3ErrorCode::InternalError,
+                "injected 500",
+            ))
+        }
+        async fn upload_part(
+            &self,
+            _req: s3s::S3Request<s3s::dto::UploadPartInput>,
+        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::UploadPartOutput>> {
+            Err(s3s::S3Error::with_message(
+                s3s::S3ErrorCode::InternalError,
+                "injected 500",
+            ))
+        }
+        async fn complete_multipart_upload(
+            &self,
+            _req: s3s::S3Request<s3s::dto::CompleteMultipartUploadInput>,
+        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>> {
+            Err(s3s::S3Error::with_message(
+                s3s::S3ErrorCode::InternalError,
+                "injected 500",
+            ))
+        }
+    }
+
+    fn always_failing_s3_uploader() -> (s3::S3Uploader, tempfile::TempDir) {
+        let s3_root = tempfile::tempdir().unwrap();
+        let fs = s3s_fs::FileSystem::new(s3_root.path()).unwrap();
+        let failing = AlwaysFailS3(fs);
+        let mut builder = s3s::service::S3ServiceBuilder::new(failing);
+        builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+        let s3_service = builder.build();
+        let s3_client: s3s_aws::Client = s3_service.into();
+        let s3_sdk_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(s3_client)
+            .force_path_style(true)
+            .build();
+        let sdk_client = aws_sdk_s3::Client::from_conf(s3_sdk_config);
+        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
+            aws_sdk_s3_transfer_manager::Config::builder()
+                .client(sdk_client)
+                .build(),
+        );
+        let s3_config = s3::S3Config::builder()
+            .bucket("test-bucket")
+            .service_name("test")
+            .instance_path("test")
+            .boot_id("test")
+            .region("us-east-1")
+            .build();
+        (s3::S3Uploader::new(tm_client, s3_config), s3_root)
+    }
+
+    /// A segment that fails with a transient S3 error (500) is kept on disk for retry.
     #[tokio::test]
-    async fn failed_segment_deleted() {
+    async fn failed_segment_kept_on_transient_error() {
         let dir = tempfile::tempdir().unwrap();
         let seg_path = dir.path().join("trace.0.bin");
         std::fs::write(&seg_path, b"bad data").unwrap();
 
-        struct AlwaysFailProcessor;
-        impl SegmentProcessor for AlwaysFailProcessor {
+        let (uploader, _s3_root) = always_failing_s3_uploader();
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(S3PipelineUploader {
+            uploader,
+            circuit_breaker: connection::CircuitBreaker::new(),
+        })];
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut worker = WorkerLoop::new(
+            config_for(dir.path()),
+            processors,
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+        worker.process_open_segments().await;
+
+        check!(
+            seg_path.exists(),
+            "segment should be kept on disk after transient S3 error"
+        );
+    }
+
+    /// A circuit-breaker-open error keeps the segment on disk.
+    #[tokio::test]
+    async fn circuit_breaker_open_keeps_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let seg_path = dir.path().join("trace.0.bin");
+        std::fs::write(&seg_path, b"trace data").unwrap();
+
+        let (uploader, _s3_root) = always_failing_s3_uploader();
+        let mut cb = connection::CircuitBreaker::new();
+        // Trip the circuit breaker so it refuses attempts.
+        cb.on_failure();
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(S3PipelineUploader {
+            uploader,
+            circuit_breaker: cb,
+        })];
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut worker = WorkerLoop::new(
+            config_for(dir.path()),
+            processors,
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+        worker.process_open_segments().await;
+
+        check!(
+            seg_path.exists(),
+            "segment should be kept when circuit breaker is open"
+        );
+    }
+
+    /// A NotFound error (evicted segment) is silently skipped — no deletion attempt.
+    #[tokio::test]
+    async fn not_found_error_skips_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let seg_path = dir.path().join("trace.0.bin");
+        // Write the file so it can be read, but the processor returns NotFound
+        std::fs::write(&seg_path, b"data").unwrap();
+
+        struct NotFoundProcessor;
+        impl SegmentProcessor for NotFoundProcessor {
             fn name(&self) -> &'static str {
-                "AlwaysFail"
+                "NotFound"
             }
             fn process(
                 &mut self,
@@ -1176,14 +1412,17 @@ mod worker_pipeline_tests {
                 Box::pin(async {
                     Err(ProcessError {
                         data,
-                        kind: ProcessErrorKind::Io(std::io::Error::other("permanent failure")),
+                        kind: ProcessErrorKind::Io(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "evicted",
+                        )),
                     })
                 })
             }
         }
 
         let stop = tokio_util::sync::CancellationToken::new();
-        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(AlwaysFailProcessor)];
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(NotFoundProcessor)];
 
         let mut worker = WorkerLoop::new(
             config_for(dir.path()),
@@ -1193,7 +1432,55 @@ mod worker_pipeline_tests {
         );
         worker.process_open_segments().await;
 
-        check!(!seg_path.exists());
+        // File still exists because the processor returned NotFound (eviction),
+        // which means the worker should skip — not attempt to delete.
+        check!(
+            seg_path.exists(),
+            "segment should not be deleted on NotFound (eviction)"
+        );
+    }
+
+    /// A permanent, non-retryable IO error deletes the segment.
+    #[tokio::test]
+    async fn permanent_io_error_deletes_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let seg_path = dir.path().join("trace.0.bin");
+        std::fs::write(&seg_path, b"bad data").unwrap();
+
+        struct PermanentFailProcessor;
+        impl SegmentProcessor for PermanentFailProcessor {
+            fn name(&self) -> &'static str {
+                "PermanentFail"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                Box::pin(async {
+                    Err(ProcessError {
+                        data,
+                        kind: ProcessErrorKind::Io(std::io::Error::other("corrupt data")),
+                    })
+                })
+            }
+        }
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(PermanentFailProcessor)];
+
+        let mut worker = WorkerLoop::new(
+            config_for(dir.path()),
+            processors,
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+        worker.process_open_segments().await;
+
+        check!(
+            !seg_path.exists(),
+            "segment should be deleted after permanent IO error"
+        );
     }
 
     /// Gzip-compressed segments pass through GzipCompressor unchanged.
@@ -1269,6 +1556,8 @@ mod worker_pipeline_tests {
             uncompressed_size: 7,
             compressed_size: None,
             invalid_file_header: false,
+            panicked: false,
+            panic_message: None,
             pipeline: PipelineMetrics::default(),
         }
         .append_on_drop(metrique_writer::sink::DevNullSink::boxed());
@@ -1312,6 +1601,8 @@ mod worker_pipeline_tests {
             uncompressed_size: 3,
             compressed_size: None,
             invalid_file_header: false,
+            panicked: false,
+            panic_message: None,
             pipeline: PipelineMetrics::default(),
         }
         .append_on_drop(metrique_writer::sink::DevNullSink::boxed());
@@ -1360,5 +1651,132 @@ mod worker_pipeline_tests {
         // A subsequent scan should find no sealed segments.
         let segments = sealed::find_sealed_segments(dir.path(), "trace").unwrap();
         check!(segments.is_empty());
+    }
+
+    /// A processor that panics must not kill the worker loop. The panicking
+    /// segment is skipped and subsequent segments are still processed.
+    #[tokio::test]
+    async fn processor_panic_does_not_kill_worker_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("trace.0.bin"), b"panic me").unwrap();
+        std::fs::write(dir.path().join("trace.1.bin"), b"process me").unwrap();
+
+        let processed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        struct PanicFirstProcessor {
+            counter: Arc<std::sync::atomic::AtomicUsize>,
+            calls: usize,
+        }
+        impl SegmentProcessor for PanicFirstProcessor {
+            fn name(&self) -> &'static str {
+                "PanicFirst"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.calls += 1;
+                let should_panic = self.calls == 1;
+                let counter = self.counter.clone();
+                Box::pin(async move {
+                    if should_panic {
+                        panic!("processor panic on first segment");
+                    }
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(data)
+                })
+            }
+        }
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(PanicFirstProcessor {
+            counter: processed.clone(),
+            calls: 0,
+        })];
+
+        use metrique_writer::AnyEntrySink;
+        use metrique_writer::test_util::Inspector;
+        let inspector = Inspector::default();
+
+        let mut worker = WorkerLoop::new(
+            config_for(dir.path()),
+            processors,
+            stop,
+            inspector.clone().boxed(),
+        );
+        worker.run().await;
+
+        // The worker must have processed at least one segment (the non-panicking one)
+        // despite the first processor call panicking.
+        check!(processed.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        // The panicking segment's file should have been removed.
+        check!(!dir.path().join("trace.0.bin").exists());
+
+        // Verify metrics: we should have entries for both segments, and the
+        // panicking one should have Panicked=true.
+        let entries = inspector.entries();
+        let panicked_entries: Vec<_> = entries
+            .iter()
+            .filter(|e| e.metrics.get("Panicked").is_some_and(|m| m.as_bool()))
+            .collect();
+        check!(
+            panicked_entries.len() == 1,
+            "expected exactly one panicked metric entry, got {}",
+            panicked_entries.len()
+        );
+        check!(panicked_entries[0].metrics["Failure"] == true);
+        // The panic message should be captured.
+        check!(panicked_entries[0].values["PanicMessage"] == "processor panic on first segment");
+    }
+
+    /// A processor that hangs must not prevent the worker from shutting down.
+    /// The drain timeout in `run_background_task` handles this, but at the
+    /// WorkerLoop level, cancellation should interrupt a hung processor.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn processor_hang_respects_shutdown_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("trace.0.bin"), b"hang me").unwrap();
+
+        struct HangingProcessor;
+        impl SegmentProcessor for HangingProcessor {
+            fn name(&self) -> &'static str {
+                "Hanging"
+            }
+            fn process(
+                &mut self,
+                _data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                Box::pin(async {
+                    // Hang forever
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                })
+            }
+        }
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(HangingProcessor)];
+
+        let mut worker = WorkerLoop::new(
+            config_for(dir.path()),
+            processors,
+            stop.clone(),
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+
+        let run_fut = worker.run();
+
+        // Simulate the shutdown path from run_background_task:
+        // cancel the stop token, then timeout the run future.
+        let drain_timeout = Duration::from_secs(2);
+        stop.cancel();
+        let result = tokio::time::timeout(drain_timeout, run_fut).await;
+
+        // The timeout should fire because the processor is hung.
+        check!(result.is_err(), "expected timeout, but worker completed");
     }
 }

@@ -287,9 +287,10 @@ where
     }
 
     fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
-        let Some(handle) = TelemetryHandle::try_current() else {
+        let handle = TelemetryHandle::current();
+        if !handle.is_enabled() {
             return;
-        };
+        }
 
         let worker_id = current_worker_id();
         let span_id = id.into_u64();
@@ -333,9 +334,10 @@ where
     }
 
     fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
-        let Some(handle) = TelemetryHandle::try_current() else {
+        let handle = TelemetryHandle::current();
+        if !handle.is_enabled() {
             return;
-        };
+        }
 
         let worker_id = current_worker_id();
         let span_id = id.into_u64();

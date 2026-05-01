@@ -37,6 +37,9 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// One-way flag to tell the signal handler to self-disarm each thread's timer.
 static DISARM_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+// libc doesn't define it for musl: https://github.com/rust-lang/libc/pull/3661
+const SIGEV_THREAD_ID: libc::c_int = 4;
+
 thread_local! {
     static THREAD_TIMER: Cell<Option<libc::timer_t>> = const { Cell::new(None) };
 }
@@ -133,7 +136,7 @@ pub fn register_thread() -> Result<(), io::Error> {
 
     // SAFETY: Zero-filled `libc::sigevent` is valid before we assign the fields we use.
     let mut sev: libc::sigevent = unsafe { mem::zeroed() };
-    sev.sigev_notify = libc::SIGEV_THREAD_ID;
+    sev.sigev_notify = SIGEV_THREAD_ID;
     sev.sigev_signo = libc::SIGPROF;
     sev.sigev_notify_thread_id = tid;
     sev.sigev_value = libc::sigval {
