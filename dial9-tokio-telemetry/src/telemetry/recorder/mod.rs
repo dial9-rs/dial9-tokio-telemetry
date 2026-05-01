@@ -1936,6 +1936,7 @@ mod tests {
                         source: CpuSampleSource::CpuProfile,
                         thread_name: None,
                         callchain: callchain.clone(),
+                        cpu: None,
                     };
                     *timestamp += 1;
                     ew.write_raw_event(RawEvent::CpuSample(Box::new(data)))

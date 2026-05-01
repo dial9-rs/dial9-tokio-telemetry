@@ -48,9 +48,13 @@ fn main() {
     // --- Print a few raw samples ---
     eprintln!("=== First 3 samples ===");
     for (i, sample) in samples.iter().take(3).enumerate() {
+        let cpu = sample
+            .cpu
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "?".into());
         eprintln!(
-            "Sample {i}: ip={:#x}, tid={}, cpu={}, frames:",
-            sample.ip, sample.tid, sample.cpu
+            "Sample {i}: ip={:#x}, tid={}, cpu={cpu}, frames:",
+            sample.ip, sample.tid
         );
         for (j, &addr) in sample.callchain.iter().enumerate() {
             let sym = resolve_symbol(addr);
