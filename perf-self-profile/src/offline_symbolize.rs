@@ -6,10 +6,10 @@
 //! (with a `StringPool` frame for symbol names).
 
 use dial9_trace_format::{
-    decoder::Decoder,
+    decoder::{Decoder, StackPool},
     types::{FieldValueRef, InternedString},
 };
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::io::{self, Write};
 
 use crate::MapsEntry;
@@ -48,14 +48,14 @@ pub fn symbolize_trace_with_maps(
     maps: &[MapsEntry],
     output: &mut impl Write,
 ) -> io::Result<()> {
-    let mut addresses: BTreeSet<u64> = BTreeSet::new();
+    let mut addresses: HashSet<u64> = HashSet::new();
 
     let mut decoder = Decoder::new(input)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
 
     decoder
         .for_each_event(|event| {
-            collect_stack_frame_addresses(event.fields, &mut addresses);
+            collect_stack_frame_addresses(event.fields, event.stack_pool, &mut addresses);
         })
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
@@ -66,14 +66,30 @@ pub fn symbolize_trace_with_maps(
     crate::sys::write_symbol_data(decoder, &addresses, maps, output)
 }
 
-fn collect_stack_frame_addresses(values: &[FieldValueRef<'_>], addresses: &mut BTreeSet<u64>) {
+fn collect_stack_frame_addresses(
+    values: &[FieldValueRef<'_>],
+    stack_pool: &StackPool,
+    addresses: &mut HashSet<u64>,
+) {
     for field in values {
-        if let FieldValueRef::StackFrames(frames) = field {
-            for addr in frames.iter() {
-                if addr != 0 {
-                    addresses.insert(addr);
+        match field {
+            FieldValueRef::StackFrames(frames) => {
+                for addr in frames.iter() {
+                    if addr != 0 {
+                        addresses.insert(addr);
+                    }
                 }
             }
+            FieldValueRef::PooledStackFrames(id) => {
+                if let Some(frames) = stack_pool.get(*id) {
+                    for &addr in frames {
+                        if addr != 0 {
+                            addresses.insert(addr);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -180,7 +196,10 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
-            &[FieldValue::Varint(0), FieldValue::StackFrames(vec![0x1000])],
+            &[
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![0x1000].into()),
+            ],
         )
         .unwrap();
         let buf = enc.finish();

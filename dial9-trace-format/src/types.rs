@@ -22,7 +22,7 @@ pub enum FieldType {
     Bool = 3,
     String = 4,
     Bytes = 5,
-    // Tag 6 was legacy Timestamp (removed).
+    PooledStackFrames = 6,
     PooledString = 7,
     StackFrames = 8,
     Varint = 9,
@@ -36,7 +36,7 @@ pub enum FieldType {
     OptionalBool = 0x83,
     OptionalString = 0x84,
     OptionalBytes = 0x85,
-    // Tag 6 was legacy Timestamp (removed).
+    OptionalPooledStackFrames = 0x86,
     OptionalPooledString = 0x87,
     OptionalStackFrames = 0x88,
     OptionalVarint = 0x89,
@@ -49,6 +49,25 @@ pub enum FieldType {
 /// Newtype for stack frame addresses (leaf-first).
 #[derive(Debug, Clone, PartialEq)]
 pub struct StackFrames(pub Vec<u64>);
+
+impl From<Vec<u64>> for StackFrames {
+    fn from(v: Vec<u64>) -> Self {
+        StackFrames(v)
+    }
+}
+
+impl FromIterator<u64> for StackFrames {
+    fn from_iter<I: IntoIterator<Item = u64>>(iter: I) -> Self {
+        StackFrames(iter.into_iter().collect())
+    }
+}
+
+impl std::ops::Deref for StackFrames {
+    type Target = [u64];
+    fn deref(&self) -> &[u64] {
+        &self.0
+    }
+}
 
 /// An interned string reference (pool ID). Created by [`Encoder::intern_string`](crate::encoder::Encoder::intern_string).
 /// On the wire this is a `PooledString` (u32 LE).
@@ -80,6 +99,38 @@ impl std::fmt::Debug for InternedString {
         write!(f, "pool#{}", self.0)
     }
 }
+
+/// An interned stack-frame reference (pool ID).
+/// On the wire this is a `PooledStackFrames` (u32 LE).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InternedStackFrames(pub(crate) u32);
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for InternedStackFrames {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.0)
+    }
+}
+
+impl InternedStackFrames {
+    /// Construct from a raw pool ID. Intended for building data from external
+    /// sources (e.g. wire decoding outside the `Encoder`).
+    pub const fn from_raw(id: u32) -> Self {
+        Self(id)
+    }
+
+    /// Returns the underlying pool ID.
+    pub const fn raw_id(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for InternedStackFrames {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stack#{}", self.0)
+    }
+}
+
 /// Owned field value. Decoded from the wire format.
 ///
 /// Note: `U8`, `U16`, and `U32` wire types are decoded into `Varint(v as u64)`.
@@ -94,7 +145,8 @@ pub enum FieldValue {
     String(String),
     Bytes(Vec<u8>),
     PooledString(InternedString),
-    StackFrames(Vec<u64>),
+    StackFrames(StackFrames),
+    PooledStackFrames(InternedStackFrames),
     Varint(u64),
     StringMap(Vec<(Vec<u8>, Vec<u8>)>),
     /// Absent optional field.
@@ -111,7 +163,8 @@ impl serde::Serialize for FieldValue {
             FieldValue::String(v) => serializer.serialize_str(v),
             FieldValue::Bytes(v) => serializer.serialize_bytes(v),
             FieldValue::PooledString(id) => id.serialize(serializer),
-            FieldValue::StackFrames(v) => v.serialize(serializer),
+            FieldValue::StackFrames(v) => v.0.serialize(serializer),
+            FieldValue::PooledStackFrames(id) => id.serialize(serializer),
             FieldValue::Varint(v) => serializer.serialize_u64(*v),
             FieldValue::StringMap(pairs) => {
                 use serde::ser::SerializeMap;
@@ -146,6 +199,7 @@ impl FieldType {
             3 => Some(FieldType::Bool),
             4 => Some(FieldType::String),
             5 => Some(FieldType::Bytes),
+            6 => Some(FieldType::PooledStackFrames),
             7 => Some(FieldType::PooledString),
             8 => Some(FieldType::StackFrames),
             9 => Some(FieldType::Varint),
@@ -158,6 +212,7 @@ impl FieldType {
             0x83 => Some(FieldType::OptionalBool),
             0x84 => Some(FieldType::OptionalString),
             0x85 => Some(FieldType::OptionalBytes),
+            0x86 => Some(FieldType::OptionalPooledStackFrames),
             0x87 => Some(FieldType::OptionalPooledString),
             0x88 => Some(FieldType::OptionalStackFrames),
             0x89 => Some(FieldType::OptionalVarint),
@@ -197,10 +252,11 @@ impl FieldValue {
                 w.write_all(v)
             }
             FieldValue::PooledString(id) => w.write_all(&id.0.to_le_bytes()),
+            FieldValue::PooledStackFrames(id) => w.write_all(&id.0.to_le_bytes()),
             FieldValue::Varint(v) => crate::leb128::encode_unsigned(*v, w),
             FieldValue::StackFrames(addrs) => {
                 w.write_all(&(addrs.len() as u32).to_le_bytes())?;
-                for &addr in addrs {
+                for &addr in addrs.iter() {
                     w.write_all(&addr.to_le_bytes())?;
                 }
                 Ok(())
@@ -255,6 +311,13 @@ impl FieldValue {
                 let id = u32::from_le_bytes(data.get(..4)?.try_into().ok()?);
                 Some((FieldValue::PooledString(InternedString(id)), &data[4..]))
             }
+            FieldType::PooledStackFrames => {
+                let id = u32::from_le_bytes(data.get(..4)?.try_into().ok()?);
+                Some((
+                    FieldValue::PooledStackFrames(InternedStackFrames(id)),
+                    &data[4..],
+                ))
+            }
             FieldType::Varint => {
                 let (v, consumed) = crate::leb128::decode_unsigned(data)?;
                 Some((FieldValue::Varint(v), &data[consumed..]))
@@ -277,7 +340,7 @@ impl FieldValue {
                     addrs.push(addr);
                     pos += 8;
                 }
-                Some((FieldValue::StackFrames(addrs), &data[pos..]))
+                Some((FieldValue::StackFrames(addrs.into()), &data[pos..]))
             }
             FieldType::StringMap => {
                 let count = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
@@ -316,6 +379,8 @@ pub enum FieldValueRef<'a> {
     PooledString(InternedString),
     /// Raw stack frame bytes. Use [`StackFramesRef::iter`] to iterate addresses.
     StackFrames(StackFramesRef<'a>),
+    /// Reference to a stack-frame pool entry. Resolve via the decoder's stack pool.
+    PooledStackFrames(InternedStackFrames),
     Varint(u64),
     StringMap(StringMapRef<'a>),
     /// Absent optional field.
@@ -410,6 +475,10 @@ impl<'a> FieldValueRef<'a> {
                 let id = u32::from_le_bytes(d.get(..4)?.try_into().ok()?);
                 Some((FieldValueRef::PooledString(InternedString(id)), 4))
             }
+            FieldType::PooledStackFrames => {
+                let id = u32::from_le_bytes(d.get(..4)?.try_into().ok()?);
+                Some((FieldValueRef::PooledStackFrames(InternedStackFrames(id)), 4))
+            }
             FieldType::Varint => {
                 let (v, consumed) = crate::leb128::decode_unsigned(d)?;
                 Some((FieldValueRef::Varint(v), consumed))
@@ -469,6 +538,7 @@ impl<'a> FieldValueRef<'a> {
             FieldValueRef::Bytes(v) => FieldValue::Bytes(v.to_vec()),
             FieldValueRef::PooledString(id) => FieldValue::PooledString(*id),
             FieldValueRef::StackFrames(sf) => FieldValue::StackFrames(sf.iter().collect()),
+            FieldValueRef::PooledStackFrames(id) => FieldValue::PooledStackFrames(*id),
             FieldValueRef::Varint(v) => FieldValue::Varint(*v),
             FieldValueRef::StringMap(sm) => FieldValue::StringMap(
                 sm.iter()
@@ -706,11 +776,15 @@ impl<'a, W: Write> EventEncoder<'a, W> {
         self.state.writer.write_all(&v.0.to_le_bytes())
     }
 
+    pub fn write_interned_stack_frames(&mut self, v: InternedStackFrames) -> io::Result<()> {
+        self.state.writer.write_all(&v.0.to_le_bytes())
+    }
+
     pub fn write_stack_frames(&mut self, v: &StackFrames) -> io::Result<()> {
         self.state
             .writer
-            .write_all(&(v.0.len() as u32).to_le_bytes())?;
-        for &addr in &v.0 {
+            .write_all(&(v.len() as u32).to_le_bytes())?;
+        for &addr in v.iter() {
             self.state.writer.write_all(&addr.to_le_bytes())?;
         }
         Ok(())
@@ -956,6 +1030,22 @@ impl TraceField for InternedString {
     }
 }
 
+impl TraceField for InternedStackFrames {
+    type Ref<'a> = InternedStackFrames;
+    fn field_type() -> FieldType {
+        FieldType::PooledStackFrames
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_interned_stack_frames(*self)
+    }
+    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
+        match val {
+            FieldValueRef::PooledStackFrames(id) => Some(*id),
+            _ => None,
+        }
+    }
+}
+
 impl TraceField for Vec<(String, String)> {
     type Ref<'a> = StringMapRef<'a>;
     fn field_type() -> FieldType {
@@ -1021,6 +1111,7 @@ macro_rules! impl_optional_trace_field {
 }
 
 impl_optional_trace_field!(InternedString);
+impl_optional_trace_field!(InternedStackFrames);
 impl_optional_trace_field!(u8);
 impl_optional_trace_field!(u16);
 impl_optional_trace_field!(u32);
@@ -1039,7 +1130,7 @@ mod tests {
 
     #[test]
     fn field_type_round_trip() {
-        for tag in [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13u8] {
+        for tag in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13u8] {
             let ft = FieldType::from_tag(tag).unwrap();
             assert_eq!(ft as u8, tag);
         }
@@ -1116,11 +1207,21 @@ mod tests {
             0x5555_5555_0800,
             0x5555_5555_0100,
         ];
-        let val = FieldValue::StackFrames(addrs.clone());
+        let val = FieldValue::StackFrames(addrs.clone().into());
         let mut buf = Vec::new();
         val.encode(&mut buf).unwrap();
         assert_eq!(buf.len(), 4 + 4 * 8); // count(4) + 4 raw u64s
         let (decoded, _) = FieldValue::decode(FieldType::StackFrames, &buf).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn encode_decode_pooled_stack_frames() {
+        let val = FieldValue::PooledStackFrames(InternedStackFrames(42));
+        let mut buf = Vec::new();
+        val.encode(&mut buf).unwrap();
+        assert_eq!(buf.len(), 4);
+        let (decoded, _) = FieldValue::decode(FieldType::PooledStackFrames, &buf).unwrap();
         assert_eq!(decoded, val);
     }
 

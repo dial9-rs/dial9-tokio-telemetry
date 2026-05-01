@@ -4,3 +4,4 @@
 !dial9-viewer/ui/demo-trace.bin
 target/
 .claude/
+.zed/

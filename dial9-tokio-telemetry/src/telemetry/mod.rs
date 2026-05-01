@@ -23,8 +23,8 @@ pub use format::{
     WorkerUnparkEvent,
 };
 pub use recorder::{
-    HasTracePath, NoTracePath, RuntimeTelemetryHandle, TelemetryCore, TelemetryGuard,
-    TelemetryHandle, TelemetryRuntimeError, TraceRuntimeCoreBuilder, TracedRuntime,
+    HasTracePath, NoTracePath, RuntimeTelemetryHandle, TelemetryCore, TelemetryCoreBuilder,
+    TelemetryGuard, TelemetryHandle, TelemetryRuntimeError, TraceRuntimeCoreBuilder, TracedRuntime,
     TracedRuntimeBuilder, current_worker_id,
 };
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};

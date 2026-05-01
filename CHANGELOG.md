@@ -30,6 +30,63 @@ All three in action:
 
 - `TelemetryHandle::current()` no longer panics off-runtime. It returns an inert handle whose `spawn` falls through to `tokio::spawn`. Use `TelemetryHandle::is_enabled()` to check whether telemetry is live.
 
+## [0.3.6](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.5...dial9-tokio-telemetry-v0.3.6) - 2026-04-30
+
+### Added
+
+- Store S3 metadata into segement metadata ([#311](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/311))
+- detect uninstrumented task spawns and surface in viewer ([#293](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/293))
+- Add simple example for local execution ([#306](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/306)) — thanks @mox692!
+
+### Fixed
+
+- Don't register sched events on blocking pool threads ([#316](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/316))
+- *(viewer)* correct schedWait unit from µs to ns ([#308](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/308))
+
+### Other
+
+- Fix thread CPU time measurement details in README ([#312](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/312))
+- Fix ctimer test on AL2 ([#317](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/317))
+- Allow opening .gz trace files in the file picker ([#315](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/315))
+- [dial9-viewer] Toolkit: parallel multi-file trace analysis with caching ([#298](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/298))
+- Retain parent stack trace when zooming into flamegraph frames ([#305](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/305))
+- Retain selection overlay while sidebar is open ([#304](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/304))
+- (viewer) Move flamegraph into sidebar instead of full-screen overlay ([#291](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/291))
+
+## [0.3.5](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.4...dial9-tokio-telemetry-v0.3.5) - 2026-04-24
+
+### Added
+
+- *(viewer)* resizable sidebar and slightly improved ux ([#290](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/290))
+
+### Fixed
+
+- *(ci)* use single cargo package invocation for cross-crate verification
+
+### Other
+
+- lower expected sample threshold in ctimer cpu load test ([#292](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/292))
+- Restore collect_files safety limits lost by merge-queue bug ([#276](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/276)) ([#295](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/295))
+- restore ([#286](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/286))
+- Fix stack overflow on large profiles ([#285](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/285))
+
+## [0.3.4](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.3...dial9-tokio-telemetry-v0.3.4) - 2026-04-23
+
+### Added
+
+- add CPU profiling fallback for perf-restricted environments. This should enable CPU profiling to work in Fargate. ([#250](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/250))
+- *(viewer)* replace stack trace popup with right sidebar panel ([#274](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/274))
+- *(viewer)* Pop-out flamegraph with interactive features ([#269](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/269))
+
+### Fixed
+
+- fix sort order of polls with cpu samples ([#272](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/272))
+
+### Other
+
+- Make worker lanes scrollable in viewer ([#275](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/275))
+- Fix docs.rs broken links by using absolute GitHub URLs ([#277](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/277))
+
 ## [0.3.3](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.2...dial9-tokio-telemetry-v0.3.3) - 2026-04-20
 
 ### Other

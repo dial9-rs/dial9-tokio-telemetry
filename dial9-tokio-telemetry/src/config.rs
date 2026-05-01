@@ -342,8 +342,10 @@ impl<S: dial9_config_builder::IsComplete> Dial9ConfigBuilder<S> {
     /// preserved. The resulting config builds a plain tokio runtime
     /// when handed to [`crate::TracedRuntime::try_new`].
     ///
-    /// Missing required fields trigger a [`debug_assert!`] so
-    /// misconfigurations surface during development.
+    /// # Panics (debug builds only)
+    ///
+    /// Panics on missing required fields to surface misconfigurations
+    /// during development.
     ///
     /// Lenient counterpart to [`build`](Self::build). Use
     /// [`build`](Self::build) instead when you want validation and

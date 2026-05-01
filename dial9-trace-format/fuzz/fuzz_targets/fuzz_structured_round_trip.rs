@@ -9,7 +9,7 @@ use libfuzzer_sys::fuzz_target;
 use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::{Encoder, Schema};
 use dial9_trace_format::schema::FieldDef;
-use dial9_trace_format::types::{FieldType, FieldValue, InternedString};
+use dial9_trace_format::types::{FieldType, FieldValue, InternedStackFrames, InternedString};
 
 /// Varint boundary values that stress LEB128 encoding edges.
 const VARINT_INTERESTING: [u64; 8] = [
@@ -32,6 +32,7 @@ enum FuzzFieldType {
     Bytes,
     PooledString,
     StackFrames,
+    PooledStackFrames,
     Varint,
     StringMap,
 }
@@ -46,13 +47,18 @@ impl FuzzFieldType {
             Self::Bytes => FieldType::Bytes,
             Self::PooledString => FieldType::PooledString,
             Self::StackFrames => FieldType::StackFrames,
+            Self::PooledStackFrames => FieldType::PooledStackFrames,
             Self::Varint => FieldType::Varint,
             Self::StringMap => FieldType::StringMap,
         }
     }
 }
 
-fn gen_value(ft: FuzzFieldType, u: &mut Unstructured) -> arbitrary::Result<FieldValue> {
+fn gen_value(
+    ft: FuzzFieldType,
+    u: &mut Unstructured,
+    interned_stack_ids: &[u32],
+) -> arbitrary::Result<FieldValue> {
     Ok(match ft {
         FuzzFieldType::I64 => FieldValue::I64(u.arbitrary()?),
         FuzzFieldType::F64 => FieldValue::F64(u.arbitrary()?),
@@ -72,7 +78,19 @@ fn gen_value(ft: FuzzFieldType, u: &mut Unstructured) -> arbitrary::Result<Field
             for _ in 0..count {
                 addrs.push(u.arbitrary()?);
             }
-            FieldValue::StackFrames(addrs)
+            FieldValue::StackFrames(addrs.into())
+        }
+        FuzzFieldType::PooledStackFrames => {
+            // Prefer real interned IDs (so the decoder's pool resolution path is
+            // exercised). Fall back to a random ID when none are available yet
+            // or to occasionally test unresolved-ID decoding.
+            let id = if !interned_stack_ids.is_empty() && u.ratio(3, 4)? {
+                let idx = u.int_in_range(0..=interned_stack_ids.len() - 1)?;
+                interned_stack_ids[idx]
+            } else {
+                u.int_in_range(0..=50)?
+            };
+            FieldValue::PooledStackFrames(InternedStackFrames::from_raw(id))
         }
         FuzzFieldType::Varint => {
             if u.ratio(1, 4)? {
@@ -112,11 +130,18 @@ struct FuzzSchema {
 enum FuzzAction {
     Event { schema_idx: u8 },
     PoolString(String8),
+    PoolStackFrames(StackFrames8),
 }
 
 #[derive(Arbitrary, Debug)]
 struct String8 {
     data: [u8; 8],
+    len: u8,
+}
+
+#[derive(Arbitrary, Debug)]
+struct StackFrames8 {
+    addrs: [u64; 8],
     len: u8,
 }
 
@@ -155,10 +180,18 @@ fuzz_target!(|data: &[u8]| {
             .fields
             .iter()
             .enumerate()
-            .map(|(j, ft)| FieldDef {
-                name: format!("f{j}"),
-                field_type: ft.to_field_type(),
-                optional: fuzz_schema.optional.get(j).copied().unwrap_or(false),
+            .map(|(j, ft)| {
+                let base = ft.to_field_type();
+                let is_optional = fuzz_schema.optional.get(j).copied().unwrap_or(false);
+                let field_type = if is_optional {
+                    FieldType::from_tag(base as u8 | FieldType::OPTIONAL_BIT).unwrap_or(base)
+                } else {
+                    base
+                };
+                FieldDef {
+                    name: format!("f{j}"),
+                    field_type,
+                }
             })
             .collect();
         schemas.push(enc.register_schema(names[i], fields).unwrap());
@@ -166,6 +199,8 @@ fuzz_target!(|data: &[u8]| {
 
     // Execute actions in fuzz-determined interleaved order
     let mut expected_events: Vec<(usize, Option<u64>, Vec<FieldValue>)> = Vec::new();
+    let mut interned_stack_ids: Vec<u32> = Vec::new();
+    let mut expected_stack_pool: Vec<(u32, Vec<u64>)> = Vec::new();
     for action in &actions {
         match action {
             FuzzAction::Event { schema_idx } => {
@@ -180,7 +215,7 @@ fuzz_target!(|data: &[u8]| {
                         if is_optional && u.ratio(1, 3).unwrap_or(false) {
                             Ok(FieldValue::None)
                         } else {
-                            gen_value(*ft, &mut u)
+                            gen_value(*ft, &mut u, &interned_stack_ids)
                         }
                     })
                     .collect::<arbitrary::Result<Vec<_>>>()
@@ -204,6 +239,15 @@ fuzz_target!(|data: &[u8]| {
                 let len = (ps.len % 8) as usize;
                 let s = String::from_utf8_lossy(&ps.data[..len]);
                 enc.intern_string(&s).unwrap();
+            }
+            FuzzAction::PoolStackFrames(sf) => {
+                let len = (sf.len % 8) as usize;
+                let frames = &sf.addrs[..len];
+                let id = enc.intern_stack_frames(frames).unwrap().raw_id();
+                if !interned_stack_ids.contains(&id) {
+                    interned_stack_ids.push(id);
+                    expected_stack_pool.push((id, frames.to_vec()));
+                }
             }
         }
     }
@@ -229,6 +273,18 @@ fuzz_target!(|data: &[u8]| {
         expected_events.len(),
         "event count mismatch"
     );
+
+    for (id, expected_frames) in &expected_stack_pool {
+        let resolved = dec
+            .stack_pool()
+            .get(InternedStackFrames::from_raw(*id))
+            .unwrap_or_else(|| panic!("stack pool missing entry for id {id}"));
+        assert_eq!(
+            resolved,
+            expected_frames.as_slice(),
+            "stack pool frames mismatch for id {id}"
+        );
+    }
 
     for (i, ((schema_idx, expected_ts, expected_vals), (_type_id, decoded_ts, decoded_vals))) in
         expected_events.iter().zip(decoded_events.iter()).enumerate()

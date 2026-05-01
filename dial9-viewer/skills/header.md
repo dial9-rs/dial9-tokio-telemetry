@@ -24,60 +24,40 @@ Get the analysis toolkit:
 
 ```bash
 dial9-viewer agents toolkit /tmp/d9-toolkit
-node /tmp/d9-toolkit/analyze.js <trace.bin>
+node /tmp/d9-toolkit/analyze.js <trace.bin or directory>  # options: --sample N, --force
 ```
 
-This copies `decode.js`, `trace_parser.js`, `trace_analysis.js`, and `analyze.js` into the target directory. Run `analyze.js` for a full diagnostic report, then edit any of the files to drill deeper.
-
-### Parsing traces manually
-
-```javascript
-const fs = require('fs');
-const { parseTrace, EVENT_TYPES } = require('./trace_parser.js');
-const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
-        computeSchedulingDelays, filterPointsOfInterest, buildFgData,
-        buildSpanData } = require('./trace_analysis.js');
-
-const buf = fs.readFileSync('trace.bin');
-const trace = await parseTrace(buf);
-
-// Get worker IDs
-const workerIds = [...new Set(
-  trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent)
-    .map(e => e.workerId)
-)].sort((a, b) => a - b);
-
-const minTs = trace.events.reduce((m, e) => Math.min(m, e.timestamp), Infinity);
-const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
-
-// Runtime events (polls, parks, wakes, scheduling)
-const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
-attachCpuSamples(trace.cpuSamples, spans.workerSpans);
-const taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
-const schedDelays = computeSchedulingDelays(spans.workerSpans, workerIds, spans.wakesByTask);
-
-// Span events from #[instrument] (what happened INSIDE each poll)
-// These are separate from runtime events and require buildSpanData()
-const spanData = buildSpanData(trace.customEvents);
-// spanData.spansByWorker[workerId] = [{start, end, spanId, spanName, fields, parentSpanId, depth}, ...]
-// spanData.spanMeta = Map<spanId, {spanName, fields, parentSpanId}>
-// spanData.unmatchedSpans = spans with enter but no exit (trace ended mid-span)
-```
+Run `analyze.js` for a full diagnostic report. See `agents skill analysis` for the programmatic API, options (`sample`, `force`, progress callbacks), and the full return schema.
 
 ## Fetching traces from S3
 
-If `dial9-viewer` is running (e.g. on port 3000), fetch traces via its API:
+Start the viewer (`dial9-viewer --bucket BUCKET`, default port 3000), then fetch traces:
 
 ```javascript
-// Search for traces
+// List traces matching a prefix
 const resp = await fetch('http://localhost:3000/api/search?bucket=BUCKET&q=2026-04-09/19');
 const objects = await resp.json(); // [{key, size, last_modified}, ...]
 
-// Fetch and parse a trace (server gunzips and concatenates segments)
-const keys = objects.map(o => `keys=${encodeURIComponent(o.key)}`).join('&');
-const traceResp = await fetch(`http://localhost:3000/api/trace?bucket=BUCKET&${keys}`);
+// Single file: fetch and parse one trace
+const traceResp = await fetch(`http://localhost:3000/api/trace?bucket=BUCKET&keys=${encodeURIComponent(objects[0].key)}`);
 const buf = Buffer.from(await traceResp.arrayBuffer());
 const trace = await parseTrace(buf);
+
+// Multiple files: download to a local directory, then analyze
+const fs = require('fs');
+const dir = '/tmp/traces';
+fs.mkdirSync(dir, { recursive: true });
+// Download in parallel (20 at a time)
+const limit = 20;
+for (let i = 0; i < objects.length; i += limit) {
+  await Promise.all(objects.slice(i, i + limit).map(async (obj) => {
+    const r = await fetch(`http://localhost:3000/api/trace?bucket=BUCKET&keys=${encodeURIComponent(obj.key)}`);
+    fs.writeFileSync(`${dir}/${obj.key.split('/').pop()}`, Buffer.from(await r.arrayBuffer()));
+  }));
+}
+for await (const trace of parseTrace(dir)) {
+  // analyze each trace
+}
 ```
 
 ## Available skill segments
