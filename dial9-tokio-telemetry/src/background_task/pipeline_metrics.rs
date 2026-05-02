@@ -245,6 +245,8 @@ mod tests {
             uncompressed_size: 65536,
             compressed_size: Some(12345),
             invalid_file_header: false,
+            panicked: false,
+            panic_message: None,
             pipeline,
         };
 

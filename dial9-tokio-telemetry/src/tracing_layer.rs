@@ -259,7 +259,7 @@ where
     S: tracing::Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
-        if !TelemetryHandle::enabled() {
+        if !TelemetryHandle::current().is_enabled() {
             return;
         }
         let mut field_values = Vec::new();
@@ -279,7 +279,7 @@ where
     }
 
     fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
-        if !TelemetryHandle::enabled() {
+        if !TelemetryHandle::current().is_enabled() {
             return;
         }
         if let Some(span) = ctx.span(id) {
@@ -293,9 +293,10 @@ where
     }
 
     fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
-        let Some(handle) = TelemetryHandle::try_current() else {
+        let handle = TelemetryHandle::current();
+        if !handle.is_enabled() {
             return;
-        };
+        }
         handle.with_encoder(|enc| {
             let worker_id = current_worker_id();
             let span_id = id.into_u64();
@@ -338,9 +339,10 @@ where
     }
 
     fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
-        let Some(handle) = TelemetryHandle::try_current() else {
+        let handle = TelemetryHandle::current();
+        if !handle.is_enabled() {
             return;
-        };
+        }
         handle.with_encoder(|enc| {
             let worker_id = current_worker_id();
             let span_id = id.into_u64();

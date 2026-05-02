@@ -127,8 +127,8 @@ fn extract_title(path: &Path) -> Option<String> {
 /// If a heading is renamed in the README, the build fails loudly.
 const SETUP_SECTIONS: &[&str] = &[
     "Prerequisites",
-    "Quick start",
-    "The root future is not instrumented",
+    "Setup",
+    "Root future limitation",
     "Tracing span events (opt-in)",
     "Wake event tracking",
 ];
@@ -146,7 +146,7 @@ fn generate_setup_from_readme(manifest_dir: &str, out_dir: &str) {
 
     for &heading in SETUP_SECTIONS {
         let section = extract_section(&readme, heading)
-            .unwrap_or_else(|| panic!("README section '## {heading}' not found; was it renamed?"));
+            .unwrap_or_else(|| panic!("README section '{heading}' not found; was it renamed?"));
         output.push_str(&section);
         output.push('\n');
     }
@@ -155,15 +155,18 @@ fn generate_setup_from_readme(manifest_dir: &str, out_dir: &str) {
     fs::write(&dest, &output).unwrap();
 }
 
-/// Extract a `## Heading` section from markdown, including everything up to the
-/// next `## ` heading (or end of file).
+/// Extract a markdown section by heading text, at any heading level.
+/// Captures everything up to the next heading of the same or higher level.
 fn extract_section(markdown: &str, heading: &str) -> Option<String> {
-    let target = format!("## {heading}");
     let lines: Vec<&str> = markdown.lines().collect();
-    let start = lines.iter().position(|l| l.trim() == target)?;
+    let start = lines.iter().position(|l| {
+        let trimmed = l.trim();
+        trimmed.starts_with('#') && trimmed.trim_start_matches('#').trim_start() == heading
+    })?;
+    let level = lines[start].chars().take_while(|&c| c == '#').count();
     let end = lines[start + 1..]
         .iter()
-        .position(|l| l.starts_with("## "))
+        .position(|l| l.starts_with('#') && l.chars().take_while(|&c| c == '#').count() <= level)
         .map(|i| start + 1 + i)
         .unwrap_or(lines.len());
     Some(lines[start..end].join("\n"))

@@ -10,9 +10,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 /// Handle used by `Traced<F>` to emit events into the telemetry system.
-/// Obtained via `TelemetryHandle::traced_handle()`.
 #[derive(Clone)]
-pub struct TracedHandle {
+pub(crate) struct TracedHandle {
     pub(crate) shared: Arc<SharedState>,
 }
 
@@ -175,7 +174,9 @@ mod tests {
         // Wake events land in the thread-local buffer (capacity 1_024), so a
         // single event will not auto-flush.  Manually drain the buffer into the
         // collector so that the guard flush below picks it up.
-        let th = handle.traced_handle();
+        let th = handle
+            .traced_handle()
+            .expect("enabled handle yields TracedHandle");
         buffer::drain_to_collector(&th.shared.collector);
 
         // Dropping the guard stops the background flush thread, joins it, then
