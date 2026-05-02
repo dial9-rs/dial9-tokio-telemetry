@@ -8,17 +8,24 @@
 //!
 //! Since dial9 is recording an event on each poll (~50ns), if your polls are very short then this fix cost of overhead will impact your application performance.
 //!
-//! ### Enabling and Disabling
-//! - If you use `Dial9ConfigBuilder::disabled()` dial9 is fully unused in your application and you have a normal, unmodified Tokio runtime.
-//! - You can also install dial9 but leave it disabled. This has a slightly higher amount of overhead. All methods that would write dial9 data do a relaxed read on an atomic. This _will_
-//!   install the runtime hooks but they will all be no-ops. You could then set up a background task that reads dynamic configuration to enable dial9 later. This is a much larger surface area of code
-//!   that is enabled, so it is higher risk.
+//! ### Enabling and disabling
 //!
-//! > Note! dial9 must be created _before_ your async runtime. dial9 relies on installing itself into the runtime telemetry hooks to produce Tokio events.
+//! - Setting [`.enabled(false)`](dial9_tokio_telemetry::Dial9ConfigBuilder::enabled) on the config builder produces a
+//!   pass-through config: the `#[main]` macro builds a plain, unmodified tokio runtime with zero dial9 overhead.
+//!   [`TelemetryHandle::current()`](dial9_tokio_telemetry::telemetry::TelemetryHandle::current) returns an inert
+//!   handle, and `handle.spawn` falls through to `tokio::spawn`, so application code does not need branches.
+//! - Alternatively, you can install dial9 but leave recording disabled at runtime via the handle's
+//!   [`disable()`](dial9_tokio_telemetry::telemetry::TelemetryHandle::disable). The runtime hooks are installed
+//!   but all event writes are no-ops behind a relaxed atomic read. This has slightly more overhead than
+//!   [`.enabled(false)`](dial9_tokio_telemetry::Dial9ConfigBuilder::enabled) but lets a background task flip
+//!   recording on from dynamic configuration later. It is a larger surface area of code, so it is higher risk.
+//!
+//! > Note! dial9 must be created _before_ your async runtime. dial9 relies on installing itself into the runtime
+//! > telemetry hooks to produce Tokio events.
 //!
 //! ### The overhead of running dial9
 //!
-//! 1. Dial9 allocates a 1MB buffer for each thread that record events. If you are recording events from a huge number of threads, this can bloat memory.
+//! 1. Dial9 allocates a 1MB buffer for each thread that records events. If you are recording events from a huge number of threads, this can bloat memory.
 //! 2. When Tokio telemetry is enabled, 2 dial9 events will be emitted by every poll. If your poll times are extremely short and your application is CPU bound then this overhead can be significant.
 //!
 //! Dial9 has many possible components you can enable. The more components, the more data you will produce and the more overhead your application will have.
@@ -76,11 +83,13 @@
 //!
 //! # Invalid configuration
 //!
-//! Parsing is performed once, eagerly, before the runtime is built. On
-//! invalid input (unknown boolean, non-numeric duration, etc.) debug builds
-//! print clap's error and **exit** so the mistake is loud during development,
-//! while release builds log a warning and fall back to a plain Tokio runtime
-//! with telemetry disabled — a bad trace config must never take down prod.
+//! Invalid operator input for the knobs above (unknown boolean, non-numeric
+//! duration, etc.) is caught by `clap` and exits with a diagnostic, as it
+//! would for any misconfigured CLI tool. Invalid _dial9_ configuration
+//! (writer I/O failure, unwritable trace directory, etc.) is handled
+//! lazily by [`dial9_tokio_telemetry::Dial9ConfigBuilder::build_or_disabled`]: the builder logs
+//! the error and falls back to a plain tokio runtime with telemetry
+//! disabled. A bad trace config must never take down prod.
 //!
 //! # Running the example
 //!
@@ -106,7 +115,7 @@
 use std::time::Duration;
 
 use clap::Parser;
-use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
+use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
 const LINUX: bool = cfg!(target_os = "linux");
@@ -161,31 +170,21 @@ impl Dial9Opts {
     fn max_disk_usage_bytes(&self) -> u64 {
         self.max_disk_usage_mb.saturating_mul(1024 * 1024)
     }
-
-    /// Parse args/env or fall back to disabled configuration.
-    ///
-    /// Debug builds panic on invalid input so mistakes are obvious; release
-    /// builds log a warning and fall back to disabled. A bad trace config
-    /// should not prevent your service from running.
-    fn parse_or_fallback() -> Self {
-        match Self::try_parse() {
-            Ok(opts) => opts,
-            Err(e) if cfg!(debug_assertions) => e.exit(),
-            Err(e) => {
-                eprintln!("warning: invalid dial9 configuration: {e}; disabling telemetry");
-                Self::parse_from::<[&str; 0], &str>([])
-            }
-        }
-    }
 }
 
 /// Translate parsed options into a [`Dial9Config`] the `#[main]` macro can consume.
+///
+/// `build_or_disabled()` is the important piece here: any writer I/O or
+/// validation failure (unwritable `trace_dir`, zero-sized budget, etc.)
+/// logs an error and returns a pass-through config that builds a plain
+/// tokio runtime. In both the disabled and fallback cases,
+/// `TelemetryHandle::current()` returns an inert handle and
+/// `handle.spawn` delegates to `tokio::spawn`, so application code does
+/// not need to branch on whether dial9 is running.
 fn configure_dial9(opts: &Dial9Opts) -> Dial9Config {
-    if !opts.enabled {
-        return Dial9ConfigBuilder::disabled().build();
-    }
-
-    if let Err(e) = std::fs::create_dir_all(&opts.trace_dir) {
+    if opts.enabled
+        && let Err(e) = std::fs::create_dir_all(&opts.trace_dir)
+    {
         eprintln!("warning: could not create {}: {e}", opts.trace_dir);
     }
 
@@ -193,70 +192,74 @@ fn configure_dial9(opts: &Dial9Opts) -> Dial9Config {
     let max_disk = opts.max_disk_usage_bytes();
     let max_file_size = (max_disk / 4).max(16 * 1024 * 1024);
 
-    let builder = Dial9ConfigBuilder::new(base_path, max_file_size, max_disk)
-        .rotation_period(opts.rotation())
-        .with_runtime(|r| r.with_task_tracking(true));
+    if opts.enabled {
+        warn_if_feature_missing(opts);
+    }
 
-    apply_s3(apply_cpu_profiling(builder, opts), opts).build()
-}
-
-/// CPU profiling is only compiled in with `--features cpu-profiling`. Without
-/// it, the relevant env vars are ignored.
-#[cfg(feature = "cpu-profiling")]
-fn apply_cpu_profiling(builder: Dial9ConfigBuilder, opts: &Dial9Opts) -> Dial9ConfigBuilder {
-    use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
-    let (cpu, sched, hz) = (
+    #[cfg(feature = "cpu-profiling")]
+    let (cpu_enabled, sched_enabled, cpu_hz) = (
         opts.cpu_profile_enabled,
         opts.schedule_profile_enabled,
         opts.cpu_sample_hz,
     );
-    builder.with_runtime(move |mut r| {
-        if cpu {
-            r = r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(hz));
-        }
-        if sched {
-            r = r.with_sched_events(SchedEventConfig::default());
-        }
-        r
-    })
+    #[cfg(feature = "worker-s3")]
+    let (s3_bucket, s3_service) = (opts.s3_bucket.clone(), opts.service_name.clone());
+
+    Dial9Config::builder()
+        .enabled(opts.enabled)
+        .base_path(base_path)
+        .max_file_size(max_file_size)
+        .max_total_size(max_disk)
+        .rotation_period(opts.rotation())
+        .with_runtime(move |mut r| {
+            r = r.with_task_tracking(true);
+            #[cfg(feature = "cpu-profiling")]
+            {
+                use dial9_tokio_telemetry::telemetry::cpu_profile::{
+                    CpuProfilingConfig, SchedEventConfig,
+                };
+                if cpu_enabled {
+                    r = r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(cpu_hz));
+                }
+                if sched_enabled {
+                    r = r.with_sched_events(SchedEventConfig::default());
+                }
+            }
+            #[cfg(feature = "worker-s3")]
+            {
+                use dial9_tokio_telemetry::background_task::s3::S3Config;
+                if let (Some(bucket), Some(service_name)) = (&s3_bucket, &s3_service) {
+                    let s3 = S3Config::builder()
+                        .bucket(bucket.clone())
+                        .service_name(service_name.clone())
+                        .build();
+                    r = r.with_s3_uploader(s3);
+                }
+            }
+            r
+        })
+        .build_or_disabled()
 }
 
-#[cfg(not(feature = "cpu-profiling"))]
-fn apply_cpu_profiling(builder: Dial9ConfigBuilder, opts: &Dial9Opts) -> Dial9ConfigBuilder {
-    if opts.cpu_profile_enabled || opts.schedule_profile_enabled {
+/// Complain at startup when the operator asked for something a feature flag
+/// disables, so silent misconfiguration doesn't go unnoticed.
+fn warn_if_feature_missing(opts: &Dial9Opts) {
+    if cfg!(not(feature = "cpu-profiling"))
+        && (opts.cpu_profile_enabled || opts.schedule_profile_enabled)
+    {
         eprintln!(
             "warning: cpu/schedule profiling requested but --features cpu-profiling not enabled; ignoring"
         );
     }
-    builder
-}
-
-#[cfg(feature = "worker-s3")]
-fn apply_s3(builder: Dial9ConfigBuilder, opts: &Dial9Opts) -> Dial9ConfigBuilder {
-    use dial9_tokio_telemetry::background_task::s3::S3Config;
-    let (Some(bucket), Some(service_name)) = (opts.s3_bucket.clone(), opts.service_name.clone())
-    else {
-        return builder;
-    };
-    let s3 = S3Config::builder()
-        .bucket(bucket)
-        .service_name(service_name)
-        .build();
-    builder.with_runtime(|r| r.with_s3_uploader(s3))
-}
-
-#[cfg(not(feature = "worker-s3"))]
-fn apply_s3(builder: Dial9ConfigBuilder, opts: &Dial9Opts) -> Dial9ConfigBuilder {
-    if opts.s3_bucket.is_some() {
+    if cfg!(not(feature = "worker-s3")) && opts.s3_bucket.is_some() {
         eprintln!(
             "warning: DIAL9_S3_BUCKET set but --features worker-s3 not enabled; traces only on local disk"
         );
     }
-    builder
 }
 
 fn my_config() -> Dial9Config {
-    let opts = Dial9Opts::parse_or_fallback();
+    let opts = Dial9Opts::parse();
     eprintln!(
         "dial9 telemetry: {}",
         if opts.enabled {
@@ -279,14 +282,8 @@ async fn workload_task(id: usize) {
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
-    // `TelemetryHandle::try_current` returns `None` when telemetry is disabled,
-    // so the same code path works in both modes.
-    let tasks: Vec<_> = (0..100)
-        .map(|i| match TelemetryHandle::try_current() {
-            Some(handle) => handle.spawn(workload_task(i)),
-            None => tokio::spawn(workload_task(i)),
-        })
-        .collect();
+    let handle = TelemetryHandle::current();
+    let tasks: Vec<_> = (0..100).map(|i| handle.spawn(workload_task(i))).collect();
     for task in tasks {
         let _ = task.await;
     }
