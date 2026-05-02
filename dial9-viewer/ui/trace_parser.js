@@ -73,6 +73,7 @@
    *   tid: number,
    *   source: number,
    *   callchain: string[],
+   *   cpu: number|null,
    * }} CpuSample
    */
 
@@ -356,12 +357,17 @@
           const chain = (v.callchain || []).map(
             (addr) => "0x" + BigInt(addr).toString(16)
           );
+          // `cpu` is encoded as OptionalVarint: null when the backend could
+          // not determine the CPU. Varints decode as strings for BigInt safety;
+          // CPU ids always fit in a Number.
+          const cpu = v.cpu == null ? null : Number(v.cpu);
           cpuSamples.push({
             timestamp: ts,
             workerId: num(v.worker_id),
             tid: num(v.tid),
             source: num(v.source),
             callchain: chain,
+            cpu,
           });
           const tn = v.thread_name;
           if (tn) {

@@ -1271,6 +1271,7 @@ mod tests {
                 thread_name: None,
                 source: CpuSampleSource::CpuProfile,
                 callchain: vec![],
+                cpu: None,
             },
             TelemetryEvent::CpuSample {
                 timestamp_nanos: 1_800_000,
@@ -1279,6 +1280,7 @@ mod tests {
                 thread_name: None,
                 source: CpuSampleSource::SchedEvent,
                 callchain: vec![],
+                cpu: None,
             },
             TelemetryEvent::PollEnd {
                 timestamp_nanos: 2_000_000,
@@ -1332,6 +1334,7 @@ mod tests {
                 thread_name: None,
                 source: CpuSampleSource::CpuProfile,
                 callchain: vec![],
+                cpu: None,
             },
         ];
         let sampled = detect_sampled_polls(&events);

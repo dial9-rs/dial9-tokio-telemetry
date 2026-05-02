@@ -27,7 +27,7 @@ struct SampleData {
     pid: u32,
     tid: u32,
     time: u64,
-    cpu: u32,
+    cpu: Option<u32>,
     period: u64,
     num_frames: u32,
     frames: [u64; MAX_FRAMES],
@@ -51,7 +51,7 @@ impl SampleSlot {
                 pid: 0,
                 tid: 0,
                 time: 0,
-                cpu: 0,
+                cpu: None,
                 period: 0,
                 num_frames: 0,
                 frames: [0u64; MAX_FRAMES],
@@ -101,7 +101,7 @@ pub(crate) struct DrainedSample {
     pub pid: u32,
     pub tid: u32,
     pub time: u64,
-    pub cpu: u32,
+    pub cpu: Option<u32>,
     /// Effective sampling period in nanoseconds, accounting for timer overruns.
     /// `interval_ns * (1 + overrun_count)`, used as sample weight in flamegraphs.
     pub period: u64,
@@ -183,7 +183,14 @@ pub(crate) struct SlotWriter {
 
 impl SlotWriter {
     #[inline]
-    pub(crate) unsafe fn write(&mut self, pid: u32, tid: u32, time: u64, cpu: u32, period: u64) {
+    pub(crate) unsafe fn write(
+        &mut self,
+        pid: u32,
+        tid: u32,
+        time: u64,
+        cpu: Option<u32>,
+        period: u64,
+    ) {
         // SAFETY: slot lives in the 'static BUFFER, and the tail CAS in
         // claim_slot hands us exclusive access until commit.
         unsafe {
@@ -238,7 +245,7 @@ impl Drop for SlotWriter {
                 (*data).pid = 0;
                 (*data).tid = 0;
                 (*data).time = 0;
-                (*data).cpu = 0;
+                (*data).cpu = None;
                 (*data).period = 0;
                 (*data).num_frames = 0;
                 (*self.slot)
@@ -352,7 +359,7 @@ mod tests {
 
         unsafe {
             let mut slot = claim_slot().expect("should claim slot");
-            slot.write(1000, 42, 999_000_000, 3, 10_000_000);
+            slot.write(1000, 42, 999_000_000, Some(3), 10_000_000);
             let frames = [0x1234u64, 0x5678, 0x9abc];
             write_frames(&mut slot, &frames, 3);
             slot.commit();
@@ -366,7 +373,7 @@ mod tests {
         assert_eq!(got[0].pid, 1000);
         assert_eq!(got[0].tid, 42);
         assert_eq!(got[0].time, 999_000_000);
-        assert_eq!(got[0].cpu, 3);
+        assert_eq!(got[0].cpu, Some(3));
         assert_eq!(got[0].period, 10_000_000);
         assert_eq!(got[0].num_frames, 3);
         assert_eq!(got[0].frames[0], 0x1234);
@@ -383,21 +390,21 @@ mod tests {
 
         unsafe {
             let mut slot = claim_slot().unwrap();
-            slot.write(1, 1, 100, 0, 0);
+            slot.write(1, 1, 100, None, 0);
             write_frames(&mut slot, &[0xAA], 1);
             slot.commit();
         }
 
         unsafe {
             let mut slot = claim_slot().unwrap();
-            slot.write(2, 2, 200, 0, 0);
+            slot.write(2, 2, 200, None, 0);
             write_frames(&mut slot, &[0xBB], 1);
             drop(slot);
         }
 
         unsafe {
             let mut slot = claim_slot().unwrap();
-            slot.write(3, 3, 300, 0, 0);
+            slot.write(3, 3, 300, None, 0);
             write_frames(&mut slot, &[0xCC], 1);
             slot.commit();
         }
@@ -449,20 +456,20 @@ mod tests {
         unsafe {
             // Slot 0: committed.
             let mut s0 = claim_slot().unwrap();
-            s0.write(10, 10, 10, 0, 1);
+            s0.write(10, 10, 10, None, 1);
             write_frames(&mut s0, &[0x10], 1);
             s0.commit();
 
             // Slot 1: left uncommitted to block ordered drain.
             let mut s1 = claim_slot().unwrap();
-            s1.write(20, 20, 20, 0, 1);
+            s1.write(20, 20, 20, None, 1);
             write_frames(&mut s1, &[0x20], 1);
             blocked_writer = s1;
 
             // Slot 2: committed, but should not be drained yet because slot 1
             // is not ready.
             let mut s2 = claim_slot().unwrap();
-            s2.write(30, 30, 30, 0, 1);
+            s2.write(30, 30, 30, None, 1);
             write_frames(&mut s2, &[0x30], 1);
             s2.commit();
         }
@@ -487,7 +494,7 @@ mod tests {
         for i in 0..BUFFER_CAP {
             unsafe {
                 let mut s = claim_slot().expect("should claim during fill");
-                s.write(i as u32, 0, 0, 0, 1);
+                s.write(i as u32, 0, 0, None, 1);
                 write_frames(&mut s, &[], 0);
                 s.commit();
             }
@@ -514,7 +521,7 @@ mod tests {
         for i in 0..50u32 {
             unsafe {
                 let mut s = claim_slot().expect("should claim after drain");
-                s.write(10000 + i, 0, 0, 0, 1);
+                s.write(10000 + i, 0, 0, None, 1);
                 write_frames(&mut s, &[], 0);
                 s.commit();
             }
@@ -552,7 +559,7 @@ mod tests {
                     for i in 0..CLAIMS_PER_PRODUCER {
                         unsafe {
                             if let Some(mut s) = claim_slot() {
-                                s.write(pid as u32, i as u32, 0, 0, 1);
+                                s.write(pid as u32, i as u32, 0, None, 1);
                                 write_frames(&mut s, &[], 0);
                                 s.commit();
                                 claimed.fetch_add(1, Ordering::Relaxed);
@@ -615,12 +622,12 @@ mod tests {
 
         unsafe {
             let mut a = claim_slot().unwrap();
-            a.write(111, 1, 1, 0, 1);
+            a.write(111, 1, 1, None, 1);
             write_frames(&mut a, &[0xAA], 1);
             a.commit();
 
             let mut b = claim_slot().unwrap();
-            b.write(222, 2, 2, 0, 1);
+            b.write(222, 2, 2, None, 1);
             write_frames(&mut b, &[0xBB], 1);
             b.commit();
         }

@@ -99,8 +99,11 @@ pub struct Sample {
     pub tid: u32,
     /// Timestamp in nanoseconds from `CLOCK_MONOTONIC` (set via `use_clockid`).
     pub time: u64,
-    /// CPU the sample was taken on.
-    pub cpu: u32,
+    /// CPU the sample was taken on, if the backend could determine it.
+    ///
+    /// Perf-based sampling always fills this in (via `PERF_SAMPLE_CPU`).
+    /// The ctimer fallback sets it to `None` when `getcpu` fails.
+    pub cpu: Option<u32>,
     /// The actual period for this sample.
     pub period: u64,
     /// Stack frames from the callchain.

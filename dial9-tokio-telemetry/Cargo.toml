@@ -68,7 +68,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 s3s = "0.13.0"
 s3s-fs = "0.13.0"
 s3s-aws = "0.13.0"
-aws-sdk-s3 = "1"
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 async-trait = "0.1.89"
 uuid = { version = "1", features = ["v4"] }

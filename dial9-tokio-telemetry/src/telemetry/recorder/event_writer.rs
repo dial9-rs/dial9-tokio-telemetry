@@ -87,6 +87,7 @@ impl EventWriter {
                     source: raw.source,
                     callchain: raw.callchain,
                     thread_name: thread_name.cloned(),
+                    cpu: raw.cpu,
                 };
                 record_event(
                     RawEvent::CpuSample(Box::new(data)),
@@ -112,6 +113,7 @@ impl EventWriter {
                         // TODO: we should be able to also track thread name here.
                         // sampler is running on worker threads so no thread name
                         thread_name: None,
+                        cpu: raw.cpu,
                     };
                     record_event(
                         RawEvent::CpuSample(Box::new(data)),

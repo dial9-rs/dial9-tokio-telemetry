@@ -54,4 +54,14 @@ fn profiles_spawned_threads() {
         tids,
         samples.len()
     );
+
+    // Perf events carry a CPU id via PERF_SAMPLE_CPU. Expect every sample to
+    // have Some(cpu) — the perf path never reports an unknown cpu.
+    let without_cpu: usize = samples.iter().filter(|s| s.cpu.is_none()).count();
+    assert_eq!(
+        without_cpu,
+        0,
+        "expected every perf sample to carry a cpu id, got {without_cpu}/{} without",
+        samples.len(),
+    );
 }

@@ -267,6 +267,7 @@ impl Encodable for RawEvent {
                     source: data.source,
                     thread_name,
                     callchain,
+                    cpu: data.cpu.map(u64::from),
                 });
             }
         }
@@ -606,5 +607,56 @@ mod tests {
         // Main thread can also access it.
         let guard = buf.lock().unwrap();
         assert_eq!(guard.event_count, 1);
+    }
+
+    /// Encode a single `RawEvent::CpuSample` through a real thread-local buffer
+    /// and decode it back via the public `decode_events` path, asserting that
+    /// the `cpu` field round-trips.
+    fn cpu_sample_round_trip(cpu: Option<u32>) -> crate::telemetry::events::TelemetryEvent {
+        use crate::telemetry::events::{CpuSampleData, CpuSampleSource, RawEvent};
+        use crate::telemetry::format::{WorkerId, decode_events};
+
+        let data = CpuSampleData {
+            timestamp_nanos: 12_345,
+            worker_id: WorkerId::from(0usize),
+            tid: 4242,
+            thread_name: None,
+            source: CpuSampleSource::CpuProfile,
+            callchain: vec![0xdead_beef, 0xcafe_babe],
+            cpu,
+        };
+        let encoded = ThreadLocalBuffer::encode_single(&RawEvent::CpuSample(Box::new(data)));
+        let events = decode_events(&encoded).expect("decode");
+        assert_eq!(events.len(), 1);
+        events.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn cpu_sample_event_round_trips_with_cpu() {
+        use crate::telemetry::events::TelemetryEvent;
+        match cpu_sample_round_trip(Some(7)) {
+            TelemetryEvent::CpuSample {
+                tid,
+                cpu,
+                callchain,
+                ..
+            } => {
+                assert_eq!(tid, 4242);
+                assert_eq!(cpu, Some(7));
+                assert_eq!(callchain, vec![0xdead_beef, 0xcafe_babe]);
+            }
+            other => panic!("expected CpuSample, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cpu_sample_event_round_trips_without_cpu() {
+        use crate::telemetry::events::TelemetryEvent;
+        match cpu_sample_round_trip(None) {
+            TelemetryEvent::CpuSample { cpu, .. } => {
+                assert_eq!(cpu, None);
+            }
+            other => panic!("expected CpuSample, got {other:?}"),
+        }
     }
 }

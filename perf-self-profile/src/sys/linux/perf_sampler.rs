@@ -344,7 +344,7 @@ impl super::sampler::SamplerBackend for PerfSamplerImpl {
                             pid: s.pid().unwrap_or(0),
                             tid: s.tid().unwrap_or(0),
                             time: s.time().unwrap_or(0),
-                            cpu: s.cpu().unwrap_or(0),
+                            cpu: s.cpu(),
                             period: s.period().unwrap_or(0),
                             callchain,
                             raw: s.raw().map(|r| r.to_vec()),

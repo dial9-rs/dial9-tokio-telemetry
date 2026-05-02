@@ -25,7 +25,7 @@ pub use format::{
 pub use recorder::{
     HasTracePath, NoTracePath, RuntimeTelemetryHandle, TelemetryCore, TelemetryCoreBuilder,
     TelemetryGuard, TelemetryHandle, TelemetryRuntimeError, TraceRuntimeCoreBuilder, TracedRuntime,
-    TracedRuntimeBuilder, current_worker_id,
+    TracedRuntimeBuilder, current_worker_id, spawn,
 };
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
 pub use writer::{NullWriter, RotatingWriter, TraceWriter};

@@ -93,7 +93,7 @@ impl SamplerBackend for CtimerSampler {
             pid: 0,
             tid: 0,
             time: 0,
-            cpu: 0,
+            cpu: None,
             period: 0,
             callchain: Vec::with_capacity(MAX_FRAMES),
             raw: None,
@@ -166,17 +166,19 @@ extern "C" fn sigprof_handler(
         let pid = libc::getpid() as u32;
         let tid = gettid() as u32;
 
-        let mut cpu = 0u32;
-        // SAFETY: `getcpu` writes one `u32` through `&mut cpu`, node/cache pointers are null (allowed).
-        let ok = libc::syscall(
+        let mut cpu_raw = 0u32;
+        // SAFETY: `getcpu` writes one `u32` through `&mut cpu_raw`, node/cache pointers are null (allowed).
+        let cpu = if libc::syscall(
             libc::SYS_getcpu,
-            &mut cpu,
+            &mut cpu_raw,
             ptr::null_mut::<libc::c_void>(),
             ptr::null_mut::<libc::c_void>(),
-        ) == 0;
-        if !ok {
-            cpu = 0; // fallback if getcpu fails
-        }
+        ) == 0
+        {
+            Some(cpu_raw)
+        } else {
+            None
+        };
 
         let mut ts: libc::timespec = mem::zeroed();
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
