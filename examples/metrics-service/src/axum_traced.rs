@@ -170,12 +170,5 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    match TelemetryHandle::try_current() {
-        Some(handle) => {
-            handle.spawn(fut);
-        }
-        None => {
-            tokio::spawn(fut);
-        }
-    }
+    TelemetryHandle::current().spawn(fut);
 }

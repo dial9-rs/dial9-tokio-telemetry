@@ -17,28 +17,20 @@
 
 use std::time::Duration;
 
-use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
+use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
 fn my_config() -> Dial9Config {
-    if std::env::var("ENABLE_DIAL9").is_err() {
-        return Dial9ConfigBuilder::disabled()
-            .with_tokio(|t| {
-                t.worker_threads(4);
-            })
-            .build();
-    }
-
-    Dial9ConfigBuilder::new(
-        "conditionally_enable_trace.bin",
-        64 * 1024 * 1024,
-        256 * 1024 * 1024,
-    )
-    .with_tokio(|t| {
-        t.worker_threads(4);
-    })
-    .with_runtime(|r| r.with_task_tracking(true))
-    .build()
+    Dial9Config::builder()
+        .enabled(std::env::var("ENABLE_DIAL9").is_ok())
+        .base_path("conditionally_enable_trace.bin")
+        .max_file_size(64 * 1024 * 1024)
+        .max_total_size(256 * 1024 * 1024)
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
+        .with_runtime(|r| r.with_task_tracking(true))
+        .build_or_disabled()
 }
 
 async fn cpu_work(iterations: u64) -> u64 {
@@ -63,7 +55,8 @@ async fn mixed_task(id: usize) {
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
-    let telemetry_enabled = TelemetryHandle::try_current().is_some();
+    let handle = TelemetryHandle::current();
+    let telemetry_enabled = handle.is_enabled();
     println!(
         "Running workload (telemetry {})...",
         if telemetry_enabled {
@@ -73,12 +66,9 @@ async fn main() {
         }
     );
 
-    let tasks: Vec<_> = (0..50)
-        .map(|i| match TelemetryHandle::try_current() {
-            Some(handle) => handle.spawn(mixed_task(i)),
-            None => tokio::spawn(mixed_task(i)),
-        })
-        .collect();
+    // `handle.spawn` records wake events when telemetry is enabled and
+    // falls through to plain `tokio::spawn` when it is disabled.
+    let tasks: Vec<_> = (0..50).map(|i| handle.spawn(mixed_task(i))).collect();
 
     for task in tasks {
         let _ = task.await;

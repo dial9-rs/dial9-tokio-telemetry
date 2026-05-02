@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "blazesym",
  "crossbeam-utils",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "arc-swap",
  "assert2",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "criterion",
  "dial9-trace-format-derive",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "assert2",

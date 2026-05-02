@@ -25,7 +25,18 @@ pub(crate) mod traced;
 /// Tracing subscriber layer for emitting span events into dial9 traces.
 pub mod tracing_layer;
 
-/// Unified configuration for the [`main`] macro.
+/// Original positional-argument config API for the
+/// `#[dial9_tokio_telemetry::main]` macro. The fluent builder re-exported
+/// at the crate root (see [`Dial9Config::builder`]) is a more ergonomic alternative.
+/// We encourage you to switch to [`Dial9Config::builder`].
+#[path = "legacy_config.rs"]
 pub mod config;
 
+#[path = "config.rs"]
+mod current_config;
+
+pub use current_config::{
+    Dial9Config, Dial9ConfigBuilder, Dial9ConfigBuilderError, ValidationError,
+};
 pub use dial9_macro::main;
+pub use telemetry::{TelemetryRuntimeError, TracedRuntime};

@@ -95,6 +95,10 @@ pub(crate) struct SegmentProcessMetrics {
     pub compressed_size: Option<u64>,
     /// True when the segment file lacks a valid SegmentMetadata header.
     pub invalid_file_header: bool,
+    /// True when a processor panicked while processing this segment.
+    pub panicked: bool,
+    /// The panic message, if a processor panicked.
+    pub panic_message: Option<String>,
     /// Per-processor metrics, keyed by processor name.
     #[metrics(flatten)]
     pub pipeline: PipelineMetrics,
