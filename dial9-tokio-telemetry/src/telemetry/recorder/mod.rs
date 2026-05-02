@@ -1619,7 +1619,7 @@ impl TracedRuntime {
 // drive the [`tokio::runtime::Builder`] directly.
 
 /// Errors produced while constructing a [`TracedRuntime`] from a
-/// [`Dial9Config`].
+/// [`crate::Dial9Config`].
 ///
 /// Writer-transport I/O has already been validated by
 /// [`crate::Dial9ConfigBuilder::build`], so the only remaining failure
