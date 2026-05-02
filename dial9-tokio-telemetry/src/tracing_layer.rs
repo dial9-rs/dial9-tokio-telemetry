@@ -259,6 +259,9 @@ where
     S: tracing::Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        if !TelemetryHandle::current().is_enabled() {
+            return;
+        }
         let mut field_values = Vec::new();
         attrs.record(&mut FieldVisitor {
             values: &mut field_values,
@@ -276,6 +279,9 @@ where
     }
 
     fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
+        if !TelemetryHandle::current().is_enabled() {
+            return;
+        }
         if let Some(span) = ctx.span(id) {
             let mut extensions = span.extensions_mut();
             if let Some(data) = extensions.get_mut::<SpanData>() {
@@ -287,32 +293,32 @@ where
     }
 
     fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
-        let Some(handle) = TelemetryHandle::try_current() else {
+        let handle = TelemetryHandle::current();
+        if !handle.is_enabled() {
             return;
-        };
-
-        let worker_id = current_worker_id();
-        let span_id = id.into_u64();
-        let ts = clock_monotonic_ns();
-
-        let Some(span_ref) = ctx.span(id) else { return };
-        let ext = span_ref.extensions();
-        let Some(data) = ext.get::<SpanData>() else {
-            return;
-        };
-
-        let schemas = self.get_schemas(data.meta);
-
-        // We only use explicit parents (span!(parent: &x, ..)), not contextual
-        // parents (ctx.current_span()), because contextual parenting is
-        // unreliable across tasks on the same worker thread. See:
-        // https://chesedo.me/blog/rust-tracing-incorrect-parent-spans-async-futures-joinset/
-        // The viewer infers nesting from timestamp containment instead.
-        let parent_span_id = data.parent_id.as_ref().map(|id| id.into_u64());
-        let span_name = data.meta.name();
-
-        // Encode directly into the thread-local buffer (no clone needed)
+        }
         handle.with_encoder(|enc| {
+            let worker_id = current_worker_id();
+            let span_id = id.into_u64();
+            let ts = clock_monotonic_ns();
+
+            let Some(span_ref) = ctx.span(id) else { return };
+            let ext = span_ref.extensions();
+            let Some(data) = ext.get::<SpanData>() else {
+                return;
+            };
+
+            let schemas = self.get_schemas(data.meta);
+
+            // We only use explicit parents (span!(parent: &x, ..)), not contextual
+            // parents (ctx.current_span()), because contextual parenting is
+            // unreliable across tasks on the same worker thread. See:
+            // https://chesedo.me/blog/rust-tracing-incorrect-parent-spans-async-futures-joinset/
+            // The viewer infers nesting from timestamp containment instead.
+            let parent_span_id = data.parent_id.as_ref().map(|id| id.into_u64());
+            let span_name = data.meta.name();
+
+            // Encode directly into the thread-local buffer (no clone needed)
             let mut values = Vec::with_capacity(5 + schemas.field_names.len());
             values.push(FieldValue::Varint(ts));
             values.push(FieldValue::Varint(worker_id.as_u64()));
@@ -333,24 +339,24 @@ where
     }
 
     fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
-        let Some(handle) = TelemetryHandle::try_current() else {
+        let handle = TelemetryHandle::current();
+        if !handle.is_enabled() {
             return;
-        };
-
-        let worker_id = current_worker_id();
-        let span_id = id.into_u64();
-        let ts = clock_monotonic_ns();
-
-        let Some(span_ref) = ctx.span(id) else { return };
-        let ext = span_ref.extensions();
-        let Some(data) = ext.get::<SpanData>() else {
-            return;
-        };
-
-        let schemas = self.get_schemas(data.meta);
-        let span_name = data.meta.name();
-
+        }
         handle.with_encoder(|enc| {
+            let worker_id = current_worker_id();
+            let span_id = id.into_u64();
+            let ts = clock_monotonic_ns();
+
+            let Some(span_ref) = ctx.span(id) else { return };
+            let ext = span_ref.extensions();
+            let Some(data) = ext.get::<SpanData>() else {
+                return;
+            };
+
+            let schemas = self.get_schemas(data.meta);
+            let span_name = data.meta.name();
+
             let mut values = Vec::with_capacity(4 + schemas.field_names.len());
             values.push(FieldValue::Varint(ts));
             values.push(FieldValue::Varint(worker_id.as_u64()));

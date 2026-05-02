@@ -196,6 +196,11 @@ pub(crate) struct CpuSampleEvent {
     pub source: CpuSampleSource,
     pub thread_name: Option<InternedString>,
     pub callchain: InternedStackFrames,
+    /// CPU the sample was taken on, if the backend could determine it.
+    ///
+    /// Widened to `u64` on the wire so the field encodes as `OptionalVarint`:
+    /// 1 byte when absent, typically 2 bytes (tag + small-varint) when present.
+    pub cpu: Option<u64>,
 }
 
 /// Wire-format event for a wake notification.
@@ -414,6 +419,8 @@ pub(crate) fn to_owned_event(
                 .get(e.callchain)
                 .expect("stack pool entry must exist for CpuSample callchain")
                 .to_vec(),
+            // CPU id is varint-encoded as u64 on the wire; real CPU ids fit in u32.
+            cpu: e.cpu.map(|v| v as u32),
         },
         TelemetryEventRef::WakeEvent(e) => TelemetryEvent::WakeEvent {
             timestamp_nanos: e.timestamp_ns,

@@ -1,4 +1,3 @@
-use super::TelemetryHandle;
 use super::shared_state::{PARKED_SCHED_WAIT, SharedState};
 use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::SchedStat;
@@ -202,11 +201,11 @@ impl Encodable for TaskSpawn {
 
 pub(super) fn make_poll_start(
     ctx: &RuntimeContext,
-    handle: &TelemetryHandle,
+    shared: &SharedState,
     location: &'static std::panic::Location<'static>,
     task_id: TaskId,
 ) -> PollStart {
-    let resolved = ctx.resolve_worker(&handle.shared);
+    let resolved = ctx.resolve_worker(shared);
     let worker_local_queue_depth = resolved
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);
@@ -219,16 +218,16 @@ pub(super) fn make_poll_start(
     }
 }
 
-pub(super) fn make_poll_end(ctx: &RuntimeContext, handle: &TelemetryHandle) -> PollEndEvent {
-    let resolved = ctx.resolve_worker(&handle.shared);
+pub(super) fn make_poll_end(ctx: &RuntimeContext, shared: &SharedState) -> PollEndEvent {
+    let resolved = ctx.resolve_worker(shared);
     PollEndEvent {
         timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
         worker_id: resolved.map(|(id, _)| id).unwrap_or(WorkerId::UNKNOWN),
     }
 }
 
-pub(super) fn make_worker_park(ctx: &RuntimeContext, handle: &TelemetryHandle) -> WorkerParkEvent {
-    let resolved = ctx.resolve_worker(&handle.shared);
+pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> WorkerParkEvent {
+    let resolved = ctx.resolve_worker(shared);
     let worker_local_queue_depth = resolved
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);
@@ -244,11 +243,8 @@ pub(super) fn make_worker_park(ctx: &RuntimeContext, handle: &TelemetryHandle) -
     }
 }
 
-pub(super) fn make_worker_unpark(
-    ctx: &RuntimeContext,
-    handle: &TelemetryHandle,
-) -> WorkerUnparkEvent {
-    let resolved = ctx.resolve_worker(&handle.shared);
+pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> WorkerUnparkEvent {
+    let resolved = ctx.resolve_worker(shared);
     let worker_local_queue_depth = resolved
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);

@@ -164,6 +164,10 @@ pub enum TelemetryEvent {
         source: CpuSampleSource,
         /// Raw instruction pointer addresses (leaf first). Symbolized offline.
         callchain: Vec<u64>,
+        /// CPU the sample was taken on, if the backend could determine it.
+        /// Perf sampling fills this in; ctimer may report `None` if `getcpu`
+        /// fails. Older traces recorded before this field existed decode as `None`.
+        cpu: Option<u32>,
     },
     /// Maps an OS thread ID to its name (from `/proc/self/task/<tid>/comm`).
     /// Emitted before the first CpuSample referencing this tid in each file.
@@ -301,6 +305,8 @@ pub(crate) struct CpuSampleData {
     pub thread_name: Option<ThreadName>,
     pub source: CpuSampleSource,
     pub callchain: Vec<u64>,
+    /// CPU the sample was taken on, if the backend could determine it.
+    pub cpu: Option<u32>,
 }
 
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.
@@ -402,7 +408,7 @@ pub(crate) fn clock_pair() -> (u64, u64) {
 pub(crate) struct SchedStat {
     pub wait_time_ns: u64,
     /// Raw fd backing this read, exposed for FD-lifecycle tests. Not used in production.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     fd: std::os::fd::RawFd,
 }
 
@@ -461,7 +467,7 @@ impl SchedStat {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad schedstat"))?;
         Ok(Self {
             wait_time_ns,
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "linux"))]
             fd,
         })
     }

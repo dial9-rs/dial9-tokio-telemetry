@@ -41,7 +41,7 @@ crate::primitives::thread_local! {
 // ---------------------------------------------------------------------------
 
 /// Commands sent to the flush thread from TelemetryHandle / TelemetryGuard.
-enum ControlCommand {
+pub(crate) enum ControlCommand {
     /// Flush, finalize (seal segment), then exit the thread.
     FinalizeAndStop(crate::primitives::sync::mpsc::SyncSender<()>),
 }
@@ -89,7 +89,7 @@ fn flush_once(
     let cpu_events_time = std::time::Instant::now();
     #[cfg(feature = "cpu-profiling")]
     {
-        if shared.enabled.load(Ordering::Relaxed) {
+        if shared.is_enabled() {
             event_writer.flush_cpu(shared);
         }
     }
@@ -157,79 +157,77 @@ fn register_hooks(
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
 ) {
-    // Build one TelemetryHandle up front and clone it into every hook
-    // closure. This lets the hooks go through the public
-    // `record_event(event, &handle)` API rather than reaching into
-    // crate-internal methods on `SharedState`, and matches the long-term
-    // goal of decoupling the tokio hook layer from the recording core.
-    let handle = TelemetryHandle {
-        shared: shared.clone(),
-        control_tx: control_tx.clone(),
-    };
+    // TODO: these should rely on public APIs instead of utilizing `SharedState`
 
     let c1 = ctx.clone();
-    let h1 = handle.clone();
+    let s1 = shared.clone();
     let c2 = ctx.clone();
-    let h2 = handle.clone();
+    let s2 = shared.clone();
     let c3 = ctx.clone();
-    let h3 = handle.clone();
+    let s3 = shared.clone();
     let c4 = ctx.clone();
-    let h4 = handle.clone();
+    let s4 = shared.clone();
 
     builder
         .on_thread_park(move || {
-            let event = make_worker_park(&c1, &h1);
-            crate::telemetry::record_event(event, &h1);
+            s1.if_enabled(|buf| {
+                let event = make_worker_park(&c1, &s1);
+                buf.record_encodable_event(&event);
+            });
         })
         .on_thread_unpark(move || {
-            let event = make_worker_unpark(&c2, &h2);
-            crate::telemetry::record_event(event, &h2);
+            s2.if_enabled(|buf| {
+                let event = make_worker_unpark(&c2, &s2);
+                buf.record_encodable_event(&event);
+            });
         })
         .on_before_task_poll(move |meta| {
-            let task_id = TaskId::from(meta.id());
-            let location = meta.spawned_at();
-            let event = make_poll_start(&c3, &h3, location, task_id);
-            crate::telemetry::record_event(event, &h3);
+            s3.if_enabled(|buf| {
+                let task_id = TaskId::from(meta.id());
+                let location = meta.spawned_at();
+                let event = make_poll_start(&c3, &s3, location, task_id);
+                buf.record_encodable_event(&event);
+            });
         })
         .on_after_task_poll(move |_meta| {
-            let event = make_poll_end(&c4, &h4);
-            crate::telemetry::record_event(event, &h4);
+            s4.if_enabled(|buf| {
+                let event = make_poll_end(&c4, &s4);
+                buf.record_encodable_event(&event);
+            });
         });
 
     if task_tracking_enabled {
-        let h5 = handle.clone();
+        let s5 = shared.clone();
         builder.on_task_spawn(move |meta| {
-            let task_id = TaskId::from(meta.id());
-            let location = meta.spawned_at();
-            let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get());
-            let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
-            crate::telemetry::record_event(
-                runtime_context::TaskSpawn {
+            s5.if_enabled(|buf| {
+                let task_id = TaskId::from(meta.id());
+                let location = meta.spawned_at();
+                let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get());
+                let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
+                buf.record_encodable_event(&runtime_context::TaskSpawn {
                     timestamp_ns,
                     task_id,
                     location,
                     instrumented,
-                },
-                &h5,
-            );
+                });
+            });
         });
-        let h6 = handle.clone();
+        let s6 = shared.clone();
         builder.on_task_terminate(move |meta| {
-            let task_id = TaskId::from(meta.id());
-            crate::telemetry::record_event(
-                TaskTerminateEvent {
+            s6.if_enabled(|buf| {
+                let task_id = TaskId::from(meta.id());
+                buf.record_encodable_event(&TaskTerminateEvent {
                     timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
                     task_id,
-                },
-                &h6,
-            );
+                });
+            });
         });
     }
 
     // Unified on_thread_start / on_thread_stop. Tokio only stores one
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
-    let handle_for_tl = handle;
+    let handle_for_tl = TelemetryHandle::enabled(shared.clone(), control_tx.clone());
     #[cfg(feature = "cpu-profiling")]
     let s_start = shared.clone();
     #[cfg(feature = "cpu-profiling")]
@@ -307,10 +305,7 @@ fn attach_runtime(
     // this thread IS the worker (block_on runs here), so the tracing layer
     // needs CURRENT_HANDLE to be set. Harmless for multi_thread runtimes.
     CURRENT_HANDLE.with(|cell| {
-        *cell.borrow_mut() = Some(TelemetryHandle {
-            shared: shared.clone(),
-            control_tx: control_tx.clone(),
-        });
+        *cell.borrow_mut() = Some(TelemetryHandle::enabled(shared.clone(), control_tx.clone()));
     });
 
     // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
@@ -346,95 +341,199 @@ fn attach_runtime(
 
 /// Cheap, cloneable handle for controlling telemetry from anywhere.
 ///
-/// Uses a channel to communicate with the flush thread — no shared mutex.
+/// A handle may be in one of two modes:
+///
+/// - **Enabled** — backed by a real telemetry session; methods record
+///   events, control recording, and wrap spawned futures with wake
+///   tracking.
+/// - **Disabled** — an inert sentinel returned by
+///   [`TelemetryHandle::disabled`] and by [`TelemetryHandle::current`]
+///   when called from a thread that is not owned by a dial9 runtime.
+///   All methods are no-ops; [`spawn`](Self::spawn) falls back to
+///   [`tokio::spawn`] without wake tracking.
+///
+/// Use [`is_enabled`](Self::is_enabled) to distinguish the two modes.
 #[derive(Clone)]
 pub struct TelemetryHandle {
+    inner: Option<HandleInner>,
+}
+
+#[derive(Clone)]
+struct HandleInner {
     shared: Arc<SharedState>,
     control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
 }
 
 impl std::fmt::Debug for TelemetryHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TelemetryHandle").finish_non_exhaustive()
+        f.debug_struct("TelemetryHandle")
+            .field("enabled", &self.is_enabled())
+            .finish_non_exhaustive()
     }
 }
 
 impl TelemetryHandle {
-    /// Return the [`TelemetryHandle`] for the current thread.
-    ///
-    /// The handle is installed on every thread owned by a traced runtime
-    /// (workers and blocking threads) via the runtime's `on_thread_start`
-    /// hook, and cleared on `on_thread_stop`.
-    ///
-    /// This is always safe to call inside a
-    /// `#[dial9_tokio_telemetry::main]` body, since the macro runs your code
-    /// on a runtime-owned thread.
-    ///
-    /// Panics if called from a thread that is not owned by a dial9 runtime
-    /// (e.g. the thread that called `runtime.block_on(...)` on a
-    /// `current_thread` runtime, or any non-runtime thread). Use
-    /// [`TelemetryHandle::try_current`] if you need to handle that case.
-    #[track_caller]
-    pub fn current() -> Self {
-        Self::try_current()
-            .expect("TelemetryHandle::current() called outside of a dial9 runtime thread")
+    pub(crate) fn enabled(
+        shared: Arc<SharedState>,
+        control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
+    ) -> Self {
+        Self {
+            inner: Some(HandleInner { shared, control_tx }),
+        }
     }
 
-    /// Return the [`TelemetryHandle`] for the current thread, or `None` if
-    /// no dial9 runtime has claimed this thread.
+    /// Return an inert handle that is not connected to any telemetry
+    /// session. All methods are no-ops; [`spawn`](Self::spawn) falls
+    /// back to [`tokio::spawn`] without wake tracking.
+    pub fn disabled() -> Self {
+        Self { inner: None }
+    }
+
+    /// Whether this handle is connected to a live telemetry session.
+    ///
+    /// Returns `false` for handles obtained via
+    /// [`TelemetryHandle::disabled`], and for handles returned by
+    /// [`TelemetryHandle::current`] when called from a thread that is
+    /// not owned by a dial9 runtime.
+    pub fn is_enabled(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    pub(crate) fn shared(&self) -> Option<&Arc<SharedState>> {
+        self.inner.as_ref().map(|i| &i.shared)
+    }
+
+    pub(crate) fn control_tx(
+        &self,
+    ) -> Option<&crate::primitives::sync::mpsc::SyncSender<ControlCommand>> {
+        self.inner.as_ref().map(|i| &i.control_tx)
+    }
+
+    /// Return the [`TelemetryHandle`] for the current thread.
+    ///
+    /// On threads owned by a dial9 runtime (workers and blocking
+    /// threads — installed via the runtime's `on_thread_start` hook,
+    /// cleared on `on_thread_stop`) this returns the live handle for
+    /// that runtime.
+    ///
+    /// On any other thread (including the caller of
+    /// `runtime.block_on(...)` on a `current_thread` runtime, threads
+    /// outside any tokio context, and threads owned by a runtime built
+    /// with telemetry disabled) this returns an inert handle whose
+    /// methods are all no-ops — see [`TelemetryHandle::disabled`].
+    ///
+    /// Use [`is_enabled`](Self::is_enabled) when you need to branch on
+    /// whether telemetry is actually live on the current thread.
+    pub fn current() -> Self {
+        CURRENT_HANDLE
+            .with(|cell| cell.borrow().clone())
+            .unwrap_or_else(Self::disabled)
+    }
+
+    /// Return the [`TelemetryHandle`] installed for the current thread,
+    /// or `None` if no dial9 runtime has claimed this thread.
+    ///
+    /// Prefer [`current`](Self::current) instead.
     pub fn try_current() -> Option<Self> {
         CURRENT_HANDLE.with(|cell| cell.borrow().clone())
     }
 
-    /// Enable telemetry recording.
+    /// Enable telemetry recording. No-op on a disabled handle.
     pub fn enable(&self) {
-        self.shared.enabled.store(true, Ordering::Relaxed);
-    }
-
-    /// Disable telemetry recording.
-    pub fn disable(&self) {
-        self.shared.enabled.store(false, Ordering::Relaxed);
-    }
-
-    /// Get a [`TracedHandle`](crate::traced::TracedHandle) for wrapping futures with wake tracking.
-    pub fn traced_handle(&self) -> crate::traced::TracedHandle {
-        crate::traced::TracedHandle {
-            shared: self.shared.clone(),
+        if let Some(inner) = &self.inner {
+            inner.shared.enabled.store(true, Ordering::Relaxed);
         }
     }
 
+    /// Disable telemetry recording. No-op on a disabled handle.
+    pub fn disable(&self) {
+        if let Some(inner) = &self.inner {
+            inner.shared.enabled.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Get a [`TracedHandle`](crate::traced::TracedHandle) for wrapping
+    /// futures with wake tracking, or `None` on a disabled handle.
+    pub(crate) fn traced_handle(&self) -> Option<crate::traced::TracedHandle> {
+        self.inner.as_ref().map(|i| crate::traced::TracedHandle {
+            shared: i.shared.clone(),
+        })
+    }
+
     /// Record a user-defined [`Encodable`](crate::telemetry::buffer::Encodable) event.
+    ///
+    /// No-op on a disabled handle or when recording is paused.
     pub(crate) fn record_encodable_event(&self, event: &dyn crate::telemetry::buffer::Encodable) {
-        self.shared.record_encodable_event(event);
+        if let Some(inner) = &self.inner {
+            inner
+                .shared
+                .if_enabled(|buf| buf.record_encodable_event(event));
+        }
     }
 
     /// Run a closure with direct access to the thread-local encoder.
     ///
-    /// Use this for dynamic schema encoding where you need to intern strings
-    /// and write events without an intermediate [`Encodable`] struct.
+    /// The closure is only invoked if telemetry is enabled.
+    /// No-op on a disabled handle or when recording is paused.
     // TODO(GH-XXX): consider making this public as an alternative to record_event
     // for zero-copy dynamic schema encoding
     pub(crate) fn with_encoder(
         &self,
         f: impl FnOnce(&mut crate::telemetry::buffer::ThreadLocalEncoder<'_>),
     ) {
-        self.shared.with_encoder(f);
+        if let Some(inner) = &self.inner {
+            inner.shared.if_enabled(|buf| buf.with_encoder(f));
+        }
     }
 
-    /// Spawn a future wrapped with wake-event tracking.
+    /// Spawn a future on the ambient tokio runtime.
+    ///
+    /// On an enabled handle, the future is wrapped with wake-event
+    /// tracking. On a disabled handle, this is a passthrough to
+    /// [`tokio::spawn`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from outside a tokio runtime context (same
+    /// as [`tokio::spawn`]).
     #[track_caller]
     pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let traced_handle = self.traced_handle();
-        let _guard = InstrumentedSpawnGuard::set();
-        tokio::spawn(async move {
-            let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-            crate::traced::Traced::new(future, traced_handle, task_id).await
-        })
+        match self.traced_handle() {
+            Some(traced_handle) => {
+                let _guard = InstrumentedSpawnGuard::set();
+                tokio::spawn(async move {
+                    let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
+                    crate::traced::Traced::new(future, traced_handle, task_id).await
+                })
+            }
+            None => tokio::spawn(future),
+        }
     }
+}
+
+/// Spawn a traced task on the current tokio runtime.
+///
+/// Like [`tokio::spawn`], but wraps the future with wake-event tracking
+/// when called from a thread owned by a dial9 runtime. On other threads,
+/// falls back to plain [`tokio::spawn`].
+///
+/// Equivalent to [`TelemetryHandle::current().spawn(future)`](TelemetryHandle::spawn).
+///
+/// # Panics
+///
+/// Panics if called from outside a tokio runtime context (same
+/// as [`tokio::spawn`]).
+#[track_caller]
+pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    TelemetryHandle::current().spawn(future)
 }
 
 /// RAII guard that sets `INSTRUMENTED_SPAWN` to `true` on creation and
@@ -464,34 +563,61 @@ impl Drop for InstrumentedSpawnGuard {
 #[derive(Clone, Debug)]
 pub struct RuntimeTelemetryHandle {
     runtime: tokio::runtime::Handle,
-    traced: crate::traced::TracedHandle,
+    traced: Option<crate::traced::TracedHandle>,
 }
 
 impl RuntimeTelemetryHandle {
     /// Spawn a future with wake-event tracking on this handle's runtime.
+    ///
+    /// On a handle obtained from a disabled [`TelemetryGuard`], wake
+    /// tracking is skipped and the future is spawned plainly.
     #[track_caller]
     pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let traced = self.traced.clone();
-        let _guard = InstrumentedSpawnGuard::set();
-        self.runtime.spawn(async move {
-            let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-            crate::traced::Traced::new(future, traced, task_id).await
-        })
+        match &self.traced {
+            Some(traced) => {
+                let traced = traced.clone();
+                let _guard = InstrumentedSpawnGuard::set();
+                self.runtime.spawn(async move {
+                    let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
+                    crate::traced::Traced::new(future, traced, task_id).await
+                })
+            }
+            None => self.runtime.spawn(future),
+        }
     }
 }
 
 /// Holds the background worker thread and its stop signal.
-struct WorkerHandle {
+pub(crate) struct WorkerHandle {
     shutdown: Option<tokio::sync::oneshot::Sender<Duration>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<crate::primitives::thread::JoinHandle<()>>,
 }
 
 /// RAII guard returned by [`TracedRuntimeBuilder::build`].
+///
+/// A guard is always present on a [`TracedRuntime`], regardless of
+/// whether telemetry is enabled. When telemetry is disabled (because
+/// the user opted out via `enabled(false)` or because a lenient config
+/// path downgraded after a build failure), the guard is in an inert
+/// mode: all methods are no-ops, [`handle`](Self::handle) returns an
+/// inert [`TelemetryHandle`], and [`graceful_shutdown`](Self::graceful_shutdown)
+/// is a successful no-op.
+///
+/// Use [`is_enabled`](Self::is_enabled) to distinguish the two modes.
 pub struct TelemetryGuard {
+    inner: GuardInner,
+}
+
+enum GuardInner {
+    Enabled(EnabledGuard),
+    Disabled,
+}
+
+struct EnabledGuard {
     handle: TelemetryHandle,
     flush_thread: Option<crate::primitives::thread::JoinHandle<()>>,
     worker: Option<WorkerHandle>,
@@ -499,40 +625,96 @@ pub struct TelemetryGuard {
 
 impl std::fmt::Debug for TelemetryGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TelemetryGuard").finish_non_exhaustive()
+        f.debug_struct("TelemetryGuard")
+            .field("enabled", &self.is_enabled())
+            .finish_non_exhaustive()
     }
 }
 
 impl TelemetryGuard {
+    pub(crate) fn enabled(
+        handle: TelemetryHandle,
+        flush_thread: Option<crate::primitives::thread::JoinHandle<()>>,
+        worker: Option<WorkerHandle>,
+    ) -> Self {
+        Self {
+            inner: GuardInner::Enabled(EnabledGuard {
+                handle,
+                flush_thread,
+                worker,
+            }),
+        }
+    }
+
+    pub(crate) fn disabled() -> Self {
+        Self {
+            inner: GuardInner::Disabled,
+        }
+    }
+
+    /// Whether this guard owns a live telemetry session.
+    ///
+    /// Returns `false` for guards created by `enabled(false)` configs
+    /// or by lenient configs that downgraded after a build failure.
+    pub fn is_enabled(&self) -> bool {
+        matches!(self.inner, GuardInner::Enabled(_))
+    }
+
     /// Get a cloneable handle for controlling telemetry.
+    ///
+    /// On a disabled guard this returns an inert handle whose methods
+    /// are all no-ops — see [`TelemetryHandle::disabled`].
     pub fn handle(&self) -> TelemetryHandle {
-        self.handle.clone()
+        match &self.inner {
+            GuardInner::Enabled(eg) => eg.handle.clone(),
+            GuardInner::Disabled => TelemetryHandle::disabled(),
+        }
     }
 
-    /// Monotonic start time of the telemetry session in nanoseconds.
-    pub fn start_time(&self) -> u64 {
-        self.handle.shared.start_time_ns
+    /// Monotonic start time of the telemetry session in nanoseconds, if
+    /// telemetry is enabled.
+    pub fn start_time(&self) -> Option<u64> {
+        self.shared().map(|s| s.start_time_ns)
     }
 
-    /// Enable telemetry recording.
+    /// Enable telemetry recording. No-op on a disabled guard.
     pub fn enable(&self) {
-        self.handle.enable();
+        if let GuardInner::Enabled(eg) = &self.inner {
+            eg.handle.enable();
+        }
     }
 
-    /// Disable telemetry recording.
+    /// Disable telemetry recording. No-op on a disabled guard.
     pub fn disable(&self) {
-        self.handle.disable();
+        if let GuardInner::Enabled(eg) = &self.inner {
+            eg.handle.disable();
+        }
     }
 
     /// Access the shared state for reuse by additional runtimes.
-    pub(crate) fn shared(&self) -> &Arc<SharedState> {
-        &self.handle.shared
+    pub(crate) fn shared(&self) -> Option<&Arc<SharedState>> {
+        match &self.inner {
+            GuardInner::Enabled(eg) => eg.handle.shared(),
+            GuardInner::Disabled => None,
+        }
+    }
+
+    pub(crate) fn control_tx(
+        &self,
+    ) -> Option<&crate::primitives::sync::mpsc::SyncSender<ControlCommand>> {
+        match &self.inner {
+            GuardInner::Enabled(eg) => eg.handle.control_tx(),
+            GuardInner::Disabled => None,
+        }
     }
 
     /// Attach a tokio runtime to this telemetry session.
     ///
     /// Returns a builder that lets you configure per-runtime settings
     /// (e.g. task tracking) before building the runtime.
+    ///
+    /// On a disabled guard the resulting builder produces a plain tokio
+    /// runtime with no telemetry hooks installed.
     ///
     /// ```rust,no_run
     /// # use dial9_tokio_telemetry::telemetry::{NullWriter, TelemetryCore};
@@ -558,23 +740,25 @@ impl TelemetryGuard {
 
     /// Send FinalizeAndStop to the flush thread, join it, then drain the
     /// caller's thread-local buffer into the collector so the flush thread
-    /// picks up any stragglers.
+    /// picks up any stragglers. No-op when telemetry is disabled.
     fn stop_flush_thread(&mut self) {
+        let GuardInner::Enabled(eg) = &mut self.inner else {
+            return;
+        };
         // Drain the current thread's buffer (e.g. main thread in block_on)
         // which may contain TaskSpawn events that were never flushed.
-        buffer::drain_to_collector(&self.handle.shared.collector);
+        if let Some(shared) = eg.handle.shared() {
+            buffer::drain_to_collector(&shared.collector);
+        }
 
         // Tell the flush thread to do a final flush + finalize, then exit.
         let (ack_tx, ack_rx) = crate::primitives::sync::mpsc::sync_channel(0);
-        if self
-            .handle
-            .control_tx
-            .send(ControlCommand::FinalizeAndStop(ack_tx))
-            .is_ok()
+        if let Some(tx) = eg.handle.control_tx()
+            && tx.send(ControlCommand::FinalizeAndStop(ack_tx)).is_ok()
         {
             let _ = ack_rx.recv();
         }
-        if let Some(t) = self.flush_thread.take() {
+        if let Some(t) = eg.flush_thread.take() {
             let _ = t.join();
         }
     }
@@ -585,6 +769,9 @@ impl TelemetryGuard {
     /// **Call this after the runtime has been dropped** so that Tokio worker
     /// threads have exited and their thread-local telemetry buffers have been
     /// flushed to the central collector.
+    ///
+    /// On a disabled guard this is a successful no-op — there is no
+    /// flush thread or background worker to drain.
     ///
     /// ```rust,no_run
     /// # use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
@@ -604,12 +791,15 @@ impl TelemetryGuard {
     pub fn graceful_shutdown(mut self, timeout: Duration) -> Result<(), std::io::Error> {
         tracing::debug!(target: "dial9_telemetry", "graceful_shutdown starting");
 
-        // 1. Stop flush thread (flushes + finalizes the last segment)
+        // 1. Stop flush thread (flushes + finalizes the last segment).
+        // No-op when disabled.
         self.stop_flush_thread();
         tracing::debug!(target: "dial9_telemetry", "flush thread joined, segment sealed");
 
         // 2. Signal worker to drain with the given timeout and wait
-        if let Some(ref mut w) = self.worker {
+        if let GuardInner::Enabled(eg) = &mut self.inner
+            && let Some(ref mut w) = eg.worker
+        {
             tracing::debug!(target: "dial9_telemetry", timeout_secs = timeout.as_secs(), "waiting for worker drain");
             if let Some(tx) = w.shutdown.take() {
                 let _ = tx.send(timeout);
@@ -628,13 +818,15 @@ impl TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        // 1. Stop the flush thread (flushes + finalizes)
+        // 1. Stop the flush thread (flushes + finalizes). No-op when disabled.
         self.stop_flush_thread();
 
         // 2. Hard shutdown: drop the sender without sending — worker sees
         // RecvError and exits without draining. No need to join the thread.
         // For graceful drain, use graceful_shutdown() instead.
-        if let Some(ref mut w) = self.worker {
+        if let GuardInner::Enabled(eg) = &mut self.inner
+            && let Some(ref mut w) = eg.worker
+        {
             w.shutdown.take();
         }
     }
@@ -753,14 +945,19 @@ impl<P> TracedRuntimeBuilder<P> {
     /// runtime index so their `WorkerId`s don't collide with existing runtimes.
     pub fn build_and_attach_to_telemetry(
         self,
-        builder: tokio::runtime::Builder,
+        mut builder: tokio::runtime::Builder,
         guard: &TelemetryGuard,
     ) -> std::io::Result<tokio::runtime::Runtime> {
+        let (Some(shared), Some(control_tx)) = (guard.shared(), guard.control_tx()) else {
+            // Disabled guard: produce a plain tokio runtime with no
+            // telemetry hooks so attaching still works gracefully.
+            return builder.build();
+        };
         attach_runtime(
-            guard.shared(),
+            shared,
             builder,
             self.runtime_name,
-            &guard.handle.control_tx,
+            control_tx,
             self.task_tracking_enabled,
         )
     }
@@ -918,9 +1115,15 @@ impl TracedRuntimeBuilder<HasTracePath> {
             .maybe_s3_client(self.s3_client);
 
         let guard = core_builder.build()?;
-        let control_tx = guard.handle.control_tx.clone();
+        let control_tx = guard
+            .control_tx()
+            .expect("TelemetryCore::builder().build() always returns an enabled guard")
+            .clone();
+        let shared = guard
+            .shared()
+            .expect("TelemetryCore::builder().build() always returns an enabled guard");
         let runtime = attach_runtime(
-            guard.shared(),
+            shared,
             builder,
             self.runtime_name,
             &control_tx,
@@ -956,18 +1159,33 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
     /// wake-tracked futures via [`RuntimeTelemetryHandle::spawn`].
     pub fn build(
         self,
-        builder: tokio::runtime::Builder,
+        mut builder: tokio::runtime::Builder,
     ) -> std::io::Result<(tokio::runtime::Runtime, RuntimeTelemetryHandle)> {
-        let runtime = attach_runtime(
+        let (Some(shared), Some(control_tx), Some(traced)) = (
             self.guard.shared(),
+            self.guard.control_tx(),
+            self.guard.handle().traced_handle(),
+        ) else {
+            // Disabled guard: build a plain tokio runtime and return a
+            // RuntimeTelemetryHandle that effectively short-circuits to
+            // tokio::spawn.
+            let runtime = builder.build()?;
+            let handle = RuntimeTelemetryHandle {
+                runtime: runtime.handle().clone(),
+                traced: None,
+            };
+            return Ok((runtime, handle));
+        };
+        let runtime = attach_runtime(
+            shared,
             builder,
             Some(self.name),
-            &self.guard.handle.control_tx,
+            control_tx,
             self.task_tracking,
         )?;
         let handle = RuntimeTelemetryHandle {
             runtime: runtime.handle().clone(),
-            traced: self.guard.handle().traced_handle(),
+            traced: Some(traced),
         };
         Ok((runtime, handle))
     }
@@ -1130,27 +1348,24 @@ impl TelemetryCore {
         let mut worker = None;
         if let Some(config) = worker_config {
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-            let wt = std::thread::Builder::new()
-                .name("dial9-worker".into())
-                .spawn(move || {
-                    #[cfg(feature = "cpu-profiling")]
-                    let _ = dial9_perf_self_profile::register_current_thread();
-                    crate::background_task::run_background_task(config, shutdown_rx);
-                    #[cfg(feature = "cpu-profiling")]
-                    dial9_perf_self_profile::unregister_current_thread();
-                })
-                .expect("failed to spawn dial9-worker thread");
+            let wt = crate::primitives::thread::spawn_named("dial9-worker", move || {
+                #[cfg(feature = "cpu-profiling")]
+                let _ = dial9_perf_self_profile::register_current_thread();
+                crate::background_task::run_background_task(config, shutdown_rx);
+                #[cfg(feature = "cpu-profiling")]
+                dial9_perf_self_profile::unregister_current_thread();
+            });
             worker = Some(WorkerHandle {
                 shutdown: Some(shutdown_tx),
                 thread: Some(wt),
             });
         }
 
-        Ok(TelemetryGuard {
-            handle: TelemetryHandle { shared, control_tx },
-            flush_thread: Some(flush_thread),
+        Ok(TelemetryGuard::enabled(
+            TelemetryHandle::enabled(shared, control_tx),
+            Some(flush_thread),
             worker,
-        })
+        ))
     }
 }
 
@@ -1194,7 +1409,7 @@ fn run_flush_loop(
         // When disabled, skip all recording work (queue sampling, metadata
         // merging, drain coordination, flush). The loop still wakes every
         // 5ms to check for control commands and the exit signal.
-        if !exit && !shared.enabled.load(Ordering::Relaxed) {
+        if !exit && !shared.is_enabled() {
             continue;
         }
 
@@ -1322,9 +1537,28 @@ fn run_flush_loop(
     }
 }
 
-/// Entry point for setting up a traced Tokio runtime.
+/// A tokio runtime paired with its (optional) dial9 telemetry guard.
+///
+/// The guard, when present, must outlive the runtime so traces are flushed
+/// on drop — keeping both inside one struct enforces that ordering at the
+/// type level (fields drop top-to-bottom, so `runtime` drops before `guard`).
+///
+/// Construct one of two ways:
+///
+/// - **High-level**: from a [`crate::Dial9Config`] via [`TracedRuntime::new`]
+///   (panicking, used by the `#[dial9_tokio_telemetry::main]` macro) or
+///   [`TracedRuntime::try_new`] (fallible).
+/// - **Low-level**: via [`TracedRuntime::builder`] →
+///   [`TracedRuntimeBuilder::build_and_start`] for direct control over the
+///   raw [`tokio::runtime::Builder`] and [`crate::telemetry::TraceWriter`].
+///   This is the path used by example code, benchmarks, and integration
+///   tests that want to wire a [`crate::telemetry::NullWriter`] or other
+///   custom writer.
 #[derive(Debug)]
-pub struct TracedRuntime;
+pub struct TracedRuntime {
+    pub(crate) runtime: tokio::runtime::Runtime,
+    pub(crate) guard: TelemetryGuard,
+}
 
 impl TracedRuntime {
     /// Create a new [`TracedRuntimeBuilder`].
@@ -1349,22 +1583,14 @@ impl TracedRuntime {
     }
 
     /// Build a plain runtime with no telemetry installed.
+    ///
+    /// The returned [`TelemetryGuard`] is in its disabled mode — see
+    /// [`TelemetryGuard::is_enabled`].
     pub fn build_disabled(
         mut builder: tokio::runtime::Builder,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         let runtime = builder.build()?;
-        let shared = Arc::new(SharedState::new(
-            crate::telemetry::events::clock_monotonic_ns(),
-        ));
-        // Create a dummy channel — nothing listens on the other end, so
-        // disable() sends will fail silently (which is correct for disabled).
-        let (control_tx, _control_rx) = crate::primitives::sync::mpsc::sync_channel(1);
-        let guard = TelemetryGuard {
-            handle: TelemetryHandle { shared, control_tx },
-            flush_thread: None,
-            worker: None,
-        };
-        Ok((runtime, guard))
+        Ok((runtime, TelemetryGuard::disabled()))
     }
 
     /// Build the traced runtime. Recording starts disabled.
@@ -1381,6 +1607,226 @@ impl TracedRuntime {
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         Self::builder().build_and_start_with_writer(builder, writer)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// High-level construction: TracedRuntime::new / try_new from Dial9Config
+// ---------------------------------------------------------------------------
+//
+// These are the entry points the `#[dial9_tokio_telemetry::main]` macro and
+// hand-written `main` functions reach for. The low-level
+// `TracedRuntime::builder()` / `build_and_start()` above stay available for
+// callers (benches, integration tests, custom-writer setups) that need to
+// drive the [`tokio::runtime::Builder`] directly.
+
+/// Errors produced while constructing a [`TracedRuntime`] from a
+/// [`Dial9Config`].
+///
+/// Writer-transport I/O has already been validated by
+/// [`crate::Dial9ConfigBuilder::build`], so the only remaining failure
+/// modes here come from the tokio runtime builder and the telemetry
+/// background worker startup.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum TelemetryRuntimeError {
+    /// Failure from [`tokio::runtime::Builder::build`].
+    TokioRuntimeBuilder(std::io::Error),
+    /// Failure from telemetry core setup (traced runtime + background worker).
+    TelemetryCore(std::io::Error),
+}
+
+impl std::fmt::Display for TelemetryRuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TelemetryRuntimeError::TokioRuntimeBuilder(e) => {
+                write!(f, "tokio runtime builder: {e}")
+            }
+            TelemetryRuntimeError::TelemetryCore(e) => write!(f, "telemetry core: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for TelemetryRuntimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TelemetryRuntimeError::TokioRuntimeBuilder(e)
+            | TelemetryRuntimeError::TelemetryCore(e) => Some(e),
+        }
+    }
+}
+
+/// Drive a [`crate::current_config::Inner`] to a tokio runtime + guard.
+///
+/// `Inner::Enabled` already carries a built [`RotatingWriter`], so this
+/// only needs to materialize the tokio builder and hand both off to
+/// [`TracedRuntimeBuilder::build_and_start`]. `Inner::Disabled`
+/// produces a plain tokio runtime paired with a disabled
+/// [`TelemetryGuard`].
+fn try_assemble_dial9_config(
+    inner: crate::current_config::Inner,
+) -> Result<(tokio::runtime::Runtime, TelemetryGuard), TelemetryRuntimeError> {
+    use crate::current_config::{Inner, materialize_tokio_builder};
+
+    match inner {
+        Inner::Enabled {
+            writer,
+            tokio_configurators,
+            runtime_builder,
+        } => {
+            let tokio_builder = materialize_tokio_builder(&tokio_configurators);
+            let (runtime, guard) = runtime_builder
+                .build_and_start(tokio_builder, writer)
+                .map_err(TelemetryRuntimeError::TelemetryCore)?;
+            Ok((runtime, guard))
+        }
+        Inner::Disabled {
+            tokio_configurators,
+        } => {
+            let runtime = materialize_tokio_builder(&tokio_configurators)
+                .build()
+                .map_err(TelemetryRuntimeError::TokioRuntimeBuilder)?;
+            Ok((runtime, TelemetryGuard::disabled()))
+        }
+    }
+}
+
+impl TracedRuntime {
+    /// Build a [`TracedRuntime`] from a config, panicking with the
+    /// underlying error on failure. Used by the
+    /// `#[dial9_tokio_telemetry::main]` macro.
+    ///
+    /// Reach for this directly when the macro doesn't fit — e.g. when an
+    /// application owns multiple tokio runtimes, when you need to control
+    /// runtime lifetime explicitly, or when you want to drive
+    /// [`TelemetryGuard::graceful_shutdown`] before the runtime drops.
+    ///
+    /// Generic over any input that converts into a [`TracedRuntime`]: in
+    /// practice that means either the fluent
+    /// [`crate::Dial9Config`] (returned by
+    /// [`Dial9Config::builder`](crate::Dial9Config::builder)) or the
+    /// deprecated positional [`crate::config::Dial9Config`]. The generic
+    /// shape is what keeps the macro source-compatible across these
+    /// input types.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying conversion fails — i.e. if the tokio
+    /// runtime cannot be built or the telemetry background worker fails
+    /// to start. When constructing from the fluent
+    /// [`crate::Dial9Config`], writer-transport I/O has already been
+    /// validated by
+    /// [`Dial9ConfigBuilder::build`](crate::Dial9ConfigBuilder::build),
+    /// so the only remaining failure modes are tokio-builder and
+    /// telemetry-core startup I/O.
+    ///
+    /// For fallible construction, use [`try_new`](Self::try_new).
+    ///
+    /// ```no_run
+    /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
+    /// let cfg = Dial9Config::builder()
+    ///     .base_path("trace.bin")
+    ///     .max_file_size(64 * 1024 * 1024)
+    ///     .max_total_size(1024 * 1024 * 1024)
+    ///     .build()?;
+    /// let rt = TracedRuntime::new(cfg);
+    /// rt.block_on(async { /* ... */ });
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn new<C>(config: C) -> Self
+    where
+        C: TryInto<TracedRuntime>,
+        <C as TryInto<TracedRuntime>>::Error: std::fmt::Display,
+    {
+        config
+            .try_into()
+            .unwrap_or_else(|e| panic!("failed to initialize runtime: {e}"))
+    }
+
+    /// Fallible counterpart to [`new`](Self::new).
+    ///
+    /// Returns the conversion error directly: when constructing from
+    /// [`crate::Dial9Config`] that's a [`TelemetryRuntimeError`]; when
+    /// constructing from the deprecated [`crate::config::Dial9Config`]
+    /// it's a [`std::io::Error`]. Use this when you want to handle
+    /// runtime construction failure rather than panic.
+    ///
+    /// ```no_run
+    /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
+    /// let cfg = Dial9Config::builder()
+    ///     .base_path("trace.bin")
+    ///     .max_file_size(64 * 1024 * 1024)
+    ///     .max_total_size(1024 * 1024 * 1024)
+    ///     .build()?;
+    /// let rt = TracedRuntime::try_new(cfg)?;
+    /// rt.block_on(async { /* ... */ });
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn try_new<C>(config: C) -> Result<Self, <C as TryInto<TracedRuntime>>::Error>
+    where
+        C: TryInto<TracedRuntime>,
+    {
+        config.try_into()
+    }
+
+    /// Borrow the underlying tokio runtime.
+    pub fn runtime(&self) -> &tokio::runtime::Runtime {
+        &self.runtime
+    }
+
+    /// Borrow the telemetry guard.
+    ///
+    /// The guard is always present, regardless of whether telemetry was
+    /// installed. Use [`TelemetryGuard::is_enabled`] to distinguish a
+    /// live telemetry session from an inert (disabled) guard.
+    pub fn guard(&self) -> &TelemetryGuard {
+        &self.guard
+    }
+
+    /// Run `fut` to completion on the runtime.
+    ///
+    /// The future is always spawned through the guard's
+    /// [`TelemetryHandle`]. On an enabled guard this records poll and
+    /// wake events; on a disabled guard the handle's `spawn` falls
+    /// through to plain [`tokio::spawn`].
+    pub fn block_on<F>(&self, fut: F) -> F::Output
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let handle = self.guard.handle();
+        self.runtime.block_on(async move {
+            match handle.spawn(fut).await {
+                Ok(output) => output,
+                Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+                Err(_) => unreachable!("task cannot be cancelled inside block_on"),
+            }
+        })
+    }
+}
+
+impl TryFrom<crate::Dial9Config> for TracedRuntime {
+    type Error = TelemetryRuntimeError;
+
+    fn try_from(config: crate::Dial9Config) -> Result<Self, Self::Error> {
+        let (runtime, guard) = try_assemble_dial9_config(config.0)?;
+        Ok(Self { runtime, guard })
+    }
+}
+
+/// Bridge for the deprecated positional config API at
+/// [`crate::config::Dial9Config`] so that it remains compatible with
+/// [`TracedRuntime::new`] (and therefore the
+/// `#[dial9_tokio_telemetry::main]` macro).
+impl TryFrom<crate::config::Dial9Config> for TracedRuntime {
+    type Error = std::io::Error;
+
+    fn try_from(config: crate::config::Dial9Config) -> Result<Self, Self::Error> {
+        let (runtime, guard) = config.build()?;
+        Ok(Self {
+            runtime,
+            guard: guard.unwrap_or_else(TelemetryGuard::disabled),
+        })
     }
 }
 
@@ -1495,9 +1941,9 @@ mod tests {
             assert_eq!(traced, 7);
         });
 
-        // No flush thread or worker to join
-        assert!(guard.flush_thread.is_none());
-        assert!(guard.worker.is_none());
+        // No flush thread or worker to join — the guard is in its
+        // disabled state.
+        assert!(!guard.is_enabled());
     }
 
     #[test]
@@ -1956,6 +2402,7 @@ mod tests {
                         source: CpuSampleSource::CpuProfile,
                         thread_name: None,
                         callchain: callchain.clone(),
+                        cpu: None,
                     };
                     *timestamp += 1;
                     ew.write_raw_event(&data).unwrap();
@@ -2078,7 +2525,7 @@ mod tests {
     #[test]
     fn telemetry_core_builds_guard_without_runtime() {
         let guard = TelemetryCore::builder().writer(NullWriter).build().unwrap();
-        assert!(guard.flush_thread.is_some());
+        assert!(guard.is_enabled());
         let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
     }
 
@@ -2236,7 +2683,12 @@ mod tests {
 
         // Drain thread-local buffers before shutdown.
         crate::telemetry::buffer::drain_to_collector(
-            &guard.handle().traced_handle().shared.collector,
+            &guard
+                .handle()
+                .traced_handle()
+                .expect("enabled handle must yield a TracedHandle")
+                .shared
+                .collector,
         );
 
         drop(runtime);
@@ -2300,5 +2752,166 @@ mod tests {
         drop(rt_a);
         drop(rt_b);
         let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
+    }
+
+    // ---------------------------------------------------------------
+    // High-level construction tests (TracedRuntime::new / try_new)
+    // ---------------------------------------------------------------
+
+    fn dial9_config_tmp_base_path() -> std::path::PathBuf {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Leak the TempDir so it isn't deleted while the test runs.
+        let path = dir.path().join("trace.bin");
+        std::mem::forget(dir);
+        path
+    }
+
+    #[test]
+    fn try_new_enabled_path_returns_value_and_exposes_guard() {
+        let cfg = crate::Dial9Config::builder()
+            .base_path(dial9_config_tmp_base_path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(4 * 1024 * 1024)
+            .build()
+            .expect("strict build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        assert!(
+            rt.guard().is_enabled(),
+            "enabled config must install a live guard"
+        );
+        // Smoke-test the runtime accessor — exists and is usable.
+        let _ = rt.runtime().handle();
+        let value = rt.block_on(async { 5u32 });
+        assert_eq!(value, 5);
+    }
+
+    #[test]
+    fn try_new_disabled_path_returns_value_no_guard() {
+        let cfg = crate::Dial9Config::builder()
+            .enabled(false)
+            .build()
+            .expect("disabled build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
+        assert!(
+            !rt.guard().is_enabled(),
+            "disabled config must yield an inert guard"
+        );
+        let value = rt.block_on(async { 11u32 });
+        assert_eq!(value, 11);
+    }
+
+    #[test]
+    fn new_returns_runtime_for_valid_disabled_config() {
+        // Happy-path counterpart to the strict-I/O panic story: when the
+        // config is valid `TracedRuntime::new` returns a usable runtime
+        // without panicking. The matching panic path is covered by hand at
+        // the type level — `new` is a thin wrapper around `try_into()` that
+        // calls `unwrap_or_else(|e| panic!(...))`, and the surrounding
+        // tests assert that the inner `TelemetryRuntimeError` formats
+        // through `Display` correctly.
+        let cfg = crate::Dial9Config::builder()
+            .enabled(false)
+            .build()
+            .expect("disabled build should succeed");
+        let rt = TracedRuntime::new(cfg);
+        let value = rt.block_on(async { 13u32 });
+        assert_eq!(value, 13);
+    }
+
+    #[test]
+    fn telemetry_runtime_error_display_and_source_chain() {
+        let inner = std::io::Error::other("boom");
+        let err = TelemetryRuntimeError::TelemetryCore(inner);
+        let display = format!("{err}");
+        assert!(
+            display.contains("telemetry core:"),
+            "Display should label the variant, got: {display}"
+        );
+        assert!(
+            display.contains("boom"),
+            "Display should include the inner io::Error message, got: {display}"
+        );
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some(), "source() must return the inner io::Error");
+    }
+
+    // ---------------------------------------------------------------
+    // Always-present TelemetryGuard / inert TelemetryHandle (Phase 3)
+    // ---------------------------------------------------------------
+
+    /// Off-runtime callers should get a usable, inert handle rather
+    /// than a panic.
+    #[test]
+    fn telemetry_handle_current_off_runtime_returns_inert_handle() {
+        // We're on the test thread, which is not owned by any dial9
+        // runtime. `current()` used to panic here.
+        let handle = TelemetryHandle::current();
+        assert!(
+            !handle.is_enabled(),
+            "off-runtime current() must return an inert handle"
+        );
+        // No-op control methods must not panic.
+        handle.enable();
+        handle.disable();
+    }
+
+    /// `TelemetryHandle::disabled` is the explicit constructor for an
+    /// inert handle.
+    #[test]
+    fn telemetry_handle_disabled_constructor_is_inert() {
+        let handle = TelemetryHandle::disabled();
+        assert!(!handle.is_enabled());
+    }
+
+    /// Spawning through a disabled handle still resolves the future —
+    /// it just falls through to plain `tokio::spawn` without wake
+    /// tracking.
+    #[test]
+    fn disabled_handle_spawn_falls_through_to_tokio_spawn() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = TelemetryHandle::disabled();
+        let result = runtime.block_on(async move {
+            handle
+                .spawn(async { 17u32 })
+                .await
+                .expect("disabled spawn must still resolve")
+        });
+        assert_eq!(result, 17);
+    }
+
+    /// A disabled guard's `graceful_shutdown` must be a successful
+    /// no-op — there is no flush thread or background worker to drain.
+    #[test]
+    fn disabled_guard_graceful_shutdown_is_noop_ok() {
+        let guard = TelemetryGuard::disabled();
+        assert!(!guard.is_enabled());
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .expect("graceful_shutdown on disabled guard must be Ok(())");
+    }
+
+    /// The guard returned from a disabled `Dial9Config` is always
+    /// present, exposes an inert handle, and reports `is_enabled() ==
+    /// false`.
+    #[test]
+    fn disabled_dial9_config_yields_inert_guard() {
+        let cfg = crate::Dial9Config::builder()
+            .enabled(false)
+            .build()
+            .expect("disabled build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
+
+        let guard = rt.guard();
+        assert!(!guard.is_enabled());
+        let handle = guard.handle();
+        assert!(!handle.is_enabled());
+        // start_time is None on a disabled guard.
+        assert!(guard.start_time().is_none());
+        // The runtime still works end-to-end.
+        let value = rt.block_on(async { 21u32 });
+        assert_eq!(value, 21);
     }
 }

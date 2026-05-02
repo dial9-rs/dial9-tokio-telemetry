@@ -86,6 +86,7 @@ pub(crate) struct RawCpuSample {
     pub timestamp_nanos: u64,
     pub callchain: Vec<u64>,
     pub source: CpuSampleSource,
+    pub cpu: Option<u32>,
 }
 
 /// Manages the process-wide perf sampler. Yields raw samples without worker IDs.
@@ -134,6 +135,7 @@ impl CpuProfiler {
                     timestamp_nanos: sample.time,
                     callchain: sample.callchain.clone(),
                     source: CpuSampleSource::CpuProfile,
+                    cpu: sample.cpu,
                 },
                 thread_name,
             );
@@ -172,6 +174,7 @@ impl SchedProfiler {
                 timestamp_nanos: sample.time,
                 callchain: sample.callchain.clone(),
                 source: CpuSampleSource::SchedEvent,
+                cpu: sample.cpu,
             });
         });
     }

@@ -86,6 +86,7 @@ impl EventWriter {
                     source: raw.source,
                     callchain: raw.callchain,
                     thread_name: thread_name.cloned(),
+                    cpu: raw.cpu,
                 };
                 record_encodable_event(&data, &shared.collector, &shared.drain_epoch);
             });
@@ -107,6 +108,7 @@ impl EventWriter {
                         // TODO: we should be able to also track thread name here.
                         // sampler is running on worker threads so no thread name
                         thread_name: None,
+                        cpu: raw.cpu,
                     };
                     record_encodable_event(&data, &shared.collector, &shared.drain_epoch);
                 });
