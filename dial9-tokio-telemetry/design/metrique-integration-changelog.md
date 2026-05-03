@@ -34,7 +34,7 @@ Round 2: Flex lowers to `FieldShape::Flex { key, value }` in the descriptor and 
 
 Round 1: `TokioContextSink` wrapped the outer sink and injected an `EntryConfig` carrying the captured context. Dial9 was effectively privileged in the composition.
 
-Round 2: context lives in a `Dial9Context` metrique field. The field's constructor captures caller-thread state; its closed form (`ClosedDial9Context`) is the snapshot the sink extracts through `Source<Dial9>`. Dial9 returns to being a peer sink. `TokioContextSink` is no longer required.
+Round 2: context lives in a `Dial9Context` metrique field. The field's constructor captures caller-thread state; its closed form (`ClosedDial9Context`) is the snapshot the sink extracts through `Extractable<Dial9>`. Dial9 returns to being a peer sink. `TokioContextSink` is no longer required.
 
 ### Per-field opt-in
 
@@ -66,7 +66,7 @@ Mostly unchanged. Global (`attach_to_stream_with_dial9`), builder (`metrique_sin
 
 ### User API (entry definition)
 
-New: `#[metrics(default_field_tag(...))]`, `#[metrics(field_tag(...))]`, `#[metrics(source(...))]`, `#[metrics(no_emit)]`. `skip(T)` is an argument form of the two tag attributes. These are general metrique features, not dial9-specific.
+New: `#[metrics(default_field_tag(...))]`, `#[metrics(field_tag(...))]`, `#[metrics(source(...))]`, `#[metrics(no_write)]`. `skip(T)` is an argument form of the two tag attributes. These are general metrique features, not dial9-specific.
 
 Round-1 entries are unchanged but do not produce dial9 traces. Users opt in by adding the tags and the `Dial9Context` field.
 
@@ -77,12 +77,12 @@ Round 1: no dial9-specific validation story. Misuse was caught if at all by the 
 Round 2: three-tier validation.
 
 - Compile-time, in the metrique macro: intrinsic structural checks (duplicate sources, conflicting tags). Independent of any sink.
-- Startup-time, at `Dial9Stream::new`: dial9 registers every descriptor declaring `source(Dial9)` via metrique's `SourceTag::register_descriptor` hook (backed by `linkme` internally). Empty registry when a dial9 sink is constructed produces a `tracing::warn!`. Users who hit legitimate false negatives disable via `no_startup_discovery`.
+- Startup-time, at `Dial9Stream::new`: dial9 registers every descriptor declaring `source(Dial9)` via metrique's `DiscoverableSourceTag` hook (backed by `linkme` internally). Empty registry when a dial9 sink is constructed produces a `tracing::warn!`. Users who hit legitimate false negatives disable per sink via `.startup_discovery(false)`; unsupported targets cfg out the hook entirely.
 - First-use, per descriptor: dial9-specific structural checks (InTrace without Dial9 source, InternString on non-string, Opaque in InTrace) run once per descriptor on the event path. `debug_assert!` in debug, rate-limited `tracing::error!` in release.
 
 ## Dependency on metrique
 
-Round 2 depends on a metrique PR that adds the descriptor system, source system (including the `SourceTag` trait with a `register_descriptor` hook), field-tag attributes, and a `descriptor()` method on the erased entry vtable. The dial9 PR cannot merge before the metrique PR lands on a released version.
+Round 2 depends on a metrique PR that adds the descriptor system, source system (`SourceTag` marker + `DiscoverableSourceTag` hook + `SourceRegistration` payload), field-tag attributes, and a `descriptor()` method on the erased entry vtable. The dial9 PR cannot merge before the metrique PR lands on a released version.
 
 Linked references:
 
@@ -110,7 +110,7 @@ Round 1 targeted requirements stayed. Round 2 adds explicit requirements that ro
 ## Alternatives that became the new baseline
 
 - Static entry descriptor with explicit `FieldShape::Optional` / `Flex` entries (new in round 2).
-- `Source<C>` extraction for caller-thread context (new in round 2).
+- `Extractable<C>` extraction for caller-thread context (new in round 2).
 - `InTrace`/`InternString` field tags (new in round 2).
 
 ## Open questions flagged in round-1 review, resolved

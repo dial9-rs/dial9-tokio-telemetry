@@ -15,7 +15,7 @@ use dial9::{Dial9, Dial9Context, InTrace, InternString};
 
 #[metrics(default_field_tag(InTrace))]
 struct RequestMetrics {
-    #[metrics(no_emit)]
+    #[metrics(no_write)]
     dial9: Dial9Context,
 
     #[metrics(field_tag(InternString))]
@@ -32,7 +32,7 @@ struct RequestMetrics {
 What this means:
 
 - `Dial9Context` is a dial9-provided metrique field type. Its constructor captures caller-thread context (worker id, task id, start monotonic timestamp). It is declared `#[metrics(source(Dial9))]` in the dial9 crate, so the sink can extract a snapshot from the closed entry.
-- `no_emit` retains `Dial9Context` on the closed entry so the sink can read it, but does not emit its fields through `Entry::write`. `Dial9Context` itself carries `default_field_tag(skip(InTrace))` in its own definition, so if a user opts for `flatten` instead, its fields do not accidentally get pulled into the dial9 payload by the parent's `InTrace` default.
+- `no_write` retains `Dial9Context` on the closed entry so the sink can read it, but does not emit its fields through `Entry::write`. `Dial9Context` itself carries `default_field_tag(skip(InTrace))` in its own definition, so if a user opts for `flatten` instead, its fields do not accidentally get pulled into the dial9 payload by the parent's `InTrace` default.
 - `InTrace` marks fields that should appear in the dial9 trace payload. `skip(InTrace)` at the struct level inverts the default.
 - `InternString` tells the sink to route string data in this field through dial9's string pool.
 
@@ -63,7 +63,7 @@ struct RequestMetrics {
 }
 ```
 
-Because `Dial9Context` itself declares `default_field_tag(skip(InTrace))`, its fields are not tagged `InTrace` by parent-default inheritance. They still carry structural source data via `Source<Dial9>`.
+Because `Dial9Context` itself declares `default_field_tag(skip(InTrace))`, its fields are not tagged `InTrace` by parent-default inheritance. They still carry structural source data via `Extractable<Dial9>`.
 
 ## Architecture
 
@@ -79,7 +79,7 @@ Because `Dial9Context` itself declares `default_field_tag(skip(InTrace))`, its f
 │ User-side:                                                     │
 │   #[metrics(default_field_tag(InTrace))]                       │
 │   struct RequestMetrics {                                      │
-│       #[metrics(no_emit)]      dial9: Dial9Context,            │
+│       #[metrics(no_write)]      dial9: Dial9Context,            │
 │       #[metrics(field_tag(InternString))] route: String,       │
 │       ...                                                      │
 │   }                                                            │
@@ -87,7 +87,7 @@ Because `Dial9Context` itself declares `default_field_tag(skip(InTrace))`, its f
 │ Macro emits:                                                   │
 │   impl Entry for ClosedRequestMetrics (as today)               │
 │   static EntryDescriptor (fields, tags, units, sources)        │
-│   impl Source<Dial9> for ClosedRequestMetrics (via dial9 field)│
+│   impl Extractable<Dial9> for ClosedRequestMetrics (via dial9 field)│
 │   descriptor() hook on the erased entry vtable                 │
 └────────────────────────────────────────────────────────────────┘
                               │
@@ -110,7 +110,7 @@ Because `Dial9Context` itself declares `default_field_tag(skip(InTrace))`, its f
 │                                                                │
 │ All CloseValue runs (Timer, Duration, Option, ...).            │
 │ Dial9Context closes to ClosedDial9Context, retained on the     │
-│ closed entry because of no_emit.                               │
+│ closed entry because of no_write.                               │
 │                                                                │
 │ Entry is pushed to BackgroundQueue as BoxEntry.                │
 └────────────────────────────────────────────────────────────────┘
@@ -194,9 +194,9 @@ impl Dial9Context {
 }
 ```
 
-Construction reads the tokio runtime thread-locals and the monotonic clock. The closed form (`ClosedDial9Context`) is the snapshot the sink extracts through `Source<Dial9>`.
+Construction always captures the monotonic clock. Tokio runtime state (worker id, task id) is captured if the thread is owned by a tokio runtime; otherwise those fields remain `None` / unset. `capture()` is infallible: an off-runtime call is a legitimate "no tokio context right here" signal, not an error. The closed form (`ClosedDial9Context`) is the snapshot the sink extracts through `Extractable<Dial9>`.
 
-If the constructor runs on a thread that is not owned by a dial9 runtime, `Dial9Context::capture()` records the best available data (`WorkerId::UNKNOWN`, no task id) and the sink proceeds normally; a rate-limited `tracing::warn!` flags the missing context. Entries still flow.
+If no dial9 runtime is attached at all (inert `TelemetryHandle`), `Dial9Stream` short-circuits the event; the `Dial9Context` field is harmlessly constructed and discarded. No rate-limited warn is required for the off-runtime case; the captured snapshot carries a timestamp and whatever tokio state was available.
 
 ### `Dial9Stream`
 
@@ -206,7 +206,7 @@ Per entry:
 
 1. If the handle is inert: return `Ok(())` immediately; entries still reach EMF through the tee.
 2. Look up `entry.descriptor()`. `None` is reported once and skipped.
-3. Look up the entry's `Source<Dial9>` snapshot. Missing source with present `InTrace` fields is reported and the entry is skipped.
+3. Look up the entry's `Extractable<Dial9>` snapshot. Missing source with present `InTrace` fields is reported and the entry is skipped.
 4. Ensure a schema is registered for this descriptor (see "Schema handling" below).
 5. Start an event on the encoder using the snapshot timestamp.
 6. Walk `Entry::write` with a `Dial9EntryWriter` that uses the descriptor to filter by `InTrace`, route `InternString` fields through the string pool, and encode each value according to its `FieldShape`.
@@ -245,9 +245,13 @@ Units encode as `("metrique.unit", "microseconds")` on the annotated field. Fiel
 
 ### Typed dynamic maps
 
-A new `FieldType` family (`StringMap<V>` for fixed-schema keys-as-strings; `PooledStringMap<V>` when keys are interned) that lets dial9 represent a metrique `Flex<(String, T)>` as a single schema field carrying a map at encode time, instead of one schema per runtime key.
+A single new `FieldType::Map { key: FieldType, value: FieldType }` variant lets dial9 represent a metrique `Flex<(String, T)>` as one schema field carrying a map at encode time, instead of one schema per runtime key.
 
-Wire layout is conventional (`<count> <repeated key value>`), using existing scalar encodings for `V` and the existing pooled-string encoding for keys when interned. The value type is fixed at schema time; if metrique later adds heterogeneous Flex values, the schema representation will need a tagged-value variant. That is out of scope for this integration.
+Wire layout: `<count> <repeated key value>`, using the existing scalar encodings determined by the `key` and `value` types declared in the schema. Keys and values are **sealed at schema registration**: the encoder does not write per-element type tags, and the decoder reads each pair using the schema-bound key and value types. A producer that writes data inconsistent with the schema produces a corrupt stream, the same guarantee the rest of the format relies on for existing fields.
+
+Recursion is forbidden. `FieldType::Map` is not a valid `key` or `value` type. Map-of-map is out of scope; a future extension can introduce a tagged-value form if metrique grows heterogeneous dynamic values.
+
+Pooled-string map keys are expressed by setting `key = FieldType::PooledString`; pooled-string map values similarly. The `dial9::InternString` field tag on a metrique `Flex` field selects the pooled variant per-position as needed.
 
 ## Error handling and resilience
 
@@ -255,7 +259,7 @@ Wire layout is conventional (`<count> <repeated key value>`), using existing sca
 - **Entries with `InTrace` fields but no `Dial9` source**: reported once per descriptor; entries are skipped. This is a user configuration error; the sink surfaces it rather than encoding partial events.
 - **Entries with `FieldShape::Opaque` selected for `InTrace`**: reported once per `(descriptor, field)` pair; the field is skipped on the wire. The rest of the entry still encodes.
 - **Inert telemetry handle**: `Dial9Stream` returns `Ok(())` immediately. Entries still reach EMF.
-- **Caller thread not owned by a dial9 runtime**: `Dial9Context::capture()` records best-effort values and the entry encodes normally.
+- **Caller thread not owned by a tokio runtime**: `Dial9Context::capture()` still records a monotonic timestamp; tokio fields remain unset. The entry encodes normally.
 - **Panic inside `Value::write`**: caught per entry; the offending event is dropped with a rate-limited log. The flush thread's encoder state stays valid.
 
 ## Validation
@@ -268,7 +272,7 @@ The metrique macro catches structural mistakes that do not depend on dial9: dupl
 
 ### Startup-time (binary-wide, opt-out via feature)
 
-Dial9 implements `metrique::SourceTag::register_descriptor` for its `Dial9` tag. Every macro-derived entry declaring `source(Dial9)` registers its `&'static EntryDescriptor` into a dial9-owned vec before `main`. At sink construction, dial9:
+Dial9 implements `metrique::DiscoverableSourceTag` for its `Dial9` tag. Every macro-derived entry declaring `source(Dial9)` registers its `&'static EntryDescriptor` into a dial9-owned vec before `main`. At sink construction, dial9:
 
 1. If the registered vec is empty: emit one `tracing::warn!` pointing the user at "you attached a dial9 sink, but no struct in this binary declares `source(Dial9)`; the sink will not produce any events." Does not abort.
 2. If the registered vec is non-empty: run per-descriptor structural checks on every registered descriptor (same checks as first-use, described below). Any failures report via `debug_assert!` in debug builds and rate-limited `tracing::error!` in release.
@@ -280,7 +284,15 @@ Known false-positive and false-negative scenarios:
 - **False positive (warn does not fire when user has a misconfiguration)**: a dependency ships its own tagged entries. The user's binary has entries from the dep even though the user added none of their own.
 - **Exotic build setups**: unusual linker flags that strip pre-main registration sections. In these builds the warn always fires regardless of user code.
 
-Users who hit a legitimate false negative can disable the warn with the dial9 crate feature `no_startup_discovery`. The feature-gated build skips the registration hook entirely (dial9 does not depend on `linkme`/`ctor` in that configuration) and omits the empty-registry warn. Per-descriptor first-use validation (below) continues to run.
+Users who hit a legitimate false negative on a supported target can disable the empty-registry warn per-sink via the builder:
+
+```rust
+Dial9Stream::builder(&handle).startup_discovery(false).build();
+```
+
+Per-descriptor first-use validation (below) continues to run unconditionally.
+
+On targets where link-time registration is unavailable (WASM without the relevant feature flags, exotic embedded targets), dial9's `DiscoverableSourceTag` impl is cfg'd out. No registrations are emitted, no registry is iterated, the empty-registry warn is compiled out. First-use validation still runs.
 
 ### First-use (descriptor-local, per descriptor, always on)
 
