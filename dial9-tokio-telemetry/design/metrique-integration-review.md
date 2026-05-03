@@ -1,156 +1,164 @@
-# Metrique Integration: Review-only Companion
+# Metrique integration: review-only companion
 
 **This document is deleted as part of PR sign-off. Anything that survives review lives in `metrique-integration.md`.**
 
-The permanent design doc covers what we are building. This document covers why we picked it and what we rejected, so reviewers can evaluate the choice without reconstructing the reasoning from scratch.
+The permanent doc covers what we are building. This doc covers why we picked it and what we rejected.
 
-## Requirements that drove the design
+See also:
 
-Hard constraints (a design that violated these would have been rejected outright):
+- `metrique-integration-changelog.md` (review-only): what changed since round 1 of PR #346 and why.
+- `metrique-integration-impl-plan.md` (review-only): sequencing, metrique-side and dial9-side module work, and intentional scope limits.
 
-1. **One sink composition works for heterogeneous entry types.** Users with multiple metrique struct types feeding the same pipeline cannot be forced to split sinks per type.
-2. **Low net caller-thread overhead.** Encoding work does not happen on the caller. Net new cost on the caller thread is on the order of tens of nanoseconds.
-3. **Tokio runtime context.** `worker_id`, `task_id`, and event timestamp are captured on the caller thread at close, not sampled later on a flush thread where the context is gone.
-4. **Event timestamps.** The dial9 event frame timestamp reflects close time on the caller, not flush time.
-5. **No metrique-core changes.** Metrique's core trait and type definitions stay untouched. It's nice to keep `metrique-macro` and `dial9-macro` untouched, but not required.
-6. **Uniform handling of metrique field types.** `Duration`, `SystemTime`, `Timer`, `TimestampValue`, `Flex<T>`, value-string enums, and user custom types all work without per-type dial9 impls.
+## Requirements
 
-Strong downsides we worked to avoid (violations were possible but would have made the design meaningfully worse):
+Hard constraints. Any design violating these would be rejected.
 
-- **Non-local coupling for users.** Requiring users to annotate every metrique struct and also configure the sink was a significant downside. Annotating every individual struct would have been acceptable, if uncomfortable. Requiring both was the real problem we worked to eliminate.
-- **No single user-facing entry point for the common case.** One call should build the sink. Advanced compositions remain possible but are not required.
+1. **Heterogeneous entries.** One sink composition must handle a `BackgroundQueue` carrying multiple metrique struct types through `BoxEntry`. Users cannot be forced to split sinks per entry type.
+2. **Low caller-thread overhead.** Encoding runs on the flush thread. Caller-thread cost must be bounded to capturing context and wrapping, on the order of tens of nanoseconds plus one clock read per entry.
+3. **Caller-thread context capture.** `worker_id`, `task_id`, and the event start timestamp are captured where they are available, not sampled on a flush thread where the tokio thread-locals are gone.
+4. **No metrique-core changes that break existing users.** Adding to metrique is acceptable; breaking existing `Entry`, `Value`, or `CloseValue` semantics is not.
+5. **Uniform metrique field types.** `Duration`, `SystemTime`, `Timer`, timestamp types, `Flex`, value-string enums, and user custom types work through one path.
+6. **Per-field opt-in.** Users must be able to choose which fields appear in the dial9 trace without wrapping fields in dial9-specific newtypes and without annotating every field individually.
+7. **Optional-field schema stability.** A struct with optional fields produces one dial9 schema, not one per combination of present/absent optionals.
+8. **Flex schema stability.** Dynamic-key maps produce one dial9 schema, not one per distinct key.
+9. **Units are first-class.** Units survive from the metrique definition into the trace metadata without name-mangling hacks.
 
-Nice to have:
+Strong preferences:
 
-- Simple misuse-resistant APIs as the primary surface, with lower-level APIs allowed to expose more footguns to users who opt into manual composition.
-- Compile-time misconfiguration checks, where cheap.
-- Unit information in the trace via field-name convention.
-- Clean Flex handling in v1 with bounded dynamic keys. Path to unbounded-key support.
-- Future optimizations (schema caching, typed dynamic maps) without breaking the v1 user API.
+- Single entry point for the common case (one function call builds the sink).
+- Advanced compositions still work: builder variants, manual `tee` + `BackgroundQueue`.
+- Clean future evolution for OTEL, custom user sinks, and a future compile-time wire plan.
+- Compile-time misconfiguration detection where cheap.
+- Zero cost on sinks that do not use any of this machinery.
 
-## Tradeoffs in the chosen design
+## Tradeoffs worth reviewer attention
 
-Items worth reviewer attention:
-
-1. **Heterogeneous sinks vs. compile-time schema.** We picked runtime schema discovery, which costs on the order of 100 to 200 ns per event on the flush thread. The cost estimate is derived from hash-per-byte and trait-dispatch counts, not benched. Worth a microbenchmark before merge, especially for pathological cases (20+ field structs).
-2. **Order-dependent shape fingerprint.** Depends on metrique's macro-generated `Entry::write` emitting fields in deterministic order per struct. True today but not a documented contract. If the order ever becomes nondeterministic per call, cache bloats. Functional but wasteful. We can add an integration test against current metrique that pins the assumption on our end, so we'd notice before users did.
-3. **Bounded cache size default of 10,000.** Guess, not measured. Rough footprint: a schema entry is about 500 bytes (field defs, name strings, hash metadata), so 10,000 entries is about 5 MB of resident memory in the worst case. The cache size should become tunable via the builder (listed in the prospective improvements). Default should still be revisited against a real workload.
-4. **Runtime warning for manual-composition misuse.** Relies on `tracing` being configured. Users running without `tracing` subscribed won't see the warning.
+- **Schema cache keyed on `&'static EntryDescriptor` pointer, not shape fingerprint.** This is correct because macro-derived descriptors are `'static` and unique per type. It works because the descriptor is the full closed-shape description; sinks never need to observe emissions to learn structure. Consequence: hand-written entries (which return `None` for the descriptor) are skipped, not encoded via a fingerprint fallback.
+- **`no_emit` introduces a new close-time behaviour users have to understand.** `ignore` and `no_emit` are adjacent but distinct: `ignore` means "the macro pretends this field does not exist for metrics purposes"; `no_emit` means "keep the field closed and retained, but do not emit through `EntryWriter`." The diagnostic story has to be careful to push users to the right one.
+- **`InTrace` default inheritance interacts with `flatten`.** The rule we landed on (child explicit decisions win; parent defaults fill only unspecified) is the rule that lets `Dial9Context` protect its own fields from accidental `InTrace` inheritance when flattened. It is a rule reviewers should exercise against their own use cases.
+- **Dial9 depends on a descriptor-system PR in metrique.** The dial9 implementation cannot land before the metrique PR does. The changelog doc tracks the specific dependency.
+- **Units on the wire are schema annotations, not field-name suffixes.** This is a one-time downstream-tooling change: consumers looking for `latency_Microseconds` need to look at schema metadata instead. It is the right long-term shape; field-name suffix is a hack we did not want to permanently bake in.
+- **Hand-written entries are skipped.** We accept losing them for this pass. The evolution path is a metrique-level "hand-written `DescribeEntry`" extension, not a dial9-level fallback. A fallback would duplicate most of the design's motivation.
 
 ## Key design choices
 
-### Runtime schema discovery rather than compile-time
+### Descriptor-aware sink, not runtime shape inference
 
-Two blockers on the compile-time path, either sufficient on its own:
+The original PR walked `Entry::write` and inferred schema from observed `(name, field_type)` sequences. That approach was rejected as the primary mechanism for two reasons:
 
-1. **Heterogeneous sinks**. The Global-sink path erases entries to `BoxEntry` before our stream sees them. A `Dial9Sink<E, S>` parameterized by a specific concrete `E` only works for homogeneous pipelines; users mixing metrique struct types through one pipeline would have to split their sinks.
-2. **Open-ended `TraceField` maintenance**. Every `Value` impl in metrique (primitives, unit wrappers, aggregation types) would need a parallel `TraceField` impl. Every user custom type that today works with metrique by implementing `Value` alone would need a new `TraceField` impl to work with dial9. This is a cost users would pay on every custom type they add.
+1. **Optional-field schema explosion.** A struct with K optional fields can produce up to 2^K distinct observed shapes. Every observed shape registers a separate schema and re-emits the schema frame. The cache either grows unboundedly or thrashes.
+2. **Unbounded Flex keys.** Each distinct `Flex::new(key)` value produces a distinct observed shape. For keys drawn from a high-cardinality source, the cache thrashes.
 
-Runtime adaptation via `Entry::write` / `Value::write` handles anything metrique can emit, through metrique's stable abstraction, with no per-type maintenance. The cost is flush-thread work. The caller is unaffected.
+The revised design consumes a static descriptor from metrique. Descriptor covers all possible fields up front. One registration per entry type. Optional fields and Flex lower to explicit descriptor entries, so the sink never needs to infer.
 
-### Context propagation via `EntryConfig`
+Runtime discovery is still available as a fallback for hand-written entries; we chose to skip them in v1 instead of paying for two code paths.
 
-`EntryConfig` is metrique's existing mechanism for per-entry format-specific metadata. Dial9 adds one type to this mechanism (`TokioContext`) and reads it from the config stream on the flush thread. No new metrique primitives required.
+### Context capture via a metrique source field, not a sink wrapper
 
-### `BoxEntry` erases concrete types
+An earlier iteration captured caller-thread context through a `TokioContextSink` wrapper that injected an `EntryConfig`. The revised design puts capture in a real metrique field (`Dial9Context`) whose constructor reads the tokio thread-locals and whose closed form is the snapshot the sink extracts via `Source<Dial9>`.
 
-On the Global path, entries pass through `BoxEntrySink::append_any` which boxes into `BoxEntry`. The user's concrete entry type is erased by the time `Dial9Stream::next` runs. `TypeId::of::<E>()` at the stream level would always return `TypeId::of::<BoxEntry>()`, which is useless for schema-cache keying.
+Advantages:
 
-The schema cache therefore keys on shape fingerprint alone: a hash of observed `(name, field_type)` pairs in emission order. This also happens to handle Flex correctly. Different Flex keys produce different fingerprints and different cache entries.
+- No sink wrapper in the composition path. Dial9 is a true peer sink.
+- Capture runs in the entry's constructor, so context is recorded on the caller thread by construction, not by convention.
+- The closed snapshot survives `BoxEntry` erasure in a typed way because it is reachable through `inner_any` and `Source<Dial9>`.
+- Users who want context visible as normal payload can `flatten` instead of `no_emit`; the source data remains structurally available.
 
-### Order-dependent shape fingerprint
+The sink wrapper is not removed outright: users who want runtime-wide defaults can still provide their own helper that constructs `Dial9Context` and merges it in. It stops being the primary path.
 
-Metrique's macro-generated `Entry::write` emits fields in declaration order today. Two emissions of the same struct produce the same fingerprint. If metrique ever introduces nondeterministic emission order, the cache will bloat. Events still encode correctly, but the same struct occupies multiple cache slots. Order-independent fingerprinting is a drop-in replacement if we ever need it.
+### Dial9-owned tags and provider, user-owned opt-in
 
-### Frame timestamp is captured on the caller thread
+Dial9 defines `Dial9` (source tag), `InTrace` (field tag), and `InternString` (field tag) in its own crate. Users opt in via `#[metrics(...)]` attributes applied to their own structs. No metrique macro change is needed to teach the macro about dial9 specifically; the macro records opaque tag identities and the dial9 sink interprets them.
 
-The dial9 event frame timestamp comes from `TokioContext::monotonic_ns`, captured at `TokioContextSink::append` time. This is close-time on the caller thread, in the same clock domain as tokio runtime events (`CLOCK_MONOTONIC`). Flush-thread timestamps would be lagged by however long the entry waited in the `BackgroundQueue` and would be unhelpful for correlation.
+This is what makes the mechanism general. OTEL, a privacy-tier sink, a metrics-rs bridge, all use the same mechanism with their own tags.
 
-For users who compose `Dial9Stream` manually without `TokioContextSink`, `Dial9Stream` logs a rate-limited warning and falls back to the flush-thread clock. Functional but inferior. Users are expected to compose correctly.
+### Schema annotations for units
+
+Units attach to fields as schema-level annotations (`("metrique.unit", "microseconds")`). Fields with no unit pay zero bytes.
+
+We considered:
+
+- **Field-name suffix** (`latency_Microseconds`). Rejected: bakes units into the name, downstream consumers have to reverse it, does not support `Unit::Custom("...")` cleanly.
+- **Sink-specific unit-typed fields** (`U64Microseconds`, `U64Bytes`). Rejected: scales with unit count, wire churn per new unit.
+
+Generic schema annotations scale without wire churn and leave room for other future metadata (display hints, privacy labels, semantic-convention names).
+
+### Typed dynamic maps for Flex
+
+Metrique `Flex<(String, T)>` lowers to a new dial9 typed-map field, encoded as `<count> <repeated key value>`. One schema field regardless of keys. The value type is fixed at schema time, matching metrique's current Flex shape. Heterogeneous values are a future extension that needs both metrique and dial9 changes.
+
+### Peer sink composition unchanged
+
+`tee(emf_stream, Dial9Stream::new(&handle))` inside a `BackgroundQueue`, `metrique_sink(...)` builder, and `ServiceMetrics::attach_to_stream_with_dial9` all remain as the three composition paths. The wire to metrique is the descriptor, not a new composition primitive.
 
 ## Alternatives considered
 
-### Compile-time `TraceEvent` path (rejected)
+### Alternative A: Runtime shape fingerprinting (the original PR)
 
-Several shapes were explored, all variations on the theme of "dial9's compile-time `TraceEvent` machinery encodes metrique entries directly":
+Rejected. See "Descriptor-aware sink, not runtime shape inference" above.
 
-- A metrique-macro attribute, for instance `#[metrics(derive(TraceEvent), observe(Dial9))]` or the wrapper-macro variants (`#[dial9_metrics]`, `observe_as(TraceEvent => Dial9)`).
-- Dial9 publishing `TraceField` implementations for metrique types (`Duration`, `SystemTime`, `Timer`, `TimestampValue`, `FlexEntry<T>`) plus a `TraceField` derive for value-string enums. Users extend for their own types.
-- A compile-time pairing check inside metrique-macro that errors if a struct has `derive(TraceEvent)` without `observe(Dial9)`.
+Kept as a bounded fallback for hand-written entries, then cut to "skip hand-written entries" to avoid two code paths. Can be reinstated if hand-written-entry support becomes important.
 
-Two independent blockers, either of which would have been decisive:
+### Alternative B: Dial9-specific `#[derive(TraceEvent)]` on the same struct
 
-**Blocker 1: the Global sink path erases `TraceEvent` through `BoxEntry`.** `BoxEntrySink::append_any` takes `impl Entry + Send + 'static` and calls `entry.boxed()` internally, so by the time `TokioContextSink` or `Dial9Stream` receives the entry, the user's concrete type has been erased to `BoxEntry`. `TraceEvent`-ness cannot be recovered from there. Preserving it would require either a parallel object-safe `DynTraceEvent` trait plus a dial9-owned box type (`TraceEvent` is not object-safe today: GAT `Ref<'a>`, generic `encode_fields<W: Write>`), or a metrique-side change so `ServiceMetrics` can attach a sink typed concretely over `TraceEvent + Entry`.
+Rejected. Two independent blockers.
 
-**Blocker 2: `TraceField` maintenance is open-ended and grows with metrique.** Every `Value` impl in metrique (primitives, unit wrappers, aggregation types, future additions) needs a parallel `TraceField` impl. More painfully, every user custom type that today works with metrique by implementing `Value` alone would need a new `TraceField` impl to work with dial9. That is a cost users pay forever, and dial9 cannot reduce it without coupling deeper into metrique's type system.
+1. **`BoxEntry` erasure.** `BoxEntrySink::append_any` takes `impl Entry + Send + 'static` and boxes internally. By the time `Dial9Stream` sees the entry, the concrete type (and any `TraceEvent` impl) has been erased. Preserving `TraceEvent`-ness requires either a parallel object-safe trait plus a dial9-owned box, or a metrique-side change so `ServiceMetrics` can attach a sink typed over `TraceEvent + Entry`. In Russell's review thread, he pointed out that `Encodeable` is `dyn`-safe; the blocker is not object safety but threading the type through `BoxEntrySink::append_any`, which does not carry that bound. The least-bad workaround is a TypeId-keyed vtable bridge on `BoxEntry`, which does not feel right.
+2. **Parallel `TraceField` maintenance.** Every `Value` impl (primitives, unit wrappers, aggregation types) plus every user custom type would need a parallel `TraceField` impl. Russell suggested a blanket `TraceField for impl Value`, which works for the primitives path, but it loses compile-time shape knowledge for user types (the whole reason one would use `TraceEvent` in the first place).
 
-Runtime adaptation via `Entry::write` / `Value::write` dodges both. It operates on metrique's stable abstraction, which the boxed entry exposes just as well as the concrete one, and which every metrique-compatible type already implements.
+The descriptor path sidesteps both. It reads metrique's stable abstraction and does not require any sink-specific trait on `Value` impls.
 
-Additional downsides that would have applied:
+### Alternative C: Compile-time dial9 wire plan
 
-- Requires metrique-macro changes (passthrough, marker emission, pairing enforcement) to catch "I derived TraceEvent but didn't wire Dial9" misuse, and structs that forget the attribute are silently absent from dial9.
-- Value-string enums cannot be covered by a single `TraceField` blanket without restricting what "being a value-string enum" means via an explicit metrique trait, which is another metrique change.
+Rejected for this pass. A compile-time wire plan would let dial9 skip `Entry::write` dispatch on the flush thread. It would be strictly better for performance, but it does not unlock any of the functional requirements; the descriptor path already meets them.
 
-### Dial9 as a `Format`
+Static plans are an evolution path, not a prerequisite. The descriptor already carries strictly less information than a static plan would; adding a plan layer on top is additive.
 
-Proposed shape: implement `metrique_writer_core::format::Format` or an `EntryIoStream` that acts as dial9's format inside a tee.
+### Alternative D: `D9Meta` / `Dial9Meta` with a `Default` impl and flatten-only sugar
 
-Partially accepted: `Dial9Stream` is an `EntryIoStream`. What was rejected:
+Russell's proposal: users write `#[metrics(flatten)] d9: D9Meta` with `..Default::default()` on construction, and the sink picks D9Meta out of the flattened fields.
 
-- Running with no caller-thread context capture. `Format::format` and `EntryIoStream::next` are called on the flush thread. Thread-locals there reflect the flush thread, not the caller. We need `TokioContextSink` on the caller side to capture context in time.
-- Running the full encoding pipeline with compile-time schema via `TraceEvent`. `Format::format` takes `&impl Entry`, not `&impl TraceEvent`. We cannot constrain entries to `TraceEvent` at the format boundary.
-- Relying on flush-thread timestamps. Entry sat in a `BackgroundQueue` for an unbounded amount of time before the format sees it.
+Rejected as the primary path because:
 
-### Wrapping metrique's composition primitives
+- It conflates source semantics with field emission. Context data does not always belong in normal emission.
+- The sink identifying "this is the dial9 context" by convention is fragile. A typed `Source<Dial9>` extractor is a better contract.
+- `flatten` was never intended as a hook for sink-specific extraction; repurposing it narrows metrique's flexibility.
 
-Proposed shape: dial9-owned `BackgroundQueue` and `tee` types that enforce composition correctness via type state, or require all dial9 users to go through dial9's versions.
+We kept flatten as a secondary path for users who want dial9 context **and** normal emission. That still works because `Dial9Context` carries its own `default_field_tag(skip(InTrace))` so the parent's `InTrace` default does not accidentally pull its fields into the dial9 payload.
 
-Rejected because:
+### Alternative E: Dial9 as a pure `Format`
 
-- Fragments the ecosystem. Users either use metrique's primitives or dial9's. Mixing is awkward. Composition with other metrique-writer features (`merge_globals`, `merge_global_dimensions`, sampling formats) becomes accidentally second-class.
-- Enforcement coverage is marginal. The Global and Builder paths already prevent the misconfiguration that wrapping would catch. The only remaining misuse is in the Manual path, where users have explicitly opted into ad-hoc composition.
+Partially accepted (`Dial9Stream` is an `EntryIoStream`), but the pure-`Format` variant is rejected because `Format::format` runs on the flush thread and cannot capture tokio context from there. Capture has to happen in the caller-thread construction of the entry.
 
-### Separate dial9-owned background thread for metrique events
+### Alternative F: Wrapping metrique's `BackgroundQueue` / `tee` primitives in dial9-owned types
 
-Proposed shape: `TelemetryHandle::with_metrique_encoder()` at runtime-build time spawns a dial9-owned encoder thread. Caller sends boxed entries to it via an mpsc channel. Dial9 owns the thread. Metrique owns its own sink separately.
+Rejected. Fragments the ecosystem; offers marginal enforcement beyond what the global and builder paths already provide; complicates composition with other metrique-writer features.
 
-Rejected because:
+### Alternative G: Separate dial9-owned background thread
 
-- Two parallel background queues (one metrique-owned for EMF, one dial9-owned for dial9) doubles the thread count and complicates flush/shutdown semantics.
-- Requires `E: Clone + Send + 'static` to send the entry across. A bound that most metrique entries satisfy but not all.
-- The metrique-writer ecosystem is the natural home for the background work. Piggy-backing on metrique's `BackgroundQueue` means dial9 benefits from queue metrics, flush coordination, shutdown timeouts, and metrics-rs integration for free.
+Rejected. Duplicates the work metrique already does via `BackgroundQueue`. Requires `Clone` on entries. Makes flush/shutdown semantics harder.
 
-### Wire format changes (deferred)
+### Alternative H: Units in field names
 
-Proposed shape: new `FieldType` variants for typed dynamic maps (e.g., `StringMapOfF64`) that would encode Flex fields as a single typed-map field per parent entry rather than one distinct schema per dynamic key.
+Rejected. See "Schema annotations for units" above.
 
-Deferred rather than rejected. This is in the prospective improvements list of the design doc.
+### Alternative I: Units as sink-specific wire types
 
-Reasoning for deferral:
+Rejected. See "Schema annotations for units" above.
 
-- No v1 user is asking for it. Bounded cache with eviction handles the common cases.
-- Wire format changes are additive but not free: every trace consumer that inspects field types has to be updated. v1's job is to get metrique events into traces. The encoding choice for highly dynamic Flex usage is a separate conversation that needs real-world v1 usage data.
+### Alternative J: Flex keys always interned
 
-### Programmatic stats handle in v1
+Rejected. Flex keys are user-controlled and may be high-cardinality. Interning is an opt-in field tag (`InternString`), not a default.
 
-Proposed shape: `Dial9StatsHandle` returned from the builder, holding an `Arc<StatsInner>` shared with `Dial9Stream`, with a `snapshot()` method.
+### Alternative K: Programmatic stats handle in v1
 
-Rejected for v1 because:
+Rejected for this pass. Shape of the desired stats API is unclear without real usage; the `tracing::debug!` periodic reporting plus rate-limited `tracing::warn!` on the error paths is enough for diagnosis. Integration into a proper metrics pipeline can happen once metrique exposes a better reporting hook (see [metrique#205](https://github.com/awslabs/metrique/issues/205)).
 
-- Doesn't compose cleanly with the Global path. `AttachHandle` is opaque and can't carry additional handles without changing metrique.
-- Shape of the desired stats API is unclear without real user pressure. Histogram vs counters, per-schema breakdown vs aggregate, push vs pull.
-- `tracing::debug!` plus rate-limited `tracing::warn!` on eviction is enough to diagnose problems in v1. Integrating into a proper metrics pipeline can happen once [metrique#205](https://github.com/awslabs/metrique/issues/205) lands a better reporting hook.
+## Feasibility checks
 
-## Feasibility checks completed
-
-The design rests on specific metrique and dial9 API shapes, confirmed before finalizing.
-
-- `AttachGlobalEntrySink::attach` takes `(impl EntrySink<BoxEntry> + Send + Sync + 'static, impl Any + Send + Sync)`. `BackgroundQueue::new(stream)` produces that tuple. The Global path hands the same tuple to `attach`.
-- `tee` and `BackgroundQueue` are public. `tee(stream1, stream2)` implements `EntryIoStream`; `BackgroundQueue::new(stream)` wraps any `EntryIoStream`, so `BackgroundQueue::new(tee(emf, dial9))` is the composition the Global and Builder paths use.
-- `EntryConfig` is `Any + Debug + 'static`. Custom config types (our `TokioContext`) slot in without metrique changes.
-- `EntryIoStream::next(&mut self, entry: &impl Entry)` is where our runtime adapter hooks. `Entry::write(writer)` drives the adapter.
-- `ValueWriter::metric(..., unit: Unit, ...)` exposes the unit for numeric values. `Unit::name()` returns `&'static str` in CloudWatch's vocabulary.
-- `dial9_tokio_telemetry::telemetry::clock_monotonic_ns()` is `pub` and callable from any thread. `TokioContextSink` depends on it.
-- `FlexEntry<T>::write` emits exactly one `value(dynamic_key, &value)` call. Different dynamic keys produce different shape fingerprints naturally.
-- `ThreadLocalEncoder` on the flush thread is how dial9 events are written. It wraps `dial9_trace_format::encoder::Encoder`, which exposes `pub fn write_event(schema, values)` for the dynamic-schema path.
-- `BoxEntry::inner()` returns `&dyn Any`, but the inner is the trait object, not the user's struct. `Any::type_id()` is useless for distinguishing user entry types through `BoxEntry`. Schema cache therefore keys on shape fingerprint, not `TypeId`.
+- `BoxEntry::inner()` returns `&(dyn Any + Send + 'static)`; the concrete closed entry is reachable for `Source<Dial9>` extraction.
+- Adding one method (`descriptor()`) to the erased entry trait is a metrique-side surface change, not a dial9-side one. Dial9 depends on it; see the impl plan for sequencing.
+- `tee` and `BackgroundQueue` are public; the existing composition paths continue to work unchanged.
+- `EntryConfig` is retained; it is the right primitive for per-emission, sink-provided data. Descriptors and sources cover per-type, entry-provided data. The two coexist.
+- `dial9_tokio_telemetry::telemetry::clock_monotonic_ns()` is `pub` and callable from any thread; `Dial9Context::capture()` uses it directly.
+- Schema annotations and typed dynamic maps are additions to `dial9-trace-format`. Backward compatibility is achievable with a schema-section version bump; see the impl plan for the concrete shape.
