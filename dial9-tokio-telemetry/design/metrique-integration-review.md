@@ -99,6 +99,20 @@ Metrique `Flex<(String, T)>` lowers to a new dial9 typed-map field, encoded as `
 
 `tee(emf_stream, Dial9Stream::new(&handle))` inside a `BackgroundQueue`, `metrique_sink(...)` builder, and `ServiceMetrics::attach_to_stream_with_dial9` all remain as the three composition paths. The wire to metrique is the descriptor, not a new composition primitive.
 
+### Validation strategy
+
+Validation runs in three phases: compile-time intrinsic checks from the metrique macro, startup-time binary-wide discovery at sink construction, and per-descriptor first-use validation on the event path. Each catches a different class of error.
+
+Compile-time checks are essentially free and entirely metrique's responsibility. They catch structural contradictions (duplicate source tags, conflicting field-tag attributes) but cannot catch dial9-specific rules because metrique treats tag identity opaquely.
+
+Startup-time discovery uses the `SourceTag::register_descriptor` hook in metrique. Dial9 implements it to push registered descriptors into a `Mutex<Vec<_>>`, and `Dial9Stream::new` inspects the vec at construction. The specific failure mode we want to catch: a user attaches a dial9 sink but no struct in the binary declares `source(Dial9)`. Without this check, the sink runs silently and produces no events, and the user finds out when they look at their trace file and see nothing.
+
+The check is best-effort, not a correctness guarantee. Known false-positive and false-negative scenarios (multi-binary workspaces, feature-gated structs, deps shipping their own tagged entries) are enumerated in the keeper's Validation section. Users who hit a false negative can disable the warn via the `no_startup_discovery` feature on the dial9 crate; the feature-gated build avoids the `linkme`/`ctor` dependency chain entirely.
+
+Per-descriptor first-use validation runs unconditionally, whether or not startup discovery ran. Every descriptor the sink sees on the event path gets walked once for dial9-specific structural errors (`InTrace` without `Dial9` source, `InternString` on non-string shape, opaque field tagged `InTrace`). The verdict caches on the `&'static EntryDescriptor` pointer.
+
+Failure policy for dial9-specific structural errors: `debug_assert!` in debug, rate-limited `tracing::error!` in release. These are errors the user must fix; they do not have meaningful false positives. The broken entry is dropped from the dial9 path; EMF and other sinks are unaffected.
+
 ## Why not compile-time (in one place)
 
 The compile-time path keeps coming up in review, so consolidating the argument here rather than scattering it across alternatives.
@@ -187,6 +201,36 @@ Rejected. Flex keys are user-controlled and may be high-cardinality. Interning i
 ### Alternative K: Programmatic stats handle in v1
 
 Rejected for this pass. Shape of the desired stats API is unclear without real usage; the `tracing::debug!` periodic reporting plus rate-limited `tracing::warn!` on the error paths is enough for diagnosis. Integration into a proper metrics pipeline can happen once metrique exposes a better reporting hook (see [metrique#205](https://github.com/awslabs/metrique/issues/205)).
+
+### Alternative L: User-invoked compile-time validation macro
+
+Proposed shape: dial9 ships `dial9::assert_dial9_compatible!(MyStruct)`. Users place it next to their `#[metrics(..)]` struct; the macro runs compile-time checks on the descriptor.
+
+Rejected. An opt-in compile-time check is a runtime check for anyone who does not remember to invoke it, which is most users most of the time. It makes the "compile-time" label dishonest. The check itself runs in every sink path at runtime, so the value added by the opt-in is narrow. Dropping it keeps the story clean: compile-time for what the macro can see intrinsically; runtime for everything sink-specific.
+
+### Alternative M: Grace-period / first-entry traffic sampling
+
+Proposed shape: after sink construction, if the sink has processed no dial9-bearing entries within N seconds (or within the first N entries), emit a warn.
+
+Rejected. Indistinguishable from normal idle or startup behaviour. A pipeline that happens to run cold for a period is not misconfigured, but the check cannot tell. Pre-traffic configuration errors should be caught pre-traffic or not signalled this way.
+
+### Alternative N: Tuple-based type-list at sink construction
+
+Proposed shape: `Dial9Stream::builder().expect_compatible::<(T1, T2, ...)>().build()`. Users list the entry types they expect to flow through, and the builder validates them at const-eval time.
+
+Rejected. Reintroduces user ceremony at the sink construction site, which is exactly the kind of boilerplate the design aims to eliminate. Users who forget to list a type get no diagnostic for it; users who list a type they no longer use get a stale type list. The `SourceTag` hook discovers the set automatically.
+
+### Alternative O: `linkme` (or similar) in metrique's public API
+
+Proposed shape: metrique's `SourceTag` trait exposes an associated `linkme::DistributedSlice` that sinks point at their own slice.
+
+Rejected. Pins metrique's public API to a specific link-time mechanism. If `linkme` needs to be swapped for a future mechanism (stable distributed slices, a different crate, a cfg-gated alternative), every sink has to migrate. The trait-method form (`fn register_descriptor(&'static EntryDescriptor)`) keeps the mechanism entirely private to metrique's macro expansion and each sink's own impl; swapping is an internal refactor.
+
+### Alternative P: Imperative pre-main registration via `ctor` exposed to users
+
+Proposed shape: metrique emits `#[ctor::ctor] fn` wrappers that users would see if they read macro-expanded output; the pre-main side effect is documented as part of the contract.
+
+Rejected as a user-facing concept. Users should not have to reason about pre-main code execution to understand their entry types. The pre-main registration, whether via `ctor`, `linkme`, or something else, is an implementation detail behind the `SourceTag::register_descriptor` hook. The keeper doc describes the hook; the impl plan pins the specific mechanism.
 
 ## Feasibility checks
 

@@ -260,44 +260,42 @@ Wire layout is conventional (`<count> <repeated key value>`), using existing sca
 
 ## Validation
 
-Validation of entry-to-sink compatibility runs in two places. Both rest on the metrique descriptor system described in `docs/entry-descriptors.md` in the metrique repo.
+Three phases, all automatic. Users configure no compile-time helpers and invoke no runtime registration APIs.
 
-### Compile-time
+### Compile-time (metrique macro, intrinsic)
 
-The metrique macro catches generic structural errors for everyone: duplicate source tags, conflicting `field_tag` + `field_tag(skip)`, conflicting struct-level defaults. Those diagnostics fire regardless of what tags are in play.
+The metrique macro catches structural mistakes that do not depend on dial9: duplicate source tags, conflicting `field_tag` + `field_tag(skip)`, conflicting struct-level defaults, and source tags that do not implement `SourceTag`. These diagnostics fire regardless of whether dial9 is in the picture.
 
-Dial9-specific compile-time diagnostics are produced by a helper macro shipped in the dial9 crate. Users opt in by invoking it alongside their metrique-derived struct:
+### Startup-time (binary-wide, opt-out via feature)
 
-```rust
-// Optional, same module as the #[metrics(..)] attribute.
-dial9::assert_dial9_compatible!(RequestMetrics);
-```
+Dial9 implements `metrique::SourceTag::register_descriptor` for its `Dial9` tag. Every macro-derived entry declaring `source(Dial9)` registers its `&'static EntryDescriptor` into a dial9-owned vec before `main`. At sink construction, dial9:
 
-The helper inspects the macro-generated descriptor at const-eval time and emits compile errors for dial9-specific mistakes:
+1. If the registered vec is empty: emit one `tracing::warn!` pointing the user at "you attached a dial9 sink, but no struct in this binary declares `source(Dial9)`; the sink will not produce any events." Does not abort.
+2. If the registered vec is non-empty: run per-descriptor structural checks on every registered descriptor (same checks as first-use, described below). Any failures report via `debug_assert!` in debug builds and rate-limited `tracing::error!` in release.
 
-- One or more fields tagged `InTrace` but the entry declares no `Dial9` source.
-- A field tagged `InternString` whose closed shape is not a string type or a Flex with a string-capable position.
-- A field tagged `InTrace` whose closed shape is `FieldShape::Opaque` (the sink has no way to encode it).
-- A source tagged `Dial9` but no fields tagged `InTrace` (mildly suspect; warning, not error).
+Known false-positive and false-negative scenarios:
 
-We keep these checks in a helper macro rather than hardcoding them into metrique because metrique does not need to know about dial9 specifically. The helper is strictly opt-in; users who do not invoke it still get the runtime diagnostics below.
+- **False negative (warn fires when user would not expect)**: multi-binary workspaces where the tagged struct lives in a binary other than the one with the sink. The binary with the sink really does have no entries; the warn is technically correct.
+- **False negative**: feature-gated or `#[cfg]`-hidden structs that are not compiled into the current binary.
+- **False positive (warn does not fire when user has a misconfiguration)**: a dependency ships its own tagged entries. The user's binary has entries from the dep even though the user added none of their own.
+- **Exotic build setups**: unusual linker flags that strip pre-main registration sections. In these builds the warn always fires regardless of user code.
 
-### Runtime
+Users who hit a legitimate false negative can disable the warn with the dial9 crate feature `no_startup_discovery`. The feature-gated build skips the registration hook entirely (dial9 does not depend on `linkme`/`ctor` in that configuration) and omits the empty-registry warn. Per-descriptor first-use validation (below) continues to run.
 
-The first time `Dial9Stream` sees a descriptor, it performs the same checks as the helper macro and caches the verdict. The cache is keyed on the `&'static EntryDescriptor` pointer, so subsequent entries of the same type pay nothing.
+### First-use (descriptor-local, per descriptor, always on)
 
-Failure modes:
+The first time `Dial9Stream` sees a descriptor in the event path (rather than via startup registration, which may be skipped), it walks the descriptor for self-contradictions. The check is cached on the `&'static EntryDescriptor` pointer; each descriptor is validated at most once.
 
 | Condition | Behaviour |
 | --- | --- |
-| `descriptor() == None` (hand-written entry) | rate-limited warn once per observed concrete type; entry dropped from dial9 path; EMF unaffected |
-| Descriptor has `InTrace` fields but no `Dial9` source | rate-limited warn once per descriptor; entries of this type dropped from dial9 path |
-| Descriptor has `InternString` on a non-string-capable shape | rate-limited warn once per descriptor + field; the offending field is skipped on the wire; rest of entry encodes |
-| `FieldShape::Opaque` field tagged `InTrace` | rate-limited warn once per descriptor + field; the offending field is skipped on the wire; rest of entry encodes |
+| `descriptor() == None` (hand-written entry, no `DescribeEntry`) | rate-limited warn once per observed concrete type; entry dropped from dial9 path; EMF unaffected |
+| Descriptor has `InTrace` fields but no `Dial9` source | `debug_assert!` in debug, rate-limited `tracing::error!` in release; entries of this type dropped from dial9 path |
+| `InternString` on a non-string-capable shape | `debug_assert!` in debug, rate-limited `tracing::error!` in release; the offending field is skipped on the wire; rest of entry encodes |
+| `FieldShape::Opaque` field tagged `InTrace` | `debug_assert!` in debug, rate-limited `tracing::error!` in release; the offending field is skipped on the wire; rest of entry encodes |
 | Inert `TelemetryHandle` | `Ok(())` fast path; no work; entries still reach EMF |
 | Panic inside `Value::write` | event dropped; rate-limited warn; flush-thread state preserved |
 
-None of these failure modes crash the sink or stop the pipeline. Every diagnostic is rate-limited `tracing::warn!` with enough context (entry type name when available; descriptor pointer as a fallback) to trace back to the offending struct.
+None of these failure modes crash the sink in release builds. Each diagnostic includes enough context (entry type name when available, descriptor pointer as a fallback) to find the offending struct.
 
 Periodic `tracing::debug!` reports aggregate counters: descriptors seen, descriptors skipped, events emitted, fields skipped. Off at `info` by default.
 

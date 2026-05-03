@@ -6,7 +6,7 @@ Candid status disclaimer: as of this PR, nothing here is implemented. The dial9 
 
 ## Sequencing
 
-1. **Metrique PR lands first.** Adds `EntryDescriptor`, `Source<C>`, field-tag attributes, `no_emit`, and the `descriptor()` hook on the erased entry vtable. See `metrique/docs/entry-descriptors.md`. Stub: https://github.com/awslabs/metrique/pulls (to be opened).
+1. **Metrique PR lands first.** Adds `EntryDescriptor`, `Source<C>`, `SourceTag`, field-tag attributes, `no_emit`, and the `descriptor()` hook on the erased entry vtable. See `metrique/docs/entry-descriptors.md`. Stub: https://github.com/awslabs/metrique/pulls (to be opened).
 2. **Metrique releases a version carrying those APIs.** Dial9 pins to that version.
 3. **Dial9 trace-format additions land.** Schema annotations, typed dynamic map wire type.
 4. **Dial9 sink implementation.** `Dial9Context`, `Dial9Stream`, the `Dial9EntryWriter` adapter, `attach_to_stream_with_dial9` / `metrique_sink` / manual primitives refreshed for the new capture path.
@@ -131,38 +131,55 @@ Exact signatures may shift during implementation; this is the shape reviewers ar
 
 Items consciously left out of this round. Each has a clear follow-up path; none of them are blockers for the core design.
 
-- **Hand-written `Entry` impls return `None` from `descriptor()`**. The dial9 sink skips them with a rate-limited report. Follow-up: a metrique extension (`DescribeEntry` or similar) that lets hand-written entries emit a descriptor.
-- **`no_emit` is restricted to fields whose type declares a source, or fields with an inline `source(...)` attribute**. Policy guard to prevent "I silently dropped my field" bugs. Semantically `no_emit` is independent of sources; the restriction can be relaxed once usage patterns are understood.
-- **`no_emit` is mutually exclusive with `flatten`**. Mixing them is expressible (retain + flatten child fields into the parent) but the semantics are not worth designing right now.
+- **Hand-written `Entry` impls return `None` from `descriptor()` by default**. Users with `impl Entry for MyType` (no `#[metrics]`) keep working on format-level sinks (EMF, JSON) and are skipped by descriptor-aware sinks. Follow-up: once metrique ships `DescribeEntry`, dial9 picks up hand-written users with no change on the dial9 side. See the dial9 review doc's "Hand-written entries and manual dial9 opt-in" section.
+- **No runtime `Entry::write` fingerprinter as a hand-written-entry fallback.** Decision, not deferral: the fingerprinter would recreate the optional-field and Flex explosion problems the descriptor path eliminates. If hand-written demand is real and `DescribeEntry` takes longer than expected, we revisit.
 - **Only one source per tag per entry**. Multiple sources for the same tag are rejected. Follow-up when a use case appears.
 - **No optional sources**. An entry either has a source for tag `T` or it does not. Follow-up when a use case appears.
 - **`FieldShape::Opaque` fields selected for `InTrace` are reported and skipped**. We do not add a runtime "encode unknown as string" path. Follow-up: either the user adds a known value type, or a future extension defines a tagged dynamic value.
 - **Flex values are homogeneous (one `T` per map)**. Heterogeneous dynamic maps (`map<string, Any>`) are out of scope and would need both a metrique value-tag model and a dial9 tagged wire value.
-- **Compile-time dial9 wire plan.** Not implemented. The descriptor path is enough for v1; a static plan is strictly additive on top.
-- **Runtime fingerprinting fallback for hand-written entries.** Removed. Decision, not deferral. See the hand-written bullet above.
+- **Compile-time dial9 wire plan.** Not implemented. The descriptor path is enough; a static plan is strictly additive on top.
+- **No user-invoked compile-time validation helper.** An earlier draft proposed `assert_dial9_compatible!(T)`; dropped. Opt-in compile-time checks are functionally runtime checks for anyone who forgets to invoke them, and the checks already run at first-use and at startup-time discovery. See rejected Alternative L in the review doc.
 - **Programmatic `Dial9StatsHandle`.** Not implemented. Diagnosis uses periodic `tracing::debug!` and rate-limited `tracing::warn!`. Follow-up once metrique exposes a richer reporting hook (see [metrique#205](https://github.com/awslabs/metrique/issues/205)).
-- **Schema-cache tunability.** The cache is keyed on `&'static` pointers, so its size is a compile-time property. No public tuning surface needed in v1.
-- **Sink-level compile-time diagnostics** (tagged-without-source, InternString-on-non-string, etc.). Metrique carries opaque tag identity; dial9-specific checks become runtime reports from the sink. A sink-driven derive helper could fold them into compile-time later.
-- **Format-layer sampling integration.** `FixedFractionSample` and `CongressSample` wrap a `Format`, not an `EntryIoStream`. Dial9 stays an `EntryIoStream` for v1; sampling integration is a follow-up that needs either a new composition shape or a metrique-side change.
-- **Structured display hints / privacy labels on the wire.** The schema-annotation mechanism supports these; no v1 consumer besides units.
+- **Schema-cache tunability.** The cache is keyed on `&'static` pointers, so its size is a compile-time property. No public tuning surface needed.
+- **Format-layer sampling integration.** `FixedFractionSample` and `CongressSample` wrap a `Format`, not an `EntryIoStream`. Dial9 stays an `EntryIoStream`; sampling integration is a follow-up that needs either a new composition shape or a metrique-side change.
+- **Structured display hints / privacy labels on the wire.** The schema-annotation mechanism supports these; no consumer besides units in this round.
+
+## Startup-time discovery: linkme, platform support, and the opt-out feature
+
+Metrique's `SourceTag::register_descriptor` hook is the mechanism dial9 uses for binary-wide discovery. Concrete pins:
+
+- **Registration mechanism: `linkme` 0.3.x**, pulled in as a metrique-internal dependency to drive the registration call, plus a dial9-internal dependency to populate dial9's own per-source registry. Not exposed in metrique's public API; the public contract is the `SourceTag` trait.
+- **Why `linkme` over `ctor` or `inventory`**: `linkme` is data-driven (registrations are `#[link_section]` statics grouped by the linker) so no code runs pre-main. `ctor` runs a function per registration pre-main, which is slightly heavier and harder to debug. `linkme`'s failure mode (empty slice) is the same failure mode we already handle for "no entries registered."
+- **Platform coverage**: `linkme` works on Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD, Android. WASM requires a feature flag and is not part of dial9's target matrix. `no_std` is out of scope for this work.
+- **Known platform gotchas**:
+  - `cdylib` or `staticlib` users linking dial9 into a larger application may see empty registrations unless they pass `-Wl,--whole-archive` (or the platform equivalent) on the dial9 archive. Document in the dial9 README near the sink setup instructions.
+  - `cargo test` test binaries are separate from production binaries; registrations from tests do not leak. Registrations from the library under test are included because the test binary links the same `rlib`.
+- **`no_startup_discovery` feature on the `dial9-tokio-telemetry` crate**: feature-gates the entire startup-time discovery path. When set:
+  - Dial9 does not depend on `linkme` (via cargo optional-dependencies).
+  - `impl metrique::SourceTag for Dial9` uses the defaulted no-op `register_descriptor`.
+  - `Dial9Stream::new` does not iterate a registry and does not emit the empty-registry warn.
+  - Per-descriptor first-use validation continues to run on the event path.
+- **Release-vs-debug policy**:
+  - First-use descriptor-local checks (InTrace-without-Dial9-source, InternString-on-non-string, Opaque-in-InTrace): `debug_assert!` panic in debug, rate-limited `tracing::error!` in release. No opt-out; these describe clearly-wrong descriptors.
+  - Empty-registry warn: `tracing::warn!` in all builds. `no_startup_discovery` is the opt-out.
 
 ## Risks and mitigations
 
 - **Metrique PR scope.** The descriptor work is non-trivial. Mitigation: the metrique design doc is explicit about what's in scope; metrique reviewers can veto pieces before dial9 starts consuming. Dial9 side can be scoped down if metrique ships a narrower initial API (e.g. no descriptor for enum entries).
-- **Format-version compatibility.** Adding schema annotations and new `FieldType` variants changes the wire format. Mitigation: introduce under a version-gated tag; older consumers cleanly reject unknown tags rather than misparsing. The dial9 format already has versioning support.
+- **Format-version compatibility.** Adding schema annotations and new `FieldType` variants changes the wire format. Mitigation: introduce under a version bump so older readers reject the file at the header rather than silently truncating. The existing format's pre-main reserved-tag space is too narrow for safe in-place extension; committing to `VERSION = 2` gives room for both annotations and the typed dynamic-map field types in one go.
 - **Caller-thread cost regression.** `Dial9Context::capture()` does roughly the same work `TokioContextSink` did (a few TL reads plus `clock_monotonic_ns()`). We expect no measurable regression, but will benchmark during implementation.
-- **Hand-written-entry users surprised by silent skip.** Mitigation: rate-limited `tracing::warn!` the first time a hand-written entry is observed, keyed on the concrete type id. Document that hand-written entries are not yet supported.
+- **Hand-written-entry users surprised by silent skip.** Mitigation: rate-limited `tracing::warn!` the first time a hand-written entry is observed, keyed on the concrete type id. Document that hand-written entries are not yet supported without `DescribeEntry`.
+- **`linkme` platform or linker-configuration problems**. Mitigation: `no_startup_discovery` opt-out feature as described above; document the `-Wl,--whole-archive` gotcha.
 
 ## Testing plan
 
-- Trace-format unit tests for schema annotations and typed dynamic maps, including backward-compat decoding.
+- Trace-format unit tests for schema annotations and typed dynamic maps, including backward-compat decoding through the version bump.
 - Descriptor round-trip: a user-space struct with optionals, Flex, units, and tags; assert the sink registers exactly one schema with the expected annotations.
 - Context extraction: a caller-thread test that captures `Dial9Context`, passes through `BackgroundQueue`, and verifies the flush-thread snapshot matches.
 - Heterogeneous queue: a `BoxEntrySink<BoxEntry>` with multiple struct types, confirming each gets one schema and one source extraction.
+- Startup-time discovery: a binary with one `source(Dial9)` struct and a binary with none, asserting the empty-registry warn fires in the second case only. Feature-gated parallel run with `no_startup_discovery` verifies the warn is suppressed.
+- Per-descriptor first-use validation: construct descriptors that violate each check (InTrace-without-Dial9-source, InternString-on-non-string, Opaque-in-InTrace), assert `debug_assert!` panic in debug and rate-limited `tracing::error!` in release.
 - Disabled-handle / no-source / no-`InTrace` paths: assert no-op behaviour and correct report rates.
 - Panic isolation: a `Value::write` that panics, asserting the offending event drops without poisoning the flush thread.
 - End-to-end: a representative example in `examples/` producing a trace file that the viewer can render, including both tokio runtime events and metrique-originated events.
-Heterogeneous queue: a `BoxEntrySink<BoxEntry>` with multiple struct types, confirming each gets one schema and one source extraction.
-- Disabled-handle / no-source / no-`InTrace` paths: assert no-op behaviour and correct report rates.
-- Panic isolation: a `Value::write` that panics, asserting the offending event drops without poisoning the flush thread.
-- End-to-end: a representative example in `examples/` producing a trace file that the viewer can render, including both tokio runtime events and metrique-originated events.
+end: a representative example in `examples/` producing a trace file that the viewer can render, including both tokio runtime events and metrique-originated events.

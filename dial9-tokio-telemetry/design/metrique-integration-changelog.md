@@ -70,9 +70,21 @@ New: `#[metrics(default_field_tag(...))]`, `#[metrics(field_tag(...))]`, `#[metr
 
 Round-1 entries are unchanged but do not produce dial9 traces. Users opt in by adding the tags and the `Dial9Context` field.
 
+### Validation
+
+Round 1: no dial9-specific validation story. Misuse was caught if at all by the fact that the runtime-fingerprinted schema looked wrong.
+
+Round 2: three-tier validation.
+
+- Compile-time, in the metrique macro: intrinsic structural checks (duplicate sources, conflicting tags). Independent of any sink.
+- Startup-time, at `Dial9Stream::new`: dial9 registers every descriptor declaring `source(Dial9)` via metrique's `SourceTag::register_descriptor` hook (backed by `linkme` internally). Empty registry when a dial9 sink is constructed produces a `tracing::warn!`. Users who hit legitimate false negatives disable via `no_startup_discovery`.
+- First-use, per descriptor: dial9-specific structural checks (InTrace without Dial9 source, InternString on non-string, Opaque in InTrace) run once per descriptor on the event path. `debug_assert!` in debug, rate-limited `tracing::error!` in release.
+
+An earlier revision of this round included a user-invoked compile-time helper (`assert_dial9_compatible!`); it was dropped because opt-in compile-time checks are functionally runtime checks for anyone who forgets to invoke them.
+
 ## Dependency on metrique
 
-Round 2 depends on a metrique PR that adds the descriptor system, source system, and field-tag attributes. The dial9 PR cannot merge before the metrique PR lands on a released version.
+Round 2 depends on a metrique PR that adds the descriptor system, source system (including the `SourceTag` trait with a `register_descriptor` hook), field-tag attributes, and a `descriptor()` method on the erased entry vtable. The dial9 PR cannot merge before the metrique PR lands on a released version.
 
 Linked references:
 
