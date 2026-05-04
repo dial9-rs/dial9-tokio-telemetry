@@ -116,7 +116,9 @@ use std::time::Duration;
 
 use clap::Parser;
 use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::telemetry::{
+    HasTracePath, PipelineUnset, TelemetryHandle, TracedRuntimeBuilder,
+};
 
 const LINUX: bool = cfg!(target_os = "linux");
 
@@ -172,6 +174,31 @@ impl Dial9Opts {
     }
 }
 
+#[cfg(feature = "cpu-profiling")]
+fn configure_runtime_common(
+    mut r: TracedRuntimeBuilder<HasTracePath, PipelineUnset>,
+    cpu_profile_enabled: bool,
+    schedule_profile_enabled: bool,
+    cpu_sample_hz: u64,
+) -> TracedRuntimeBuilder<HasTracePath, PipelineUnset> {
+    r = r.with_task_tracking(true);
+    use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
+    if cpu_profile_enabled {
+        r = r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(cpu_sample_hz));
+    }
+    if schedule_profile_enabled {
+        r = r.with_sched_events(SchedEventConfig::default());
+    }
+    r
+}
+
+#[cfg(not(feature = "cpu-profiling"))]
+fn configure_runtime_common(
+    r: TracedRuntimeBuilder<HasTracePath, PipelineUnset>,
+) -> TracedRuntimeBuilder<HasTracePath, PipelineUnset> {
+    r.with_task_tracking(true)
+}
+
 /// Translate parsed options into a [`Dial9Config`] the `#[main]` macro can consume.
 ///
 /// `build_or_disabled()` is the important piece here: any writer I/O or
@@ -205,40 +232,46 @@ fn configure_dial9(opts: &Dial9Opts) -> Dial9Config {
     #[cfg(feature = "worker-s3")]
     let (s3_bucket, s3_service) = (opts.s3_bucket.clone(), opts.service_name.clone());
 
-    Dial9Config::builder()
+    let cfg = Dial9Config::builder()
         .enabled(opts.enabled)
         .base_path(base_path)
         .max_file_size(max_file_size)
         .max_total_size(max_disk)
-        .rotation_period(opts.rotation())
-        .with_runtime(move |mut r| {
-            r = r.with_task_tracking(true);
-            #[cfg(feature = "cpu-profiling")]
-            {
-                use dial9_tokio_telemetry::telemetry::cpu_profile::{
-                    CpuProfilingConfig, SchedEventConfig,
-                };
-                if cpu_enabled {
-                    r = r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(cpu_hz));
+        .rotation_period(opts.rotation());
+
+    #[cfg(feature = "worker-s3")]
+    if let (Some(bucket), Some(service_name)) = (s3_bucket, s3_service) {
+        use dial9_tokio_telemetry::background_task::s3::S3Config;
+        let s3 = S3Config::builder()
+            .bucket(bucket)
+            .service_name(service_name)
+            .build();
+        return cfg
+            .with_runtime(move |r| {
+                #[cfg(feature = "cpu-profiling")]
+                {
+                    configure_runtime_common(r, cpu_enabled, sched_enabled, cpu_hz)
+                        .with_s3_uploader(s3)
                 }
-                if sched_enabled {
-                    r = r.with_sched_events(SchedEventConfig::default());
+                #[cfg(not(feature = "cpu-profiling"))]
+                {
+                    configure_runtime_common(r).with_s3_uploader(s3)
                 }
-            }
-            #[cfg(feature = "worker-s3")]
-            {
-                use dial9_tokio_telemetry::background_task::s3::S3Config;
-                if let (Some(bucket), Some(service_name)) = (&s3_bucket, &s3_service) {
-                    let s3 = S3Config::builder()
-                        .bucket(bucket.clone())
-                        .service_name(service_name.clone())
-                        .build();
-                    r = r.with_s3_uploader(s3);
-                }
-            }
-            r
-        })
-        .build_or_disabled()
+            })
+            .build_or_disabled();
+    }
+
+    cfg.with_runtime(move |r| {
+        #[cfg(feature = "cpu-profiling")]
+        {
+            configure_runtime_common(r, cpu_enabled, sched_enabled, cpu_hz)
+        }
+        #[cfg(not(feature = "cpu-profiling"))]
+        {
+            configure_runtime_common(r)
+        }
+    })
+    .build_or_disabled()
 }
 
 /// Complain at startup when the operator asked for something a feature flag
