@@ -44,6 +44,7 @@ Explicitly out of scope for this dial9 release. Each has an evolution path; none
 - **User-invoked compile-time validation helper.** A sink-specific `dial9::assert_dial9_compatible!(T)` macro is not part of the design. The checks run at first-use and at startup-time discovery automatically.
 - **Wire format version bump.** Dial9 trace-format extensions (schema annotations, typed dynamic maps) are additive. Old decoders halt at unknown tags; we accept silent truncation when a new trace is read by an older viewer because the format is not widely distributed outside this repo and the in-tree viewer ships in lockstep with producers.
 - **Heterogeneous Flex values.** Metrique `Flex<(String, T)>` has a fixed `T` per type; dial9 mirrors that in its `Map { key, value }` field type. A tagged dynamic value form would need both sides to change.
+- **Distribution-typed fields on the wire.** `metrique_aggregation::Histogram<T>`, `SharedHistogram<T>`, and user distribution types lower to `FieldShape::Opaque` today. Dial9 skips them with a diagnostic when tagged `InTrace`. EMF/JSON render distributions normally. Evolution path is metrique-side: add `FieldShape::Distribution(KnownShape)` once `DescribeValue` lets aggregation types self-describe as distribution-shaped; dial9 then gains a corresponding wire variant as an additive change.
 
 ## Tradeoffs worth reviewer attention
 

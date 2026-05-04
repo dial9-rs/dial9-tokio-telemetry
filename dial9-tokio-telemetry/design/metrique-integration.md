@@ -166,6 +166,7 @@ Because `Dial9Context` itself declares `default_field_tag(skip(InTrace))`, its f
 │       -> encode according to FieldShape:                       │
 │            Known   : encode scalar                             │
 │            Optional: encode presence byte + inner              │
+│            List    : encode <count> <repeated element>         │
 │            Flex    : encode map<key, value>                    │
 │            Opaque  : report + skip (sink-side validation)      │
 │                                                                │
@@ -243,15 +244,14 @@ A new annotation section on `SchemaEntry` that carries repeated `(field_index, k
 
 Units encode as `("metrique.unit", "microseconds")` on the annotated field. Fields without annotations cost nothing.
 
-### Typed dynamic maps
+### Typed lists and maps
 
-A single new `FieldType::Map { key: FieldType, value: FieldType }` variant lets dial9 represent a metrique `Flex<(String, T)>` as one schema field carrying a map at encode time, instead of one schema per runtime key.
+Two new `FieldType` variants cover the metrique shapes that cannot be represented as scalars:
 
-Wire layout: `<count> <repeated key value>`, using the existing scalar encodings determined by the `key` and `value` types declared in the schema. Keys and values are **sealed at schema registration**: the encoder does not write per-element type tags, and the decoder reads each pair using the schema-bound key and value types. A producer that writes data inconsistent with the schema produces a corrupt stream, the same guarantee the rest of the format relies on for existing fields.
+- `FieldType::List(FieldType)` carries `[T]`-style list data. The element type is sealed at schema registration; the encoder does not write per-element type tags, and the decoder reads each element using the schema-bound element type. A producer that writes data inconsistent with the schema produces a corrupt stream, the same guarantee the rest of the format relies on for existing fields. Recursion is forbidden: `FieldType::List` is not a valid element type.
+- `FieldType::Map { key: FieldType, value: FieldType }` represents a metrique `Flex<(String, T)>` as one schema field carrying a map at encode time, instead of one schema per runtime key. Wire layout: `<count> <repeated key value>`, using the existing scalar encodings determined by the `key` and `value` types declared in the schema. Keys and values are sealed at schema registration. Recursion is forbidden: `FieldType::Map` is not a valid `key` or `value` type. Map-of-map is out of scope; a future extension can introduce a tagged-value form if metrique grows heterogeneous dynamic values.
 
-Recursion is forbidden. `FieldType::Map` is not a valid `key` or `value` type. Map-of-map is out of scope; a future extension can introduce a tagged-value form if metrique grows heterogeneous dynamic values.
-
-Pooled-string map keys are expressed by setting `key = FieldType::PooledString`; pooled-string map values similarly. The `dial9::InternString` field tag on a metrique `Flex` field selects the pooled variant per-position as needed.
+Pooled-string positions are expressed by setting `FieldType::PooledString` as the key or the value (or the element type for `List`). The `dial9::InternString` field tag on a metrique `Flex` or list field selects the pooled variant per-position as needed.
 
 ## Error handling and resilience
 
