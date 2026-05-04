@@ -14,6 +14,7 @@ use tracing_subscriber::prelude::*;
 struct SpanEvents {
     enter_count: u32,
     exit_count: u32,
+    close_count: u32,
     enter_names: Vec<String>,
     /// All (field_key, field_value) pairs seen on enter events.
     enter_fields: Vec<(String, String)>,
@@ -34,6 +35,7 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
     let mut result = SpanEvents {
         enter_count: 0,
         exit_count: 0,
+        close_count: 0,
         enter_names: Vec::new(),
         enter_fields: Vec::new(),
         exit_fields: Vec::new(),
@@ -88,6 +90,8 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
                             .push((field_def.name.clone(), v.to_owned()));
                     }
                 }
+            } else if ev.name == "SpanCloseEvent" {
+                result.close_count += 1;
             }
         })
         .unwrap();
@@ -183,6 +187,12 @@ fn span_events_appear_in_trace() {
     assert_eq!(
         events.enter_count, events.exit_count,
         "enter/exit count mismatch"
+    );
+
+    // Close events: one per unique span instance
+    assert!(
+        events.close_count > 0,
+        "expected at least 1 SpanCloseEvent, got 0"
     );
 
     // Span names
