@@ -1,5 +1,7 @@
 # Metrique integration
 
+> **Status: design, not yet implemented.**
+
 Dial9 is a peer metrique sink. Users configure dial9 alongside their existing EMF/JSON metrique pipeline; every metrique entry that flows through the configured sink is also recorded into the dial9 trace. A single trace file carries both tokio runtime telemetry and per-request application metrics.
 
 The sink reads metrique's entry descriptor for each entry to learn its structural shape (fields, optionality, Flex, units), extracts caller-thread context via metrique's source system, and encodes the user-selected subset of fields into the dial9 trace. Nothing about the integration requires a dial9-specific metrique macro or dial9-specific newtype wrappers on fields.
