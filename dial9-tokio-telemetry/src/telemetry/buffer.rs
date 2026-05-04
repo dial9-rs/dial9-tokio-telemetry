@@ -510,8 +510,8 @@ mod tests {
     }
 
     #[cfg(feature = "cpu-profiling")]
-
     mod cpu_tests {
+        use super::ThreadLocalBuffer;
 
         /// Encode a single `CpuSampleData` through a real thread-local buffer
         /// and decode it back via the public `decode_events` path, asserting that

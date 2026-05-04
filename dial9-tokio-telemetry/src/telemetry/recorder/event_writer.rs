@@ -35,6 +35,7 @@ impl EventWriter {
         self.events_written
     }
 
+    // TODO: delete/refactor this method, it is only used in tests.
     /// Encode a single event into a batch and write it through the writer.
     #[cfg(all(test, feature = "cpu-profiling"))]
     pub(crate) fn write_raw_event(
