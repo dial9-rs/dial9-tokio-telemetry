@@ -86,8 +86,8 @@ Round 2 depends on a metrique PR that adds the descriptor system, source system 
 
 Linked references:
 
-- metrique entry-descriptor design: `docs/entry-descriptors.md` (to be added in the metrique PR)
-- metrique PR: TBD, stub link: https://github.com/awslabs/metrique/pulls
+- metrique entry-descriptor design: `docs/entry-descriptors.md` (added in [metrique#282](https://github.com/awslabs/metrique/pull/282))
+- metrique PR: [awslabs/metrique#282](https://github.com/awslabs/metrique/pull/282)
 
 ## Requirements: what changed
 

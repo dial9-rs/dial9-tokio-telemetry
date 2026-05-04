@@ -2,7 +2,7 @@
 
 **This document is deleted as part of PR sign-off. It captures what the implementation work looks like, in what order, in which files, and which design decisions each piece depends on.**
 
-Status: as of this PR, nothing here is implemented. The dial9 work depends on a not-yet-opened metrique PR. This plan exists so reviewers can evaluate whether the scope and sequencing are sound.
+Status: as of this PR, nothing here is implemented. The dial9 work depends on [metrique#282](https://github.com/awslabs/metrique/pull/282). This plan exists so reviewers can evaluate whether the scope and sequencing are sound.
 
 ## Sequencing
 

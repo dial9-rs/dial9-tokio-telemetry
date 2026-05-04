@@ -6,7 +6,7 @@ Dial9 is a peer metrique sink. Users configure dial9 alongside their existing EM
 
 The sink reads metrique's entry descriptor for each entry to learn its structural shape (fields, optionality, Flex, units), extracts caller-thread context via metrique's source system, and encodes the user-selected subset of fields into the dial9 trace. Nothing about the integration requires a dial9-specific metrique macro or dial9-specific newtype wrappers on fields.
 
-This design depends on the entry descriptor system in metrique (see `docs/entry-descriptors.md` in the metrique repo; tracked under [metrique PR TBD](https://github.com/awslabs/metrique/pulls)). The dial9 side is a descriptor-aware sink; the metrique side is where descriptors, sources, and field tags are defined.
+This design depends on the entry descriptor system in metrique (see `docs/entry-descriptors.md` in the metrique repo; tracked under [awslabs/metrique#282](https://github.com/awslabs/metrique/pull/282)). The dial9 side is a descriptor-aware sink; the metrique side is where descriptors, sources, and field tags are defined.
 
 ## User-facing API
 
