@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-macro"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "insta",
  "prettyplease",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.3.6"
+version = "0.4.0"
 dependencies = [
  "blazesym",
  "crossbeam-utils",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "arc-swap",
  "assert2",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "assert2",

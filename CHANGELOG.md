@@ -7,13 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.6...dial9-tokio-telemetry-v0.3.7) - 2026-05-04
+
 ### Added
 
-- **Inline config in the macro**: `#[dial9_tokio_telemetry::main]` now accepts a closure, so simple setups no longer need a separate config function.
-- **Fluent config builder**: `Dial9Config::builder()` with named setters, `with_tokio`/`with_runtime` closures, and `.enabled(bool)`. The original positional API under `dial9_tokio_telemetry::config` is unchanged.
-- **`build_or_disabled()`**: on config validation or writer I/O failure, logs an error and starts a plain tokio runtime instead of crashing. Use `build()` to handle failures explicitly.
-
-All three in action:
+- Include CPU id in CPU profile samples ([#338](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/338))
+- **New config API** ([#256](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/256)): `Dial9Config::builder()` replaces the positional `Dial9ConfigBuilder::new(path, file_size, total_size)` with a fluent builder. Inline closures are now supported in the macro, and `build_or_disabled()` gracefully falls back to a plain tokio runtime on config/IO failure:
 
   ```rust
   #[dial9_tokio_telemetry::main(config = || {
@@ -25,10 +24,25 @@ All three in action:
   })]
   async fn main() { /* ... */ }
   ```
+- free `dial9_tokio_telemetry::spawn()` function ([#343](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/343))
 
 ### Changed
 
-- `TelemetryHandle::current()` no longer panics off-runtime. It returns an inert handle whose `spawn` falls through to `tokio::spawn`. Use `TelemetryHandle::is_enabled()` to check whether telemetry is live.
+- `TelemetryHandle::current()` no longer panics off-runtime — it returns an inert handle whose `spawn` falls through to `tokio::spawn`. Use `TelemetryHandle::is_enabled()` to check whether telemetry is live. ([#256](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/256))
+
+### Fixed
+
+- fix security audit ([#344](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/344))
+- Avoid constructing events when telemetry is disabled ([#332](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/332))
+- align span panel to worker lane coordinate system ([#341](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/341))
+
+### Other
+
+- Add metrics section to the prod use docs ([#352](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/352))
+- Add SpanCloseEvent to tracing layer ([#348](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/348))
+- Remove RawEvent and unify internals to use public API ([#339](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/339))
+- fix unresolved intra-doc links in rustdoc builds ([#347](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/347))
+- Add dial9-in-prod example ([#335](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/335))
 
 ## [0.3.6](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.5...dial9-tokio-telemetry-v0.3.6) - 2026-04-30
 
