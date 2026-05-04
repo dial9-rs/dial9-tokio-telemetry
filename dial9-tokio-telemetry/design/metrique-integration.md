@@ -232,7 +232,7 @@ For Flex fields, the unit applies to the map values, not the keys.
 ### Observability
 
 - Periodic `tracing::debug!` reporting schema cache size and cumulative counters (registrations, events emitted, entries skipped for `None` descriptor, entries skipped for missing source).
-- Rate-limited `tracing::warn!` on each distinct "no Dial9 source but InTrace fields present" report (per descriptor, not per event) and on each distinct hand-written entry seen.
+- On first-use detection of a structurally broken descriptor (InTrace without Dial9 source, InternString on a non-string shape, Opaque field tagged InTrace): `debug_assert!` panic in debug, rate-limited `tracing::error!` in release, keyed per descriptor so each distinct broken type is reported once. Rate-limited `tracing::warn!` on each distinct hand-written entry observed (no descriptor to validate against).
 
 ## Trace format additions
 
@@ -317,3 +317,4 @@ Periodic `tracing::debug!` reports aggregate counters: descriptors seen, descrip
 - Per-sink compile-time wire plans, once metrique can emit them, to replace the flush-thread `Entry::write` walk with a direct encode.
 - More schema annotations: display hints, aggregation hints, privacy labels. Same mechanism as units.
 - Heterogeneous Flex values once metrique carries a tagged runtime value model for them.
+- Nested container widening: once metrique lifts its one-optional-layer restriction on `List` and `Flex.value`, dial9's `FieldType::List` and `FieldType::Map` wire variants accept the richer shapes with no format change (they already recurse at the type level).

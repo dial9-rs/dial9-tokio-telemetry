@@ -88,10 +88,10 @@ pub struct SourceDescriptor { /* ... */ }
 pub struct SourceExtractor { /* ... */ }
 pub trait SourceTag: Any + Send + Sync + 'static {
     type Snapshot: Any + Send;
-    fn register_descriptor(_registration: SourceRegistration<'static>) {}
+    fn register_descriptor(_registration: SourceRegistration) {}
 }
 #[non_exhaustive]
-pub struct SourceRegistration<'a> { pub descriptor: &'a EntryDescriptor }
+pub struct SourceRegistration { pub descriptor: &'static EntryDescriptor }
 impl EntryDescriptor {
     pub fn source<C: SourceTag>(
         &self,
@@ -125,7 +125,7 @@ impl metrique::SourceTag for Dial9 {
     // DIAL9_ENTRIES. On other targets, the default no-op runs and linkme
     // is not pulled in.
     #[cfg(any(target_os = "linux", target_os = "macos", /* ... */))]
-    fn register_descriptor(reg: metrique::SourceRegistration<'static>) {
+    fn register_descriptor(reg: metrique::SourceRegistration) {
         DIAL9_ENTRIES.lock().unwrap().push(reg.descriptor);
     }
 }
