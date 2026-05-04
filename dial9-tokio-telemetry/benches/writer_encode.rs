@@ -1,4 +1,4 @@
-//! Benchmark for the writer encode path: RawEvent → RotatingWriter → Encoder.
+//! Benchmark for the writer encode path: TraceEvent → RotatingWriter → Encoder.
 //!
 //! This exercises the full `write_resolved` path including event conversion,
 //! string interning, and varint encoding. Writes to `/dev/null` to isolate

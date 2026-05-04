@@ -83,7 +83,7 @@ fn record_wake_event(data: &TracedWakerData) {
         let event = data
             .shared
             .create_wake_event(data.woken_task_id, waking_worker_u8);
-        buf.record_event(event);
+        buf.record_encodable_event(&event);
     });
 }
 

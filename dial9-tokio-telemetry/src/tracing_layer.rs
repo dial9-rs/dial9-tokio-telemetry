@@ -57,6 +57,7 @@
 //! for production use with appropriate span filtering.
 
 use crate::telemetry::{TelemetryHandle, clock_monotonic_ns, current_worker_id};
+use dial9_trace_format::TraceEvent;
 use dial9_trace_format::encoder::Schema;
 use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
@@ -66,6 +67,13 @@ use std::sync::Mutex;
 use tracing::callsite::Identifier;
 use tracing::span;
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
+
+#[derive(TraceEvent)]
+struct SpanCloseEvent {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
+    span_id: u64,
+}
 
 // ── Per-callsite schema cache ───────────────────────────────────────────────
 
@@ -369,6 +377,17 @@ where
                 }
             }
             enc.write_event(&schemas.exit, &values);
+        });
+    }
+
+    fn on_close(&self, id: span::Id, _ctx: Context<'_, S>) {
+        let Some(handle) = TelemetryHandle::try_current() else {
+            return;
+        };
+
+        handle.record_encodable_event(&SpanCloseEvent {
+            timestamp_ns: clock_monotonic_ns(),
+            span_id: id.into_u64(),
         });
     }
 }

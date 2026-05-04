@@ -9,8 +9,10 @@
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex, Weak};
 use crate::telemetry::collector::CentralCollector;
-use crate::telemetry::events::RawEvent;
-use crate::telemetry::format::*;
+#[cfg(feature = "cpu-profiling")]
+use crate::telemetry::events::CpuSampleData;
+#[cfg(feature = "cpu-profiling")]
+use crate::telemetry::format::CpuSampleEvent;
 use dial9_trace_format::encoder::{Encoder, FxHashMap};
 use dial9_trace_format::{InternedStackFrames, InternedString};
 use std::panic::Location;
@@ -165,112 +167,23 @@ impl<T: dial9_trace_format::TraceEvent + 'static> Encodable for T {
     }
 }
 
-impl Encodable for RawEvent {
+#[cfg(feature = "cpu-profiling")]
+impl Encodable for CpuSampleData {
     fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
-        match self {
-            RawEvent::PollStart {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                task_id,
-                location,
-            } => {
-                let spawn_loc = enc.intern_location(location);
-                enc.encode(&PollStartEvent {
-                    timestamp_ns: *timestamp_nanos,
-                    worker_id: *worker_id,
-                    local_queue: *worker_local_queue_depth as u8,
-                    task_id: *task_id,
-                    spawn_loc,
-                });
-            }
-            RawEvent::PollEnd {
-                timestamp_nanos,
-                worker_id,
-            } => enc.encode(&PollEndEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-            }),
-            RawEvent::WorkerPark {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                cpu_time_nanos,
-            } => enc.encode(&WorkerParkEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-                local_queue: *worker_local_queue_depth as u8,
-                cpu_time_ns: *cpu_time_nanos,
-            }),
-            RawEvent::WorkerUnpark {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                cpu_time_nanos,
-                sched_wait_delta_nanos,
-            } => enc.encode(&WorkerUnparkEvent {
-                timestamp_ns: *timestamp_nanos,
-                worker_id: *worker_id,
-                local_queue: *worker_local_queue_depth as u8,
-                cpu_time_ns: *cpu_time_nanos,
-                sched_wait_ns: *sched_wait_delta_nanos,
-            }),
-            RawEvent::QueueSample {
-                timestamp_nanos,
-                global_queue_depth,
-            } => enc.encode(&QueueSampleEvent {
-                timestamp_ns: *timestamp_nanos,
-                global_queue: *global_queue_depth as u8,
-            }),
-            RawEvent::TaskSpawn {
-                timestamp_nanos,
-                task_id,
-                location,
-                instrumented,
-            } => {
-                let spawn_loc = enc.intern_location(location);
-                enc.encode(&TaskSpawnEvent {
-                    timestamp_ns: *timestamp_nanos,
-                    task_id: *task_id,
-                    spawn_loc,
-                    instrumented: *instrumented,
-                });
-            }
-            RawEvent::TaskTerminate {
-                timestamp_nanos,
-                task_id,
-            } => enc.encode(&TaskTerminateEvent {
-                timestamp_ns: *timestamp_nanos,
-                task_id: *task_id,
-            }),
-            RawEvent::WakeEvent {
-                timestamp_nanos,
-                waker_task_id,
-                woken_task_id,
-                target_worker,
-            } => enc.encode(&WakeEventEvent {
-                timestamp_ns: *timestamp_nanos,
-                waker_task_id: *waker_task_id,
-                woken_task_id: *woken_task_id,
-                target_worker: *target_worker,
-            }),
-            RawEvent::CpuSample(data) => {
-                let thread_name = data
-                    .thread_name
-                    .as_ref()
-                    .map(|n| enc.intern_string(n.as_str()));
-                let callchain = enc.intern_stack_frames(&data.callchain);
-                enc.encode(&CpuSampleEvent {
-                    timestamp_ns: data.timestamp_nanos,
-                    worker_id: data.worker_id,
-                    tid: data.tid,
-                    source: data.source,
-                    thread_name,
-                    callchain,
-                    cpu: data.cpu.map(u64::from),
-                });
-            }
-        }
+        let thread_name = self
+            .thread_name
+            .as_ref()
+            .map(|n| enc.intern_string(n.as_str()));
+        let callchain = enc.intern_stack_frames(&self.callchain);
+        enc.encode(&CpuSampleEvent {
+            timestamp_ns: self.timestamp_nanos,
+            worker_id: self.worker_id,
+            tid: self.tid,
+            source: self.source,
+            thread_name,
+            callchain,
+            cpu: self.cpu.map(u64::from),
+        });
     }
 }
 
@@ -364,7 +277,7 @@ impl ThreadLocalBuffer {
     /// Encode a single event into a self-contained batch (header + event).
     /// Used by tests that need to write individual events through the batch API.
     #[cfg(test)]
-    pub(crate) fn encode_single(event: &RawEvent) -> Vec<u8> {
+    pub(crate) fn encode_single(event: &dyn Encodable) -> Vec<u8> {
         let mut buf = Self::with_batch_size(1024);
         buf.record_encodable(event);
         buf.flush().encoded_bytes
@@ -417,21 +330,6 @@ pub(crate) struct TlBufferHandle {
 
 crate::primitives::thread_local! {
     static BUFFER: Arc<Mutex<ThreadLocalBuffer>> = Arc::new(Mutex::new(ThreadLocalBuffer::new()));
-}
-
-/// Record an event into the current thread's buffer. If the buffer is full,
-/// automatically flush the batch to `collector` and stamp the current
-/// `drain_epoch` on the buffer's `FlushEpoch`.
-///
-/// On the first call per thread (when the collector is set), returns a
-/// [`TlBufferHandle`] that the caller should register in `SharedState`
-/// so the flush thread can drain this buffer.
-pub(crate) fn record_event(
-    event: RawEvent,
-    collector: &Arc<CentralCollector>,
-    drain_epoch: &AtomicU64,
-) -> Option<TlBufferHandle> {
-    record_encodable_event(&event, collector, drain_epoch)
 }
 
 /// Drain the current thread's buffer into `collector`, even if not full.
@@ -507,9 +405,11 @@ pub(crate) fn with_encoder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn poll_end_event() -> RawEvent {
-        RawEvent::PollEnd {
-            timestamp_nanos: 1000,
+    use crate::telemetry::format::PollEndEvent;
+
+    fn poll_end_event() -> PollEndEvent {
+        PollEndEvent {
+            timestamp_ns: 1000,
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
         }
     }
@@ -609,54 +509,59 @@ mod tests {
         assert_eq!(guard.event_count, 1);
     }
 
-    /// Encode a single `RawEvent::CpuSample` through a real thread-local buffer
-    /// and decode it back via the public `decode_events` path, asserting that
-    /// the `cpu` field round-trips.
-    fn cpu_sample_round_trip(cpu: Option<u32>) -> crate::telemetry::events::TelemetryEvent {
-        use crate::telemetry::events::{CpuSampleData, CpuSampleSource, RawEvent};
-        use crate::telemetry::format::{WorkerId, decode_events};
+    #[cfg(feature = "cpu-profiling")]
+    mod cpu_tests {
+        use super::ThreadLocalBuffer;
 
-        let data = CpuSampleData {
-            timestamp_nanos: 12_345,
-            worker_id: WorkerId::from(0usize),
-            tid: 4242,
-            thread_name: None,
-            source: CpuSampleSource::CpuProfile,
-            callchain: vec![0xdead_beef, 0xcafe_babe],
-            cpu,
-        };
-        let encoded = ThreadLocalBuffer::encode_single(&RawEvent::CpuSample(Box::new(data)));
-        let events = decode_events(&encoded).expect("decode");
-        assert_eq!(events.len(), 1);
-        events.into_iter().next().unwrap()
-    }
+        /// Encode a single `CpuSampleData` through a real thread-local buffer
+        /// and decode it back via the public `decode_events` path, asserting that
+        /// the `cpu` field round-trips.
+        fn cpu_sample_round_trip(cpu: Option<u32>) -> crate::telemetry::events::TelemetryEvent {
+            use crate::telemetry::events::{CpuSampleData, CpuSampleSource};
+            use crate::telemetry::format::{WorkerId, decode_events};
 
-    #[test]
-    fn cpu_sample_event_round_trips_with_cpu() {
-        use crate::telemetry::events::TelemetryEvent;
-        match cpu_sample_round_trip(Some(7)) {
-            TelemetryEvent::CpuSample {
-                tid,
+            let data = CpuSampleData {
+                timestamp_nanos: 12_345,
+                worker_id: WorkerId::from(0usize),
+                tid: 4242,
+                thread_name: None,
+                source: CpuSampleSource::CpuProfile,
+                callchain: vec![0xdead_beef, 0xcafe_babe],
                 cpu,
-                callchain,
-                ..
-            } => {
-                assert_eq!(tid, 4242);
-                assert_eq!(cpu, Some(7));
-                assert_eq!(callchain, vec![0xdead_beef, 0xcafe_babe]);
-            }
-            other => panic!("expected CpuSample, got {other:?}"),
+            };
+            let encoded = ThreadLocalBuffer::encode_single(&data);
+            let events = decode_events(&encoded).expect("decode");
+            assert_eq!(events.len(), 1);
+            events.into_iter().next().unwrap()
         }
-    }
 
-    #[test]
-    fn cpu_sample_event_round_trips_without_cpu() {
-        use crate::telemetry::events::TelemetryEvent;
-        match cpu_sample_round_trip(None) {
-            TelemetryEvent::CpuSample { cpu, .. } => {
-                assert_eq!(cpu, None);
+        #[test]
+        fn cpu_sample_event_round_trips_with_cpu() {
+            use crate::telemetry::events::TelemetryEvent;
+            match cpu_sample_round_trip(Some(7)) {
+                TelemetryEvent::CpuSample {
+                    tid,
+                    cpu,
+                    callchain,
+                    ..
+                } => {
+                    assert_eq!(tid, 4242);
+                    assert_eq!(cpu, Some(7));
+                    assert_eq!(callchain, vec![0xdead_beef, 0xcafe_babe]);
+                }
+                other => panic!("expected CpuSample, got {other:?}"),
             }
-            other => panic!("expected CpuSample, got {other:?}"),
+        }
+
+        #[test]
+        fn cpu_sample_event_round_trips_without_cpu() {
+            use crate::telemetry::events::TelemetryEvent;
+            match cpu_sample_round_trip(None) {
+                TelemetryEvent::CpuSample { cpu, .. } => {
+                    assert_eq!(cpu, None);
+                }
+                other => panic!("expected CpuSample, got {other:?}"),
+            }
         }
     }
 }

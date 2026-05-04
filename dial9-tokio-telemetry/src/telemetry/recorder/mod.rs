@@ -14,7 +14,7 @@ use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::Ordering;
 use crate::rate_limit::rate_limited;
 use crate::telemetry::buffer;
-use crate::telemetry::events::RawEvent;
+use crate::telemetry::format::TaskTerminateEvent;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::writer::{RotatingWriter, TraceWriter};
 use metrique::timers::Timer;
@@ -157,6 +157,8 @@ fn register_hooks(
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
 ) {
+    // TODO: these should rely on public APIs instead of utilizing `SharedState`
+
     let c1 = ctx.clone();
     let s1 = shared.clone();
     let c2 = ctx.clone();
@@ -170,13 +172,13 @@ fn register_hooks(
         .on_thread_park(move || {
             s1.if_enabled(|buf| {
                 let event = make_worker_park(&c1, &s1);
-                buf.record_event(event);
+                buf.record_encodable_event(&event);
             });
         })
         .on_thread_unpark(move || {
             s2.if_enabled(|buf| {
                 let event = make_worker_unpark(&c2, &s2);
-                buf.record_event(event);
+                buf.record_encodable_event(&event);
             });
         })
         .on_before_task_poll(move |meta| {
@@ -184,13 +186,13 @@ fn register_hooks(
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
                 let event = make_poll_start(&c3, &s3, location, task_id);
-                buf.record_event(event);
+                buf.record_encodable_event(&event);
             });
         })
         .on_after_task_poll(move |_meta| {
             s4.if_enabled(|buf| {
                 let event = make_poll_end(&c4, &s4);
-                buf.record_event(event);
+                buf.record_encodable_event(&event);
             });
         });
 
@@ -201,9 +203,9 @@ fn register_hooks(
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
                 let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get());
-
-                buf.record_event(RawEvent::TaskSpawn {
-                    timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
+                let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
+                buf.record_encodable_event(&runtime_context::TaskSpawn {
+                    timestamp_ns,
                     task_id,
                     location,
                     instrumented,
@@ -214,8 +216,8 @@ fn register_hooks(
         builder.on_task_terminate(move |meta| {
             s6.if_enabled(|buf| {
                 let task_id = TaskId::from(meta.id());
-                buf.record_event(RawEvent::TaskTerminate {
-                    timestamp_nanos: crate::telemetry::events::clock_monotonic_ns(),
+                buf.record_encodable_event(&TaskTerminateEvent {
+                    timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
                     task_id,
                 });
             });
@@ -2084,23 +2086,30 @@ mod tests {
         ];
         for (i, loc) in locations.iter().enumerate() {
             let task_id = crate::telemetry::task_metadata::TaskId::from_u32(i as u32);
-            buffer::record_event(
-                RawEvent::TaskSpawn {
-                    timestamp_nanos: (i as u64 + 1) * 1000,
-                    task_id,
-                    location: loc,
-                    instrumented: true,
+            let ts = (i as u64 + 1) * 1000;
+            buffer::with_encoder(
+                |enc| {
+                    let spawn_loc = enc.intern_location(loc);
+                    enc.encode(&crate::telemetry::format::TaskSpawnEvent {
+                        timestamp_ns: ts,
+                        task_id,
+                        spawn_loc,
+                        instrumented: true,
+                    });
                 },
                 &collector,
                 &drain_epoch,
             );
-            buffer::record_event(
-                RawEvent::PollStart {
-                    timestamp_nanos: (i as u64 + 1) * 1000,
-                    worker_id: WorkerId::from(0usize),
-                    worker_local_queue_depth: 0,
-                    task_id,
-                    location: loc,
+            buffer::with_encoder(
+                |enc| {
+                    let spawn_loc = enc.intern_location(loc);
+                    enc.encode(&crate::telemetry::format::PollStartEvent {
+                        timestamp_ns: ts,
+                        worker_id: WorkerId::from(0usize),
+                        local_queue: 0,
+                        task_id,
+                        spawn_loc,
+                    });
                 },
                 &collector,
                 &drain_epoch,
@@ -2501,8 +2510,7 @@ mod tests {
                         cpu: None,
                     };
                     *timestamp += 1;
-                    ew.write_raw_event(RawEvent::CpuSample(Box::new(data)))
-                        .unwrap();
+                    ew.write_raw_event(&data).unwrap();
                 }
             }
 
@@ -2510,16 +2518,17 @@ mod tests {
                 if let FlushOp::PollStart { location_idx } = op {
                     let loc = locations[*location_idx];
                     let task_id = TaskId::from_u32(*timestamp as u32);
-                    let raw = RawEvent::PollStart {
-                        timestamp_nanos: *timestamp,
-                        worker_id: WorkerId::from(0usize),
-                        worker_local_queue_depth: 0,
-                        task_id,
-                        location: loc,
-                    };
+                    let ts = *timestamp;
                     *timestamp += 1;
 
-                    ew.write_raw_event(raw).unwrap();
+                    ew.write_raw_event(&runtime_context::PollStart {
+                        timestamp_ns: ts,
+                        worker_id: WorkerId::from(0usize),
+                        local_queue: 0,
+                        task_id,
+                        location: loc,
+                    })
+                    .unwrap();
                     *expected_raw += 1;
                 }
             }

@@ -48,6 +48,57 @@
 //! Dial9 can capture Tracing spans via the `TracingLayer`. On the scale of tracing, this is fairly low overhead, however, if you have a large amount of deeply nested spans, this can produce a huge amount
 //! of data. We recommend using a very fine-grained filter.
 //!
+//! ### Metrics
+//!
+//! Dial9 emits operational metrics about its own internals via a pluggable
+//! [`metrique_writer::BoxEntrySink`]. These tell you how the trace pipeline
+//! is performing (not application metrics). Wire up a sink with
+//! [`TracedRuntimeBuilder::with_worker_metrics_sink`](dial9_tokio_telemetry::telemetry::recorder::TracedRuntimeBuilder::with_worker_metrics_sink)
+//! or via `.with_runtime(|r| ...)` on the `Dial9Config` builder.
+//! If no sink is provided, metrics are discarded.
+//!
+//! #### Metrics emitted
+//!
+//! Dial9 emits three metric entries:
+//!
+//! - **Flush**: each flush cycle (~30 s) and on shutdown.
+//!   `EventCount`, `DroppedBatches`, `CpuFlushDuration` (µs),
+//!   `FlushDuration` (µs), `LastFlush`.
+//!
+//! - **TlDrain**: each thread-local buffer drain (~30 s).
+//!   `BuffersFlushed`, `BuffersLocked`, `BuffersSkippedBusy`,
+//!   `EventsFlushed`, `DeadPruned`, `Duration` (µs).
+//!
+//! - **ProcessSegment**: per sealed segment processed by the background worker.
+//!   `TotalTime` (ms), `Success`/`Failure`, `SegmentIndex`,
+//!   `UncompressedSize`/`CompressedSize` (bytes), plus per-stage keys
+//!   like `Gzip.Time`, `S3Upload.Success`.
+//!
+//! #### Example: emit metrics to stderr
+//!
+//! ```rust,no_run
+//! use metrique::local::{LocalFormat, OutputStyle};
+//! use metrique::writer::format::FormatExt;
+//! use metrique::writer::sink::FlushImmediatelyBuilder;
+//!
+//! let metrics_sink = FlushImmediatelyBuilder::new().build_boxed(
+//!     LocalFormat::new(OutputStyle::Pretty)
+//!         .output_to_makewriter(|| std::io::stderr().lock()),
+//! );
+//! ```
+//!
+//! Then pass it inside `.with_runtime`:
+//!
+//! ```rust,ignore
+//! Dial9Config::builder()
+//!     // ...other config...
+//!     .with_runtime(move |r| r.with_worker_metrics_sink(metrics_sink))
+//!     .build_or_disabled()
+//! ```
+//!
+//! In a test or local-dev scenario you can use the test utilities from
+//! `metrique_writer::test_util` to capture and inspect entries programmatically.
+//!
 //! The rest of this example shows an opinionated way to wire dial9
 //! so it can be enabled and tuned with CLI flags or environment variables
 //! (via [`clap`]). The same binary can then run in dev, staging, and prod
@@ -119,6 +170,9 @@ use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::telemetry::{
     HasTracePath, PipelineUnset, TelemetryHandle, TracedRuntimeBuilder,
 };
+use metrique::local::{LocalFormat, OutputStyle};
+use metrique::writer::format::FormatExt;
+use metrique::writer::sink::FlushImmediatelyBuilder;
 
 const LINUX: bool = cfg!(target_os = "linux");
 
@@ -174,14 +228,26 @@ impl Dial9Opts {
     }
 }
 
+/// Emit dial9 operational metrics (Flush, TlDrain, ProcessSegment) to stderr.
+/// In production, you would typically pass the `ServiceMetrics` sink that
+/// your application already uses.
+fn stderr_metrics_sink() -> metrique_writer::BoxEntrySink {
+    FlushImmediatelyBuilder::new().build_boxed(
+        LocalFormat::new(OutputStyle::Pretty).output_to_makewriter(|| std::io::stderr().lock()),
+    )
+}
+
 #[cfg(feature = "cpu-profiling")]
 fn configure_runtime_common(
     mut r: TracedRuntimeBuilder<HasTracePath, PipelineUnset>,
+    metrics_sink: metrique_writer::BoxEntrySink,
     cpu_profile_enabled: bool,
     schedule_profile_enabled: bool,
     cpu_sample_hz: u64,
 ) -> TracedRuntimeBuilder<HasTracePath, PipelineUnset> {
-    r = r.with_task_tracking(true);
+    r = r
+        .with_task_tracking(true)
+        .with_worker_metrics_sink(metrics_sink);
     use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
     if cpu_profile_enabled {
         r = r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(cpu_sample_hz));
@@ -195,8 +261,10 @@ fn configure_runtime_common(
 #[cfg(not(feature = "cpu-profiling"))]
 fn configure_runtime_common(
     r: TracedRuntimeBuilder<HasTracePath, PipelineUnset>,
+    metrics_sink: metrique_writer::BoxEntrySink,
 ) -> TracedRuntimeBuilder<HasTracePath, PipelineUnset> {
     r.with_task_tracking(true)
+        .with_worker_metrics_sink(metrics_sink)
 }
 
 /// Translate parsed options into a [`Dial9Config`] the `#[main]` macro can consume.
@@ -248,27 +316,29 @@ fn configure_dial9(opts: &Dial9Opts) -> Dial9Config {
             .build();
         return cfg
             .with_runtime(move |r| {
+                let sink = stderr_metrics_sink();
                 #[cfg(feature = "cpu-profiling")]
                 {
-                    configure_runtime_common(r, cpu_enabled, sched_enabled, cpu_hz)
+                    configure_runtime_common(r, sink, cpu_enabled, sched_enabled, cpu_hz)
                         .with_s3_uploader(s3)
                 }
                 #[cfg(not(feature = "cpu-profiling"))]
                 {
-                    configure_runtime_common(r).with_s3_uploader(s3)
+                    configure_runtime_common(r, sink).with_s3_uploader(s3)
                 }
             })
             .build_or_disabled();
     }
 
     cfg.with_runtime(move |r| {
+        let sink = stderr_metrics_sink();
         #[cfg(feature = "cpu-profiling")]
         {
-            configure_runtime_common(r, cpu_enabled, sched_enabled, cpu_hz)
+            configure_runtime_common(r, sink, cpu_enabled, sched_enabled, cpu_hz)
         }
         #[cfg(not(feature = "cpu-profiling"))]
         {
-            configure_runtime_common(r)
+            configure_runtime_common(r, sink)
         }
     })
     .build_or_disabled()

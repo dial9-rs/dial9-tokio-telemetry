@@ -4,9 +4,9 @@ use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::buffer;
 use crate::telemetry::buffer::TlBufferHandle;
 use crate::telemetry::collector::CentralCollector;
-use crate::telemetry::events::RawEvent;
 #[cfg(feature = "cpu-profiling")]
 use crate::telemetry::events::ThreadRole;
+use crate::telemetry::format::{QueueSampleEvent, WakeEventEvent};
 use crate::telemetry::task_metadata::TaskId;
 use std::cell::Cell;
 #[cfg(feature = "cpu-profiling")]
@@ -73,10 +73,14 @@ impl SharedState {
 
     /// Create a wake event. Pragmatic exception: calls `tokio::task::try_id()`
     /// because `Traced` is inherently tokio-specific.
-    pub(crate) fn create_wake_event(&self, woken_task_id: TaskId, waking_worker: u8) -> RawEvent {
+    pub(crate) fn create_wake_event(
+        &self,
+        woken_task_id: TaskId,
+        waking_worker: u8,
+    ) -> WakeEventEvent {
         let waker_task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-        RawEvent::WakeEvent {
-            timestamp_nanos: self.timestamp_nanos(),
+        WakeEventEvent {
+            timestamp_ns: self.timestamp_nanos(),
             waker_task_id,
             woken_task_id,
             target_worker: waking_worker,
@@ -105,14 +109,10 @@ impl SharedState {
     }
 
     pub(crate) fn record_queue_sample(&self, global_queue_depth: usize) {
-        self.record_event(RawEvent::QueueSample {
-            timestamp_nanos: self.timestamp_nanos(),
-            global_queue_depth,
+        self.record_encodable_event(&QueueSampleEvent {
+            timestamp_ns: self.timestamp_nanos(),
+            global_queue: global_queue_depth as u8,
         });
-    }
-
-    fn record_event(&self, event: RawEvent) {
-        self.record_encodable_event(&event);
     }
 
     /// Record a user-defined [`Encodable`](crate::telemetry::buffer::Encodable) event.
@@ -211,10 +211,6 @@ impl SharedState {
 pub(crate) struct EventBuffer<'a>(&'a SharedState);
 
 impl EventBuffer<'_> {
-    pub(crate) fn record_event(&self, event: RawEvent) {
-        self.record_encodable_event(&event);
-    }
-
     pub(crate) fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
         if let Some(handle) =
             buffer::record_encodable_event(event, &self.0.collector, &self.0.drain_epoch)
@@ -233,11 +229,11 @@ impl EventBuffer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::format::WorkerId;
+    use crate::telemetry::format::{PollEndEvent, WorkerId};
 
-    fn poll_end_event() -> RawEvent {
-        RawEvent::PollEnd {
-            timestamp_nanos: 1000,
+    fn poll_end_event() -> PollEndEvent {
+        PollEndEvent {
+            timestamp_ns: 1000,
             worker_id: WorkerId::from(0usize),
         }
     }
@@ -253,7 +249,7 @@ mod tests {
     fn record_event_registers_tl_buffer_handle() {
         let ss = enabled_shared_state();
         // First event on this thread should register a handle.
-        ss.record_event(poll_end_event());
+        ss.record_encodable_event(&poll_end_event());
         let handles = ss.tl_buffers.lock().unwrap();
         assert_eq!(handles.len(), 1);
         assert!(handles[0].buffer.upgrade().is_some());
@@ -262,8 +258,8 @@ mod tests {
     #[test]
     fn second_record_event_does_not_re_register() {
         let ss = enabled_shared_state();
-        ss.record_event(poll_end_event());
-        ss.record_event(poll_end_event());
+        ss.record_encodable_event(&poll_end_event());
+        ss.record_encodable_event(&poll_end_event());
         let handles = ss.tl_buffers.lock().unwrap();
         assert_eq!(handles.len(), 1);
     }
@@ -272,7 +268,7 @@ mod tests {
     fn drain_all_tl_buffers_flushes_idle_buffer() {
         let ss = enabled_shared_state();
         // Write an event (won't self-flush — buffer is 1MB).
-        ss.record_event(poll_end_event());
+        ss.record_encodable_event(&poll_end_event());
         // Nothing in the collector yet (buffer not full).
         assert!(ss.collector.next().is_none());
         // Bump epoch so the idle buffer (epoch 0) is stale, then drain.
@@ -288,8 +284,8 @@ mod tests {
         let ss2 = ss.clone();
         // Write events from a spawned thread.
         let handle = std::thread::spawn(move || {
-            ss2.record_event(poll_end_event());
-            ss2.record_event(poll_end_event());
+            ss2.record_encodable_event(&poll_end_event());
+            ss2.record_encodable_event(&poll_end_event());
         });
         handle.join().unwrap();
         // Bump epoch so the buffer is stale, then drain from the main thread.
@@ -302,7 +298,7 @@ mod tests {
     #[test]
     fn drain_skips_busy_buffer() {
         let ss = enabled_shared_state();
-        ss.record_event(poll_end_event());
+        ss.record_encodable_event(&poll_end_event());
         // Bump epoch to 1 (simulates the tick before the drain).
         ss.bump_drain_epoch();
         // Simulate a self-flush by stamping the current epoch.
@@ -320,7 +316,7 @@ mod tests {
         let ss = Arc::new(enabled_shared_state());
         let ss2 = ss.clone();
         let handle = std::thread::spawn(move || {
-            ss2.record_event(poll_end_event());
+            ss2.record_encodable_event(&poll_end_event());
         });
         handle.join().unwrap();
         // Thread exited — its Arc<Mutex<TLB>> was dropped, Weak is dead.
@@ -348,7 +344,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             // drain_epoch is 0, so no self-flush happens — the event
             // stays in the buffer.
-            ss2.record_event(poll_end_event());
+            ss2.record_encodable_event(&poll_end_event());
             ready_tx.send(()).unwrap();
             // Park until main thread has drained. The TLB `Drop` impl must
             // not run before the intrusive drain, otherwise we're not
@@ -376,7 +372,7 @@ mod tests {
 
     // Concurrent-stress proptest: the core invariant of the TL buffer
     // drain feature is that no events are lost and none are duplicated,
-    // regardless of how `record_event`, `bump_drain_epoch`, and
+    // regardless of how `record_encodable_event`, `bump_drain_epoch`, and
     // `drain_all_tl_buffers` interleave across threads. Spawn N writer
     // threads, each recording M events, while a drainer thread
     // concurrently bumps+drains. After joining, a final bump+drain should
@@ -401,7 +397,7 @@ mod tests {
                     std::thread::spawn(move || {
                         start.wait();
                         for _ in 0..events_per_thread {
-                            ss.record_event(poll_end_event());
+                            ss.record_encodable_event(&poll_end_event());
                         }
                     })
                 })

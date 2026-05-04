@@ -1,6 +1,7 @@
 use crate::telemetry::{format::WorkerId, task_metadata::TaskId};
 use dial9_trace_format::{FieldValue, InternedString};
 use serde::Serialize;
+#[cfg(feature = "cpu-profiling")]
 use std::sync::Arc;
 
 /// Role of a thread known to the telemetry system.
@@ -32,9 +33,11 @@ impl CpuSampleSource {
     }
 }
 
+#[cfg(feature = "cpu-profiling")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ThreadName(Arc<str>);
 
+#[cfg(feature = "cpu-profiling")]
 impl ThreadName {
     pub(crate) fn new(name: String) -> Self {
         Self(name.into())
@@ -47,10 +50,10 @@ impl ThreadName {
 
 /// Wire event representing a telemetry record after interning.
 ///
-/// Compare with `RawEvent` which is emitted by worker threads and carries
-/// `&'static Location` instead of interned `SpawnLocationId`.
-///
-/// Future updates will continue to diverge the in-memory format with the wire format.
+/// This is the decoded representation produced by reading a trace back — the
+/// on-disk wire format goes through the `TraceEvent` structs defined in
+/// [`crate::telemetry::format`]. Worker threads encode those `TraceEvent`s
+/// directly; this enum is only constructed during decode for analysis.
 ///
 /// NOTE: the `Serialize` impl here is just for convienence of writing to JSON.
 /// It does NOT reflect the wire format.
@@ -290,62 +293,11 @@ impl TelemetryEvent {
     }
 }
 
-/// Raw event emitted by worker threads into thread-local buffers.
-/// Carries rich data (including `&'static Location`) with no locking.
-/// Converted to wire format by the flush thread.
-#[derive(Debug, Clone)]
-pub(crate) enum RawEvent {
-    PollStart {
-        timestamp_nanos: u64,
-        worker_id: WorkerId,
-        worker_local_queue_depth: usize,
-        task_id: crate::telemetry::task_metadata::TaskId,
-        location: &'static std::panic::Location<'static>,
-    },
-    PollEnd {
-        timestamp_nanos: u64,
-        worker_id: WorkerId,
-    },
-    WorkerPark {
-        timestamp_nanos: u64,
-        worker_id: WorkerId,
-        worker_local_queue_depth: usize,
-        cpu_time_nanos: u64,
-    },
-    WorkerUnpark {
-        timestamp_nanos: u64,
-        worker_id: WorkerId,
-        worker_local_queue_depth: usize,
-        cpu_time_nanos: u64,
-        sched_wait_delta_nanos: u64,
-    },
-    QueueSample {
-        timestamp_nanos: u64,
-        global_queue_depth: usize,
-    },
-    TaskSpawn {
-        timestamp_nanos: u64,
-        task_id: crate::telemetry::task_metadata::TaskId,
-        location: &'static std::panic::Location<'static>,
-        instrumented: bool,
-    },
-    TaskTerminate {
-        timestamp_nanos: u64,
-        task_id: crate::telemetry::task_metadata::TaskId,
-    },
-    WakeEvent {
-        timestamp_nanos: u64,
-        waker_task_id: crate::telemetry::task_metadata::TaskId,
-        woken_task_id: crate::telemetry::task_metadata::TaskId,
-        target_worker: u8,
-    },
-    /// A CPU stack trace sample from perf_event, attributed to a worker thread.
-    #[cfg_attr(not(feature = "cpu-profiling"), allow(dead_code))]
-    CpuSample(Box<CpuSampleData>),
-}
-
-/// Data for a CPU stack trace sample. Boxed inside [`RawEvent`] to keep the
-/// enum small for the common hot-path variants.
+/// Data for a CPU stack trace sample. Implements `Encodable` so samples can
+/// be written directly into the thread-local trace buffer without an
+/// intermediate enum. Interning of `thread_name` and `callchain` happens in
+/// the `Encodable::encode` impl.
+#[cfg(feature = "cpu-profiling")]
 #[derive(Debug, Clone)]
 pub(crate) struct CpuSampleData {
     pub timestamp_nanos: u64,

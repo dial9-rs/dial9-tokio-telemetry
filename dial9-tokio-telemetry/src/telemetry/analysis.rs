@@ -860,7 +860,7 @@ mod tests {
     #[test]
     fn trace_reader_reads_gzip_trace_files() {
         use crate::telemetry::buffer::ThreadLocalBuffer;
-        use crate::telemetry::events::RawEvent;
+        use crate::telemetry::format::WorkerParkEvent;
         use crate::telemetry::writer::{RotatingWriter, TraceWriter};
         use flate2::Compression;
         use flate2::write::GzEncoder;
@@ -871,11 +871,11 @@ mod tests {
 
         let mut writer = RotatingWriter::single_file(&raw_path).unwrap();
         let batch = crate::telemetry::collector::Batch::new(
-            ThreadLocalBuffer::encode_single(&RawEvent::WorkerPark {
-                timestamp_nanos: 1_000,
+            ThreadLocalBuffer::encode_single(&WorkerParkEvent {
+                timestamp_ns: 1_000,
                 worker_id: WorkerId::from(7usize),
-                worker_local_queue_depth: 3,
-                cpu_time_nanos: 11,
+                local_queue: 3,
+                cpu_time_ns: 11,
             }),
             1,
         );
