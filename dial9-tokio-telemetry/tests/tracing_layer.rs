@@ -26,6 +26,10 @@ struct SpanEvents {
     worker_ids: HashSet<u64>,
     /// Unique schema names seen for enter events.
     enter_schema_names: HashSet<String>,
+    /// Unique span IDs seen on enter events.
+    entered_span_ids: HashSet<u64>,
+    /// Span IDs seen on close events.
+    closed_span_ids: HashSet<u64>,
 }
 
 fn decode_span_events(path: &std::path::Path) -> SpanEvents {
@@ -42,6 +46,8 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
         saw_parent_span_id: false,
         worker_ids: HashSet::new(),
         enter_schema_names: HashSet::new(),
+        entered_span_ids: HashSet::new(),
+        closed_span_ids: HashSet::new(),
     };
 
     decoder
@@ -55,6 +61,11 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
                         && let Some(name) = ev.string_pool.get(*id)
                     {
                         result.enter_names.push(name.to_owned());
+                    }
+                    if field_def.name == "span_id"
+                        && let FieldValueRef::Varint(v) = field_val
+                    {
+                        result.entered_span_ids.insert(*v);
                     }
                     if field_def.name == "parent_span_id"
                         && let FieldValueRef::Varint(v) = field_val
@@ -92,6 +103,13 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
                 }
             } else if ev.name == "SpanCloseEvent" {
                 result.close_count += 1;
+                for (field_def, field_val) in ev.schema.fields.iter().zip(ev.fields.iter()) {
+                    if field_def.name == "span_id"
+                        && let FieldValueRef::Varint(v) = field_val
+                    {
+                        result.closed_span_ids.insert(*v);
+                    }
+                }
             }
         })
         .unwrap();
@@ -189,10 +207,15 @@ fn span_events_appear_in_trace() {
         "enter/exit count mismatch"
     );
 
-    // Close events: one per unique span instance
-    assert!(
-        events.close_count > 0,
-        "expected at least 1 SpanCloseEvent, got 0"
+    // Close events: one per unique span instance, and every entered span must be closed
+    assert_eq!(
+        events.entered_span_ids, events.closed_span_ids,
+        "every entered span should have a matching close event"
+    );
+    assert_eq!(
+        events.close_count,
+        events.entered_span_ids.len() as u32,
+        "each span should close exactly once"
     );
 
     // Span names
@@ -344,5 +367,9 @@ fn span_events_on_current_thread_runtime() {
     assert!(
         events.enter_names.contains(&"do_work".to_string()),
         "missing do_work span on current_thread runtime"
+    );
+    assert_eq!(
+        events.entered_span_ids, events.closed_span_ids,
+        "every entered span should have a matching close event on current_thread runtime"
     );
 }
