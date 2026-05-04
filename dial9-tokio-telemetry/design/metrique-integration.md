@@ -63,7 +63,7 @@ struct RequestMetrics {
 }
 ```
 
-Because `Dial9Context` itself declares `default_field_tag(skip(InTrace))`, its fields are not tagged `InTrace` by parent-default inheritance. They still carry structural source data via `Extractable<Dial9>`.
+Because `Dial9Context` itself declares `default_field_tag(skip(InTrace))`, its fields are not tagged `InTrace` by parent-default inheritance. They still carry structural source data reachable via `desc.source::<Dial9>(..)`.
 
 ## Architecture
 
@@ -87,7 +87,7 @@ Because `Dial9Context` itself declares `default_field_tag(skip(InTrace))`, its f
 │ Macro emits:                                                   │
 │   impl Entry for ClosedRequestMetrics (as today)               │
 │   static EntryDescriptor (fields, tags, units, sources)        │
-│   impl Extractable<Dial9> for ClosedRequestMetrics (via dial9 field)│
+│   SourceExtractor for Dial9 stored in descriptor                  │
 │   descriptor() hook on the erased entry vtable                 │
 └────────────────────────────────────────────────────────────────┘
                               │
@@ -194,7 +194,7 @@ impl Dial9Context {
 }
 ```
 
-Construction always captures the monotonic clock. Tokio runtime state (worker id, task id) is captured if the thread is owned by a tokio runtime; otherwise those fields remain `None` / unset. `capture()` is infallible: an off-runtime call is a legitimate "no tokio context right here" signal, not an error. The closed form (`ClosedDial9Context`) is the snapshot the sink extracts through `Extractable<Dial9>`.
+Construction always captures the monotonic clock. Tokio runtime state (worker id, task id) is captured if the thread is owned by a tokio runtime; otherwise those fields remain `None` / unset. `capture()` is infallible: an off-runtime call is a legitimate "no tokio context right here" signal, not an error. The closed form is the snapshot the sink extracts via `desc.source::<Dial9>(entry.inner_any())`.
 
 If no dial9 runtime is attached at all (inert `TelemetryHandle`), `Dial9Stream` short-circuits the event; the `Dial9Context` field is harmlessly constructed and discarded. No rate-limited warn is required for the off-runtime case; the captured snapshot carries a timestamp and whatever tokio state was available.
 
@@ -206,7 +206,7 @@ Per entry:
 
 1. If the handle is inert: return `Ok(())` immediately; entries still reach EMF through the tee.
 2. Look up `entry.descriptor()`. `None` is reported once and skipped.
-3. Look up the entry's `Extractable<Dial9>` snapshot. Missing source with present `InTrace` fields is reported and the entry is skipped.
+3. Look up the entry's `Dial9` snapshot via `desc.source::<Dial9>(entry.inner_any())`. Missing source with present `InTrace` fields is reported and the entry is skipped.
 4. Ensure a schema is registered for this descriptor (see "Schema handling" below).
 5. Start an event on the encoder using the snapshot timestamp.
 6. Walk `Entry::write` with a `Dial9EntryWriter` that uses the descriptor to filter by `InTrace`, route `InternString` fields through the string pool, and encode each value according to its `FieldShape`.
@@ -272,7 +272,7 @@ The metrique macro catches structural mistakes that do not depend on dial9: dupl
 
 ### Startup-time (binary-wide, opt-out via feature)
 
-Dial9 implements `metrique::DiscoverableSourceTag` for its `Dial9` tag. Every macro-derived entry declaring `source(Dial9)` registers its `&'static EntryDescriptor` into a dial9-owned vec before `main`. At sink construction, dial9:
+Dial9 implements `metrique::SourceTag` for its `Dial9` tag. Every macro-derived entry declaring `source(Dial9)` registers its `&'static EntryDescriptor` into a dial9-owned vec before `main`. At sink construction, dial9:
 
 1. If the registered vec is empty: emit one `tracing::warn!` pointing the user at "you attached a dial9 sink, but no struct in this binary declares `source(Dial9)`; the sink will not produce any events." Does not abort.
 2. If the registered vec is non-empty: run per-descriptor structural checks on every registered descriptor (same checks as first-use, described below). Any failures report via `debug_assert!` in debug builds and rate-limited `tracing::error!` in release.
@@ -292,7 +292,7 @@ Dial9Stream::builder(&handle).startup_discovery(false).build();
 
 Per-descriptor first-use validation (below) continues to run unconditionally.
 
-On targets where link-time registration is unavailable (WASM without the relevant feature flags, exotic embedded targets), dial9's `DiscoverableSourceTag` impl is cfg'd out. No registrations are emitted, no registry is iterated, the empty-registry warn is compiled out. First-use validation still runs.
+On targets where link-time registration is unavailable (WASM without the relevant feature flags, exotic embedded targets), dial9's `SourceTag` override is cfg'd out. No registrations are emitted, no registry is iterated, the empty-registry warn is compiled out. First-use validation still runs.
 
 ### First-use (descriptor-local, per descriptor, always on)
 

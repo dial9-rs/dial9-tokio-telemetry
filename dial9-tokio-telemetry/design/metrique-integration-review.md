@@ -31,6 +31,20 @@ Strong preferences:
 - Compile-time misconfiguration detection where cheap.
 - Zero cost on sinks that do not use any of this machinery.
 
+## Non-goals
+
+Explicitly out of scope for this dial9 release. Each has an evolution path; none is a blocker.
+
+- **Hand-written `Entry` impls carrying dial9 telemetry.** A type with `impl Entry for MyType {}` and no `#[metrics]` returns `None` from the erased `descriptor()` and is skipped by `Dial9Stream` with a rate-limited warn. Evolution path: metrique ships `DescribeEntry` (sketched in the metrique review as a non-goal of the initial metrique release). Once that lands, dial9 picks up hand-written users with no change on the dial9 side.
+- **Runtime `Entry::write` shape fingerprinting as a fallback for hand-written entries.** Decision, not deferral: a fingerprinter carries the optional-field and Flex explosion problems the descriptor design eliminates.
+- **Compile-time generated dial9 wire plan.** The descriptor-plus-`Entry::write` path is enough to meet functional requirements. A static plan is strictly additive on top when flush-thread CPU savings matter beyond the descriptor path.
+- **Programmatic stats handle in the sink.** Diagnostics use periodic `tracing::debug!` and rate-limited `tracing::warn!`. A richer stats API can land once metrique exposes a general reporting hook.
+- **Schema-cache tunability.** The cache is keyed on `&'static EntryDescriptor` pointers, so its size is a compile-time property. No tuning surface.
+- **Format-layer sampling integration.** Dial9 stays an `EntryIoStream`; `FixedFractionSample` / `CongressSample` wrapping a `Format` is a follow-up that needs either a new composition shape or a metrique-side change.
+- **User-invoked compile-time validation helper.** A sink-specific `dial9::assert_dial9_compatible!(T)` macro is not part of the design. The checks run at first-use and at startup-time discovery automatically.
+- **Wire format version bump.** Dial9 trace-format extensions (schema annotations, typed dynamic maps) are additive. Old decoders halt at unknown tags; we accept silent truncation when a new trace is read by an older viewer because the format is not widely distributed outside this repo and the in-tree viewer ships in lockstep with producers.
+- **Heterogeneous Flex values.** Metrique `Flex<(String, T)>` has a fixed `T` per type; dial9 mirrors that in its `Map { key, value }` field type. A tagged dynamic value form would need both sides to change.
+
 ## Tradeoffs worth reviewer attention
 
 - **Schema cache keyed on `&'static EntryDescriptor` pointer, not shape fingerprint.** This is correct because macro-derived descriptors are `'static` and unique per type. It works because the descriptor is the full closed-shape description; sinks never need to observe emissions to learn structure. Consequence: hand-written entries (which return `None` for the descriptor) are skipped, not encoded via a fingerprint fallback.
@@ -38,15 +52,6 @@ Strong preferences:
 - **`InTrace` default inheritance interacts with `flatten`.** The rule we landed on (child explicit decisions win; parent defaults fill only unspecified) is the rule that lets `Dial9Context` protect its own fields from accidental `InTrace` inheritance when flattened. It is a rule reviewers should exercise against their own use cases.
 - **Dial9 depends on a descriptor-system PR in metrique.** The dial9 implementation cannot land before the metrique PR does. The changelog doc tracks the specific dependency.
 - **Units on the wire are schema annotations, not field-name suffixes.** This is a one-time downstream-tooling change: consumers looking for `latency_Microseconds` need to look at schema metadata instead. It is the right long-term shape; field-name suffix is a hack we did not want to permanently bake in.
-- **Hand-written `Entry` impls are skipped by default.** Users with a direct `impl Entry for MyType` (no `#[metrics]`, no derive) continue to work for EMF/JSON but are invisible to dial9 until they also implement `DescribeEntry` (see below). We chose skip-with-a-warn over a runtime fingerprinting fallback because the fallback would duplicate most of the design's motivation (fingerprint-per-optional-combination, fingerprint-per-Flex-key), and because the opt-in story is concrete enough that users who care can get back in.
-
-## Hand-written entries and manual dial9 opt-in
-
-Dial9 supports hand-written `Entry` impls via the same mechanism macro-derived entries use: `DescribeEntry`, defined in metrique (see `docs/entry-descriptors-review.md` in the metrique repo). A user with a hand-rolled `impl Entry` writes a `const EntryDescriptor` by hand and an `extract_source` implementation returning `Dial9ContextSnapshot` for the `Dial9` tag. No dial9-specific change is needed to support them; once metrique ships `DescribeEntry`, any hand-written user can participate in the dial9 trace.
-
-The initial dial9 release does not include examples for hand-written opt-in beyond a pointer at the metrique docs. If there is demand we can ship a narrow-scope dial9 helper (say, a `Dial9Context::snapshot_for_hand_written(&self)` that returns the right typed snapshot) so hand-written users do not have to reach into dial9 internals to construct it.
-
-We explicitly chose not to ship a runtime `Entry::write` fingerprinter as a hand-written fallback. The fingerprinter carries the optional-field and Flex explosion problem we designed this system to avoid; adding it as a second code path would keep the thrash problem alive inside dial9 even after the primary path stopped having it. If demand for hand-written support is real and `DescribeEntry` is not shipping soon enough, we can revisit.
 
 ## Key design choices
 
@@ -63,13 +68,13 @@ Runtime discovery is still available as a fallback for hand-written entries; we 
 
 ### Context capture via a metrique source field, not a sink wrapper
 
-An earlier iteration captured caller-thread context through a `TokioContextSink` wrapper that injected an `EntryConfig`. The revised design puts capture in a real metrique field (`Dial9Context`) whose constructor reads the tokio thread-locals and whose closed form is the snapshot the sink extracts via `Extractable<Dial9>`.
+An earlier iteration captured caller-thread context through a `TokioContextSink` wrapper that injected an `EntryConfig`. The revised design puts capture in a real metrique field (`Dial9Context`) whose constructor reads the tokio thread-locals and whose closed form is the snapshot the sink extracts via `desc.source::<Dial9>(..)`.
 
 Advantages:
 
 - No sink wrapper in the composition path. Dial9 is a true peer sink.
 - Capture runs in the entry's constructor, so context is recorded on the caller thread by construction, not by convention.
-- The closed snapshot survives `BoxEntry` erasure in a typed way because it is reachable through `inner_any` and `Extractable<Dial9>`.
+- The closed snapshot survives `BoxEntry` erasure in a typed way because it is reachable through `desc.source::<Dial9>(entry.inner_any())`.
 - Users who want context visible as normal payload can `flatten` instead of `no_write`; the source data remains structurally available.
 
 The sink wrapper is not removed outright: users who want runtime-wide defaults can still provide their own helper that constructs `Dial9Context` and merges it in. It stops being the primary path.
@@ -105,9 +110,9 @@ Validation runs in three phases: compile-time intrinsic checks from the metrique
 
 Compile-time checks are essentially free and entirely metrique's responsibility. They catch structural contradictions (duplicate source tags, conflicting field-tag attributes) but cannot catch dial9-specific rules because metrique treats tag identity opaquely.
 
-Startup-time discovery uses metrique's `DiscoverableSourceTag::register_descriptor` hook. Dial9 implements the hook on its `Dial9` tag to push registered descriptors into a `Mutex<Vec<_>>`, and `Dial9Stream::new` inspects the vec at construction. The specific failure mode we want to catch: a user attaches a dial9 sink but no struct in the binary declares `source(Dial9)`. Without this check, the sink runs silently and produces no events, and the user finds out when they look at their trace file and see nothing.
+Startup-time discovery uses metrique's `SourceTag::register_descriptor` hook. Dial9 implements the hook on its `Dial9` tag to push registered descriptors into a `Mutex<Vec<_>>`, and `Dial9Stream::new` inspects the vec at construction. The specific failure mode we want to catch: a user attaches a dial9 sink but no struct in the binary declares `source(Dial9)`. Without this check, the sink runs silently and produces no events, and the user finds out when they look at their trace file and see nothing.
 
-The check is best-effort, not a correctness guarantee. Known false-positive and false-negative scenarios (multi-binary workspaces, feature-gated structs, deps shipping their own tagged entries) are enumerated in the keeper's Validation section. Users who hit a false negative disable the empty-registry warn per-sink via the builder (`Dial9Stream::builder(...).startup_discovery(false).build()`). On targets where link-time registration is unavailable, dial9's `DiscoverableSourceTag` impl is cfg'd out automatically; no cargo feature is involved.
+The check is best-effort, not a correctness guarantee. Known false-positive and false-negative scenarios (multi-binary workspaces, feature-gated structs, deps shipping their own tagged entries) are enumerated in the keeper's Validation section. Users who hit a false negative disable the empty-registry warn per-sink via the builder (`Dial9Stream::builder(...).startup_discovery(false).build()`). On targets where link-time registration is unavailable, dial9's `SourceTag` override is cfg'd out automatically; no cargo feature is involved.
 
 Per-descriptor first-use validation runs unconditionally, whether or not startup discovery ran. Every descriptor the sink sees on the event path gets walked once for dial9-specific structural errors (`InTrace` without `Dial9` source, `InternString` on non-string shape, opaque field tagged `InTrace`). The verdict caches on the `&'static EntryDescriptor` pointer.
 
@@ -169,7 +174,7 @@ Russell's proposal: users write `#[metrics(flatten)] d9: D9Meta` with `..Default
 Rejected as the primary path because:
 
 - It conflates source semantics with field emission. Context data does not always belong in normal emission.
-- The sink identifying "this is the dial9 context" by convention is fragile. A typed `Extractable<Dial9>` extractor is a better contract.
+- The sink identifying "this is the dial9 context" by convention is fragile. A typed `SourceTag`-driven extractor accessed via `desc.source::<Dial9>(..)` is a better contract.
 - `flatten` was never intended as a hook for sink-specific extraction; repurposing it narrows metrique's flexibility.
 
 We kept flatten as a secondary path for users who want dial9 context **and** normal emission. That still works because `Dial9Context` carries its own `default_field_tag(skip(InTrace))` so the parent's `InTrace` default does not accidentally pull its fields into the dial9 payload.
@@ -230,17 +235,17 @@ Rejected. Pins metrique's public API to a specific link-time mechanism. If `link
 
 Proposed shape: metrique emits `#[ctor::ctor] fn` wrappers that users would see if they read macro-expanded output; the pre-main side effect is documented as part of the contract.
 
-Rejected as a user-facing concept. Users should not have to reason about pre-main code execution to understand their entry types. The pre-main registration, whether via `ctor`, `linkme`, or something else, is an implementation detail behind the `DiscoverableSourceTag` hook. The keeper doc describes the hook; the impl plan pins the specific mechanism.
+Rejected as a user-facing concept. Users should not have to reason about pre-main code execution to understand their entry types. The pre-main registration, whether via `ctor`, `linkme`, or something else, is an implementation detail behind the `SourceTag::register_descriptor` hook. The keeper doc describes the hook; the impl plan pins the specific mechanism.
 
 ### Alternative Q: Cargo feature for startup-discovery opt-out
 
-A shape we rejected: ship a `no_startup_discovery` (or inverted `startup_discovery`) cargo feature on the dial9 crate that gates the `DiscoverableSourceTag` impl, the `linkme` dependency, and the empty-registry check.
+A shape we rejected: ship a `no_startup_discovery` (or inverted `startup_discovery`) cargo feature on the dial9 crate that gates dial9's `SourceTag::register_descriptor` override, the `linkme` dependency, and the empty-registry check.
 
-Rejected because cargo features are infectious: a workspace using dial9 via multiple dependencies gets the union of all feature sets, so one crate enabling the default features forces every crate in the graph to do the same. We need two different opt-outs for two different problems: build-time impossibility on targets where `linkme` does not work, and runtime false-positive suppression per-sink. The current design handles them separately: the build-time case is a target-cfg gate on dial9's `DiscoverableSourceTag` impl (no cargo feature involved, automatic per-target); the runtime case is a per-sink `.startup_discovery(false)` builder toggle. Neither carries the cargo-feature infection risk.
+Rejected because cargo features are infectious: a workspace using dial9 via multiple dependencies gets the union of all feature sets, so one crate enabling the default features forces every crate in the graph to do the same. We need two different opt-outs for two different problems: build-time impossibility on targets where `linkme` does not work, and runtime false-positive suppression per-sink. The current design handles them separately: the build-time case is a target-cfg gate on dial9's `SourceTag` override (no cargo feature involved, automatic per-target); the runtime case is a per-sink `.startup_discovery(false)` builder toggle. Neither carries the cargo-feature infection risk.
 
 ## Feasibility checks
 
-- `BoxEntry::inner()` returns `&(dyn Any + Send + 'static)`; the concrete closed entry is reachable for `Extractable<Dial9>` extraction.
+- `BoxEntry::inner()` returns `&(dyn Any + Send + 'static)`; the concrete closed entry is reachable for typed source extraction via `desc.source::<Dial9>(..)`.
 - Adding one method (`descriptor()`) to the erased entry trait is a metrique-side surface change, not a dial9-side one. Dial9 depends on it; see the impl plan for sequencing.
 - `tee` and `BackgroundQueue` are public; the existing composition paths continue to work unchanged.
 - `EntryConfig` is retained; it is the right primitive for per-emission, sink-provided data. Descriptors and sources cover per-type, entry-provided data. The two coexist.

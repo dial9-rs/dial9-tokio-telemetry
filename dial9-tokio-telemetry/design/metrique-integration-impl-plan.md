@@ -10,7 +10,7 @@ Work graph is three tracks with explicit dependencies. Tracks run in parallel wh
 
 ### Track A: metrique descriptor + source system
 
-Prerequisite for Tracks B and C. Tracked separately in the metrique repo; see `metrique/docs/entry-descriptors-impl-plan.md` for the full sub-track breakdown (M-A descriptor types, M-B erased-entry vtable hook, M-C macro + descriptor emission, M-D hand-written `DescribeEntry`).
+Prerequisite for Tracks B and C. Tracked separately in the metrique repo; see `metrique/docs/entry-descriptors-impl-plan.md` for the full sub-track breakdown (M-A descriptor types, M-B erased-entry vtable hook, M-C macro + descriptor emission).
 
 Dial9 pins to a metrique release that has M-A, M-B, and M-C shipped. M-D is optional for dial9's initial work; dial9 users with hand-written entries benefit from it but dial9 does not require it to function.
 
@@ -31,7 +31,7 @@ Parallelism within Track B: B1-B4 proceed together; B5-B6 come after B1-B4 stabi
 
 Depends on Track A (released metrique) and Track B (released trace-format).
 
-- C1. `src/metrique/tags.rs`: `pub struct Dial9;`, `pub struct InTrace;`, `pub struct InternString;`. Plain `impl metrique::SourceTag for Dial9 {}` unconditionally. On supported targets, also `impl metrique::DiscoverableSourceTag for Dial9` pushing into `DIAL9_ENTRIES`, a `Mutex<Vec<&'static EntryDescriptor>>` populated by `linkme`. The `DiscoverableSourceTag` impl and `DIAL9_ENTRIES` are cfg-gated on target so that unsupported targets do not carry `linkme`. Ties to: dial9 keeper's "User-facing API" section; review's "Validation strategy" section.
+- C1. `src/metrique/tags.rs`: `pub struct Dial9;`, `pub struct InTrace;`, `pub struct InternString;`. `impl metrique::SourceTag for Dial9` with `type Snapshot = Dial9ContextSnapshot`. On supported targets, override `register_descriptor` to push into `DIAL9_ENTRIES`, a `Mutex<Vec<&'static EntryDescriptor>>` populated by `linkme`. The overridden hook and `DIAL9_ENTRIES` are cfg-gated on target so that unsupported targets fall back to the defaulted no-op and do not carry `linkme`. Ties to: dial9 keeper's "User-facing API" section; review's "Validation strategy" section.
 - C2. `src/metrique/context.rs`: `Dial9Context` metrique field type with `#[metrics(source(Dial9))]` and `#[metrics(default_field_tag(skip(InTrace)))]`. `capture()` reads worker/task/monotonic. Closed form holds caller-thread + flush-thread snapshot. Ties to: dial9 keeper's "Components → `Dial9Context`" section.
 - C3. `src/metrique/schema.rs`: `SchemaEntry` builder that takes an `EntryDescriptor` and produces the wire schema with annotations. Keyed cache on the `&'static EntryDescriptor` pointer. Ties to: dial9 keeper's "Components → Schema handling" section.
 - C4. `src/metrique/writer.rs`: `Dial9EntryWriter` adapter walking `Entry::write` callbacks, cross-referencing the descriptor to filter by `InTrace`, routing `InternString` fields through the string pool, encoding per `FieldShape`. Ties to: dial9 keeper's architecture diagram "inside Dial9Stream" block.
@@ -57,9 +57,9 @@ Tests are authored alongside the code in each track.
 
 ## Startup-time discovery: linkme, target gating, runtime toggle
 
-`linkme` 0.3.x is the registration mechanism. Dial9 uses it via the `DiscoverableSourceTag` impl on `Dial9` to populate `DIAL9_ENTRIES` (a `Mutex<Vec<&'static EntryDescriptor>>`). Metrique uses `linkme` internally to drive the `register_descriptor` call per declared source. Neither appears in metrique's public API.
+`linkme` 0.3.x is the registration mechanism. Dial9 uses it to populate `DIAL9_ENTRIES` (a `Mutex<Vec<&'static EntryDescriptor>>`) from within its overridden `SourceTag::register_descriptor` on the `Dial9` tag. Metrique uses `linkme` internally to drive the `register_descriptor` call per declared source. Neither appears in metrique's public API.
 
-- **Target gating**. The `DiscoverableSourceTag` impl on `Dial9` and the `DIAL9_ENTRIES` static are both attached to a `#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "android"))]` gate. On other targets (WASM without appropriate features, exotic embedded, etc.) the impl and the static are compiled out; dial9 does not pull in `linkme` at all. The marker `SourceTag` impl exists unconditionally.
+- **Target gating**. The overridden `SourceTag::register_descriptor` on `Dial9` and the `DIAL9_ENTRIES` static are both attached to a `#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "android"))]` gate. On other targets (WASM without appropriate features, exotic embedded, etc.) the override falls back to metrique's defaulted no-op `register_descriptor` and `DIAL9_ENTRIES` is compiled out; dial9 does not pull in `linkme` at all.
 - **Dependency wiring**. `linkme` is declared as a target-conditional dependency in dial9's `Cargo.toml`: `[target.'cfg(any(target_os = "linux", ...))'.dependencies] linkme = "0.3"`. Nothing to toggle via cargo features.
 - **Runtime per-sink toggle**. `Dial9Stream::builder(...).startup_discovery(false).build()` skips the registry inspection for that sink instance. Default is `true`. The toggle is a plain `bool` field on the builder.
 - **Known gotchas**:
@@ -86,13 +86,18 @@ pub struct FieldDescriptor { /* ... */ }
 pub enum FieldShape { /* ... */ }
 pub struct SourceDescriptor { /* ... */ }
 pub struct SourceExtractor { /* ... */ }
-pub trait Extractable<C> { type Snapshot; fn snapshot(&self) -> Self::Snapshot; }
-pub trait SourceTag: Any + Send + Sync + 'static {}
-pub trait DiscoverableSourceTag: SourceTag {
-    fn register_descriptor(registration: SourceRegistration<'static>);
+pub trait SourceTag: Any + Send + Sync + 'static {
+    type Snapshot: Any + Send;
+    fn register_descriptor(_registration: SourceRegistration<'static>) {}
 }
 #[non_exhaustive]
 pub struct SourceRegistration<'a> { pub descriptor: &'a EntryDescriptor }
+impl EntryDescriptor {
+    pub fn source<C: SourceTag>(
+        &self,
+        entry: &(dyn Any + Send + 'static),
+    ) -> Option<C::Snapshot>;
+}
 
 // Erased entry trait (method added to the existing dyn trait object behind BoxEntry)
 fn descriptor(&self) -> Option<&'static EntryDescriptor>;
@@ -113,11 +118,13 @@ pub struct Dial9;
 pub struct InTrace;
 pub struct InternString;
 
-impl metrique::SourceTag for Dial9 {}
+impl metrique::SourceTag for Dial9 {
+    type Snapshot = Dial9ContextSnapshot;
 
-// On supported targets only.
-#[cfg(any(target_os = "linux", target_os = "macos", /* ... */))]
-impl metrique::DiscoverableSourceTag for Dial9 {
+    // On supported targets, override the defaulted no-op hook to push into
+    // DIAL9_ENTRIES. On other targets, the default no-op runs and linkme
+    // is not pulled in.
+    #[cfg(any(target_os = "linux", target_os = "macos", /* ... */))]
     fn register_descriptor(reg: metrique::SourceRegistration<'static>) {
         DIAL9_ENTRIES.lock().unwrap().push(reg.descriptor);
     }
@@ -154,4 +161,4 @@ pub trait AttachDial9Ext {
 - **Metrique PR scope.** The descriptor work is non-trivial. Mitigation: the metrique design doc is explicit about what is in scope; metrique reviewers can veto pieces before dial9 starts consuming. Dial9 side can be scoped down if metrique ships a narrower initial API (e.g. no descriptor for enum entries).
 - **Format forward compatibility.** Additive extensions only; no format version bump. Old decoders halt at unknown tags, which means old viewers reading new traces will silently truncate at the first extension point. Mitigation: the viewer lives in-repo and updates with the format; users producing new traces update both together. Acceptable because the format is not widely distributed.
 - **Caller-thread cost regression.** `Dial9Context::capture()` does a few thread-local reads plus `clock_monotonic_ns()`. Small fixed cost per entry; we will benchmark during implementation to confirm no measurable regression versus baseline metrique.
-- **`linkme` platform or linker-configuration problems.** Mitigation: target-cfg gate on the `DiscoverableSourceTag` impl skips `linkme` entirely on unsupported targets. Per-sink `.startup_discovery(false)` silences the warn for users who hit legitimate false negatives. Document the `-Wl,--whole-archive` gotcha for `cdylib`/`staticlib` linking in the dial9 README.
+- **`linkme` platform or linker-configuration problems.** Mitigation: target-cfg gate on the `SourceTag::register_descriptor` override skips `linkme` entirely on unsupported targets. Per-sink `.startup_discovery(false)` silences the warn for users who hit legitimate false negatives. Document the `-Wl,--whole-archive` gotcha for `cdylib`/`staticlib` linking in the dial9 README.
