@@ -136,7 +136,8 @@ pub enum TelemetryEvent {
         task_id: TaskId,
         /// Interned spawn location of the task.
         spawn_loc: InternedString,
-        /// Whether this task was spawned via [`TelemetryHandle::spawn`].
+        /// Whether this task was spawned via
+        /// [`TelemetryHandle::spawn`](crate::telemetry::TelemetryHandle::spawn).
         /// `None` for traces recorded before this field existed.
         instrumented: Option<bool>,
     },

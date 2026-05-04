@@ -38,6 +38,8 @@ Without this flag, compilation will fail with errors about missing methods on `t
 
 ## Setup
 
+If you are integrating dial9 into a production service, see the [`production_use` example](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/examples/production_use.rs).
+
 > **Note:** `#[dial9_tokio_telemetry::main]` is a **replacement** for `#[tokio::main]`, not a complement — do not use both on the same function. The macro builds and configures the Tokio runtime internally.
 
 ```rust,no_run
