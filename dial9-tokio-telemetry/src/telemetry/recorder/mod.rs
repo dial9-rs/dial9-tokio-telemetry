@@ -1046,15 +1046,20 @@ impl<P> TracedRuntimeBuilder<P, PipelineS3> {
         self
     }
 
-    /// Replace the configured S3 uploader. Any previously-set client is
-    /// discarded.
+    /// Replace the configured S3 uploader. A client previously bound via
+    /// [`with_s3_client`](Self::with_s3_client) is carried over to the new
+    /// uploader so that call order between the two is irrelevant.
     pub fn with_s3_uploader(mut self, config: crate::background_task::s3::S3Config) -> Self {
         self.segment_metadata = config
             .as_metadata()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+        let carried = match &mut self.pipeline {
+            PipelineConfig::S3(uploader) => uploader.take_client(),
+            _ => None,
+        };
         self.pipeline = PipelineConfig::S3(crate::background_task::S3PipelineUploader::new(
-            config, None,
+            config, carried,
         ));
         self
     }
@@ -3018,5 +3023,57 @@ mod tests {
         // The runtime still works end-to-end.
         let value = rt.block_on(async { 21u32 });
         assert_eq!(value, 21);
+    }
+
+    #[cfg(feature = "worker-s3")]
+    #[test]
+    fn with_s3_client_then_with_s3_uploader_preserves_client() {
+        use crate::background_task::s3::S3Config;
+
+        fn dummy_client() -> aws_sdk_s3::Client {
+            let conf = aws_sdk_s3::Config::builder()
+                .behavior_version_latest()
+                .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                    "test", "test", None, None, "test",
+                ))
+                .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                .build();
+            aws_sdk_s3::Client::from_conf(conf)
+        }
+
+        fn cfg(boot_id: &str) -> S3Config {
+            S3Config::builder()
+                .bucket("b")
+                .service_name("s")
+                .boot_id(boot_id)
+                .build()
+        }
+
+        // Order A: client set after the uploader — already worked.
+        let mut builder = TracedRuntime::builder()
+            .with_s3_uploader(cfg("a"))
+            .with_s3_client(dummy_client());
+        match &mut builder.pipeline {
+            PipelineConfig::S3(u) => {
+                assert!(u.take_client().is_some(), "client must be present in order A");
+            }
+            _ => panic!("expected S3 pipeline"),
+        }
+
+        // Order B: client set first, then a follow-up `with_s3_uploader`. The
+        // replacement must carry the previously-bound client across.
+        let mut builder = TracedRuntime::builder()
+            .with_s3_uploader(cfg("a"))
+            .with_s3_client(dummy_client())
+            .with_s3_uploader(cfg("b"));
+        match &mut builder.pipeline {
+            PipelineConfig::S3(u) => {
+                assert!(
+                    u.take_client().is_some(),
+                    "client bound before the second with_s3_uploader must be carried over"
+                );
+            }
+            _ => panic!("expected S3 pipeline"),
+        }
     }
 }

@@ -881,6 +881,16 @@ impl S3PipelineUploader {
         }
     }
 
+    /// Take any previously-stashed client out of a `Pending` uploader so it
+    /// can be carried into a replacement. Returns `None` once the uploader
+    /// has been initialized.
+    pub(crate) fn take_client(&mut self) -> Option<aws_sdk_s3::Client> {
+        match &mut self.state {
+            S3UploaderState::Pending { client, .. } => client.take(),
+            S3UploaderState::Ready { .. } => None,
+        }
+    }
+
     /// Construct an uploader directly in the `Ready` state. Test-only —
     /// production code goes through [`new`](Self::new) and lazy init.
     #[cfg(test)]
