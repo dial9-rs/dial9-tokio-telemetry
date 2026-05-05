@@ -25,6 +25,13 @@ crate::primitives::thread_local! {
 /// No tokio imports. All runtime-specific logic lives in `RuntimeContext`.
 pub(crate) struct SharedState {
     pub(crate) enabled: AtomicBool,
+    /// Set when `TaskDumpConfig` is provided at build time. When `true`,
+    /// wrapping futures capture async backtraces at yield points.
+    pub(crate) task_dumps_enabled: AtomicBool,
+    /// Snapshot of `TaskDumpConfig::idle_threshold` in nanos. Copied onto
+    /// each `TaskDumped` instance at construction time so the hot poll path
+    /// does not need an atomic load.
+    pub(crate) task_dump_idle_threshold_ns: AtomicU64,
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
     pub(crate) start_time_ns: u64,
@@ -54,6 +61,8 @@ impl SharedState {
     pub(super) fn new(start_time_ns: u64) -> Self {
         Self {
             enabled: AtomicBool::new(false),
+            task_dumps_enabled: AtomicBool::new(false),
+            task_dump_idle_threshold_ns: AtomicU64::new(0),
             collector: Arc::new(CentralCollector::new()),
             start_time_ns,
             next_worker_id: AtomicU64::new(0),

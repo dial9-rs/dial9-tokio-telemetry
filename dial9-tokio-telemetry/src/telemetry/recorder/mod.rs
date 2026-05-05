@@ -507,12 +507,39 @@ impl TelemetryHandle {
                 let _guard = InstrumentedSpawnGuard::set();
                 tokio::spawn(async move {
                     let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-                    crate::traced::Traced::new(future, traced_handle, task_id).await
+                    let inner = wrap_task_dumped(future, traced_handle.shared.clone(), task_id);
+                    crate::traced::Traced::new(inner, traced_handle, task_id).await
                 })
             }
             None => tokio::spawn(future),
         }
     }
+}
+
+/// If the `taskdump` feature is on, wrap `future` in `TaskDumped<F>`; otherwise
+/// pass through unchanged. Factored so `TelemetryHandle::spawn` stays readable.
+#[cfg(feature = "taskdump")]
+fn wrap_task_dumped<F>(
+    future: F,
+    shared: Arc<crate::telemetry::recorder::SharedState>,
+    task_id: TaskId,
+) -> crate::task_dumped::TaskDumped<F>
+where
+    F: std::future::Future,
+{
+    crate::task_dumped::TaskDumped::new(future, shared, task_id)
+}
+
+#[cfg(not(feature = "taskdump"))]
+fn wrap_task_dumped<F>(
+    future: F,
+    _shared: Arc<crate::telemetry::recorder::SharedState>,
+    _task_id: TaskId,
+) -> F
+where
+    F: std::future::Future,
+{
+    future
 }
 
 /// Spawn a traced task on the current tokio runtime.
@@ -843,6 +870,7 @@ pub struct HasTracePath;
 pub struct TracedRuntimeBuilder<P = NoTracePath> {
     enabled: bool,
     task_tracking_enabled: bool,
+    task_dump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
     trace_path: Option<PathBuf>,
     runtime_name: Option<String>,
     #[cfg(feature = "cpu-profiling")]
@@ -881,6 +909,18 @@ impl<P> TracedRuntimeBuilder<P> {
     /// Enable or disable task spawn/terminate tracking.
     pub fn with_task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking_enabled = enabled;
+        self
+    }
+
+    /// Capture async backtraces at yield points for tasks that stay idle
+    /// longer than the configured threshold. Requires the `taskdump` crate
+    /// feature to actually record events; the builder accepts the config
+    /// unconditionally so the API surface is stable.
+    pub fn with_task_dumps(
+        mut self,
+        config: crate::telemetry::task_dump_config::TaskDumpConfig,
+    ) -> Self {
+        self.task_dump_config = Some(config);
         self
     }
 
@@ -966,6 +1006,7 @@ impl<P> TracedRuntimeBuilder<P> {
         TracedRuntimeBuilder {
             enabled: self.enabled,
             task_tracking_enabled: self.task_tracking_enabled,
+            task_dump_config: self.task_dump_config,
             trace_path: self.trace_path,
             runtime_name: self.runtime_name,
             #[cfg(feature = "cpu-profiling")]
@@ -1101,6 +1142,7 @@ impl TracedRuntimeBuilder<HasTracePath> {
         let core_builder = TelemetryCore::builder()
             .writer(writer)
             .maybe_trace_path(self.trace_path)
+            .maybe_task_dump_config(self.task_dump_config)
             .maybe_worker_poll_interval(self.worker_poll_interval)
             .maybe_worker_metrics_sink(self.worker_metrics_sink);
 
@@ -1226,6 +1268,9 @@ impl TelemetryCore {
         /// cpu-profiling or S3 is configured.
         #[builder(into)]
         trace_path: Option<PathBuf>,
+        /// Capture async backtraces at yield points. Requires the `taskdump`
+        /// crate feature to actually record events.
+        task_dump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
         /// Enable CPU profiling (Linux only).
         #[cfg(feature = "cpu-profiling")]
         cpu_profiling: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
@@ -1245,6 +1290,12 @@ impl TelemetryCore {
     ) -> std::io::Result<TelemetryGuard> {
         let start_mono_ns = crate::telemetry::events::clock_monotonic_ns();
         let shared = Arc::new(SharedState::new(start_mono_ns));
+        if let Some(cfg) = task_dump_config.as_ref() {
+            shared.task_dumps_enabled.store(true, Ordering::Relaxed);
+            shared
+                .task_dump_idle_threshold_ns
+                .store(cfg.idle_threshold().as_nanos() as u64, Ordering::Relaxed);
+        }
         #[allow(unused_mut)]
         let mut event_writer = EventWriter::new(Box::new(writer));
         #[cfg(feature = "worker-s3")]
@@ -1566,6 +1617,7 @@ impl TracedRuntime {
         TracedRuntimeBuilder {
             enabled: true,
             task_tracking_enabled: false,
+            task_dump_config: None,
             trace_path: None,
             runtime_name: None,
             #[cfg(feature = "cpu-profiling")]

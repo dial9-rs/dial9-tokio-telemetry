@@ -179,6 +179,18 @@ pub enum TelemetryEvent {
         /// Human-readable thread name.
         name: String,
     },
+    /// Async backtrace captured at a yield point after the task was idle
+    /// longer than the configured threshold. Instruction pointers are
+    /// symbolized offline.
+    TaskDump {
+        /// Wall-clock timestamp in nanoseconds (monotonic) — capture time.
+        #[serde(rename = "timestamp_ns")]
+        timestamp_nanos: u64,
+        /// Task that was idle.
+        task_id: TaskId,
+        /// Raw instruction pointer addresses (leaf first).
+        callchain: Vec<u64>,
+    },
     /// One task woke another task.
     WakeEvent {
         /// Wall-clock timestamp in nanoseconds (monotonic).
@@ -245,6 +257,9 @@ impl TelemetryEvent {
             | TelemetryEvent::CpuSample {
                 timestamp_nanos, ..
             }
+            | TelemetryEvent::TaskDump {
+                timestamp_nanos, ..
+            }
             | TelemetryEvent::WakeEvent {
                 timestamp_nanos, ..
             }
@@ -278,6 +293,7 @@ impl TelemetryEvent {
             TelemetryEvent::QueueSample { .. }
             | TelemetryEvent::TaskSpawn { .. }
             | TelemetryEvent::TaskTerminate { .. }
+            | TelemetryEvent::TaskDump { .. }
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. }
             | TelemetryEvent::SegmentMetadata { .. }
