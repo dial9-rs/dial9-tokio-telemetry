@@ -3055,7 +3055,10 @@ mod tests {
             .with_s3_client(dummy_client());
         match &mut builder.pipeline {
             PipelineConfig::S3(u) => {
-                assert!(u.take_client().is_some(), "client must be present in order A");
+                assert!(
+                    u.take_client().is_some(),
+                    "client must be present in order A"
+                );
             }
             _ => panic!("expected S3 pipeline"),
         }
