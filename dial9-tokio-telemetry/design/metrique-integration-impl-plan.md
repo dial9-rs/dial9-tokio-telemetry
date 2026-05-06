@@ -131,7 +131,6 @@ pub struct Emit;       // field tag: "this field goes in the dial9 payload"
 pub struct Interned;   // field tag: "intern string data for this field"
 
 #[metrics]
-#[derive(Default)]
 pub struct Dial9Context {
     #[metrics(field_tag(Context))]
     worker_id: WorkerId,
@@ -140,7 +139,13 @@ pub struct Dial9Context {
     #[metrics(field_tag(Context))]
     monotonic_ns_start: u64,
     #[metrics(field_tag(Context))]
-    monotonic_ns_end: u64,  // populated on close via CloseValue
+    monotonic_ns_end: MonotonicAtClose,  // captures the clock on close
+}
+
+pub struct MonotonicAtClose;
+impl CloseValue for MonotonicAtClose {
+    type Closed = u64;
+    fn close(self) -> u64 { clock_monotonic_ns() }
 }
 
 impl Dial9Context {

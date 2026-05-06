@@ -166,7 +166,6 @@ Regular metrique struct defined in the dial9 crate:
 
 ```rust
 #[metrics]
-#[derive(Default)]
 pub struct Dial9Context {
     #[metrics(field_tag(dial9::Context))]
     worker_id: WorkerId,
@@ -177,8 +176,18 @@ pub struct Dial9Context {
     #[metrics(field_tag(dial9::Context))]
     monotonic_ns_start: u64,
 
+    /// Captures the monotonic clock at close, not at construction.
     #[metrics(field_tag(dial9::Context))]
-    monotonic_ns_end: u64,  // populated on close via CloseValue
+    monotonic_ns_end: MonotonicAtClose,
+}
+
+/// Field type that reads the monotonic clock when its CloseValue runs.
+/// Its closed form is u64 (monotonic nanoseconds at close).
+pub struct MonotonicAtClose;
+
+impl CloseValue for MonotonicAtClose {
+    type Closed = u64;
+    fn close(self) -> u64 { clock_monotonic_ns() }
 }
 
 impl Dial9Context {
@@ -186,7 +195,11 @@ impl Dial9Context {
 }
 ```
 
+The metrique macro's generated `CloseValue` impl for `Dial9Context` delegates to each field's own `CloseValue::close`, which is the standard metrique pattern (the same way `Timer` and other close-time field types work). `MonotonicAtClose::close` reads the monotonic clock at close time; `u64` appears in the closed form.
+
 Construction always captures the monotonic clock at request start. Tokio runtime state (worker id, task id) is captured if the thread is owned by a tokio runtime; otherwise those fields remain `None` / unset. `capture()` is infallible.
+
+`Dial9Context` deliberately does not implement `Default` or `Clone`. `Default::default()` would produce zero-valued fields that silently look like "valid context captured at monotonic time 0" without ever firing the "no context" diagnostic (the `dial9::Context` tag is still present, the values are just meaningless). Users construct it with `Dial9Context::capture()` at the field initializer site; forgetting produces a clear compile error about the missing field.
 
 The end monotonic is captured at close time via `CloseValue`, so the event carries both endpoints. Dial9 viewers can render events as timeline spans (start + end + duration) rather than single points.
 
