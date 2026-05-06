@@ -14,6 +14,17 @@ The design mirrors jemalloc's and Go's allocation profilers: **geometric
 is 1 sample per N bytes allocated, regardless of object size distribution.
 This gives unbiased size-weighted profiles at bounded overhead.
 
+**Why not delegate to jemalloc's built-in profiling?** jemalloc's `prof`
+feature is excellent but allocator-specific — it doesn't work with the
+system allocator, mimalloc, or any other `GlobalAlloc`. Our wrapper
+approach works with *any* allocator, integrates directly into the dial9
+trace (same timeline, same viewer, same task attribution), and captures
+stacks via our existing frame-pointer unwinder (which is already
+installed for CPU profiling). The tradeoff: jemalloc's profiler has
+zero-cost access to internal metadata (bin sizes, arena stats) that we
+can't see from outside. For users who need that level of allocator
+internals, jemalloc's `prof` remains the right tool.
+
 ## Goals
 
 - Always-on in production, with sub-1% overhead at default sampling rates.
@@ -22,14 +33,18 @@ This gives unbiased size-weighted profiles at bounded overhead.
 - Stacks tied to the worker thread + task that performed the allocation, so
   allocation hot paths can be attributed to specific tasks or poll ranges.
 - Optional live-set tracking for leak detection. Off by default — it adds
-  a per-allocation hashmap lookup and a concurrent hashmap.
+  a per-allocation lookup and a concurrent data structure.
 - No symbolication on the hot path. Addresses flow through the existing
   background `SymbolizeProcessor`.
 - **Install-once, captured handle.** `MemoryProfiler::install(handle)`
   sets a process-global static that the allocator reads. The captured
-  handle routes all sampled events through the central recorder —
-  allocations on any thread (tokio workers, blocking pool, user OS
-  threads, library-spawned threads) get recorded identically.
+  handle routes all sampled events through the central recorder.
+- **Instruments all threads**, not just tokio workers — allocations on
+  tokio workers, blocking pool, user OS threads, and library-spawned
+  threads are all recorded identically.
+- **Viewer and analysis toolkit support.** Allocation flamegraphs,
+  per-task allocation totals, and leak detection views ship alongside
+  the backend instrumentation.
 
 ## Non-goals
 
@@ -38,9 +53,19 @@ This gives unbiased size-weighted profiles at bounded overhead.
   fine for dev-time analysis. Dial9 is for production, always-on.
 - Detecting use-after-free, double-free, or other memory safety bugs.
   That's what Miri and ASAN are for.
+- **Inspecting memory contents.** We record size, address, and stack —
+  never the bytes stored in the allocation. No PII/secret leakage risk.
+- **Cryptographic randomness.** The per-thread RNG is a fast PRNG
+  (Xoshiro256++) seeded from a user-supplied or random seed. It is not
+  cryptographically secure and doesn't need to be — sampling decisions
+  are not security-sensitive.
 - Tracking stack allocations or `mmap`-backed memory outside the
   allocator. A future `RssSample` event could sample `/proc/self/statm`,
-  but that's out of scope here.
+  but that's out of scope here. **Evolution path:** once the core
+  allocator profiling is stable, we can add `mmap`/`munmap` interception
+  via `LD_PRELOAD` or a similar mechanism to cover large anonymous
+  mappings that bypass the allocator. The event schema (`addr`, `size`,
+  `stack`, `timestamp`) generalizes naturally.
 
 ---
 
@@ -51,6 +76,8 @@ Per-thread byte counter `next_sample_bytes`. On every allocation of size
 
 ```rust
 fn on_alloc(size: usize) {
+    // i64: must be signed — subtracting a large `size` from a small
+    // remaining counter must go negative, not wrap around.
     let remaining = next_sample_bytes.get() - size as i64;
     if remaining > 0 {
         next_sample_bytes.set(remaining);
@@ -69,7 +96,7 @@ fn on_alloc(size: usize) {
 }
 ```
 
-Yes — this matches the structure you sketched. Two notes on that sketch:
+Two important details in this structure:
 
 - The `while` loop is important. A single huge allocation (or a very low
   sample rate) can push `next_sample_bytes` below zero by more than one
@@ -208,9 +235,18 @@ rare enough to ignore; for *allocation* profiling the bias is
 systematic — allocations performed inside functions with unusually
 large stack frames (large `Box::pin(future)` state machines, large
 `[u8; N]` locals) will consistently have their stacks cut off at the
-big frame. We accept this for the MVP and document it as a known
-limitation. Raising the cap or making it configurable in the unwinder
-is future work.
+big frame.
+
+**Why not just raise the cap now?** The 256 KiB threshold is a
+safety/correctness tradeoff, not a performance one. A higher cap means
+the unwinder follows more wild pointers before giving up, increasing
+the chance of reading garbage memory (triggering SIGSEGV safe-load
+faults, ~1-5µs each) or producing bogus frames. We'd need to validate
+a higher cap empirically across real workloads to confirm it doesn't
+degrade stack quality. Plan: raise to 1 MiB in the unwinder PR (step 1
+of rollout) with a benchmark that measures false-frame rate at the
+higher cap. If the false-frame rate stays negligible, ship it; if not,
+keep 256 KiB and document the limitation.
 
 **Why a handle-returning `install`, not auto-install-on-first-capture?**
 
@@ -481,9 +517,12 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
     unsafe fn realloc(
         &self, ptr: *mut u8, old_layout: Layout, new_size: usize
     ) -> *mut u8 {
-        hook::on_dealloc(ptr, old_layout.size());
         let new_ptr = unsafe { self.0.realloc(ptr, old_layout, new_size) };
         if !new_ptr.is_null() {
+            // Only record the free-of-old after confirming realloc
+            // succeeded. If realloc returns null, the old pointer is
+            // still live and must not be recorded as freed.
+            hook::on_dealloc(ptr, old_layout.size());
             hook::on_alloc(new_ptr, new_size);
         }
         new_ptr
@@ -512,10 +551,10 @@ The wrapper is zero-cost when memory profiling isn't attached (see §6).
 
 ## 5. Ring-buffer hand-off (considered, rejected for MVP)
 
-Your idea: have the allocator hook push raw data to a ring buffer, then
-a separate thread reads and processes it. This is worth writing out
-because it surfaces which costs we can move off the hot path and which
-we can't.
+An alternative design: have the allocator hook push raw data to a ring
+buffer, then a separate thread reads and processes it. This is worth
+writing out because it surfaces which costs we can move off the hot
+path and which we can't.
 
 **What the allocator hook does:**
 1. Sampling decision. Per-thread counter, ~5ns.
@@ -549,7 +588,9 @@ stack (N × u64 addresses) plus size, timestamp, `tid`. That's
 
 **Decision for MVP: don't build the ring buffer.** Use a thread-local
 reentrancy guard (§6) and the existing thread-local buffer
-infrastructure. Revisit if:
+infrastructure. Revisit after the MVP ships and we have real profiling
+data from the allocation-focused benchmark (§9). Specifically, we'll
+evaluate the ring buffer if:
 - The reentrancy guard turns out to drop too many events (we'd see
   this in a "dropped alloc events" counter we add from day one).
 - Encoding on the hot path shows up in profiles.
@@ -571,7 +612,7 @@ Concrete cases:
 - `Encoder::intern_string` calls `s.to_string()` and `HashMap::insert`
   — both allocate.
 - Growing the thread-local buffer's `Vec<u8>` allocates.
-- The liveset `DashMap::insert` allocates.
+- The liveset `SkipMap::insert` allocates (per-node heap allocation).
 - tracing logs allocate.
 
 ### Guard: thread-local "I'm recording an alloc event" flag
@@ -581,12 +622,36 @@ thread_local! {
     static IN_ALLOC_HOOK: Cell<bool> = const { Cell::new(false) };
 }
 
-fn on_alloc(ptr: *mut u8, size: usize) {
-    if IN_ALLOC_HOOK.with(|f| f.replace(true)) {
-        return; // reentrant — skip
+/// RAII guard that clears the reentrancy flag on drop, even if the
+/// hook panics. Without this, a panic mid-hook would leave the flag
+/// set and silently suppress all future samples on that thread.
+struct ReentrancyGuard;
+
+impl ReentrancyGuard {
+    /// Returns `None` if already inside the hook (reentrant call).
+    fn acquire() -> Option<Self> {
+        IN_ALLOC_HOOK.with(|f| {
+            if f.replace(true) {
+                None // already held
+            } else {
+                Some(ReentrancyGuard)
+            }
+        })
     }
+}
+
+impl Drop for ReentrancyGuard {
+    fn drop(&mut self) {
+        IN_ALLOC_HOOK.with(|f| f.set(false));
+    }
+}
+
+fn on_alloc(ptr: *mut u8, size: usize) {
+    let Some(_guard) = ReentrancyGuard::acquire() else {
+        return; // reentrant — skip
+    };
     // ... sampling decision, stack capture, event emission ...
-    IN_ALLOC_HOOK.with(|f| f.set(false));
+    // _guard drops here (or on panic), clearing the flag.
 }
 ```
 
@@ -614,8 +679,11 @@ currently ~1 µs deep in `on_alloc`'s hot path (stack capture +
 encode), that span event is dropped. At 2000 samples/sec and typical
 tracing-span rates the collision rate is still tiny (<0.01%), but
 this is a real and non-obvious behavior that operators reviewing
-dropped-event counters need to know about. Noted here because it's
-the kind of interaction that looks like a bug a year from now.
+dropped-event counters need to know about. The `dropped_samples`
+counter covers this case too — any event suppressed by the
+reentrancy guard increments it, whether it's an alloc event or a
+tracing span event. Noted here because it's the kind of interaction
+that looks like a bug a year from now.
 
 ### Allocation during stack capture
 
@@ -723,7 +791,7 @@ impl MemoryProfiler {
             unwinder,
             handle,
             config: self.config,
-            liveset: self.config.track_liveset.then(DashMap::new),
+            liveset: self.config.track_liveset.then(SkipMap::new),
         };
 
         // 3. Publish exactly once. `OnceLock::set` returns `Err(state)`
@@ -910,33 +978,84 @@ struct LivesetEntry {
 
 // Shared, concurrent: all threads alloc; all threads free.
 // Lives inside MemoryProfilerInner.
-liveset: DashMap<usize, LivesetEntry>,
+liveset: SkipMap<usize, LivesetEntry>,
 ```
 
-### Why `DashMap`?
+### Why `crossbeam-skiplist::SkipMap`?
 
 Requirements:
 - `insert(addr, entry)` on alloc from any thread.
 - `remove(addr) -> Option<entry>` on dealloc from any thread.
 - Low contention on mixed read/write workload.
 - `Send + Sync`.
+- **No deadlock risk inside a global allocator hook.** This is the
+  critical constraint. DashMap uses per-shard locks; if a thread holds
+  a shard lock and then triggers an allocation (e.g. DashMap resizing
+  internally), the reentrancy guard prevents infinite recursion but
+  doesn't prevent a *different* thread from blocking on that same
+  shard lock while inside its own allocator hook — a classic
+  priority-inversion deadlock.
 
 Options evaluated:
 
 | Crate | Pros | Cons |
 |-------|------|------|
-| `dashmap` | Widely used, sharded, good perf | Allocates internally; not lock-free |
-| `scc::HashMap` | Lock-free, fast | Larger dep surface, newer |
+| `crossbeam-skiplist` | **Lock-free**, no deadlock risk, epoch-based GC | Per-node heap alloc; ordered (unnecessary but harmless) |
+| `dashmap` | Widely used, sharded, good perf | Shard locks → deadlock-prone inside allocator |
+| `scc::HashMap` | Lock-free reads, fast | Larger dep surface, newer |
 | `std::sync::Mutex<HashMap>` | Zero deps | Single lock, bad under contention |
-| Sharded `Mutex<HashMap>` by addr hash | Simple, no new deps | We'd hand-roll what dashmap gives us |
 
-Start with `dashmap`. Abstract behind a `trait Liveset` so swapping to
-`scc` or a sharded-mutex implementation is mechanical if benchmarks
-demand it.
+**Decision: `crossbeam-skiplist::SkipMap`.** It is truly lock-free
+(uses CAS + epoch-based reclamation from `crossbeam-epoch`), which
+eliminates the deadlock concern entirely. The API maps directly to
+our needs:
 
-**Allocations by the DashMap itself** are caught by the
-`IN_ALLOC_HOOK` guard — they go to the inner allocator without
+```rust
+// On sampled alloc:
+liveset.insert(ptr as usize, LivesetEntry { size, timestamp_ns });
+
+// On dealloc:
+if let Some(entry) = liveset.remove(&(ptr as usize)) {
+    emit_free_event(entry.value());
+}
+```
+
+**Trait bounds:** `insert` and `remove` require `K: Ord + Send + 'static`
+and `V: Send + 'static`. Our key is `usize` and value is `LivesetEntry`
+(two `u64` fields) — both trivially satisfy these bounds.
+
+**Internal allocations:** Each skip list node is separately
+heap-allocated. These allocations are caught by the `ReentrancyGuard`
+— they go to the inner allocator without recursing, same as any other
+internal allocation. The key difference from DashMap: because SkipMap
+is lock-free, these internal allocations can never cause a thread to
+block waiting on another thread that is also inside the allocator hook.
+
+**Epoch-based garbage:** Removed nodes aren't immediately freed —
+they're added to crossbeam-epoch's garbage queue and reclaimed when
+all threads advance past the current epoch. For a liveset that churns
+constantly (alloc/free), this means slightly higher steady-state
+memory than an immediately-freeing structure. But entries are tiny
+(16 bytes + ~64 bytes node overhead), and the deferred reclamation is
+what makes the lock-freedom possible.
+
+**Dependency fit:** The project already uses `crossbeam-utils` and
+`crossbeam-queue`. Adding `crossbeam-skiplist` (which depends on
+`crossbeam-epoch` and `crossbeam-utils`) is a natural extension.
+
+**Allocations by the SkipMap itself** are caught by the
+`ReentrancyGuard` — they go to the inner allocator without
 recursing.
+
+### Bloom filter optimization
+
+With SkipMap, a lookup for a non-existent key traverses the skip list
+(O(log n) expected). For the dealloc hot path where 99.9% of lookups
+miss (unsampled allocations), this is already fast — the skip list
+short-circuits quickly when the key isn't present. A bloom filter in
+front would reduce this to a single hash + bit-check for the common
+miss case, but adds complexity. Ship without it; add based on
+profiling if the O(log n) miss path shows up in benchmarks.
 
 ### Bounded liveset
 
@@ -956,25 +1075,17 @@ Default: `None` (unbounded). Users opt in to a cap.
 
 ### Liveset overhead
 
-Per sampled alloc: one hash + one shard lock + insert (~30-50ns
-uncontended).
+Per sampled alloc: skip list insert (~50-80ns uncontended, includes
+node allocation + CAS loop).
 
-Per **any** dealloc (not just sampled): one hash + one shard lock +
-map lookup. If the pointer isn't in the liveset (typical — 99.9% of
-deallocs), this is a lock+lookup+miss on a cold key. ~40-60ns on
-DashMap.
+Per **any** dealloc (not just sampled): skip list lookup + remove.
+If the pointer isn't in the liveset (typical — 99.9% of deallocs),
+this is an O(log n) traversal that terminates quickly when the key
+isn't found. ~30-60ns for a liveset of ~2000 entries (typical at
+512 KiB sample rate).
 
-Two optimizations to consider:
-
-1. **Bloom filter in front of DashMap.** Sampled `alloc` inserts into
-   both; `dealloc` checks the Bloom first, only hits the map on a hit.
-   At 1% false positive rate, 99% of unsampled deallocs avoid the map
-   entirely. Adds complexity; optional.
-2. **Address low-bits hash precheck.** Keep a `RoaringBitmap` of low
-   32 bits of tracked addresses, checked first. Similar idea, cheaper
-   false-positive handling.
-
-Ship without these. Add based on profiling.
+**Dealloc overhead with liveset:** ~30-60ns per dealloc → ~3-6% extra
+on a dealloc-heavy workload. This is why liveset is off by default.
 
 ---
 
@@ -982,9 +1093,16 @@ Ship without these. Add based on profiling.
 
 Target: <1% at default settings (512 KiB sample rate, no liveset).
 
+**Context: typical allocator latencies.** For reference, a single
+`malloc`/`free` call on modern allocators (glibc, jemalloc, mimalloc)
+takes ~20-80ns uncontended. Under contention or with fragmentation,
+individual calls can spike to 1-10µs. Our fast-path overhead (~5ns)
+is well within the noise of a single allocation; the sampled-path
+overhead (~300-500ns) is comparable to a single contended malloc.
+
 Per-allocation fast path (unsampled, ~99.9% of calls):
 - 1 atomic load of `ACTIVE` pointer (~1ns)
-- 1 TLS load of `IN_ALLOC_HOOK` (~2ns)
+- 1 TLS load of `ReentrancyGuard` (~2ns)
 - 1 subtract + compare on per-thread `next_sample_bytes` (~1ns)
 - Return
 
@@ -996,12 +1114,13 @@ Per-sampled allocation (~0.1% of calls at 512 KiB):
   ns likely in production with cold caches)
 - `record_event` into TL buffer (~100-200ns)
 - Optional timestamp call (~25ns)
-- Liveset insert if enabled (~30-50ns)
+- Liveset insert if enabled (~50-80ns)
 
-At 2000 samples/sec: well under 1ms/sec CPU, comfortably under budget.
+At 2000 samples/sec: ~0.6-1.0ms of CPU per second (0.06-0.1% of one
+core), comfortably under budget.
 
-**Dealloc overhead with liveset:** +40-60ns per dealloc → ~5% extra on
-a dealloc-heavy workload. This is why liveset is off by default.
+**Dealloc overhead with liveset:** ~30-60ns per dealloc → ~3-6% extra
+on a dealloc-heavy workload. This is why liveset is off by default.
 
 ### Benchmarking
 
@@ -1162,6 +1281,12 @@ We do **not** add a test-only `reset_for_testing()` escape hatch:
    buffer, trigger rotation so the `AllocEvent` is evicted, free the
    buffer, verify `FreeEvent.size` is non-zero and analysis can still
    compute the net-bytes delta.
+7. **Concurrency (shuttle)**: Use [shuttle](https://github.com/awslabs/shuttle)
+   to test the reentrancy guard and liveset under simulated thread
+   interleavings. Key scenarios: two threads sampling simultaneously,
+   a thread freeing while another inserts, and epoch advancement under
+   contention. Shuttle's deterministic scheduler can surface races that
+   stress tests miss.
 
 ---
 
@@ -1171,12 +1296,18 @@ We do **not** add a test-only `reset_for_testing()` escape hatch:
    with a `clock_monotonic_ns` pair gives allocator latency, which is
    interesting for jemalloc/mimalloc fragmentation investigations.
    Cost: +50ns per sampled alloc (two vDSO calls). Easy to add as a
-   field later.
+   field later. If added, this should use a lower sample rate than the
+   default 512 KiB (e.g. 4 MiB) since the latency measurement adds
+   overhead to every sampled alloc and the signal-to-noise ratio is
+   good even at lower rates.
 
 2. **MUSL / static builds.** The `safe_load` trampoline + SIGSEGV chain
    works on glibc. Need to verify on musl (Alpine containers). If it
-   doesn't, fall back to the `backtrace` crate on init — slower but
-   allocation-free if called with a preallocated buffer.
+   doesn't work reliably, **conditionally compile out** the frame-pointer
+   unwinder on musl targets (`#[cfg(not(target_env = "musl"))]`) and
+   fall back to no-stack-capture mode (events still emitted with empty
+   stacks). We should not ship untested code paths — if musl isn't
+   validated before release, it's compiled out.
 
 3. **Multi-runtime selection.** With a single captured handle, all
    allocations land in the trace owned by whichever runtime the user
