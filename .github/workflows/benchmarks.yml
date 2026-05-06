@@ -18,6 +18,11 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      bencher_branch:
+        description: 'Override Bencher branch name for iai_main (e.g. set to "main" to seed baseline from a feature branch). Leave empty to use the running branch name.'
+        required: false
+        default: ''
 
 permissions:
   checks: write
@@ -106,6 +111,10 @@ jobs:
         run: cargo install iai-callgrind-runner --version ${{ env.IAI_CALLGRIND_VERSION }} --locked
       - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
       - name: Run iai benches → Bencher
+        env:
+          # workflow_dispatch can override target branch (e.g. seed Bencher's
+          # `main` history from a feature branch when bootstrapping).
+          BENCHER_BRANCH: ${{ github.event.inputs.bencher_branch != '' && github.event.inputs.bencher_branch || github.ref_name }}
         run: |
           set -euo pipefail
           for entry in \
@@ -116,7 +125,7 @@ jobs:
             pkg="${entry%:*}"; bench="${entry#*:}"
             bencher run \
               --token '${{ secrets.BENCHER_API_TOKEN }}' \
-              --branch '${{ github.ref_name }}' \
+              --branch "$BENCHER_BRANCH" \
               --testbed ubuntu-latest \
               --adapter rust_iai_callgrind \
               "cargo bench -p $pkg --bench $bench"

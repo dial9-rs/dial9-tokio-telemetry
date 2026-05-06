@@ -16,7 +16,7 @@ rustc-args = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 all-features = true
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)", "cfg(iai_enabled)"] }
 
 [dependencies]
 tokio = { version = "1.51.0", features = ["rt", "macros", "time", "rt-multi-thread", "sync", "net", "io-util"] }
