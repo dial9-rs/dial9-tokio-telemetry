@@ -4,7 +4,28 @@
 
 This summarises what changed in the design across rounds of review and why.
 
-## Headline change in round 3 (current)
+## Headline change in round 4 (current)
+
+Polish driven by a second pass of adversarial review plus author feedback:
+
+- Dropped `no_write` from V1 (no in-scope consumer; deferred to ship when the source system reopens).
+- All descriptor accessors return `&self`-tied borrows instead of `&'static`. Nested shapes wrap in a `ShapeRef` handle. `DescriptorRef` and `DescriptorId` are opaque, backed by `&'static` today but free to change internal storage. This follows the PR reviewer's feedback that "provide accessor methods" is the forward-compat path for lifetimes as well as struct fields.
+- `EntryDescriptor::timestamp()` exposes `#[metrics(timestamp)]` fields separately from `fields()`. Preserves the `fields()` order == `Entry::write` callback order contract.
+- `KnownShape` enumerates the full scalar set (`U8/U16/U32/U64/I8/I16/I32/I64/F32/F64/Bool/String/Bytes`) so `#[metrics(value)]` newtypes lower cleanly.
+- Flatten + tag resolution pinned down: field-level wins > child-struct default > flatten-site tag propagates as default > parent default fills unspecified. The `field_tag(skip(dial9::Emit))` on a flatten site now propagates to the flattened children.
+- `Entry::write` emission order == descriptor field order as a contract (not a convention). Macro guarantees by construction, CI test enforces, debug-mode runtime check panics on mismatch.
+- `DescriptorId` stability documented as in-process only.
+- `ResolvedFieldTag` defined as an opaque struct with `tag_id()` + `state()` accessors; `FieldTagState::Present | Absent`.
+- `#[metrics(ignore)]` fields excluded from the descriptor entirely. Subfield structs (marked `#[metrics(subfield)]`) don't emit descriptors of their own; their fields appear in the parent via flatten.
+- `#[metrics(value)]` newtypes lower to the wrapped scalar's shape when macro-known; user-typed inner fields fall through to `Opaque`.
+- Dial9 renames: `InTrace` → `Emit`, `InternString` → `Interned`, `Dial9ContextField` → `Context`.
+- `Dial9Context` gains an end monotonic captured via `CloseValue` at close. The viewer can render dial9 events as spans (start + end) rather than single points.
+- Dial9 "Emit fields but no Context fields" now fires one `tracing::error!` per descriptor (not rate-limited by time, deduped by `DescriptorId`). Events still encode with flush-thread monotonic.
+- Dial9 keeper adds a "visualization data shape" section describing the semantic surface viewers receive (timeline, worker placement, task correlation, event type, full payload + units, wall-clock timestamp if present, schema enumeration for filtering UI) without prescribing visualization UI.
+- Fixed "TypeId-keyed vtable bridge simultaneously rejected and described" contradiction in the review doc.
+- Updated the binary cost claim to match V1 reality (no linkme, no per-source registration slot).
+
+## Headline change in round 3
 
 Scoped down: the source system (typed structural extraction of `Dial9Context` via `SourceTag` and `desc.source::<Dial9>()`) moves from the in-scope v1 design to a deferred appendix on the metrique side. Dial9 reads context from `Dial9Context` fields flattened into the user's entry and marked with a `Dial9ContextField` field tag. Binary-wide "sink attached, no dial9-compatible structs in this binary" discovery also moves to deferred; first-use per-descriptor validation is the only validation path in the initial release.
 
