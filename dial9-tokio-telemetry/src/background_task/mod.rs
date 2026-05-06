@@ -905,12 +905,17 @@ impl S3PipelineUploader {
         }
     }
 
-    /// Set (or override) the pre-built S3 client. Only effective before
-    /// the uploader has been initialized (i.e. before the first segment
-    /// has been processed); otherwise this is a no-op.
+    /// Set (or override) the pre-built S3 client. Must be called before the
+    /// uploader has been initialized (i.e. before the first segment has been
+    /// processed);
+    /// Note: the only caller is the builder, which runs before the
+    /// worker is spawned, so reaching the `Ready` arm is a programmer error.
     pub(crate) fn set_client(&mut self, client: aws_sdk_s3::Client) {
-        if let S3UploaderState::Pending { client: slot, .. } = &mut self.state {
-            *slot = Some(client);
+        match &mut self.state {
+            S3UploaderState::Pending { client: slot, .. } => *slot = Some(client),
+            S3UploaderState::Ready { .. } => {
+                unreachable!("set_client called after uploader initialization")
+            }
         }
     }
 
@@ -1257,6 +1262,38 @@ mod tests {
             "CompressedSize should be non-zero, got {}",
             compressed
         );
+    }
+
+    /// `set_client` is only valid while the uploader is `Pending`. Calling it
+    /// on a `Ready` uploader indicates an internal misuse and must panic
+    /// rather than silently drop the new client.
+    #[test]
+    #[should_panic(expected = "set_client called after uploader initialization")]
+    fn set_client_after_ready_panics() {
+        let s3_config = s3::S3Config::builder()
+            .bucket("test")
+            .service_name("test")
+            .instance_path("test")
+            .boot_id("test")
+            .region("us-east-1")
+            .build();
+        let sdk_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .build();
+        let sdk_client = aws_sdk_s3::Client::from_conf(sdk_config);
+        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
+            aws_sdk_s3_transfer_manager::Config::builder()
+                .client(sdk_client.clone())
+                .build(),
+        );
+        let uploader = s3::S3Uploader::new(tm_client, s3_config);
+        let mut pipeline_uploader =
+            S3PipelineUploader::from_ready(uploader, connection::CircuitBreaker::new());
+        pipeline_uploader.set_client(sdk_client);
     }
 
     // --- Review finding #10: uncompressed_size should use bytes.len() ---
