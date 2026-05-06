@@ -8,6 +8,17 @@ The sink reads metrique's entry descriptor for each entry to learn its structura
 
 This design depends on the entry descriptor system in metrique (see `docs/entry-descriptors.md` in the metrique repo; tracked under [awslabs/metrique#282](https://github.com/awslabs/metrique/pull/282)). The dial9 side is a descriptor-aware sink; the metrique side is where descriptors and field tags are defined.
 
+## Glossary
+
+- **`Dial9Stream`**: the dial9 `EntryIoStream` implementation. Composed into a user's metrique pipeline via `attach_to_stream_with_dial9`, `metrique_sink(...)`, or a manual `tee(emf, Dial9Stream::new(..))`. Consumes every entry that flows through the pipeline and encodes dial9-opted entries into the trace.
+- **`Dial9Context`**: a metrique struct users flatten into their entries. Its constructor captures caller-thread `worker_id`, `task_id`, and `monotonic_ns_start`; its `CloseValue` captures `monotonic_ns_end`. These four fields are tagged `dial9::Context` internally so the sink can route them to the trace event header rather than into the payload.
+- **`dial9::Emit`**: the user-facing field tag that opts a field into the dial9 payload. Applied at struct scope via `#[metrics(default_field_tag(Emit))]` or at field scope via `#[metrics(field_tag(Emit))]`; inverted with `skip(Emit)`.
+- **`dial9::Interned`**: the user-facing field tag that asks dial9 to route string data in this field through its string pool. Orthogonal to `Emit`.
+- **`dial9::Context`**: a `#[doc(hidden)]` dial9-internal field tag carried by `Dial9Context`'s own fields. Users do not interact with it directly; they flatten `Dial9Context` into their entry, and the sink walks the descriptor on first-use to find fields tagged `Context`. The name is not a stable guarantee; a future typed source-extraction mechanism would replace this tag-based discovery.
+- **`Dial9EntryWriter`**: the dial9 adapter that walks `Entry::write` on the flush thread. Uses the cached context- and payload-field index sets to route each callback to either the event header (context) or the payload encoder (Emit), or to skip.
+- **First-use per-descriptor**: the moment a `Dial9Stream` first sees an entry with a given `DescriptorId`. Dial9 walks the descriptor once, caches the index sets and any diagnostics, and uses the cache for every subsequent entry of that type.
+- **Trace format**: dial9's wire format, defined in `dial9-trace-format`. Carries schema frames (one per entry type), event frames (one per emission), and pool frames (deduplicated strings and stack frames). Extended in this design with schema-level annotations and two new field type variants (`List`, `Map`).
+
 ## User-facing API
 
 ### Opt-in on the entry
