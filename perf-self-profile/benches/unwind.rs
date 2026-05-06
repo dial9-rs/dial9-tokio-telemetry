@@ -2,16 +2,50 @@
 //!
 //! Measures latency of walking a real frame-pointer chain of known depth.
 //! Run with: RUSTFLAGS="-C force-frame-pointers=yes" cargo bench --bench unwind --features __internal-bench
+//!
+//! Requires Linux x86_64 or aarch64.
 
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
+fn main() {}
 
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 use std::arch::asm;
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 use std::hint::black_box;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+use criterion::Criterion;
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 use dial9_perf_self_profile::__bench_internals::{install_handler, unwind};
 
-/// Read the current frame pointer (rbp), stack pointer (rsp), and instruction pointer (rip).
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn main() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_unwind_20(&mut criterion);
+    bench_unwind_5(&mut criterion);
+    criterion.final_summary();
+}
+
+/// Read the current frame pointer, stack pointer, and instruction pointer.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[inline(always)]
 fn read_registers() -> (usize, usize, usize) {
     let fp: usize;
@@ -30,7 +64,31 @@ fn read_registers() -> (usize, usize, usize) {
     (pc, fp, sp)
 }
 
+/// Read the current frame pointer, stack pointer, and instruction pointer.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[inline(always)]
+fn read_registers() -> (usize, usize, usize) {
+    let fp: usize;
+    let sp: usize;
+    let pc: usize;
+    unsafe {
+        asm!(
+            "mov {fp}, x29",
+            "mov {sp}, sp",
+            "adr {pc}, .",
+            fp = out(reg) fp,
+            sp = out(reg) sp,
+            pc = out(reg) pc,
+        );
+    }
+    (pc, fp, sp)
+}
+
 /// Perform the unwind and return the number of frames walked.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 #[inline(never)]
 fn do_unwind() -> usize {
     let (pc, fp, sp) = read_registers();
@@ -38,7 +96,11 @@ fn do_unwind() -> usize {
     unsafe { unwind(pc, fp, sp, &mut out) }
 }
 
-// Build a chain of exactly N inline(never) frames via recursion.
+/// Build a chain of exactly N inline(never) frames via recursion.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 #[inline(never)]
 fn recurse(depth: u32) -> usize {
     if depth == 0 {
@@ -48,6 +110,10 @@ fn recurse(depth: u32) -> usize {
     }
 }
 
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn bench_unwind_20(c: &mut Criterion) {
     unsafe { install_handler().expect("failed to install SIGSEGV handler") };
 
@@ -64,6 +130,10 @@ fn bench_unwind_20(c: &mut Criterion) {
     });
 }
 
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn bench_unwind_5(c: &mut Criterion) {
     // Verify we get frames
     let frames = recurse(5);
@@ -77,6 +147,3 @@ fn bench_unwind_5(c: &mut Criterion) {
         b.iter(|| black_box(recurse(5)));
     });
 }
-
-criterion_group!(benches, bench_unwind_20, bench_unwind_5);
-criterion_main!(benches);
