@@ -62,9 +62,9 @@ The builder and manual composition paths are unchanged from the original design.
 │ COMPILE TIME: metrique macro                                   │
 │                                                                │
 │ Dial9 defines (in its own crate):                              │
-│   pub struct Context;       // field tag for context fields    │
 │   pub struct Emit;          // field tag for payload           │
 │   pub struct Interned;      // field tag for string pool       │
+│   #[doc(hidden)] pub struct Context;  // internal marker       │
 │                                                                │
 │   #[metrics]                                                   │
 │   pub struct Dial9Context { /* fields tagged Context */ }      │
@@ -239,7 +239,7 @@ For `Flex` fields, the unit applies to the map values, not the keys.
 ### Observability
 
 - Periodic `tracing::debug!` reporting schema cache size and cumulative counters (registrations, events emitted, entries skipped for `None` descriptor).
-- Rate-limited `tracing::warn!` on each distinct hand-written entry seen (one report per observed concrete type id).
+- Rate-limited `tracing::warn!` on each distinct hand-written entry seen (one report per distinct concrete type id observed).
 
 ## Visualization data shape
 
@@ -280,7 +280,7 @@ Pooled-string positions are expressed by setting `FieldType::PooledString` as th
 
 ## Error handling and resilience
 
-- **Hand-written entries**: `descriptor()` is `None`. Dial9 reports once per distinct type id observed and skips. A future extension can let hand-written entries opt in via metrique's `DescribeEntry` follow-up.
+- **Hand-written entries**: `descriptor()` is `None`. Dial9 reports once per distinct concrete type id observed and skips. A future extension can let hand-written entries opt in via metrique's `DescribeEntry` follow-up.
 - **Entries with `Emit` fields but no `dial9::Context`-tagged fields**: dial9 treats the entry as having no context. The event header falls back to a flush-thread monotonic timestamp with `WorkerId::UNKNOWN` / `task_id = None`. A single `tracing::error!` per descriptor (deduped by `DescriptorId`, not time-rate-limited) names the offending entry type and hints that `#[cfg]` gating or forgotten `Dial9Context` field may be responsible. In debug builds this is `debug_assert!`. The payload still encodes; dropping the event would be worse.
 - **Entries with `FieldShape::Opaque` selected for `Emit`**: `debug_assert!` in debug, rate-limited `tracing::error!` in release, keyed per `(DescriptorId, field)` pair; the field is skipped on the wire. The rest of the entry still encodes.
 - **Inert telemetry handle**: `Dial9Stream` returns `Ok(())` immediately. Entries still reach EMF.
@@ -303,7 +303,7 @@ The first time `Dial9Stream` encounters a `DescriptorId`, it walks the descripto
 
 | Condition | Behaviour |
 | --- | --- |
-| `descriptor() == None` (hand-written entry) | rate-limited warn once per observed concrete type; entry dropped from dial9 path; EMF unaffected |
+| `descriptor() == None` (hand-written entry) | rate-limited warn once per distinct concrete type id observed; entry dropped from dial9 path; EMF unaffected |
 | Descriptor has `Emit` fields but no `dial9::Context`-tagged fields | `debug_assert!` in debug, single `tracing::error!` per descriptor in release (deduped by `DescriptorId`); entries of this type encode with UNKNOWN worker and flush-thread monotonic fallback |
 | `Interned` on a non-string-capable shape | `debug_assert!` in debug, rate-limited `tracing::error!` in release; the offending field is skipped on the wire; rest of entry encodes |
 | `FieldShape::Opaque` field tagged `Emit` | `debug_assert!` in debug, rate-limited `tracing::error!` in release; the offending field is skipped on the wire; rest of entry encodes |

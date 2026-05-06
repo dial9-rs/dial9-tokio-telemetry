@@ -31,7 +31,7 @@ Parallelism within Track B: B1-B4 proceed together; B5-B6 come after B1-B4 stabi
 
 Depends on Track A (released metrique) and Track B (released trace-format).
 
-- C1. `src/metrique/tags.rs`: `pub struct Context;`, `pub struct Emit;`, `pub struct Interned;`. These are opaque marker types used for field tagging; no traits implemented beyond what metrique requires. Ties to: dial9 keeper's "User-facing API" and "Components → Dial9Context" sections.
+- C1. `src/metrique/tags.rs`: `pub struct Emit;`, `pub struct Interned;` (user-facing field tags). `#[doc(hidden)] pub struct Context;` (dial9-internal marker that `Dial9Context`'s fields carry; not part of the user-facing contract, name not stable). These are opaque marker types used for field tagging; no traits implemented beyond what metrique requires. Ties to: dial9 keeper's "User-facing API" and "Components → Dial9Context" sections.
 - C2. `src/metrique/context.rs`: `Dial9Context` metrique struct with four fields (`worker_id`, `task_id`, `monotonic_ns_start`, `monotonic_ns_end`), each tagged `#[metrics(field_tag(Context))]`. `capture()` reads worker/task/monotonic_start. A `CloseValue` impl reads the monotonic clock at close and populates `monotonic_ns_end`. Ties to: dial9 keeper's "Components → `Dial9Context`" section; review's "Context capture via a flattened metrique field" section.
 - C3. `src/metrique/schema.rs`: build a `SchemaEntry` (with annotations) from an `EntryDescriptor`. Compute two index sets per descriptor: context-field indices (fields tagged `dial9::Context`) and payload-field indices (fields tagged `dial9::Emit`). Cache keyed on `DescriptorId`. Ties to: dial9 keeper's "Components → Schema handling" section.
 - C4. `src/metrique/writer.rs`: `Dial9EntryWriter` adapter walking `Entry::write` callbacks in descriptor order (relies on metrique's contract that `Entry::write` matches `fields()` order). Uses the cached index sets to route each `(name, value)` callback to either the event header (context), the payload encoder (Emit with `FieldShape` dispatch), or skip. `Interned`-tagged fields have their string data routed through the dial9 string pool. Overrides `ValueWriter::values()` so `Vec<T>` encodes as a typed list on the wire, not as the default comma-joined string. Ties to: dial9 keeper's architecture diagram "inside Dial9Stream" block and review's "Typed lists and maps for `Vec` and `Flex`" section.
@@ -52,7 +52,7 @@ Tests are authored alongside the code in each track.
 - D3. Caller-thread context extraction: caller captures `Dial9Context`, the entry flows through `BackgroundQueue`, flush-thread event header carries the captured worker/task/monotonic_start/monotonic_end.
 - D4. Heterogeneous queue: a `BoxEntrySink<BoxEntry>` with multiple struct types, each gets one schema and its own cached context/payload index sets.
 - D5. First-use validation: descriptors that violate each check (`Emit` on `Opaque`, `Interned` on non-string, `Emit` fields with no `Context` fields) trigger the documented diagnostic. Debug panics; release error/warn logs. The `Emit`-with-no-`Context` case tests the "dedupe by `DescriptorId`, not by time" behaviour: emit many events of the same misconfigured type, assert exactly one `tracing::error!` is produced.
-- D6. Hand-written entry observed in the event path triggers a rate-limited `tracing::warn!` once per distinct type id.
+- D6. Hand-written entry observed in the event path triggers a rate-limited `tracing::warn!` once per distinct concrete type id observed.
 - D7. Panic isolation: a `Value::write` that panics drops the offending event without poisoning the flush thread.
 - D8. `Entry::write` order matches descriptor order for every metrique struct the dial9 tests construct. Leverages metrique's M-D2 order-check helper wrapped around the dial9 adapter's `EntryWriter`.
 - D9. `ValueWriter::values()` override: a `Vec<String>` field produces a typed-list wire encoding, not a comma-joined string.
@@ -62,7 +62,7 @@ Tests are authored alongside the code in each track.
 
 - First-use descriptor-local checks for clearly-wrong descriptors (`Interned` on non-string, `Opaque` in `Emit`): `debug_assert!` panic in debug, rate-limited `tracing::error!` in release.
 - First-use descriptor-local checks for soft misconfigurations (`Emit` fields with no `dial9::Context` fields): `debug_assert!` in debug, single `tracing::error!` per descriptor in release (deduped by `DescriptorId`, not time-rate-limited). Includes a hint about feature-flag gating in the message. The event still encodes with a flush-thread monotonic fallback.
-- Hand-written entries observed in the event path: rate-limited `tracing::warn!` once per distinct type id.
+- Hand-written entries observed in the event path: rate-limited `tracing::warn!` once per distinct concrete type id observed.
 - Panic inside `Value::write`: caught per entry, rate-limited `tracing::warn!`, flush-thread state preserved.
 - Inert `TelemetryHandle`: `Ok(())` fast path; no validation; no work; entries still reach EMF.
 
@@ -126,7 +126,8 @@ pub trait Entry {
 ### In dial9
 
 ```rust
-pub struct Context;    // field tag: "this field carries dial9 context"
+#[doc(hidden)]
+pub struct Context;    // field tag carried by Dial9Context's fields (internal, not a stable name)
 pub struct Emit;       // field tag: "this field goes in the dial9 payload"
 pub struct Interned;   // field tag: "intern string data for this field"
 
