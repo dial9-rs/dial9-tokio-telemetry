@@ -35,6 +35,7 @@ use crate::telemetry::{Encodable, ThreadLocalEncoder};
 use pin_project_lite::pin_project;
 use smallvec::SmallVec;
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -54,7 +55,7 @@ pin_project! {
         frames: FrameBuf,
         // Monotonic nanoseconds when the frames in `frames` were captured.
         // Only meaningful when `frames.has_data()`.
-        pending_capture_ts: u64,
+        pending_capture_ts: Option<NonZeroU64>,
         // Snapshot of SharedState::task_dump_idle_threshold_ns at construction;
         // promotes the atomic load off the poll hot path.
         idle_threshold_ns: u64,
@@ -69,7 +70,7 @@ impl<F> TaskDumped<F> {
             shared,
             task_id,
             frames: FrameBuf::new(),
-            pending_capture_ts: 0,
+            pending_capture_ts: None,
             idle_threshold_ns,
         }
     }
@@ -91,38 +92,42 @@ impl<F: Future> Future for TaskDumped<F> {
             // after capture resumes.
             if this.frames.has_data() {
                 this.frames.clear();
-                *this.pending_capture_ts = 0;
+                *this.pending_capture_ts = None;
             }
             return this.inner.poll(cx);
         }
 
         // If we have captured frames from a previous idle, decide whether
         // that idle was long enough to emit.
-        let should_emit = if this.frames.has_data() {
-            let now = crate::telemetry::events::clock_monotonic_ns();
-            now.saturating_sub(*this.pending_capture_ts) > *this.idle_threshold_ns
-        } else {
-            false
+        let poll_start = crate::telemetry::recorder::poll_start_ts_or_now();
+        let should_emit = match *this.pending_capture_ts {
+            Some(ts) if this.frames.has_data() => {
+                poll_start.saturating_sub(ts.get()) > *this.idle_threshold_ns
+            }
+            _ => false,
         };
 
         let result = this.inner.as_mut().poll(cx);
 
         if should_emit {
-            this.frames
-                .emit(this.shared, *this.task_id, *this.pending_capture_ts);
+            this.frames.emit(
+                this.shared,
+                *this.task_id,
+                this.pending_capture_ts.unwrap().get(),
+            );
         }
 
         match &result {
             Poll::Ready(_) => {
                 // Terminal. Nothing more to capture; discard stale frames.
                 this.frames.clear();
-                *this.pending_capture_ts = 0;
+                *this.pending_capture_ts = None;
             }
             Poll::Pending => {
                 // Capture the yield point we just landed on, for the next
                 // poll's threshold check.
                 this.frames.capture(this.inner.as_mut());
-                *this.pending_capture_ts = crate::telemetry::events::clock_monotonic_ns();
+                *this.pending_capture_ts = NonZeroU64::new(poll_start);
             }
         }
 

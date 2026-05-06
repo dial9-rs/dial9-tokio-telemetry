@@ -4,6 +4,8 @@ mod shared_state;
 
 pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
+#[cfg(feature = "taskdump")]
+pub(crate) use runtime_context::poll_start_ts_or_now;
 pub(crate) use shared_state::SharedState;
 
 use event_writer::EventWriter;
@@ -913,13 +915,18 @@ impl<P> TracedRuntimeBuilder<P> {
     }
 
     /// Capture async backtraces at yield points for tasks that stay idle
-    /// longer than the configured threshold. Requires the `taskdump` crate
-    /// feature to actually record events; the builder accepts the config
-    /// unconditionally so the API surface is stable.
+    /// longer than the configured threshold.
+    ///
+    /// Requires the `taskdump` crate feature to actually record events
     pub fn with_task_dumps(
         mut self,
         config: crate::telemetry::task_dump_config::TaskDumpConfig,
     ) -> Self {
+        if cfg!(not(feature = "taskdump")) {
+            tracing::warn!(
+                "taskdumps enabled but `taskdump` feature was not. No task dumps will be captured."
+            )
+        }
         self.task_dump_config = Some(config);
         self
     }
