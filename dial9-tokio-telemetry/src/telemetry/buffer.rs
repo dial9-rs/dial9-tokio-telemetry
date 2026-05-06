@@ -509,6 +509,39 @@ mod tests {
         assert_eq!(guard.event_count, 1);
     }
 
+    #[cfg(feature = "taskdump")]
+    mod task_dump_tests {
+        use super::ThreadLocalBuffer;
+        use crate::task_dumped::TaskDumpData;
+        use crate::telemetry::events::TelemetryEvent;
+        use crate::telemetry::format::decode_events;
+        use crate::telemetry::task_metadata::TaskId;
+
+        #[test]
+        fn task_dump_event_round_trips() {
+            let dump = TaskDumpData {
+                timestamp_ns: 42_000,
+                task_id: TaskId::from_u32(17),
+                callchain: &[0x1111_2222, 0x3333_4444, 0x5555_6666],
+            };
+            let encoded = ThreadLocalBuffer::encode_single(&dump);
+            let events = decode_events(&encoded).expect("decode");
+            assert_eq!(events.len(), 1);
+            match events.into_iter().next().unwrap() {
+                TelemetryEvent::TaskDump {
+                    timestamp_nanos,
+                    task_id,
+                    callchain,
+                } => {
+                    assert_eq!(timestamp_nanos, 42_000);
+                    assert_eq!(task_id, TaskId::from_u32(17));
+                    assert_eq!(callchain, vec![0x1111_2222, 0x3333_4444, 0x5555_6666]);
+                }
+                other => panic!("expected TaskDump, got {other:?}"),
+            }
+        }
+    }
+
     #[cfg(feature = "cpu-profiling")]
     mod cpu_tests {
         use super::ThreadLocalBuffer;

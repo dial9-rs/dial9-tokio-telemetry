@@ -333,6 +333,7 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
             TelemetryEvent::TaskSpawn { .. }
             | TelemetryEvent::TaskTerminate { .. }
             | TelemetryEvent::CpuSample { .. }
+            | TelemetryEvent::TaskDump { .. }
             | TelemetryEvent::ThreadNameDef { .. }
             | TelemetryEvent::WakeEvent { .. }
             | TelemetryEvent::SegmentMetadata { .. }

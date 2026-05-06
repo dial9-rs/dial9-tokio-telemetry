@@ -32,8 +32,12 @@ runs:
               if [ "${{ inputs.toolchain }}" = nightly ]; then
                   rm -fv Cargo.lock
               fi
+              # tokio's `taskdump` feature only compiles on linux aarch64/x86/x86_64.
+              # On macOS drop it from --all-features; leave everything else intact.
               if [ "$RUNNER_OS" = "Linux" ]; then
                   # Raise locked-memory limit for large perf ring buffers
                   sudo prlimit --pid $$ --memlock=unlimited:unlimited
+                  cargo test --all-targets --all-features
+              else
+                  cargo test --all-targets --features __nonlinux_all_features
               fi
-              cargo test --all-targets --all-features

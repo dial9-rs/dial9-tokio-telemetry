@@ -203,6 +203,16 @@ pub(crate) struct CpuSampleEvent {
     pub cpu: Option<u64>,
 }
 
+/// Wire-format event for a task dump: async backtrace captured at a yield point
+/// after the task stayed idle past the configured threshold.
+#[derive(TraceEvent)]
+pub(crate) struct TaskDumpEvent {
+    #[traceevent(timestamp)]
+    pub timestamp_ns: u64,
+    pub task_id: TaskId,
+    pub callchain: InternedStackFrames,
+}
+
 /// Wire-format event for a wake notification.
 #[derive(Debug, TraceEvent)]
 pub struct WakeEventEvent {
@@ -274,6 +284,7 @@ pub(crate) enum TelemetryEventRef<'a> {
     TaskSpawn(TaskSpawnEventRef<'a>),
     TaskTerminate(TaskTerminateEventRef<'a>),
     CpuSample(CpuSampleEventRef<'a>),
+    TaskDump(TaskDumpEventRef<'a>),
     WakeEvent(WakeEventEventRef<'a>),
     SegmentMetadata(SegmentMetadataEventRef<'a>),
     ClockSync(ClockSyncEventRef<'a>),
@@ -293,6 +304,7 @@ impl<'a> TelemetryEventRef<'a> {
             Self::TaskSpawn(e) => Some(e.timestamp_ns),
             Self::TaskTerminate(e) => Some(e.timestamp_ns),
             Self::CpuSample(e) => Some(e.timestamp_ns),
+            Self::TaskDump(e) => Some(e.timestamp_ns),
             Self::WakeEvent(e) => Some(e.timestamp_ns),
             Self::SegmentMetadata(e) => Some(e.timestamp_ns),
             Self::ClockSync(e) => Some(e.timestamp_ns),
@@ -343,6 +355,9 @@ pub(crate) fn decode_ref<'a>(
         )?),
         "CpuSampleEvent" => {
             TelemetryEventRef::CpuSample(CpuSampleEvent::decode(timestamp_ns, fields, field_defs)?)
+        }
+        "TaskDumpEvent" => {
+            TelemetryEventRef::TaskDump(TaskDumpEvent::decode(timestamp_ns, fields, field_defs)?)
         }
         "WakeEventEvent" => {
             TelemetryEventRef::WakeEvent(WakeEventEvent::decode(timestamp_ns, fields, field_defs)?)
@@ -421,6 +436,14 @@ pub(crate) fn to_owned_event(
                 .to_vec(),
             // CPU id is varint-encoded as u64 on the wire; real CPU ids fit in u32.
             cpu: e.cpu.map(|v| v as u32),
+        },
+        TelemetryEventRef::TaskDump(e) => TelemetryEvent::TaskDump {
+            timestamp_nanos: e.timestamp_ns,
+            task_id: e.task_id,
+            callchain: stack_pool
+                .get(e.callchain)
+                .expect("stack pool entry must exist for TaskDump callchain")
+                .to_vec(),
         },
         TelemetryEventRef::WakeEvent(e) => TelemetryEvent::WakeEvent {
             timestamp_nanos: e.timestamp_ns,
