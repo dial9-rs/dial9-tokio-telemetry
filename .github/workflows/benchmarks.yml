@@ -24,7 +24,9 @@ permissions:
   pull-requests: write
 
 jobs:
-  # Runs on every push to main to build the statistical baseline.
+  # Disabled until a dedicated runner exists. Wall-clock criterion +
+  # integration benches are too noisy on shared ubuntu-latest. iai jobs
+  # below cover the deterministic micro tier in the meantime.
   benchmark_main:
     name: Benchmark — ${{ matrix.bench.name }} (main baseline)
     if: ${{ false && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }} # skip job
@@ -56,14 +58,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-
       - name: Enable perf_event_open and kallsyms
         run: |
           sudo sysctl kernel.perf_event_paranoid=1
           sudo sysctl kernel.kptr_restrict=0
-
       - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
-
       - name: Run benchmark
         run: |
           bencher run \
@@ -73,64 +72,99 @@ jobs:
             --adapter '${{ matrix.bench.adapter }}' \
             "${{ matrix.bench.command }}"
 
-  # Runs on same-repo PRs. Fork PRs are skipped — they have no access to
-  # BENCHER_API_TOKEN, so the job would fail rather than silently skip.
-  benchmark_pr:
-    name: Benchmark — ${{ matrix.bench.name }} (PR regression check)
-    if: ${{ false && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }} # skip job
+  # iai micro tier on push to main: populates the Bencher baseline used
+  # by iai_micro PR gate below. Instruction counts are deterministic so
+  # shared ubuntu-latest is fine.
+  iai_main:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    name: iai micro benches (main baseline)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        bench:
-          - name: writer_encode
-            adapter: rust_criterion
-            command: cargo bench --package dial9-tokio-telemetry --bench writer_encode
-          - name: codec
-            adapter: rust_criterion
-            command: cargo bench --package dial9-trace-format --bench codec
-          - name: overhead_bench
-            adapter: json
-            command: cargo bench --bench overhead_bench -- --bmf 10
-          - name: overhead_bench_ctimer
-            adapter: json
-            command: DIAL9_FORCE_CTIMER=1 cargo bench --bench overhead_bench -- --bmf 10
-          - name: e2e_workload
-            adapter: json
-            command: cargo bench --bench e2e_workload -- --bmf 10
     env:
       RUST_BACKTRACE: 1
+      IAI_CALLGRIND_VERSION: "0.16.1"
       BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-
-      - name: Enable perf_event_open and kallsyms
-        run: |
-          sudo sysctl kernel.perf_event_paranoid=1
-          sudo sysctl kernel.kptr_restrict=0
-
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Cache iai-callgrind-runner
+        id: runner_cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/iai-callgrind-runner
+          key: iai-runner-${{ env.IAI_CALLGRIND_VERSION }}
+      - name: Install iai-callgrind-runner
+        if: steps.runner_cache.outputs.cache-hit != 'true'
+        run: cargo install iai-callgrind-runner --version ${{ env.IAI_CALLGRIND_VERSION }} --locked
       - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
-
-      - name: Run benchmark
+      - name: Run iai benches → Bencher
         run: |
-          bencher run \
-            --token '${{ secrets.BENCHER_API_TOKEN }}' \
-            --branch '${{ github.head_ref }}' \
-            --start-point main \
-            --start-point-reset \
-            --testbed ubuntu-latest \
-            --adapter '${{ matrix.bench.adapter }}' \
-            --threshold-measure latency \
-            --threshold-test percentage \
-            --threshold-lower-boundary _ \
-            --threshold-upper-boundary 0.25 \
-            --threshold-measure throughput \
-            --threshold-test percentage \
-            --threshold-lower-boundary 0.25 \
-            --threshold-upper-boundary _ \
-            --error-on-alert \
-            --github-actions '${{ secrets.GITHUB_TOKEN }}' \
-            "${{ matrix.bench.command }}"
+          set -euo pipefail
+          for entry in \
+              "dial9-tokio-telemetry:writer_encode_iai" \
+              "dial9-tokio-telemetry:writer_write_encoded_iai" \
+              "dial9-tokio-telemetry:threadlocal_encode_iai" \
+              "dial9-trace-format:codec_iai"; do
+            pkg="${entry%:*}"; bench="${entry#*:}"
+            bencher run \
+              --token '${{ secrets.BENCHER_API_TOKEN }}' \
+              --branch '${{ github.ref_name }}' \
+              --testbed ubuntu-latest \
+              --adapter rust_iai_callgrind \
+              "cargo bench -p $pkg --bench $bench"
+          done
+
+  # iai micro tier on PRs: regression gate against main baseline on
+  # Bencher (>1% instruction-count delta fails + PR comment + dashboard
+  # alarm). Same-repo PRs only (requires BENCHER_API_TOKEN).
+  iai_micro:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    name: iai micro benches (PR gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUST_BACKTRACE: 1
+      IAI_CALLGRIND_VERSION: "0.16.1"
+      BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Cache iai-callgrind-runner
+        id: runner_cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/iai-callgrind-runner
+          key: iai-runner-${{ env.IAI_CALLGRIND_VERSION }}
+      - name: Install iai-callgrind-runner
+        if: steps.runner_cache.outputs.cache-hit != 'true'
+        run: cargo install iai-callgrind-runner --version ${{ env.IAI_CALLGRIND_VERSION }} --locked
+      - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
+      - name: Run iai benches → Bencher (gated vs main)
+        run: |
+          set -euo pipefail
+          for entry in \
+              "dial9-tokio-telemetry:writer_encode_iai" \
+              "dial9-tokio-telemetry:writer_write_encoded_iai" \
+              "dial9-tokio-telemetry:threadlocal_encode_iai" \
+              "dial9-trace-format:codec_iai"; do
+            pkg="${entry%:*}"; bench="${entry#*:}"
+            bencher run \
+              --token '${{ secrets.BENCHER_API_TOKEN }}' \
+              --branch '${{ github.head_ref }}' \
+              --start-point main \
+              --start-point-reset \
+              --testbed ubuntu-latest \
+              --adapter rust_iai_callgrind \
+              --threshold-measure instructions \
+              --threshold-test percentage \
+              --threshold-upper-boundary 0.01 \
+              --error-on-alert \
+              --github-actions '${{ secrets.GITHUB_TOKEN }}' \
+              "cargo bench -p $pkg --bench $bench"
+          done

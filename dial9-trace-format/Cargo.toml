@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Self-describing binary trace format with schema registry"
+autobenches = false
 
 [features]
 serde = ["dep:serde"]
@@ -18,7 +19,12 @@ serde_json = "1"
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 flate2 = "1"
+iai-callgrind = "0.16"
 
 [[bench]]
 name = "codec"
+harness = false
+
+[[bench]]
+name = "codec_iai"
 harness = false

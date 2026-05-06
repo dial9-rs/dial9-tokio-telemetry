@@ -72,6 +72,7 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-ve
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 async-trait = "0.1.89"
 uuid = { version = "1", features = ["v4"] }
+iai-callgrind = "0.16"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 dial9-tokio-telemetry = { path = ".", features = ["cpu-profiling", "worker-s3", "analysis", "tracing-layer"] }
@@ -133,3 +134,15 @@ harness = false
 name = "tracing_layer_bench"
 harness = false
 required-features = ["tracing-layer"]
+
+[[bench]]
+name = "writer_encode_iai"
+harness = false
+
+[[bench]]
+name = "threadlocal_encode_iai"
+harness = false
+
+[[bench]]
+name = "writer_write_encoded_iai"
+harness = false
