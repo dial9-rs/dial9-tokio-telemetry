@@ -39,6 +39,5 @@ runs:
                   sudo prlimit --pid $$ --memlock=unlimited:unlimited
                   cargo test --all-targets --all-features
               else
-                  cargo test --all-targets \
-                      --features analysis,cpu-profiling,tracing-layer,worker-s3
+                  cargo test --all-targets --features __nonlinux_all_features
               fi

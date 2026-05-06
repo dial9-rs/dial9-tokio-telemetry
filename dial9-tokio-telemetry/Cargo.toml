@@ -58,6 +58,8 @@ _shuttle = ["dep:shuttle", "metrique-timesource/custom-timesource", "metrique-ti
 taskdump = ["tokio/taskdump", "dep:backtrace"]
 tracing-layer = ["dep:tracing-subscriber"]
 worker-s3 = ["dep:aws-sdk-s3-transfer-manager", "dep:aws-sdk-s3", "dep:aws-config", "dep:time"]
+## All features except platform-specific ones (taskdump). Used in CI for non-Linux targets.
+__nonlinux_all_features = ["analysis", "cpu-profiling", "tracing-layer", "worker-s3"]
 
 [dev-dependencies]
 dial9-tokio-telemetry = { path = ".", features = ["analysis", "tracing-layer", "worker-s3"] }
