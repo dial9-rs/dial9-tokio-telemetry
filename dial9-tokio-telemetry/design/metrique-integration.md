@@ -13,33 +13,33 @@ This design depends on the entry descriptor system in metrique (see `docs/entry-
 ### Opt-in on the entry
 
 ```rust
-use dial9::{Dial9Context, InTrace, InternString};
+use dial9::{Dial9Context, Emit, Interned};
 
-#[metrics(default_field_tag(InTrace))]
+#[metrics(default_field_tag(Emit))]
 struct RequestMetrics {
-    // Dial9 context fields. Flatten with skip(InTrace) so context data is not
+    // Dial9 context fields. Flatten with skip(Emit) so context data is not
     // duplicated into the dial9 payload; the sink picks it up via the
-    // Dial9ContextField tag that Dial9Context's fields carry.
-    #[metrics(flatten, field_tag(skip(InTrace)))]
+    // dial9::Context tag that Dial9Context's fields carry.
+    #[metrics(flatten, field_tag(skip(Emit)))]
     dial9: Dial9Context,
 
-    #[metrics(field_tag(InternString))]
+    #[metrics(field_tag(Interned))]
     route: String,
 
     operation: &'static str,
     request_id: String,
 
-    #[metrics(field_tag(skip(InTrace)))]
+    #[metrics(field_tag(skip(Emit)))]
     debug_blob: String,
 }
 ```
 
 What this means:
 
-- `Dial9Context` is a dial9-provided metrique struct. Its fields (worker id, task id, start monotonic timestamp) are tagged with a dial9-internal `Dial9ContextField` marker. The constructor captures caller-thread state.
-- `flatten` spreads `Dial9Context`'s fields into the parent. `field_tag(skip(InTrace))` keeps them out of the dial9 payload proper; the sink reads them as context, not as fields of the event.
-- `InTrace` marks fields that should appear in the dial9 trace payload. `skip(InTrace)` at the field level overrides.
-- `InternString` tells the sink to route string data in this field through dial9's string pool.
+- `Dial9Context` is a dial9-provided metrique struct. Its fields (worker id, task id, start monotonic timestamp, end monotonic timestamp) are tagged with a dial9-internal `dial9::Context` marker. The constructor captures caller-thread start-time state; the end-time monotonic is captured via `CloseValue` at close.
+- `flatten` spreads `Dial9Context`'s fields into the parent. `field_tag(skip(Emit))` on the flatten site propagates to the flattened children as their default, so the context fields aren't duplicated into the dial9 payload.
+- `Emit` marks fields that should appear in the dial9 trace payload. `skip(Emit)` at the field level overrides.
+- `Interned` tells the sink to route string data in this field through dial9's string pool.
 
 ### Sink construction
 
@@ -62,28 +62,27 @@ The builder and manual composition paths are unchanged from the original design.
 │ COMPILE TIME: metrique macro                                   │
 │                                                                │
 │ Dial9 defines (in its own crate):                              │
-│   pub struct Dial9ContextField;      // field tag              │
-│   pub struct InTrace;                // field tag              │
-│   pub struct InternString;           // field tag              │
+│   pub struct Context;       // field tag for context fields    │
+│   pub struct Emit;          // field tag for payload           │
+│   pub struct Interned;      // field tag for string pool       │
 │                                                                │
 │   #[metrics]                                                   │
-│   pub struct Dial9Context { /* fields tagged with              │
-│                                Dial9ContextField */ }          │
+│   pub struct Dial9Context { /* fields tagged Context */ }      │
 │                                                                │
 │ User-side:                                                     │
-│   #[metrics(default_field_tag(InTrace))]                       │
+│   #[metrics(default_field_tag(Emit))]                          │
 │   struct RequestMetrics {                                      │
-│       #[metrics(flatten, field_tag(skip(InTrace)))]            │
+│       #[metrics(flatten, field_tag(skip(Emit)))]               │
 │       dial9: Dial9Context,                                     │
 │                                                                │
-│       #[metrics(field_tag(InternString))]                      │
+│       #[metrics(field_tag(Interned))]                          │
 │       route: String,                                           │
 │       ...                                                      │
 │   }                                                            │
 │                                                                │
 │ Macro emits:                                                   │
 │   impl Entry for ClosedRequestMetrics (as today)               │
-│   static EntryDescriptor (fields, tags, units)                 │
+│   static EntryDescriptor (fields, tags, units, canonical name) │
 │   impl Entry::descriptor() returning Some(DescriptorRef)       │
 └────────────────────────────────────────────────────────────────┘
                               │
@@ -93,7 +92,7 @@ The builder and manual composition paths are unchanged from the original design.
 │                                                                │
 │ let m = RequestMetrics { dial9: Dial9Context::capture(), ... };│
 │   Dial9Context::capture() reads:                               │
-│     tokio worker id, task id, monotonic clock                  │
+│     tokio worker id, task id, monotonic clock (start)          │
 │   other fields populated normally                              │
 │                                                                │
 │ Caller-thread overhead: a few TL reads + clock_monotonic_ns()  │
@@ -105,6 +104,7 @@ The builder and manual composition paths are unchanged from the original design.
 │ CALLER THREAD: append-on-drop / close                          │
 │                                                                │
 │ All CloseValue runs (Timer, Duration, Option, ...).            │
+│ Dial9Context's CloseValue reads the monotonic clock (end).     │
 │                                                                │
 │ Entry is pushed to BackgroundQueue as BoxEntry.                │
 └────────────────────────────────────────────────────────────────┘
@@ -125,8 +125,8 @@ The builder and manual composition paths are unchanged from the original design.
 │                                                                │
 │         on first-use per DescriptorId, compute:                │
 │           context_fields: indices into d.fields() where the    │
-│                           Dial9ContextField tag is present     │
-│           payload_fields: indices where InTrace is present     │
+│                           dial9::Context tag is present        │
+│           payload_fields: indices where Emit is present        │
 │                                                                │
 │         cache those indices keyed on d.id()                    │
 └────────────────────────────────────────────────────────────────┘
@@ -136,10 +136,10 @@ The builder and manual composition paths are unchanged from the original design.
 │ FLUSH THREAD: inside Dial9Stream, per entry                    │
 │                                                                │
 │ Walk entry.write(Dial9EntryWriter { ... }):                    │
-│   for each (name, value) callback:                             │
+│   for each (name, value) callback (in descriptor order):       │
 │     if index is in context_fields:                             │
 │       pull value into the trace event header (worker, task,    │
-│       monotonic_ns)                                            │
+│       monotonic_ns_start, monotonic_ns_end)                    │
 │                                                                │
 │     else if index is in payload_fields:                        │
 │       encode according to FieldShape:                          │
@@ -149,7 +149,7 @@ The builder and manual composition paths are unchanged from the original design.
 │            Flex    : encode map<key, value>                    │
 │            Opaque  : report + skip (sink-side validation)      │
 │                                                                │
-│     if field is tagged InternString and carries string data:   │
+│     if field is tagged Interned and carries string data:       │
 │       route through encoder.intern_string(..)                  │
 │                                                                │
 │ encoder.finish_event()                                         │
@@ -168,26 +168,31 @@ Regular metrique struct defined in the dial9 crate:
 #[metrics]
 #[derive(Default)]
 pub struct Dial9Context {
-    #[metrics(field_tag(dial9::Dial9ContextField))]
+    #[metrics(field_tag(dial9::Context))]
     worker_id: WorkerId,
 
-    #[metrics(field_tag(dial9::Dial9ContextField))]
+    #[metrics(field_tag(dial9::Context))]
     task_id: Option<TaskId>,
 
-    #[metrics(field_tag(dial9::Dial9ContextField))]
-    monotonic_ns: u64,
+    #[metrics(field_tag(dial9::Context))]
+    monotonic_ns_start: u64,
+
+    #[metrics(field_tag(dial9::Context))]
+    monotonic_ns_end: u64,  // populated on close via CloseValue
 }
 
 impl Dial9Context {
-    pub fn capture() -> Self { /* read worker/task/monotonic */ }
+    pub fn capture() -> Self { /* read worker/task/monotonic_start */ }
 }
 ```
 
-Construction always captures the monotonic clock. Tokio runtime state (worker id, task id) is captured if the thread is owned by a tokio runtime; otherwise those fields remain `None` / unset. `capture()` is infallible: an off-runtime call is a legitimate "no tokio context right here" signal, not an error.
+Construction always captures the monotonic clock at request start. Tokio runtime state (worker id, task id) is captured if the thread is owned by a tokio runtime; otherwise those fields remain `None` / unset. `capture()` is infallible.
+
+The end monotonic is captured at close time via `CloseValue`, so the event carries both endpoints. Dial9 viewers can render events as timeline spans (start + end + duration) rather than single points.
 
 If no dial9 runtime is attached at all (inert `TelemetryHandle`), `Dial9Stream` short-circuits the event; the `Dial9Context` field is harmlessly constructed and discarded.
 
-When flattened into a user struct, the three fields become part of the parent's descriptor with the `Dial9ContextField` tag. Dial9 finds them by walking the descriptor at first-use.
+When flattened into a user struct, the four fields become part of the parent's descriptor with the `dial9::Context` tag. Dial9 finds them by walking the descriptor at first-use.
 
 ### `Dial9Stream`
 
@@ -197,8 +202,10 @@ Per entry:
 
 1. If the handle is inert: return `Ok(())` immediately; entries still reach EMF through the tee.
 2. Look up `entry.descriptor()`. `None` is reported once (per observed concrete type id via `inner_any().type_id()`) and skipped.
-3. First-use per `DescriptorId`: walk the descriptor to compute the context-field indices (fields tagged `Dial9ContextField`) and payload-field indices (tagged `InTrace`). Build the wire schema with annotations for units.
-4. Walk `entry.write(..)` with a `Dial9EntryWriter` that uses the cached index sets to route each callback to either the event header (context) or the payload encoder (InTrace), or to skip. `InternString` fields have their string data routed through the dial9 string pool.
+3. First-use per `DescriptorId`: walk the descriptor to compute the context-field indices (fields tagged `dial9::Context`) and payload-field indices (tagged `dial9::Emit`). Build the wire schema with annotations for units.
+4. Walk `entry.write(..)` with a `Dial9EntryWriter` that uses the cached index sets to route each callback to either the event header (context) or the payload encoder (Emit), or to skip. `Interned` fields have their string data routed through the dial9 string pool. Relies on the metrique contract that `Entry::write` emits `value` callbacks in descriptor order.
+
+`Dial9EntryWriter` overrides `ValueWriter::values()` (the default implementation comma-joins elements into a string) to preserve the typed list wire encoding for `Vec<T>` fields.
 
 A `catch_unwind(AssertUnwindSafe(..))` guard around the `Entry::write` walk drops offending events (rate-limited log) without poisoning the flush thread's state.
 
@@ -221,6 +228,24 @@ For `Flex` fields, the unit applies to the map values, not the keys.
 - Periodic `tracing::debug!` reporting schema cache size and cumulative counters (registrations, events emitted, entries skipped for `None` descriptor).
 - Rate-limited `tracing::warn!` on each distinct hand-written entry seen (one report per observed concrete type id).
 
+## Visualization data shape
+
+Dial9 produces a trace with per-event data that supports viewer tooling. The design does not prescribe how the viewer renders, but the structural surface it receives from dial9 includes:
+
+- **Timeline placement**: start and end monotonic timestamps from `Dial9Context` (start from `capture()`, end from `CloseValue`). Events render as timeline spans with duration `end - start`.
+- **Worker placement**: `worker_id` from `Dial9Context`. Events pin to their starting tokio worker. Off-runtime events carry `WorkerId::UNKNOWN`.
+- **Task correlation**: `task_id: Option<TaskId>` from `Dial9Context`. Lets the viewer correlate events that ran on the same task (e.g., a `DbQueryMetrics` emitted inside a `RequestMetrics` block sharing `task_id`).
+- **Event type identity**: the entry's canonical name from `EntryDescriptor::name()`. Viewer tooling can group, filter, or color-code by event type.
+- **Full payload with units**: every `Emit`-tagged field of the event, with:
+  - Field name (post-rename, as emitted via `Entry::write`).
+  - Field value (decoded per `FieldShape`: scalars, optionals, lists, dynamic maps; pooled strings transparently resolved through the trace's string pool).
+  - Unit from `FieldDescriptor::unit()`, encoded as a schema-level annotation.
+  - Future schema annotations (display hints, privacy labels, `dial9.kpi` markers, etc.) arrive through the same annotation mechanism.
+- **Canonical wall-clock timestamp** (optional): `#[metrics(timestamp)]` fields, emitted through `EntryWriter::timestamp`. Supplements the monotonic start/end when present. Some events may not have one (monotonic is sufficient for dial9's ordering).
+- **Entry schema enumeration**: descriptor-aware viewer tooling can enumerate all fields and their shapes from the `EntryDescriptor` independently of any specific event, so search/filter UI knows up-front which fields exist on which event types.
+
+The viewer is free to render this data however fits: timeline spans, grouped lanes, inspector panels, correlation views, histograms, whatever. The design does not prescribe UI.
+
 ## Trace format additions
 
 Two additions to `dial9-trace-format` enable the integration without per-sink extensions:
@@ -238,13 +263,13 @@ Two new `FieldType` variants cover the metrique shapes that cannot be represente
 - `FieldType::List(FieldType)` carries `[T]`-style list data. The element type is sealed at schema registration; the encoder does not write per-element type tags, and the decoder reads each element using the schema-bound element type. A producer that writes data inconsistent with the schema produces a corrupt stream, the same guarantee the rest of the format relies on for existing fields. Recursion is forbidden: `FieldType::List` is not a valid element type.
 - `FieldType::Map { key: FieldType, value: FieldType }` represents a metrique `Flex<(String, T)>` as one schema field carrying a map at encode time, instead of one schema per runtime key. Wire layout: `<count> <repeated key value>`, using the existing scalar encodings determined by the `key` and `value` types declared in the schema. Keys and values are sealed at schema registration. Recursion is forbidden.
 
-Pooled-string positions are expressed by setting `FieldType::PooledString` as the key, value, or list element type. The `dial9::InternString` field tag on a metrique `Flex` or list field selects the pooled variant per-position as needed.
+Pooled-string positions are expressed by setting `FieldType::PooledString` as the key, value, or list element type. The `dial9::Interned` field tag on a metrique `Flex` or list field selects the pooled variant per-position as needed.
 
 ## Error handling and resilience
 
 - **Hand-written entries**: `descriptor()` is `None`. Dial9 reports once per distinct type id observed and skips. A future extension can let hand-written entries opt in via metrique's `DescribeEntry` follow-up.
-- **Entries with `InTrace` fields but no `Dial9ContextField`-tagged fields**: dial9 treats the entry as having no context. The event header gets a flush-thread monotonic timestamp and `WorkerId::UNKNOWN` / `task_id = None`; a rate-limited warn flags the missing context. The payload still encodes; dropping the event would be worse.
-- **Entries with `FieldShape::Opaque` selected for `InTrace`**: `debug_assert!` in debug, rate-limited `tracing::error!` in release, keyed per `(DescriptorId, field)` pair; the field is skipped on the wire. The rest of the entry still encodes.
+- **Entries with `Emit` fields but no `dial9::Context`-tagged fields**: dial9 treats the entry as having no context. The event header falls back to a flush-thread monotonic timestamp with `WorkerId::UNKNOWN` / `task_id = None`. A single `tracing::error!` per descriptor (deduped by `DescriptorId`, not time-rate-limited) names the offending entry type and hints that `#[cfg]` gating or forgotten `Dial9Context` field may be responsible. In debug builds this is `debug_assert!`. The payload still encodes; dropping the event would be worse.
+- **Entries with `FieldShape::Opaque` selected for `Emit`**: `debug_assert!` in debug, rate-limited `tracing::error!` in release, keyed per `(DescriptorId, field)` pair; the field is skipped on the wire. The rest of the entry still encodes.
 - **Inert telemetry handle**: `Dial9Stream` returns `Ok(())` immediately. Entries still reach EMF.
 - **Caller thread not owned by a tokio runtime**: `Dial9Context::capture()` still records a monotonic timestamp; tokio fields remain unset. The entry encodes normally.
 - **Panic inside `Value::write`**: caught per entry; the offending event is dropped with a rate-limited log. The flush thread's encoder state stays valid.
@@ -255,7 +280,7 @@ Validation runs in two places.
 
 ### Compile-time
 
-The metrique macro catches intrinsic structural mistakes that do not depend on dial9: conflicting `field_tag` + `field_tag(skip)`, conflicting struct-level defaults, `no_write + flatten` on the same field. These fire regardless of whether dial9 is in the picture.
+The metrique macro catches intrinsic structural mistakes that do not depend on dial9: conflicting `field_tag` + `field_tag(skip)`, conflicting struct-level defaults. These fire regardless of whether dial9 is in the picture.
 
 Dial9-specific diagnostics are runtime (see below) because the metrique macro does not interpret tag identity.
 
@@ -266,13 +291,13 @@ The first time `Dial9Stream` encounters a `DescriptorId`, it walks the descripto
 | Condition | Behaviour |
 | --- | --- |
 | `descriptor() == None` (hand-written entry) | rate-limited warn once per observed concrete type; entry dropped from dial9 path; EMF unaffected |
-| Descriptor has `InTrace` fields but no `Dial9ContextField`-tagged fields | rate-limited warn once per descriptor; entries of this type encode with UNKNOWN worker and flush-thread timestamp |
-| `InternString` on a non-string-capable shape | `debug_assert!` in debug, rate-limited `tracing::error!` in release; the offending field is skipped on the wire; rest of entry encodes |
-| `FieldShape::Opaque` field tagged `InTrace` | `debug_assert!` in debug, rate-limited `tracing::error!` in release; the offending field is skipped on the wire; rest of entry encodes |
+| Descriptor has `Emit` fields but no `dial9::Context`-tagged fields | `debug_assert!` in debug, single `tracing::error!` per descriptor in release (deduped by `DescriptorId`); entries of this type encode with UNKNOWN worker and flush-thread monotonic fallback |
+| `Interned` on a non-string-capable shape | `debug_assert!` in debug, rate-limited `tracing::error!` in release; the offending field is skipped on the wire; rest of entry encodes |
+| `FieldShape::Opaque` field tagged `Emit` | `debug_assert!` in debug, rate-limited `tracing::error!` in release; the offending field is skipped on the wire; rest of entry encodes |
 | Inert `TelemetryHandle` | `Ok(())` fast path; no work; entries still reach EMF |
 | Panic inside `Value::write` | event dropped; rate-limited warn; flush-thread state preserved |
 
-None of these failure modes crash the sink in release builds. Each diagnostic includes enough context (entry type name when available, descriptor pointer as a fallback) to find the offending struct.
+None of these failure modes crash the sink in release builds. Each diagnostic includes enough context (entry type name via `EntryDescriptor::name()`, descriptor pointer as a fallback) to find the offending struct.
 
 Periodic `tracing::debug!` reports aggregate counters: descriptors seen, descriptors skipped, events emitted, fields skipped. Off at `info` by default.
 
@@ -282,8 +307,8 @@ Note: the initial release does not have a binary-wide "sink attached, no dial9-c
 
 - **Hand-written `Entry` impls opting into descriptors** (once metrique ships `DescribeEntry`) so they participate in dial9 without derive sugar.
 - **Binary-wide source discovery at sink construction** (once metrique's source system re-opens). Would add a `Dial9Stream::builder().startup_discovery(true)` toggle and a warn when no dial9-bearing structs are registered.
-- **Typed source extraction for context** (paired with the above). Would let `Dial9Context` be read as a typed snapshot rather than walking flattened fields. Cleaner API at the cost of more metrique-side machinery.
+- **Typed source extraction for context** (paired with the above). Would let `Dial9Context` be read as a typed snapshot rather than walking flattened fields. Cleaner API at the cost of more metrique-side machinery. Existing dial9 users' code continues to work unchanged.
 - **Per-sink compile-time wire plans**, once metrique can emit them, to replace the flush-thread `Entry::write` walk with a direct encode.
-- **More schema annotations**: display hints, aggregation hints, privacy labels. Same mechanism as units.
+- **More schema annotations**: display hints, aggregation hints, privacy labels, `dial9.kpi` markers for fields that should be graphed. Same mechanism as units.
 - **Heterogeneous `Flex` values** once metrique carries a tagged runtime value model for them.
 - **Nested container widening**: once metrique lifts its one-optional-layer restriction on `List` and `Flex.value`, dial9's `FieldType::List` and `FieldType::Map` wire variants accept the richer shapes with no format change (they already recurse at the type level).
