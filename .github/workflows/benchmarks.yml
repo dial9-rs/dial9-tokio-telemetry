@@ -26,9 +26,8 @@ permissions:
 jobs:
   # Runs on every push to main to build the statistical baseline.
   benchmark_main:
-    if: ${{ false }} # skip job
     name: Benchmark — ${{ matrix.bench.name }} (main baseline)
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: ${{ false && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }} # skip job
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -77,9 +76,8 @@ jobs:
   # Runs on same-repo PRs. Fork PRs are skipped — they have no access to
   # BENCHER_API_TOKEN, so the job would fail rather than silently skip.
   benchmark_pr:
-    if: ${{ false }} # skip job
     name: Benchmark — ${{ matrix.bench.name }} (PR regression check)
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    if: ${{ false && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }} # skip job
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
