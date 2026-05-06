@@ -920,6 +920,25 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
         self
     }
 
+    /// Set static metadata embedded as a `SegmentMetadata` event in every
+    /// sealed segment file. Read back during analysis and attached to every
+    /// Span.
+    ///
+    /// [`with_s3_uploader`](Self::with_s3_uploader) injects bucket /
+    /// service_name / instance_path / boot_id automatically; call this
+    /// method when using [`with_custom_pipeline`](Self::with_custom_pipeline)
+    /// (or no pipeline) and you still want those entries — or when you want
+    /// to override the preset's defaults.
+    ///
+    /// Repeated calls **replace** the metadata, matching how
+    /// `with_s3_uploader` overwrites on a second call. The last call wins,
+    /// so `with_segment_metadata` placed *after* `with_s3_uploader`
+    /// overrides the preset's injection.
+    pub fn with_segment_metadata(mut self, entries: Vec<(String, String)>) -> Self {
+        self.segment_metadata = entries;
+        self
+    }
+
     /// Enable CPU profiling with the given configuration (Linux only).
     #[cfg(feature = "cpu-profiling")]
     pub fn with_cpu_profiling(
@@ -1027,6 +1046,11 @@ impl<P> TracedRuntimeBuilder<P, PipelineUnset> {
     /// and `.pipe(processor)` for user-supplied processors.
     ///
     /// Mutually exclusive with [`with_s3_uploader`](Self::with_s3_uploader).
+    ///
+    /// Unlike the S3 preset, this path does **not** auto-populate writer-side
+    /// segment metadata — call
+    /// [`with_segment_metadata`](Self::with_segment_metadata) if you want
+    /// identity entries (service, host, etc.) embedded in trace files.
     pub fn with_custom_pipeline<F>(mut self, build: F) -> TracedRuntimeBuilder<P, PipelineCustom>
     where
         F: FnOnce(
@@ -3082,6 +3106,139 @@ mod tests {
                 );
             }
             _ => panic!("expected S3 pipeline"),
+        }
+    }
+
+    /// Pin which builder paths populate `segment_metadata` (the static
+    /// entries the writer embeds as a `SegmentMetadata` event in every
+    /// sealed segment file). Today the S3 preset auto-injects;
+    /// `with_custom_pipeline` does not, so users on that path opt in via
+    /// `with_segment_metadata`.
+    mod segment_metadata_routing {
+        use super::*;
+
+        fn entries<P, M>(builder: &TracedRuntimeBuilder<P, M>) -> &[(String, String)] {
+            &builder.segment_metadata
+        }
+
+        #[cfg(feature = "worker-s3")]
+        fn s3_cfg() -> crate::background_task::s3::S3Config {
+            crate::background_task::s3::S3Config::builder()
+                .bucket("test-bucket")
+                .service_name("checkout-api")
+                .instance_path("us-east-1/i-0abc123")
+                .boot_id("test-boot")
+                .build()
+        }
+
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn s3_preset_populates_from_config() {
+            let builder = TracedRuntime::builder().with_s3_uploader(s3_cfg());
+            let m: std::collections::HashMap<&str, &str> = entries(&builder)
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            assert_eq!(m.get("bucket"), Some(&"test-bucket"));
+            assert_eq!(m.get("service_name"), Some(&"checkout-api"));
+            assert_eq!(m.get("instance_path"), Some(&"us-east-1/i-0abc123"));
+            assert_eq!(m.get("boot_id"), Some(&"test-boot"));
+        }
+
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn s3_preset_replace_overwrites_metadata() {
+            let cfg2 = crate::background_task::s3::S3Config::builder()
+                .bucket("other-bucket")
+                .service_name("other-svc")
+                .boot_id("other-boot")
+                .build();
+            let builder = TracedRuntime::builder()
+                .with_s3_uploader(s3_cfg())
+                .with_s3_uploader(cfg2);
+            let m: std::collections::HashMap<&str, &str> = entries(&builder)
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            // cfg2 wins; nothing leaks from the first call.
+            assert_eq!(m.get("bucket"), Some(&"other-bucket"));
+            assert_eq!(m.get("service_name"), Some(&"other-svc"));
+            assert_eq!(m.get("boot_id"), Some(&"other-boot"));
+        }
+
+        /// Custom pipeline does NOT auto-populate, even when `b.s3(cfg)` is
+        /// composed inside it. Documented behavior — pinned here so a future
+        /// change is intentional.
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn custom_pipeline_with_s3_does_not_auto_populate() {
+            let builder =
+                TracedRuntime::builder().with_custom_pipeline(|b| b.gzip().s3(s3_cfg()));
+            assert!(
+                entries(&builder).is_empty(),
+                "with_custom_pipeline must not auto-inject segment metadata; got {:?}",
+                entries(&builder)
+            );
+        }
+
+        #[test]
+        fn custom_pipeline_without_s3_is_empty() {
+            let builder = TracedRuntime::builder()
+                .with_custom_pipeline(|b| b.gzip().write_back());
+            assert!(entries(&builder).is_empty());
+        }
+
+        #[test]
+        fn unset_pipeline_is_empty() {
+            let builder = TracedRuntime::builder();
+            assert!(entries(&builder).is_empty());
+        }
+
+        /// Custom-pipeline users can recover S3-preset parity by calling
+        /// `with_segment_metadata` explicitly.
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn with_segment_metadata_recovers_parity_in_custom_pipeline() {
+            let cfg = s3_cfg();
+            let preset_entries: Vec<(String, String)> = cfg
+                .as_metadata()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let builder = TracedRuntime::builder()
+                .with_custom_pipeline(|b| b.gzip().s3(s3_cfg()))
+                .with_segment_metadata(preset_entries.clone());
+            assert_eq!(entries(&builder), preset_entries.as_slice());
+        }
+
+        /// `with_segment_metadata` after `with_s3_uploader` overrides the
+        /// preset's injection — last call wins.
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn with_segment_metadata_after_s3_overrides_preset() {
+            let custom = vec![("env".to_string(), "prod".to_string())];
+            let builder = TracedRuntime::builder()
+                .with_s3_uploader(s3_cfg())
+                .with_segment_metadata(custom.clone());
+            assert_eq!(entries(&builder), custom.as_slice());
+        }
+
+        /// `with_s3_uploader` after `with_segment_metadata` overwrites the
+        /// custom entries — same "last call wins" rule.
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn s3_after_with_segment_metadata_overwrites() {
+            let builder = TracedRuntime::builder()
+                .with_segment_metadata(vec![("env".into(), "prod".into())])
+                .with_s3_uploader(s3_cfg());
+            let m: std::collections::HashMap<&str, &str> = entries(&builder)
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            assert_eq!(m.get("bucket"), Some(&"test-bucket"));
+            assert!(
+                !m.contains_key("env"),
+                "with_s3_uploader should overwrite, not merge"
+            );
         }
     }
 }
