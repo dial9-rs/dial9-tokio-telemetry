@@ -513,12 +513,14 @@
 
   /**
    * Build span data structures from custom events.
-   * Pairs SpanEnterEvent/SpanExitEvent into span intervals per worker,
-   * and builds a lookup table for span metadata (name, fields, parent).
+   * Groups SpanEnter/SpanExit pairs into spans with segments (one per poll).
+   * SpanCloseEvent finalizes a span and enables span ID recycling.
    * @param {Array<{name: string, timestamp: number, fields: Object}>} customEvents
    * @returns {{
-   *   spansByWorker: Object<number, Array<{start: number, end: number, spanId: number, spanName: string, fields: Object, parentSpanId: number|null}>>,
+   *   allSpans: Array<{start: number, end: number, spanId: number, spanName: string, fields: Object, parentSpanId: number|null, segments: Array<{start: number, end: number, workerId: number}>, activeNs: number, depth: number}>,
    *   spanMeta: Map<number, {spanName: string, fields: Object, parentSpanId: number|null}>,
+   *   maxDepth: number,
+   *   unmatchedSpans: Array<{start: number, spanId: number, workerId: number, spanName: string, fields: Object, parentSpanId: number|null}>,
    * }}
    */
   function buildSpanData(customEvents) {
