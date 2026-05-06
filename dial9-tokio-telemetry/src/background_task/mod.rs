@@ -1,11 +1,13 @@
 #[cfg(feature = "worker-s3")]
 pub(crate) mod connection;
 pub mod instance_metadata;
+mod payload;
 pub(crate) mod pipeline_metrics;
 #[cfg(feature = "worker-s3")]
 pub mod s3;
 pub(crate) mod sealed;
 
+pub use payload::Payload;
 pub use sealed::SealedSegment;
 
 use crate::metrics::{Operation, SegmentProcessMetrics, SegmentProcessMetricsGuard};
@@ -92,12 +94,12 @@ impl BackgroundTaskConfig {
 
 /// Data flowing through the processor pipeline.
 ///
-/// The worker reads the sealed segment file into `bytes`, populates initial
+/// The worker reads the sealed segment file into `payload`, populates initial
 /// `metadata`, then passes this through each [`SegmentProcessor`] in order.
 /// Metrics are flushed automatically when the `SegmentData` is dropped.
 pub struct SegmentData {
     pub(crate) segment: SealedSegment,
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) payload: Payload,
     pub(crate) metadata: HashMap<String, String>,
     pub(crate) metrics: SegmentProcessMetricsGuard,
 }
@@ -108,24 +110,19 @@ impl SegmentData {
         &self.segment
     }
 
-    /// Current payload bytes (raw, symbolized, compressed, etc.).
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    /// Current payload (raw, symbolized, compressed, etc.).
+    pub fn payload(&self) -> &Payload {
+        &self.payload
     }
 
-    /// Mutable reference to the payload bytes.
-    pub fn bytes_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.bytes
+    /// Take ownership of the payload, leaving an empty [`Payload`] in its place.
+    pub fn take_payload(&mut self) -> Payload {
+        std::mem::take(&mut self.payload)
     }
 
-    /// Take ownership of the payload bytes, leaving an empty `Vec` in its place.
-    pub fn take_bytes(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.bytes)
-    }
-
-    /// Replace the payload bytes.
-    pub fn set_bytes(&mut self, bytes: Vec<u8>) {
-        self.bytes = bytes;
+    /// Replace the payload.
+    pub fn set_payload(&mut self, payload: impl Into<Payload>) {
+        self.payload = payload.into();
     }
 
     /// Metadata accumulated by upstream processors.
@@ -151,7 +148,7 @@ impl std::fmt::Debug for SegmentData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SegmentData")
             .field("segment", &self.segment)
-            .field("bytes", &format_args!("[{} bytes]", self.bytes.len()))
+            .field("payload", &self.payload)
             .field("metadata", &self.metadata)
             .field("metrics", &self.metrics)
             .finish()
@@ -304,7 +301,7 @@ pub trait SegmentProcessor: Send {
 ///         -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
 ///     {
 ///         Box::pin(async move {
-///             println!("segment {} ({} bytes)", data.segment().index(), data.bytes().len());
+///             println!("segment {} ({} bytes)", data.segment().index(), data.payload().len());
 ///             Ok(data)
 ///         })
 ///     }
@@ -453,46 +450,42 @@ impl SegmentProcessor for GzipCompressor {
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
             // Skip already-compressed segments to avoid double-gzip.
-            if data.bytes.starts_with(&[0x1f, 0x8b]) {
+            if data.payload.starts_with(&[0x1f, 0x8b]) {
                 data.metadata
                     .insert("content_encoding".into(), "gzip".into());
                 data.metadata
                     .insert("write_back_extension".into(), ".gz".into());
                 return Ok(data);
             }
-            let raw = data.bytes;
+            let raw = std::mem::take(&mut data.payload);
             let compressed = tokio::task::spawn_blocking(move || {
                 use flate2::write::GzEncoder;
                 use std::io::Write;
                 let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
-                encoder.write_all(&raw)?;
+                for chunk in raw.chunks() {
+                    encoder.write_all(chunk)?;
+                }
                 encoder.finish()
             })
             .await;
             match compressed {
                 Ok(Ok(bytes)) => {
                     data.metrics.compressed_size = Some(bytes.len() as u64);
-                    data.bytes = bytes;
+                    data.payload = Payload::from_vec(bytes);
                     data.metadata
                         .insert("content_encoding".into(), "gzip".into());
                     data.metadata
                         .insert("write_back_extension".into(), ".gz".into());
                     Ok(data)
                 }
-                Ok(Err(e)) => {
-                    data.bytes = vec![];
-                    Err(ProcessError {
-                        data,
-                        kind: ProcessErrorKind::Io(e),
-                    })
-                }
-                Err(e) => {
-                    data.bytes = vec![];
-                    Err(ProcessError {
-                        data,
-                        kind: ProcessErrorKind::Io(std::io::Error::other(e)),
-                    })
-                }
+                Ok(Err(e)) => Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(e),
+                }),
+                Err(e) => Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(std::io::Error::other(e)),
+                }),
             }
         })
     }
@@ -520,28 +513,34 @@ impl SegmentProcessor for SymbolizeProcessor {
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
             // Skip already-compressed segments (e.g. leftover from a previous run).
-            if data.bytes.starts_with(&[0x1f, 0x8b]) {
+            if data.payload.starts_with(&[0x1f, 0x8b]) {
                 tracing::debug!(target: "dial9_worker", "segment is gzip-compressed, skipping symbolization");
                 return Ok(data);
             }
-            let input = std::mem::take(&mut data.bytes);
+            // The symbolize FFI reads `&[u8]`, so we materialize a single
+            // contiguous `Bytes`. When there's only one chunk this is a
+            // zero-copy `Bytes::clone`-equivalent; the `BytesMut` concat
+            // path runs only on already-segmented input (rare).
+            let input = std::mem::take(&mut data.payload).into_bytes();
             let result = tokio::task::spawn_blocking(move || {
                 let maps = dial9_perf_self_profile::read_proc_maps();
-                // TODO: reduce the amount of reallocation we are doing here, probably by making it possible to extend segment data instead of all the copying
                 let mut output = Vec::new();
                 dial9_perf_self_profile::offline_symbolize::symbolize_trace_with_maps(
                     &input,
                     &maps,
                     &mut output,
                 )?;
-                let mut combined = input;
-                combined.extend_from_slice(&output);
+                // Hand back the original bytes plus the symbol output as two
+                // chunks — no copy of `input`.
+                let mut combined = Payload::new();
+                combined.push(input);
+                combined.push(bytes::Bytes::from(output));
                 Ok::<_, std::io::Error>(combined)
             })
             .await;
             match result {
-                Ok(Ok(bytes)) => {
-                    data.bytes = bytes;
+                Ok(Ok(payload)) => {
+                    data.payload = payload;
                     Ok(data)
                 }
                 Ok(Err(e)) => {
@@ -591,10 +590,17 @@ impl SegmentProcessor for WriteBackProcessor {
                 }
                 None => original_path.clone(),
             };
-            let bytes = data.bytes.clone();
+            let payload = data.payload.clone();
             let write_dest = dest_path.clone();
-            let result =
-                tokio::task::spawn_blocking(move || std::fs::write(&write_dest, &bytes)).await;
+            let result = tokio::task::spawn_blocking(move || {
+                use std::io::{BufWriter, Write};
+                let mut f = BufWriter::new(std::fs::File::create(&write_dest)?);
+                for chunk in payload.chunks() {
+                    f.write_all(chunk)?;
+                }
+                f.flush()
+            })
+            .await;
             match result {
                 Ok(Ok(())) => {
                     if dest_path != original_path {
@@ -742,7 +748,7 @@ impl WorkerLoop {
 
             let mut data = SegmentData {
                 segment: segment.clone(),
-                bytes,
+                payload: Payload::from_vec(bytes),
                 metadata: HashMap::from([
                     ("epoch_secs".into(), epoch_secs.to_string()),
                     ("segment_index".into(), segment.index.to_string()),
@@ -1020,9 +1026,9 @@ impl SegmentProcessor for S3PipelineUploader {
                     },
                 });
             }
-            let bytes = std::mem::take(&mut data.bytes);
+            let payload = std::mem::take(&mut data.payload);
             match uploader
-                .upload_and_delete(&data.segment, bytes, &data.metadata)
+                .upload_and_delete(&data.segment, payload, &data.metadata)
                 .await
             {
                 Ok(key) => {
@@ -1217,7 +1223,7 @@ mod tests {
 
         let mut pipe_data = SegmentData {
             segment,
-            bytes: data,
+            payload: Payload::from_vec(data),
             metadata: HashMap::from([
                 ("epoch_secs".into(), "1741209000".into()),
                 ("segment_index".into(), "0".into()),
@@ -1709,7 +1715,7 @@ mod worker_pipeline_tests {
                 data: SegmentData,
             ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
             {
-                *self.0.lock().unwrap() = data.bytes.clone();
+                *self.0.lock().unwrap() = data.payload.clone().into_vec();
                 Box::pin(async { Ok(data) })
             }
         }
@@ -1764,7 +1770,7 @@ mod worker_pipeline_tests {
 
         let data = SegmentData {
             segment,
-            bytes: b"payload".to_vec(),
+            payload: Payload::from(b"payload"),
             metadata: HashMap::from([("write_back_extension".into(), ".gz".into())]),
             metrics,
         };
@@ -1809,7 +1815,7 @@ mod worker_pipeline_tests {
 
         let data = SegmentData {
             segment,
-            bytes: b"new".to_vec(),
+            payload: Payload::from(b"new"),
             metadata: HashMap::new(),
             metrics,
         };

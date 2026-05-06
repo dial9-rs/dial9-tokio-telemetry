@@ -58,7 +58,7 @@ impl SegmentProcessor for LoggingProcessor {
             println!(
                 "[Logging]   segment {:>3}  {:>8} bytes  metadata={:?}",
                 data.segment().index(),
-                data.bytes().len(),
+                data.payload().len(),
                 data.metadata(),
             );
             Ok(data)
@@ -154,7 +154,7 @@ impl SegmentProcessor for SizeReporter {
         data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         self.segments_seen += 1;
-        self.bytes_seen += data.bytes().len() as u64;
+        self.bytes_seen += data.payload().len() as u64;
         if self.segments_seen.is_multiple_of(self.report_every) {
             println!(
                 "[Stats]     {} segments processed, {} bytes total",
