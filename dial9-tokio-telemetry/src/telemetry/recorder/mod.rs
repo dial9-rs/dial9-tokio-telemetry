@@ -1095,10 +1095,16 @@ impl<P> TracedRuntimeBuilder<P, PipelineUnset> {
     ///
     /// Mutually exclusive with [`with_s3_uploader`](Self::with_s3_uploader).
     ///
-    /// Unlike the S3 preset, this path does **not** auto-populate writer-side
-    /// segment metadata — call
-    /// [`with_segment_metadata`](Self::with_segment_metadata) if you want
-    /// identity entries (service, host, etc.) embedded in trace files.
+    /// This is the "full control" path: the resulting pipeline is exactly
+    /// what the closure builds, with nothing prepended or appended. In
+    /// particular, unlike the S3 preset, this path does **not**:
+    /// - auto-populate writer-side segment metadata — call
+    ///   [`with_segment_metadata`](Self::with_segment_metadata) if you want
+    ///   identity entries (service, host, etc.) embedded in trace files.
+    /// - auto-prepend the `Symbolize` step when CPU profiling is enabled.
+    ///   Chain
+    ///   [`.symbolize()`](crate::background_task::PipelineBuilder::symbolize)
+    ///   first if you want symbolized stack frames.
     pub fn with_custom_pipeline<F>(mut self, build: F) -> TracedRuntimeBuilder<P, PipelineCustom>
     where
         F: FnOnce(
@@ -1299,8 +1305,11 @@ impl<M> TracedRuntimeBuilder<HasTracePath, M> {
 
 /// Build the final processor pipeline.
 ///
-/// `Symbolize` is auto-prepended whenever CPU profiling is enabled,
-/// regardless of pipeline strategy.
+/// `Symbolize` is auto-prepended for the built-in presets (`Unset`, `S3`)
+/// when CPU profiling is enabled. The `Custom` path is "full control" — the
+/// user's processor list is passed through verbatim, and they're expected to
+/// chain [`PipelineBuilder::symbolize`](crate::background_task::PipelineBuilder::symbolize)
+/// themselves if they want symbolization.
 ///
 /// Behaviour matrix:
 ///
@@ -1308,7 +1317,7 @@ impl<M> TracedRuntimeBuilder<HasTracePath, M> {
 /// |----------|--------------------------------|-------------------|
 /// | Unset    | `[Symbolize, Gzip, WriteBack]` | (worker skipped)  |
 /// | S3       | `[Symbolize, Gzip, S3]`        | `[Gzip, S3]`      |
-/// | Custom   | `[Symbolize, ...user]`         | `[...user]`       |
+/// | Custom   | `[...user]`                    | `[...user]`       |
 fn assemble_processors(
     #[cfg(feature = "cpu-profiling")] cpu_profiling_enabled: bool,
     pipeline: PipelineConfig,
@@ -1321,17 +1330,21 @@ fn assemble_processors(
     }
 
     let mut processors: Vec<Box<dyn crate::background_task::SegmentProcessor>> = Vec::new();
-    #[cfg(feature = "cpu-profiling")]
-    if cpu_profiling_enabled {
-        processors.push(Box::new(crate::background_task::SymbolizeProcessor));
-    }
     match pipeline {
         PipelineConfig::Unset => {
+            #[cfg(feature = "cpu-profiling")]
+            if cpu_profiling_enabled {
+                processors.push(Box::new(crate::background_task::SymbolizeProcessor));
+            }
             processors.push(Box::new(crate::background_task::GzipCompressor));
             processors.push(Box::new(crate::background_task::WriteBackProcessor));
         }
         #[cfg(feature = "worker-s3")]
         PipelineConfig::S3(uploader) => {
+            #[cfg(feature = "cpu-profiling")]
+            if cpu_profiling_enabled {
+                processors.push(Box::new(crate::background_task::SymbolizeProcessor));
+            }
             processors.push(Box::new(crate::background_task::GzipCompressor));
             processors.push(Box::new(uploader));
         }

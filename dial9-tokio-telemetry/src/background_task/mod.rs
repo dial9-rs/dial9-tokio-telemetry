@@ -350,6 +350,11 @@ impl PipelineBuilder {
 
     /// Resolve stack-frame addresses in the segment to symbol names.
     /// Only valid when the runtime is built with the `cpu-profiling` feature.
+    ///
+    /// The built-in S3 / default presets prepend this automatically when
+    /// CPU profiling is on; on the custom path the pipeline is passed
+    /// through verbatim, so chain `.symbolize()` first if you want
+    /// symbolized stack frames in your trace files.
     #[cfg(feature = "cpu-profiling")]
     pub fn symbolize(mut self) -> Self {
         self.processors.push(Box::new(SymbolizeProcessor));
