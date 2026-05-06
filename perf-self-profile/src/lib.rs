@@ -84,3 +84,11 @@ pub fn unregister_current_thread() {
 // blazesym-dependent APIs
 #[cfg(target_os = "linux")]
 pub use sys::{resolve_symbol_with_maps, resolve_symbols_with_maps};
+
+/// Internal module exposed only for benchmarks. Not part of the public API.
+#[cfg(all(target_os = "linux", feature = "__internal-bench"))]
+#[doc(hidden)]
+pub mod __bench_internals {
+    pub use crate::sys::fp_profiler::install_handler;
+    pub use crate::sys::fp_profiler::unwind::unwind;
+}
