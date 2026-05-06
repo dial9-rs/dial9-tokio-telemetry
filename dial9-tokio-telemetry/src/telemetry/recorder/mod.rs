@@ -834,25 +834,30 @@ impl Drop for TelemetryGuard {
 
 /// Marker: no trace path has been set yet.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct NoTracePath;
 /// Marker: a trace path has been set.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct HasTracePath;
 
 /// Marker: no pipeline strategy has been chosen yet. From this state the
 /// builder can transition to either S3 (via `with_s3_uploader`) or a custom
 /// pipeline (via `with_custom_pipeline`).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct PipelineUnset;
 
 /// Marker: the S3 preset has been selected. `with_s3_client` is available
 /// to bind a pre-built client; `with_custom_pipeline` is not in scope.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct PipelineS3;
 
 /// Marker: a custom pipeline has been configured. No further pipeline
 /// methods are available.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct PipelineCustom;
 
 enum PipelineConfig {

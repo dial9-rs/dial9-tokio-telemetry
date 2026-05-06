@@ -185,8 +185,11 @@ impl ProcessError {
 #[non_exhaustive]
 pub enum ProcessErrorKind {
     /// The processor hit an `std::io::Error`.
+    #[non_exhaustive]
     Io(std::io::Error),
-    /// An S3 transfer manager error.
+
+    /// An error transferring data off the host
+    #[non_exhaustive]
     Transfer {
         /// Underlying error source.
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -290,6 +293,25 @@ pub trait SegmentProcessor: Send {
 /// ([`gzip`](Self::gzip), [`write_back`](Self::write_back),
 /// [`s3`](Self::s3), [`symbolize`](Self::symbolize)); custom processors
 /// are added with [`pipe`](Self::pipe).
+///
+/// # Example
+///
+/// ```ignore
+/// struct Logger;
+/// impl SegmentProcessor for Logger {
+///     fn name(&self) -> &'static str { "logger" }
+///     fn process(&mut self, data: SegmentData)
+///         -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+///     {
+///         Box::pin(async move {
+///             println!("segment {} ({} bytes)", data.segment().index(), data.bytes().len());
+///             Ok(data)
+///         })
+///     }
+/// }
+///
+/// builder.with_custom_pipeline(|p| p.pipe(Logger).gzip().write_back())
+/// ```
 #[must_use]
 pub struct PipelineBuilder {
     processors: Vec<Box<dyn SegmentProcessor>>,
