@@ -7,6 +7,8 @@ use crate::telemetry::format::{
 use crate::telemetry::task_metadata::TaskId;
 use std::cell::Cell;
 use std::collections::HashMap;
+#[cfg(feature = "taskdump")]
+use std::num::NonZeroU64;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 use tokio::runtime::RuntimeMetrics;
@@ -35,6 +37,21 @@ thread_local! {
     /// Whether we've registered this thread's OS tid for CPU profiling.
     #[cfg(feature = "cpu-profiling")]
     static TID_REGISTERED: Cell<bool> = const { Cell::new(false) };
+    /// Monotonic timestamp captured in `on_before_task_poll`, cleared in
+    /// `on_after_task_poll`. Allows code running inside a poll (e.g.
+    /// `TaskDumped`) to reuse the timestamp without an extra clock read.
+    #[cfg(feature = "taskdump")]
+    static POLL_START_TS: Cell<Option<NonZeroU64>> = const { Cell::new(None) };
+}
+
+/// Returns the poll-start timestamp if we're inside a poll, otherwise reads
+/// the clock.
+#[cfg(feature = "taskdump")]
+pub(crate) fn poll_start_ts_or_now() -> u64 {
+    POLL_START_TS.with(|c| c.get()).map_or_else(
+        crate::telemetry::events::clock_monotonic_ns,
+        NonZeroU64::get,
+    )
 }
 
 impl RuntimeContext {
@@ -209,8 +226,11 @@ pub(super) fn make_poll_start(
     let worker_local_queue_depth = resolved
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);
+    let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
+    #[cfg(feature = "taskdump")]
+    POLL_START_TS.with(|c| c.set(NonZeroU64::new(timestamp_ns)));
     PollStart {
-        timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
+        timestamp_ns,
         worker_id: resolved.map(|(id, _)| id).unwrap_or(WorkerId::UNKNOWN),
         local_queue: worker_local_queue_depth as u8,
         task_id,
@@ -219,6 +239,8 @@ pub(super) fn make_poll_start(
 }
 
 pub(super) fn make_poll_end(ctx: &RuntimeContext, shared: &SharedState) -> PollEndEvent {
+    #[cfg(feature = "taskdump")]
+    POLL_START_TS.with(|c| c.set(None));
     let resolved = ctx.resolve_worker(shared);
     PollEndEvent {
         timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),

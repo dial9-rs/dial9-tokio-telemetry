@@ -13,6 +13,7 @@ pub mod cpu_profile;
 pub(crate) mod events;
 pub(crate) mod format;
 pub(crate) mod recorder;
+pub mod task_dump_config;
 pub(crate) mod task_metadata;
 pub(crate) mod writer;
 
@@ -27,6 +28,7 @@ pub use recorder::{
     TelemetryCore, TelemetryCoreBuilder, TelemetryGuard, TelemetryHandle, TelemetryRuntimeError,
     TraceRuntimeCoreBuilder, TracedRuntime, TracedRuntimeBuilder, current_worker_id, spawn,
 };
+pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
 pub use writer::{NullWriter, RotatingWriter, TraceWriter};
 

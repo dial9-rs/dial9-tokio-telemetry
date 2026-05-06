@@ -439,6 +439,8 @@ impl<W: Write> Encoder<W> {
         codec::encode_stack_pool(
             &[StackPoolEntry {
                 pool_id: id,
+                // TODO: allow `StackPoolEntry` to have borrowed frames avoiding the unecessary clone here
+                // https://github.com/dial9-rs/dial9-tokio-telemetry/issues/358
                 frames: frames.to_vec(),
             }],
             &mut self.state.writer,

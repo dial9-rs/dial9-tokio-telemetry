@@ -16,6 +16,8 @@ pub mod background_task;
 pub(crate) mod metrics;
 pub(crate) mod primitives;
 pub(crate) mod rate_limit;
+#[cfg(feature = "taskdump")]
+pub(crate) mod task_dumped;
 /// Core telemetry types, recording, and trace I/O.
 pub mod telemetry;
 pub(crate) mod traced;
