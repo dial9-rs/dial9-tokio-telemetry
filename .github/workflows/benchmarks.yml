@@ -84,6 +84,11 @@ jobs:
       RUST_BACKTRACE: 1
       IAI_CALLGRIND_VERSION: "0.16.1"
       BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+      # Mirror .cargo/config.toml [build] rustflags + add iai_enabled cfg
+      # so the bench files compile their real iai entry point. Without
+      # this cfg they compile to a no-op stub (so plain `cargo test
+      # --all-targets` doesn't try to spawn iai-callgrind-runner).
+      RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes --cfg iai_enabled"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -129,6 +134,7 @@ jobs:
       RUST_BACKTRACE: 1
       IAI_CALLGRIND_VERSION: "0.16.1"
       BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+      RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes --cfg iai_enabled"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

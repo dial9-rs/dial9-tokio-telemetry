@@ -6,6 +6,15 @@
 //!
 //! Usage:
 //!   cargo bench --bench writer_encode_iai
+//!
+//! Gated on `--cfg iai_enabled` so plain `cargo test --all-targets`
+//! compiles to a no-op stub `fn main()` instead of spawning
+//! `iai-callgrind-runner`. CI iai jobs set RUSTFLAGS to enable.
+
+#![cfg_attr(not(iai_enabled), allow(unused))]
+
+#[cfg(not(iai_enabled))]
+fn main() {}
 
 use dial9_tokio_telemetry::telemetry::{
     PollEndEvent, PollStartEvent, TaskId, TaskSpawnEvent, WakeEventEvent, WorkerId,
@@ -89,4 +98,6 @@ fn writer_encode(workers: Vec<usize>) -> Vec<u8> {
 }
 
 library_benchmark_group!(name = encode_group; benchmarks = writer_encode);
+
+#[cfg(iai_enabled)]
 main!(library_benchmark_groups = encode_group);

@@ -4,6 +4,15 @@
 //!
 //! Usage:
 //!   cargo bench --bench codec_iai
+//!
+//! Gated on `--cfg iai_enabled` so plain `cargo test --all-targets`
+//! compiles to a no-op stub `fn main()` instead of spawning
+//! `iai-callgrind-runner`. CI iai jobs set RUSTFLAGS to enable.
+
+#![cfg_attr(not(iai_enabled), allow(unused))]
+
+#[cfg(not(iai_enabled))]
+fn main() {}
 
 use dial9_trace_format::decoder::Decoder;
 use dial9_trace_format::encoder::Encoder;
@@ -147,4 +156,6 @@ library_benchmark_group!(
     name = codec_group;
     benchmarks = encode, decode_all, decode_all_ref, for_each_event
 );
+
+#[cfg(iai_enabled)]
 main!(library_benchmark_groups = codec_group);
