@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "blazesym",
  "criterion",
@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "arc-swap",
  "assert2",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format"
-version = "0.3.6"
+version = "0.4.0"
 dependencies = [
  "dial9-trace-format-derive",
  "flate2",
@@ -1581,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format-derive"
-version = "0.3.5"
+version = "0.4.0"
 dependencies = [
  "insta",
  "prettyplease",
@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "assert2",

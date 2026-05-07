@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.7...dial9-tokio-telemetry-v0.3.8) - 2026-05-08
+
+### Added
+
+- Add task dump capture behind `taskdump` feature ([#354](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/354))
+- Task dumps: switch to Poisson sampling and libunwind ([#369](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/369))
+- Taskdump viewer and expand inline frames in flamegraphs ([#378](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/378))
+- Expose runtime pipeline ([#355](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/355), [#365](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/365))
+- Add typed list and map FieldTypes ([#367](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/367))
+- Add TAG_SCHEMA_ANNOTATIONS frame and SchemaEntry::annotations ([#366](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/366))
+- *(viewer)* Adopt agent skills spec, Symposium integration, lightweight benchmark ([#370](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/370))
+- *(toolkit)* Task dumps in recipes, bugfixes ([#380](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/380))
+- Document task dumps, other README improvements ([#379](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/379))
+
+### Fixed
+
+- Use real waker in task dump capture to prevent lost wakes ([#372](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/372))
+- Eliminate task dump busy loop and move dl_iterate_phdr off hot path ([#375](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/375))
+- Redo tracing UI and add span close events ([#342](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/342))
+
+### Other
+
+- *(design)* metrique to dial9 integration ([#346](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/346))
+- Memory profiling design ([#362](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/362))
+- Add iai-callgrind PR gate, retire criterion CI ([#360](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/360))
+- Write dial9 crate README ([#374](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/374))
+- Add symposium keyword to dial9-tokio-telemetry ([#376](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/376))
+- update Cargo.lock dependencies
+
 ## [0.3.7](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.6...dial9-tokio-telemetry-v0.3.7) - 2026-05-04
 
 ### Added

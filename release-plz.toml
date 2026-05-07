@@ -12,6 +12,7 @@ changelog_include = [
     "dial9-trace-format",
     "dial9-trace-format-derive",
     "dial9-viewer",
+    "dial9",
 ]
 
 [[package]]
@@ -25,10 +26,12 @@ changelog_update = false
 [[package]]
 name = "dial9-trace-format"
 changelog_update = false
+version_group = "trace-format"
 
 [[package]]
 name = "dial9-trace-format-derive"
 changelog_update = false
+version_group = "trace-format"
 
 [[package]]
 name = "dial9-viewer"
