@@ -14,8 +14,8 @@ impl ::dial9_trace_format::TraceEvent for SimpleEvent {
     }
     fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
         vec![
-            ::dial9_trace_format::schema::FieldDef { name : "value".to_string(),
-            field_type : < u32 as ::dial9_trace_format::TraceField > ::field_type(), }
+            ::dial9_trace_format::schema::FieldDef::new("value", < u32 as
+            ::dial9_trace_format::TraceField > ::field_type(),)
         ]
     }
     fn timestamp(&self) -> u64 {

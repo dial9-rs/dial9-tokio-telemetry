@@ -11,10 +11,7 @@ fn dynamic_list_round_trip() {
     let schema = enc
         .register_schema(
             "ListEvent",
-            vec![FieldDef {
-                name: "items".into(),
-                field_type: FieldType::DynamicList,
-            }],
+            vec![FieldDef::new("items", FieldType::DynamicList)],
         )
         .unwrap();
 
@@ -50,10 +47,7 @@ fn dynamic_map_round_trip() {
     let schema = enc
         .register_schema(
             "MapEvent",
-            vec![FieldDef {
-                name: "props".into(),
-                field_type: FieldType::DynamicMap,
-            }],
+            vec![FieldDef::new("props", FieldType::DynamicMap)],
         )
         .unwrap();
 
@@ -91,10 +85,7 @@ fn optional_dynamic_list_round_trip() {
     let schema = enc
         .register_schema(
             "OptListEvent",
-            vec![FieldDef {
-                name: "tags".into(),
-                field_type: FieldType::OptionalDynamicList,
-            }],
+            vec![FieldDef::new("tags", FieldType::OptionalDynamicList)],
         )
         .unwrap();
 
@@ -131,10 +122,7 @@ fn heterogeneous_list_round_trip() {
     let schema = enc
         .register_schema(
             "MixedList",
-            vec![FieldDef {
-                name: "data".into(),
-                field_type: FieldType::DynamicList,
-            }],
+            vec![FieldDef::new("data", FieldType::DynamicList)],
         )
         .unwrap();
 
@@ -172,10 +160,7 @@ fn nested_list_in_map_round_trip() {
     let schema = enc
         .register_schema(
             "NestedEvent",
-            vec![FieldDef {
-                name: "nested".into(),
-                field_type: FieldType::DynamicMap,
-            }],
+            vec![FieldDef::new("nested", FieldType::DynamicMap)],
         )
         .unwrap();
 
@@ -209,14 +194,8 @@ fn empty_list_and_map_round_trip() {
         .register_schema(
             "EmptyContainers",
             vec![
-                FieldDef {
-                    name: "list".into(),
-                    field_type: FieldType::DynamicList,
-                },
-                FieldDef {
-                    name: "map".into(),
-                    field_type: FieldType::DynamicMap,
-                },
+                FieldDef::new("list", FieldType::DynamicList),
+                FieldDef::new("map", FieldType::DynamicMap),
             ],
         )
         .unwrap();

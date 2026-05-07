@@ -208,10 +208,7 @@ mod tests {
         let schema1 = enc1
             .register_schema(
                 "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::PooledStackFrames,
-                }],
+                vec![FieldDef::new("frames", FieldType::PooledStackFrames)],
             )
             .unwrap();
         let id_a = enc1.intern_stack_frames(&[addr_a]).unwrap();
@@ -227,10 +224,7 @@ mod tests {
         let schema2 = enc2
             .register_schema(
                 "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::PooledStackFrames,
-                }],
+                vec![FieldDef::new("frames", FieldType::PooledStackFrames)],
             )
             .unwrap();
         let id_b = enc2.intern_stack_frames(&[addr_b]).unwrap();
@@ -270,13 +264,7 @@ mod tests {
 
         let mut enc = Encoder::new();
         let schema = enc
-            .register_schema(
-                "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::StackFrames,
-                }],
-            )
+            .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
             .unwrap();
         enc.write_event(
             &schema,
@@ -326,13 +314,7 @@ mod tests {
         // Build a minimal trace containing a single StackFrames event with our address.
         let mut enc = Encoder::new();
         let schema = enc
-            .register_schema(
-                "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::StackFrames,
-                }],
-            )
+            .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
             .unwrap();
         enc.write_event(
             &schema,

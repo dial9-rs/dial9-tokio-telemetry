@@ -396,10 +396,7 @@ fn kernel_field_to_trace_format(field: &TracepointField) -> FieldDef {
     } else {
         kernel_type_to_field_type(&field.field_type, field.size, field.signed)
     };
-    FieldDef {
-        name: field.name.clone(),
-        field_type,
-    }
+    FieldDef::new(field.name.clone(), field_type)
 }
 
 fn kernel_type_to_field_type(type_str: &str, size: usize, signed: bool) -> FieldType {

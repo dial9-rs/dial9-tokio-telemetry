@@ -29,10 +29,7 @@ fn empty_stream_after_header() {
 fn schema_max_type_id_via_encoder() {
     // Register a schema and verify round-trip
     let mut enc = Encoder::new();
-    let fields = vec![FieldDef {
-        name: "v".into(),
-        field_type: FieldType::Varint,
-    }];
+    let fields = vec![FieldDef::new("v", FieldType::Varint)];
     let schema = enc.register_schema("Ev", fields).unwrap();
     enc.write_event(
         &schema,
@@ -65,10 +62,7 @@ fn schema_empty_name_via_encoder() {
 fn schema_many_fields_via_encoder() {
     let mut enc = Encoder::new();
     let fields: Vec<FieldDef> = (0..256)
-        .map(|i| FieldDef {
-            name: format!("f{i}"),
-            field_type: FieldType::Varint,
-        })
+        .map(|i| FieldDef::new(format!("f{i}"), FieldType::Varint))
         .collect();
     let schema = enc.register_schema("Wide", fields).unwrap();
     let mut values = vec![FieldValue::Varint(0)]; // timestamp
@@ -258,10 +252,7 @@ fn string_pool_many_entries_via_encoder() {
 #[test]
 fn multiple_schemas_then_events() {
     let mut enc = Encoder::new();
-    let fields = vec![FieldDef {
-        name: "v".into(),
-        field_type: FieldType::Varint,
-    }];
+    let fields = vec![FieldDef::new("v", FieldType::Varint)];
     let schemas: Vec<_> = (0..5)
         .map(|i| {
             enc.register_schema(&format!("Ev{i}"), fields.clone())
@@ -294,13 +285,7 @@ fn multiple_schemas_then_events() {
 fn interleaved_pool_and_events() {
     let mut enc = Encoder::new();
     let schema = enc
-        .register_schema(
-            "Ev",
-            vec![FieldDef {
-                name: "s".into(),
-                field_type: FieldType::PooledString,
-            }],
-        )
+        .register_schema("Ev", vec![FieldDef::new("s", FieldType::PooledString)])
         .unwrap();
     let id0 = enc.intern_string("first").unwrap();
     enc.write_event(

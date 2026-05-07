@@ -11,14 +11,8 @@ fn full_round_trip() {
         .register_schema(
             "PollStart",
             vec![
-                FieldDef {
-                    name: "worker".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "task_id".into(),
-                    field_type: FieldType::Varint,
-                },
+                FieldDef::new("worker", FieldType::Varint),
+                FieldDef::new("task_id", FieldType::Varint),
             ],
         )
         .unwrap();
@@ -26,14 +20,8 @@ fn full_round_trip() {
         .register_schema(
             "CpuSample",
             vec![
-                FieldDef {
-                    name: "thread_name".into(),
-                    field_type: FieldType::PooledString,
-                },
-                FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::StackFrames,
-                },
+                FieldDef::new("thread_name", FieldType::PooledString),
+                FieldDef::new("frames", FieldType::StackFrames),
             ],
         )
         .unwrap();
@@ -68,18 +56,9 @@ fn full_round_trip() {
         .register_schema(
             "SymbolTableEntry",
             vec![
-                FieldDef {
-                    name: "base_addr".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "size".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "symbol_name".into(),
-                    field_type: FieldType::PooledString,
-                },
+                FieldDef::new("base_addr", FieldType::Varint),
+                FieldDef::new("size", FieldType::Varint),
+                FieldDef::new("symbol_name", FieldType::PooledString),
             ],
         )
         .unwrap();
@@ -144,38 +123,14 @@ fn round_trip_all_field_types() {
         .register_schema(
             "AllTypes",
             vec![
-                FieldDef {
-                    name: "a".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "b".into(),
-                    field_type: FieldType::I64,
-                },
-                FieldDef {
-                    name: "c".into(),
-                    field_type: FieldType::F64,
-                },
-                FieldDef {
-                    name: "d".into(),
-                    field_type: FieldType::Bool,
-                },
-                FieldDef {
-                    name: "e".into(),
-                    field_type: FieldType::String,
-                },
-                FieldDef {
-                    name: "f".into(),
-                    field_type: FieldType::Bytes,
-                },
-                FieldDef {
-                    name: "h".into(),
-                    field_type: FieldType::PooledString,
-                },
-                FieldDef {
-                    name: "i".into(),
-                    field_type: FieldType::StackFrames,
-                },
+                FieldDef::new("a", FieldType::Varint),
+                FieldDef::new("b", FieldType::I64),
+                FieldDef::new("c", FieldType::F64),
+                FieldDef::new("d", FieldType::Bool),
+                FieldDef::new("e", FieldType::String),
+                FieldDef::new("f", FieldType::Bytes),
+                FieldDef::new("h", FieldType::PooledString),
+                FieldDef::new("i", FieldType::StackFrames),
             ],
         )
         .unwrap();

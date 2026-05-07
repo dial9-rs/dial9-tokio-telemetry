@@ -49,6 +49,7 @@ impl FieldAnnotation {
 }
 
 /// A single field within a schema: a name and a [`FieldType`].
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldDef {
     /// Field name (e.g. `"worker_id"`).
@@ -59,8 +60,26 @@ pub struct FieldDef {
     pub field_type: FieldType,
 }
 
+impl FieldDef {
+    /// Construct a field definition with the given name and type.
+    ///
+    /// ```
+    /// # use dial9_trace_format::schema::FieldDef;
+    /// # use dial9_trace_format::types::FieldType;
+    /// FieldDef::new("worker_id", FieldType::Varint);
+    /// FieldDef::new("tags", FieldType::DynamicList);
+    /// ```
+    pub fn new(name: impl Into<String>, field_type: FieldType) -> Self {
+        Self {
+            name: name.into(),
+            field_type,
+        }
+    }
+}
+
 /// Describes the layout of an event type. Does not carry a wire type ID —
 /// the ID is assigned by the encoder and tracked externally by the registry.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaEntry {
     /// Event type name (e.g. `"PollStart"`).
@@ -72,6 +91,33 @@ pub struct SchemaEntry {
     /// Per-field annotations (metadata such as units, display hints).
     /// Empty by default; carried in a separate wire frame.
     pub annotations: Vec<FieldAnnotation>,
+}
+
+impl SchemaEntry {
+    /// Construct a new schema entry.
+    pub fn new(name: impl Into<String>, has_timestamp: bool, fields: Vec<FieldDef>) -> Self {
+        Self {
+            name: name.into(),
+            has_timestamp,
+            fields,
+            annotations: Vec::new(),
+        }
+    }
+
+    /// Construct a schema entry with annotations.
+    pub fn with_annotations(
+        name: impl Into<String>,
+        has_timestamp: bool,
+        fields: Vec<FieldDef>,
+        annotations: Vec<FieldAnnotation>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            has_timestamp,
+            fields,
+            annotations,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]

@@ -15,6 +15,7 @@ use std::io::{self, Write};
 /// absent (decoded as [`FieldValueRef::None`]), `0x01` means present (followed
 /// by the inner type's normal encoding). The inner type tag is `tag & 0x7F`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 #[repr(u8)]
 pub enum FieldType {
     I64 = 1,

@@ -7,25 +7,19 @@ use dial9_trace_format::types::{FieldType, FieldValue};
 #[test]
 fn annotations_round_trip() {
     let mut enc = Encoder::new();
-    let entry = SchemaEntry {
-        name: "Latency".into(),
-        has_timestamp: true,
-        fields: vec![
-            FieldDef {
-                name: "duration_us".into(),
-                field_type: FieldType::Varint,
-            },
-            FieldDef {
-                name: "endpoint".into(),
-                field_type: FieldType::PooledString,
-            },
+    let entry = SchemaEntry::with_annotations(
+        "Latency",
+        true,
+        vec![
+            FieldDef::new("duration_us", FieldType::Varint),
+            FieldDef::new("endpoint", FieldType::PooledString),
         ],
-        annotations: vec![
+        vec![
             FieldAnnotation::new(0, "metrique.unit", "microseconds"),
             FieldAnnotation::new(1, "dial9.display", "label"),
             FieldAnnotation::new(0, "dial9.kpi", "true"),
         ],
-    };
+    );
     let schema = Schema::from_entry(entry);
     enc.register_existing(&schema).unwrap();
 
@@ -85,14 +79,8 @@ fn annotations_round_trip() {
 #[test]
 fn no_annotations_no_frame() {
     let mut enc = Encoder::new();
-    enc.register_schema(
-        "Simple",
-        vec![FieldDef {
-            name: "x".into(),
-            field_type: FieldType::Varint,
-        }],
-    )
-    .unwrap();
+    enc.register_schema("Simple", vec![FieldDef::new("x", FieldType::Varint)])
+        .unwrap();
 
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
@@ -111,24 +99,18 @@ fn no_annotations_no_frame() {
 fn multiple_schemas_with_mixed_annotations() {
     let mut enc = Encoder::new();
 
-    let annotated = SchemaEntry {
-        name: "Annotated".into(),
-        has_timestamp: true,
-        fields: vec![FieldDef {
-            name: "val".into(),
-            field_type: FieldType::Varint,
-        }],
-        annotations: vec![FieldAnnotation::new(0, "unit", "ms")],
-    };
-    let plain = SchemaEntry {
-        name: "Plain".into(),
-        has_timestamp: true,
-        fields: vec![FieldDef {
-            name: "val".into(),
-            field_type: FieldType::Varint,
-        }],
-        annotations: Vec::new(),
-    };
+    let annotated = SchemaEntry::with_annotations(
+        "Annotated",
+        true,
+        vec![FieldDef::new("val", FieldType::Varint)],
+        vec![FieldAnnotation::new(0, "unit", "ms")],
+    );
+    let plain = SchemaEntry::with_annotations(
+        "Plain",
+        true,
+        vec![FieldDef::new("val", FieldType::Varint)],
+        Vec::new(),
+    );
 
     let schema_a = Schema::from_entry(annotated);
     let schema_b = Schema::from_entry(plain);
@@ -160,15 +142,12 @@ fn multiple_schemas_with_mixed_annotations() {
 fn annotations_silent_truncation() {
     // Encode a trace with annotations, then truncate before the annotation frame.
     let mut enc = Encoder::new();
-    let entry = SchemaEntry {
-        name: "Ev".into(),
-        has_timestamp: true,
-        fields: vec![FieldDef {
-            name: "x".into(),
-            field_type: FieldType::Varint,
-        }],
-        annotations: vec![FieldAnnotation::new(0, "key", "value")],
-    };
+    let entry = SchemaEntry::with_annotations(
+        "Ev",
+        true,
+        vec![FieldDef::new("x", FieldType::Varint)],
+        vec![FieldAnnotation::new(0, "key", "value")],
+    );
     let schema = Schema::from_entry(entry);
     enc.register_existing(&schema).unwrap();
     let data = enc.finish();
@@ -197,13 +176,7 @@ fn annotations_unknown_type_id_skipped() {
     // Build a valid trace, then manually append an annotation frame for an unknown type_id.
     let mut enc = Encoder::new();
     let schema = enc
-        .register_schema(
-            "Real",
-            vec![FieldDef {
-                name: "x".into(),
-                field_type: FieldType::Varint,
-            }],
-        )
+        .register_schema("Real", vec![FieldDef::new("x", FieldType::Varint)])
         .unwrap();
 
     enc.write_event(
@@ -247,15 +220,12 @@ fn annotations_unknown_type_id_skipped() {
 fn annotations_round_trip_ref() {
     // Verify the zero-copy path also works
     let mut enc = Encoder::new();
-    let entry = SchemaEntry {
-        name: "Ev".into(),
-        has_timestamp: true,
-        fields: vec![FieldDef {
-            name: "x".into(),
-            field_type: FieldType::Varint,
-        }],
-        annotations: vec![FieldAnnotation::new(0, "key", "val")],
-    };
+    let entry = SchemaEntry::with_annotations(
+        "Ev",
+        true,
+        vec![FieldDef::new("x", FieldType::Varint)],
+        vec![FieldAnnotation::new(0, "key", "val")],
+    );
     let schema = Schema::from_entry(entry);
     enc.register_existing(&schema).unwrap();
     enc.write_event(
@@ -283,15 +253,12 @@ fn annotations_round_trip_ref() {
 fn annotations_for_each_event_works() {
     // Verify that for_each_event processes events correctly when annotations are present
     let mut enc = Encoder::new();
-    let entry = SchemaEntry {
-        name: "Metric".into(),
-        has_timestamp: true,
-        fields: vec![FieldDef {
-            name: "val".into(),
-            field_type: FieldType::Varint,
-        }],
-        annotations: vec![FieldAnnotation::new(0, "unit", "bytes")],
-    };
+    let entry = SchemaEntry::with_annotations(
+        "Metric",
+        true,
+        vec![FieldDef::new("val", FieldType::Varint)],
+        vec![FieldAnnotation::new(0, "unit", "bytes")],
+    );
     let schema = Schema::from_entry(entry);
     enc.register_existing(&schema).unwrap();
     enc.write_event(
