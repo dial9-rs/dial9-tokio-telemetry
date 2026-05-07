@@ -12,6 +12,7 @@ const FieldType = {
   I64: 1, F64: 2, Bool: 3, String: 4,
   Bytes: 5, PooledStackFrames: 6, PooledString: 7, StackFrames: 8, Varint: 9,
   StringMap: 10, U8: 11, U16: 12, U32: 13,
+  DynamicList: 14, DynamicMap: 15,
 };
 
 function decodeULEB128(view, offset) {
@@ -85,6 +86,33 @@ function decodeFieldValue(view, offset, fieldType) {
     case FieldType.U8: return [view.getUint8(offset), 1];
     case FieldType.U16: return [view.getUint16(offset, true), 2];
     case FieldType.U32: return [view.getUint32(offset, true), 4];
+    case FieldType.DynamicList: {
+      const count = view.getUint32(offset, true);
+      let pos = 4;
+      const items = [];
+      for (let i = 0; i < count; i++) {
+        const tag = view.getUint8(offset + pos); pos += 1;
+        const [val, consumed] = decodeFieldValue(view, offset + pos, tag);
+        items.push(val);
+        pos += consumed;
+      }
+      return [items, pos];
+    }
+    case FieldType.DynamicMap: {
+      const count = view.getUint32(offset, true);
+      let pos = 4;
+      const entries = [];
+      for (let i = 0; i < count; i++) {
+        const keyTag = view.getUint8(offset + pos); pos += 1;
+        const [key, keySize] = decodeFieldValue(view, offset + pos, keyTag);
+        pos += keySize;
+        const valTag = view.getUint8(offset + pos); pos += 1;
+        const [val, valSize] = decodeFieldValue(view, offset + pos, valTag);
+        pos += valSize;
+        entries.push([key, val]);
+      }
+      return [entries, pos];
+    }
     default: throw new Error(`Unknown field type: ${fieldType}`);
   }
 }

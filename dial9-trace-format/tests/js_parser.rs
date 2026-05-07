@@ -364,3 +364,44 @@ fn js_decodes_optional_pooled_stack_frames() {
     );
     assert!(events[1]["values"]["callchain"].is_null());
 }
+
+#[test]
+fn js_decodes_dynamic_list_and_map() {
+    let mut enc = Encoder::new();
+    let tid = enc
+        .register_schema(
+            "Containers",
+            vec![
+                FieldDef::new("items", FieldType::DynamicList),
+                FieldDef::new("props", FieldType::DynamicMap),
+            ],
+        )
+        .unwrap();
+
+    let list = FieldValue::List(vec![
+        FieldValue::String("hello".into()),
+        FieldValue::Varint(42),
+    ]);
+    let map = FieldValue::Map(vec![(
+        FieldValue::String("key".into()),
+        FieldValue::Varint(99),
+    )]);
+    enc.write_event(&tid, &[FieldValue::Varint(1000), list, map])
+        .unwrap();
+
+    let data = enc.finish();
+    let json = js_decode(&data);
+
+    let frames = json["frames"].as_array().unwrap();
+    // schema + event = 2
+    assert_eq!(frames.len(), 2);
+
+    let vals = &frames[1]["values"];
+    let items = vals["items"].as_array().unwrap();
+    assert_eq!(items[0], "hello");
+    assert_eq!(items[1], "42");
+
+    let props = vals["props"].as_array().unwrap();
+    assert_eq!(props[0][0], "key");
+    assert_eq!(props[0][1], "99");
+}
