@@ -44,7 +44,7 @@ fn annotations_round_trip() {
     for frame in &frames {
         match frame {
             DecodedFrame::Schema(s) => {
-                assert_eq!(s.name, "Latency");
+                assert_eq!(s.name(), "Latency");
                 saw_schema = true;
             }
             DecodedFrame::SchemaAnnotations {
@@ -72,8 +72,8 @@ fn annotations_round_trip() {
 
     // Verify annotations are merged into the registry
     let registry_entry = dec.registry().get(WireTypeId(0)).unwrap();
-    assert_eq!(registry_entry.annotations.len(), 3);
-    assert_eq!(registry_entry.annotations[0].key(), "metrique.unit");
+    assert_eq!(registry_entry.annotations().len(), 3);
+    assert_eq!(registry_entry.annotations()[0].key(), "metrique.unit");
 }
 
 #[test]
@@ -130,12 +130,12 @@ fn multiple_schemas_with_mixed_annotations() {
 
     // Annotations attached to the right schema
     let annotated_entry = dec.registry().get(WireTypeId(0)).unwrap();
-    assert_eq!(annotated_entry.name, "Annotated");
-    assert_eq!(annotated_entry.annotations.len(), 1);
+    assert_eq!(annotated_entry.name(), "Annotated");
+    assert_eq!(annotated_entry.annotations().len(), 1);
 
     let plain_entry = dec.registry().get(WireTypeId(1)).unwrap();
-    assert_eq!(plain_entry.name, "Plain");
-    assert!(plain_entry.annotations.is_empty());
+    assert_eq!(plain_entry.name(), "Plain");
+    assert!(plain_entry.annotations().is_empty());
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn annotations_unknown_type_id_skipped() {
 
     // The "Real" schema should have no annotations
     let real_entry = dec.registry().get(WireTypeId(0)).unwrap();
-    assert!(real_entry.annotations.is_empty());
+    assert!(real_entry.annotations().is_empty());
 }
 
 #[test]
@@ -273,8 +273,8 @@ fn annotations_for_each_event_works() {
     dec.for_each_event(|ev| {
         assert_eq!(ev.name, "Metric");
         // Annotations should be visible on the schema
-        assert_eq!(ev.schema.annotations.len(), 1);
-        assert_eq!(ev.schema.annotations[0].key(), "unit");
+        assert_eq!(ev.schema.annotations().len(), 1);
+        assert_eq!(ev.schema.annotations()[0].key(), "unit");
         event_count += 1;
     })
     .unwrap();

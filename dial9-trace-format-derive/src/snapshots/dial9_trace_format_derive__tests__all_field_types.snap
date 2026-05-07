@@ -88,7 +88,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "a_u8")
+                    .find(|(f, _)| f.name() == "a_u8")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u8 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -99,7 +99,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "b_u16")
+                    .find(|(f, _)| f.name() == "b_u16")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u16 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -110,7 +110,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "c_u32")
+                    .find(|(f, _)| f.name() == "c_u32")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u32 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -121,7 +121,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "d_u64")
+                    .find(|(f, _)| f.name() == "d_u64")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -132,7 +132,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "e_i64")
+                    .find(|(f, _)| f.name() == "e_i64")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <i64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -143,7 +143,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "f_f64")
+                    .find(|(f, _)| f.name() == "f_f64")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <f64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -154,7 +154,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "g_bool")
+                    .find(|(f, _)| f.name() == "g_bool")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <bool as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -165,7 +165,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "h_string")
+                    .find(|(f, _)| f.name() == "h_string")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => {
@@ -180,7 +180,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "i_bytes")
+                    .find(|(f, _)| f.name() == "i_bytes")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => {
@@ -195,7 +195,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "j_interned")
+                    .find(|(f, _)| f.name() == "j_interned")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => {
@@ -212,7 +212,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "k_frames")
+                    .find(|(f, _)| f.name() == "k_frames")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => {
@@ -227,7 +227,7 @@ impl ::dial9_trace_format::TraceEvent for AllFieldTypes {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "l_map")
+                    .find(|(f, _)| f.name() == "l_map")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => {

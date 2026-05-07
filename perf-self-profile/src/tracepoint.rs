@@ -556,20 +556,20 @@ print fmt: "prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=
         assert_eq!(defs.len(), 7);
 
         // char[16] → String
-        assert_eq!(defs[0].name, "prev_comm");
-        assert_eq!(defs[0].field_type, FieldType::String);
+        assert_eq!(defs[0].name(), "prev_comm");
+        assert_eq!(defs[0].field_type(), FieldType::String);
 
         // pid_t (4 bytes, signed) → I64
-        assert_eq!(defs[1].name, "prev_pid");
-        assert_eq!(defs[1].field_type, FieldType::I64);
+        assert_eq!(defs[1].name(), "prev_pid");
+        assert_eq!(defs[1].field_type(), FieldType::I64);
 
         // int (4 bytes, signed) → I64
-        assert_eq!(defs[2].name, "prev_prio");
-        assert_eq!(defs[2].field_type, FieldType::I64);
+        assert_eq!(defs[2].name(), "prev_prio");
+        assert_eq!(defs[2].field_type(), FieldType::I64);
 
         // long (8 bytes, signed) → I64
-        assert_eq!(defs[3].name, "prev_state");
-        assert_eq!(defs[3].field_type, FieldType::I64);
+        assert_eq!(defs[3].name(), "prev_state");
+        assert_eq!(defs[3].field_type(), FieldType::I64);
     }
 
     #[test]
@@ -633,10 +633,10 @@ print fmt: "prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=
         for frame in frames {
             match frame {
                 DecodedFrame::Schema(entry) => {
-                    assert_eq!(entry.name, "sched_switch");
-                    assert!(entry.has_timestamp);
-                    assert_eq!(entry.fields.len(), 7);
-                    assert_eq!(entry.fields[0].name, "prev_comm");
+                    assert_eq!(entry.name(), "sched_switch");
+                    assert!(entry.has_timestamp());
+                    assert_eq!(entry.fields().len(), 7);
+                    assert_eq!(entry.fields()[0].name(), "prev_comm");
                     found_schema = true;
                 }
                 DecodedFrame::Event {
@@ -819,7 +819,7 @@ format:
         let defs = tp.to_trace_format_fields();
 
         // __data_loc char[] → String
-        assert_eq!(defs[2].name, "name");
-        assert_eq!(defs[2].field_type, FieldType::String);
+        assert_eq!(defs[2].name(), "name");
+        assert_eq!(defs[2].field_type(), FieldType::String);
     }
 }

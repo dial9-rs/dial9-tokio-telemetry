@@ -86,7 +86,7 @@ fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
                 let name = dec
                     .registry()
                     .get(type_id)
-                    .map(|s| s.name.as_str())
+                    .map(|s| s.name())
                     .ok_or(ParseTimestampError::UnknownTypeId(type_id.0))?;
                 if name == "ClockSyncEvent" {
                     return match values.first() {

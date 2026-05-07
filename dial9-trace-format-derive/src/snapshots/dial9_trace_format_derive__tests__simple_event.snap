@@ -39,7 +39,7 @@ impl ::dial9_trace_format::TraceEvent for SimpleEvent {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "value")
+                    .find(|(f, _)| f.name() == "value")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u32 as ::dial9_trace_format::TraceField>::decode_ref(v)?,

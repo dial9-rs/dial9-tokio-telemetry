@@ -84,8 +84,8 @@ fn full_round_trip() {
     // + 1 cpu sample + 1 pool("my_function") + 1 symbol event = 8
     assert_eq!(decoded.len(), 8, "got: {decoded:#?}");
 
-    assert!(matches!(&decoded[0], DecodedFrame::Schema(s) if s.name == "PollStart"));
-    assert!(matches!(&decoded[1], DecodedFrame::Schema(s) if s.name == "CpuSample"));
+    assert!(matches!(&decoded[0], DecodedFrame::Schema(s) if s.name() == "PollStart"));
+    assert!(matches!(&decoded[1], DecodedFrame::Schema(s) if s.name() == "CpuSample"));
 
     assert_eq!(dec.string_pool().get(thread_id), Some("worker-0"));
     assert_eq!(dec.string_pool().get(sym_name_id), Some("my_function"));
@@ -106,7 +106,7 @@ fn full_round_trip() {
     }
 
     // Verify symbol table event
-    assert!(matches!(&decoded[6], DecodedFrame::Schema(s) if s.name == "SymbolTableEntry"));
+    assert!(matches!(&decoded[6], DecodedFrame::Schema(s) if s.name() == "SymbolTableEntry"));
     if let DecodedFrame::Event { values, .. } = &decoded[7] {
         assert_eq!(values[0], FieldValue::Varint(0x5555_5555_0000));
         assert_eq!(values[1], FieldValue::Varint(0x2000));

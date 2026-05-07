@@ -39,7 +39,7 @@ fn schema_max_type_id_via_encoder() {
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all();
-    assert!(matches!(&frames[0], DecodedFrame::Schema(s) if s.name == "Ev"));
+    assert!(matches!(&frames[0], DecodedFrame::Schema(s) if s.name() == "Ev"));
     if let DecodedFrame::Event { values, .. } = &frames[1] {
         assert_eq!(values[0], FieldValue::Varint(42));
     } else {
@@ -55,7 +55,7 @@ fn schema_empty_name_via_encoder() {
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all();
-    assert!(matches!(&frames[0], DecodedFrame::Schema(s) if s.name.is_empty()));
+    assert!(matches!(&frames[0], DecodedFrame::Schema(s) if s.name().is_empty()));
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn schema_many_fields_via_encoder() {
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all();
-    assert!(matches!(&frames[0], DecodedFrame::Schema(s) if s.fields.len() == 256));
+    assert!(matches!(&frames[0], DecodedFrame::Schema(s) if s.fields().len() == 256));
 }
 
 // --- Field type edge cases ---

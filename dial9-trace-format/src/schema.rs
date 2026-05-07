@@ -52,12 +52,8 @@ impl FieldAnnotation {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldDef {
-    /// Field name (e.g. `"worker_id"`).
-    pub name: String,
-    /// Wire type used to encode this field. Optional variants (e.g.
-    /// `FieldType::OptionalPooledString`) indicate the field uses the
-    /// high-bit optional encoding on the wire.
-    pub field_type: FieldType,
+    pub(crate) name: String,
+    pub(crate) field_type: FieldType,
 }
 
 impl FieldDef {
@@ -75,6 +71,16 @@ impl FieldDef {
             field_type,
         }
     }
+
+    /// Field name (e.g. `"worker_id"`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Wire type used to encode this field.
+    pub fn field_type(&self) -> FieldType {
+        self.field_type
+    }
 }
 
 /// Describes the layout of an event type. Does not carry a wire type ID —
@@ -82,24 +88,23 @@ impl FieldDef {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaEntry {
-    /// Event type name (e.g. `"PollStart"`).
-    pub name: String,
-    /// Whether events of this type carry a packed u24 nanosecond timestamp in the event header.
-    pub has_timestamp: bool,
-    /// Ordered list of fields (excluding the timestamp, which is in the header).
-    pub fields: Vec<FieldDef>,
-    /// Per-field annotations (metadata such as units, display hints).
-    /// Empty by default; carried in a separate wire frame.
-    pub annotations: Vec<FieldAnnotation>,
+    pub(crate) name: String,
+    pub(crate) has_timestamp: bool,
+    pub(crate) fields: Vec<FieldDef>,
+    pub(crate) annotations: Vec<FieldAnnotation>,
 }
 
 impl SchemaEntry {
     /// Construct a new schema entry.
-    pub fn new(name: impl Into<String>, has_timestamp: bool, fields: Vec<FieldDef>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        has_timestamp: bool,
+        fields: impl IntoIterator<Item = FieldDef>,
+    ) -> Self {
         Self {
             name: name.into(),
             has_timestamp,
-            fields,
+            fields: fields.into_iter().collect(),
             annotations: Vec::new(),
         }
     }
@@ -108,15 +113,35 @@ impl SchemaEntry {
     pub fn with_annotations(
         name: impl Into<String>,
         has_timestamp: bool,
-        fields: Vec<FieldDef>,
-        annotations: Vec<FieldAnnotation>,
+        fields: impl IntoIterator<Item = FieldDef>,
+        annotations: impl IntoIterator<Item = FieldAnnotation>,
     ) -> Self {
         Self {
             name: name.into(),
             has_timestamp,
-            fields,
-            annotations,
+            fields: fields.into_iter().collect(),
+            annotations: annotations.into_iter().collect(),
         }
+    }
+
+    /// Event type name (e.g. `"PollStart"`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether events of this type carry a packed timestamp in the event header.
+    pub fn has_timestamp(&self) -> bool {
+        self.has_timestamp
+    }
+
+    /// Ordered list of fields (excluding the timestamp).
+    pub fn fields(&self) -> &[FieldDef] {
+        &self.fields
+    }
+
+    /// Per-field annotations.
+    pub fn annotations(&self) -> &[FieldAnnotation] {
+        &self.annotations
     }
 }
 

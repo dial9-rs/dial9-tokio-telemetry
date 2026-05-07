@@ -43,7 +43,7 @@ impl ::dial9_trace_format::TraceEvent for PollStart {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "worker_id")
+                    .find(|(f, _)| f.name() == "worker_id")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -54,7 +54,7 @@ impl ::dial9_trace_format::TraceEvent for PollStart {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "task_id")
+                    .find(|(f, _)| f.name() == "task_id")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,

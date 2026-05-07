@@ -188,7 +188,7 @@ mod tests {
                 type_id, values, ..
             } = frame
                 && let Some(entry) = dec.registry().get(*type_id)
-                && entry.name == SymbolTableEntry::event_name()
+                && entry.name() == SymbolTableEntry::event_name()
                 && let Some(FieldValue::Varint(addr)) = values.first()
             {
                 out.push(*addr);
@@ -289,7 +289,7 @@ mod tests {
             .iter()
             .any(|f| matches!(f, DecodedFrame::StringPool(_)));
         let has_symbol_schema = frames.iter().any(
-            |f| matches!(f, DecodedFrame::Schema(s) if s.name == SymbolTableEntry::event_name()),
+            |f| matches!(f, DecodedFrame::Schema(s) if s.name() == SymbolTableEntry::event_name()),
         );
         assert!(has_string_pool, "expected StringPool frame in output");
         assert!(
@@ -338,7 +338,7 @@ mod tests {
         let frames = dec.decode_all();
 
         let has_symbol_schema = frames.iter().any(
-            |f| matches!(f, DecodedFrame::Schema(s) if s.name == SymbolTableEntry::event_name()),
+            |f| matches!(f, DecodedFrame::Schema(s) if s.name() == SymbolTableEntry::event_name()),
         );
         assert!(
             has_symbol_schema,

@@ -80,7 +80,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
         decode_tokens.push(quote! {
             #field_name: {
                 let val = field_defs.iter().zip(fields.iter())
-                    .find(|(f, _)| f.name == #field_name_str)
+                    .find(|(f, _)| f.name() == #field_name_str)
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <#ty as ::dial9_trace_format::TraceField>::decode_ref(v)?,

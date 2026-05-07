@@ -47,7 +47,7 @@ impl ::dial9_trace_format::TraceEvent for DocEvent {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "worker_id")
+                    .find(|(f, _)| f.name() == "worker_id")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -58,7 +58,7 @@ impl ::dial9_trace_format::TraceEvent for DocEvent {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "local_queue")
+                    .find(|(f, _)| f.name() == "local_queue")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u8 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
