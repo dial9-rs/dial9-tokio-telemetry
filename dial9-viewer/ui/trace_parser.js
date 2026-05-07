@@ -168,6 +168,7 @@
       },
       then(resolve, reject) { return promise.then(resolve, reject); },
       catch(reject) { return promise.catch(reject); },
+      finally(cb) { return promise.finally(cb); },
     };
     return iterable;
   }

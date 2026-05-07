@@ -25,8 +25,8 @@ async function redFlagScan(tracePath) {
       trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent)
         .map(e => e.workerId)
     )].sort((a, b) => a - b);
-    const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
-    const minTs = trace.events.reduce((m, e) => Math.min(m, e.timestamp), Infinity);
+    const maxTs = trace.maxTs;
+    const minTs = trace.minTs;
     const durationMs = (maxTs - minTs) / 1e6;
     const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
     attachCpuSamples(trace.cpuSamples, spans.workerSpans);

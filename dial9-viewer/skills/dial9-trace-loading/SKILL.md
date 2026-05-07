@@ -80,13 +80,11 @@ const EVENT_TYPES = {
 ## Parse options
 
 ```javascript
-for await (const trace of parseTrace('/path/to/trace.bin', {
+const trace = await parseTrace('/path/to/trace.bin', {
   maxEvents: 100000,        // Cap event count (metadata/symbols always parsed)
   startTime: 1000000000,    // Filter events to time range (absolute ns)
   endTime:   2000000000,
-})) {
-  // ...
-}
+});
 ```
 
 ## Converting timestamps

@@ -113,8 +113,8 @@ async function main() {
         trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent)
           .map(e => e.workerId)
       )].sort((a, b) => a - b);
-      maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
-      minTs = trace.events.reduce((m, e) => Math.min(m, e.timestamp), Infinity);
+      maxTs = trace.maxTs;
+      minTs = trace.minTs;
       spans = buildWorkerSpans(trace.events, workerIds, maxTs);
       attachCpuSamples(trace.cpuSamples, spans.workerSpans);
       taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);

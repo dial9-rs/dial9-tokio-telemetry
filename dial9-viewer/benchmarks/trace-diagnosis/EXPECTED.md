@@ -42,11 +42,14 @@
 ## Tool usage analysis (for JSON output modes)
 
 ```bash
+# All commands run by the agent (also saved to $LOG.commands)
+jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use" and .name == "Bash") | .input.command' "$LOG.raw"
+
 # Skills loaded
 jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use" and .name == "Skill") | .input.skill' "$LOG.raw"
 
-# Commands run
-jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use" and .name == "Bash") | .input.command' "$LOG.raw"
+# All tool calls summary
+jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use") | .name' "$LOG.raw" | sort | uniq -c | sort -rn
 
 # Files read
 jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use" and .name == "Read") | .input.file_path // .input.path // empty' "$LOG.raw"

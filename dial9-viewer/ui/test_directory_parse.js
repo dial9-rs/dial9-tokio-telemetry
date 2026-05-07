@@ -256,7 +256,7 @@ async function main() {
             .map(e => e.workerId)
         )].sort((a, b) => a - b);
         assert(workerIds.length > 0, "pipeline: has workers");
-        const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
+        const maxTs = trace.maxTs;
         const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
         assert(spans.workerSpans[workerIds[0]].polls.length > 0, "pipeline: has polls");
         const { pollsWithCpuSamples } = attachCpuSamples(trace.cpuSamples, spans.workerSpans);

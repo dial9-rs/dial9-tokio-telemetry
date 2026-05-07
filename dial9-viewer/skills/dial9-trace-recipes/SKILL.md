@@ -32,6 +32,7 @@ for await (const trace of parseTrace('/path/to/traces/')) {
       .map(e => e.workerId)
   )].sort((a, b) => a - b);
   const maxTs = trace.maxTs;
+  const minTs = trace.minTs;
   const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
   attachCpuSamples(trace.cpuSamples, spans.workerSpans);
   const schedDelays = computeSchedulingDelays(spans.workerSpans, workerIds, spans.wakesByTask);
