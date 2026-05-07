@@ -1361,6 +1361,10 @@
                 unmatchedSpans = [];
                 spanMaxDepth = 0;
                 _spanDurCache = null;
+                focusedSpanId = null;
+                selectedSpanId = null;
+                selectedSpanIds = new Set();
+                selectedTaskId = null;
                 if (trace.customEvents && trace.customEvents.length > 0) {
                     const spanResult2 = buildSpanData(trace.customEvents);
                     allSpans = spanResult2.allSpans;
@@ -4103,8 +4107,9 @@
              */
             function eventToTimelineNs(clientX) {
                 const rect = lanesContainer.getBoundingClientRect();
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
                 const mouseX = clientX - rect.left - LABEL_W;
-                const drawW = rect.width - LABEL_W;
+                const drawW = rect.width - LABEL_W - scrollbarW;
                 if (mouseX < 0 || mouseX > drawW) return null;
                 return viewStart + (mouseX / drawW) * (viewEnd - viewStart);
             }
