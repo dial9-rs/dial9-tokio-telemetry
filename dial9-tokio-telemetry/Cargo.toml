@@ -41,7 +41,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
 bytes = "1"
-backtrace = { version = "0.3", optional = true }
 dial9-perf-self-profile = { workspace = true, optional = true }
 dial9-trace-format = { workspace = true, features = ["serde"] }
 tracing = "0.1.44"
@@ -78,7 +77,7 @@ _shuttle = [
 ## (aarch64/x86/x86_64): tokio's upstream `taskdump` feature refuses to
 ## compile on other targets. Enabling this feature on an unsupported target
 ## is a hard compile error from tokio.
-taskdump = ["tokio/taskdump", "dep:backtrace"]
+taskdump = ["tokio/taskdump"]
 tracing-layer = ["dep:tracing-subscriber"]
 worker-s3 = [
     "dep:aws-sdk-s3-transfer-manager",

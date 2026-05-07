@@ -205,39 +205,15 @@ impl FrameBuf {
     }
 }
 
-/// Walk the stack via [`backtrace::trace`], skipping frames at or below
-/// `leaf_addr` (tokio's `trace_leaf` function — any frames at or below it
-/// are internal plumbing) and stopping at `root_addr` (tokio's `Root::poll`
-/// boundary). `root_addr` is always `None` today because we don't wrap
-/// spawned tasks in `Root`, but we keep the check defensively in case that
-/// changes — unwrapping the whole stack otherwise walks through scheduler
-/// internals that the caller has no use for.
-///
-/// Held behind the `backtrace` crate's process-wide mutex. This will be optimized in
-/// https://github.com/dial9-rs/dial9-tokio-telemetry/issues/357. This is not a
-/// complete blocker for the MvP because no code is utilizing the symbolizing from
-/// `backtrace` so the mutex is not actually held for long periods of time. Nevertheless,
-/// this will be a fast follow.
+/// Walk the stack, collecting instruction pointers between `leaf_addr` and
+/// `root_addr`. Calls `_Unwind_Backtrace` directly via [`crate::unwind`],
+/// bypassing the `backtrace` crate's process-wide mutex.
 fn capture_frames(
     ips: &mut Vec<u64>,
     root_addr: Option<*const core::ffi::c_void>,
     leaf_addr: *const core::ffi::c_void,
 ) {
-    let mut above_leaf = false;
-    backtrace::trace(|frame| {
-        let sym = frame.symbol_address();
-        let below_root = root_addr.is_none_or(|root| !std::ptr::eq(sym, root));
-
-        if above_leaf && below_root {
-            ips.push(frame.ip() as u64);
-        }
-
-        if std::ptr::eq(sym, leaf_addr) {
-            above_leaf = true;
-        }
-
-        below_root
-    });
+    crate::unwind::collect_frames(ips, root_addr, leaf_addr);
 }
 
 /// Borrowed-callchain view of a task-dump event that implements [`Encodable`]
