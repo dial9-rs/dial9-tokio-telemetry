@@ -133,10 +133,8 @@ impl<F> TaskDumped<F> {
 
 impl<F: Future> Future for TaskDumped<F> {
     type Output = F::Output;
-
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let mut this = self.project();
-
         // Fast path: forward without any capture work when either task dumps
         // are disabled, or telemetry as a whole is paused.
         if !this.shared.task_dumps_enabled.load(Ordering::Relaxed) || !this.shared.is_enabled() {
@@ -146,9 +144,11 @@ impl<F: Future> Future for TaskDumped<F> {
             }
             return this.inner.poll(cx);
         }
-
-        // Poisson sampling: subtract the idle duration from the counter.
-        // If it goes to zero or below, we should emit.
+        // Poisson sampling over idle time: subtract the idle duration from
+        // the counter. If it goes to zero or below, emit and redraw a fresh
+        // interval. Short idles have a small but nonzero chance of being
+        // sampled (~ idle / mean); long idles are sampled with probability
+        // approaching 1. At most one emission per poll.
         let poll_start = crate::telemetry::recorder::poll_start_ts_or_now();
         let should_emit = match *this.pending_capture_ts {
             Some(ts) if this.frames.has_data() => {
@@ -158,22 +158,15 @@ impl<F: Future> Future for TaskDumped<F> {
             }
             _ => false,
         };
-
         let result = this.inner.as_mut().poll(cx);
-
         if should_emit {
-            this.frames.emit(
-                this.shared,
-                *this.task_id,
-                this.pending_capture_ts.unwrap().get(),
-            );
-            // Redraw: loop in case the draw is smaller than the deficit
-            // (rare, but possible for very large idles / small means).
-            while *this.next_sample_ns <= 0 {
-                *this.next_sample_ns += this.rng.draw_exponential_ns(*this.sample_mean_ns);
-            }
+            let ts = this
+                .pending_capture_ts
+                .expect("checked in match above")
+                .get();
+            this.frames.emit(this.shared, *this.task_id, ts);
+            *this.next_sample_ns = this.rng.draw_exponential_ns(*this.sample_mean_ns);
         }
-
         match &result {
             Poll::Ready(_) => {
                 this.frames.clear();
@@ -181,10 +174,10 @@ impl<F: Future> Future for TaskDumped<F> {
             }
             Poll::Pending => {
                 this.frames.capture(this.inner.as_mut());
-                *this.pending_capture_ts = NonZeroU64::new(poll_start);
+                let poll_end = crate::telemetry::recorder::poll_start_ts_or_now();
+                *this.pending_capture_ts = NonZeroU64::new(poll_end);
             }
         }
-
         result
     }
 }
