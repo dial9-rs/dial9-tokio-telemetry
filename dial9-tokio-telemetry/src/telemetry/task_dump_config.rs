@@ -1,7 +1,7 @@
 //! Configuration for task dump capture.
 //!
 //! Task dumps capture async backtraces at yield points for tasks that have
-//! been idle, using geometric (Poisson) sampling keyed on idle duration.
+//! been idle, using Poisson sampling keyed on idle duration.
 //! Use [`TaskDumpConfig`] with
 //! [`TracedRuntimeBuilder::with_task_dumps`](crate::telemetry::TracedRuntimeBuilder::with_task_dumps)
 //! or [`TelemetryCoreBuilder::task_dump_config`](crate::telemetry::TelemetryCoreBuilder::task_dump_config).
@@ -12,13 +12,13 @@
 
 use std::time::Duration;
 
-/// Default mean idle duration for geometric sampling.
+/// Default mean idle duration for Poisson sampling.
 const DEFAULT_IDLE_THRESHOLD: Duration = Duration::from_millis(10);
 
 /// Configuration for task dump capture.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct TaskDumpConfig {
-    /// Mean idle duration for geometric (Poisson) sampling. On average, one
+    /// Mean idle duration for Poisson sampling. On average, one
     /// task dump is emitted per this amount of cumulative idle time. Shorter
     /// idles have a lower (but non-zero) probability of triggering a dump;
     /// longer idles are very likely to trigger. Defaults to 10ms.
@@ -39,7 +39,7 @@ impl Default for TaskDumpConfig {
 }
 
 impl TaskDumpConfig {
-    /// Mean idle duration for geometric sampling.
+    /// Mean idle duration for Poisson sampling.
     pub fn idle_threshold(&self) -> Duration {
         self.idle_threshold
     }

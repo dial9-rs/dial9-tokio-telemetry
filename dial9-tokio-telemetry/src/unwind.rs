@@ -68,6 +68,6 @@ pub(crate) fn collect_frames(
         leaf_addr,
     };
     unsafe {
-        _Unwind_Backtrace(trace_fn, core::ptr::addr_of_mut!(data).cast());
+        _Unwind_Backtrace(trace_fn, (&raw mut data).cast());
     }
 }

@@ -1,5 +1,5 @@
 //! `TaskDumped<F>` wraps a future and captures async backtraces at yield
-//! points using geometric (Poisson) sampling keyed on idle duration.
+//! points using Poisson sampling keyed on idle duration.
 //!
 //! This wrapper is intentionally separate from [`crate::traced::Traced`]: the
 //! wake-event capture in `Traced` runs on every instrumented spawn regardless
@@ -83,7 +83,7 @@ impl SplitMix64 {
 
 pin_project! {
     /// Future wrapper that captures async backtraces at yield points using
-    /// geometric (Poisson) sampling keyed on idle duration.
+    /// Poisson sampling keyed on idle duration.
     pub(crate) struct TaskDumped<F> {
         #[pin]
         inner: F,
@@ -93,7 +93,7 @@ pin_project! {
         // Monotonic nanoseconds when the frames in `frames` were captured.
         // Only meaningful when `frames.has_data()`.
         pending_capture_ts: Option<NonZeroU64>,
-        // Geometric sampling state: remaining nanoseconds of idle time before
+        // Sampling state: remaining nanoseconds of idle time before
         // the next sample triggers. Signed so subtracting a large idle from a
         // small remaining value goes negative rather than wrapping.
         next_sample_ns: i64,
@@ -107,15 +107,14 @@ pin_project! {
 impl<F> TaskDumped<F> {
     pub(crate) fn new(inner: F, shared: Arc<SharedState>, task_id: TaskId) -> Self {
         let sample_mean_ns = shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed);
-        let base_seed = shared.task_dump_rng_seed.load(Ordering::Relaxed);
-        // When a fixed seed is configured (non-zero), use it directly for
-        // deterministic tests. Otherwise use task_id + timestamp for
-        // production uniqueness across tasks.
-        let seed = if base_seed != 0 {
-            base_seed
-        } else {
-            (task_id.to_u64()).wrapping_mul(0x517cc1b727220a95)
-                ^ crate::telemetry::events::clock_monotonic_ns()
+        // When a fixed seed is configured, use it directly for deterministic
+        // tests. Otherwise use task_id + timestamp for production uniqueness.
+        let seed = match shared.task_dump_rng_seed {
+            Some(s) => s,
+            None => {
+                (task_id.to_u64()).wrapping_mul(0x517cc1b727220a95)
+                    ^ crate::telemetry::events::clock_monotonic_ns()
+            }
         };
         let mut rng = SplitMix64::new(seed);
         let next_sample_ns = rng.draw_exponential_ns(sample_mean_ns);
@@ -148,7 +147,7 @@ impl<F: Future> Future for TaskDumped<F> {
             return this.inner.poll(cx);
         }
 
-        // Geometric sampling: subtract the idle duration from the counter.
+        // Poisson sampling: subtract the idle duration from the counter.
         // If it goes to zero or below, we should emit.
         let poll_start = crate::telemetry::recorder::poll_start_ts_or_now();
         let should_emit = match *this.pending_capture_ts {
@@ -287,5 +286,45 @@ impl Encodable for TaskDumpData<'_> {
             task_id: self.task_id,
             callchain: interned_callchain,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SplitMix64;
+
+    #[test]
+    fn splitmix64_deterministic() {
+        let mut rng = SplitMix64::new(42);
+        let a = rng.next_u64();
+        let b = rng.next_u64();
+
+        let mut rng2 = SplitMix64::new(42);
+        assert_eq!(a, rng2.next_u64());
+        assert_eq!(b, rng2.next_u64());
+    }
+
+    #[test]
+    fn draw_exponential_ns_mean_is_reasonable() {
+        let mut rng = SplitMix64::new(123);
+        let mean_ns: u64 = 10_000_000; // 10ms
+        let n = 10_000;
+        let sum: f64 = (0..n)
+            .map(|_| rng.draw_exponential_ns(mean_ns) as f64)
+            .sum();
+        let observed_mean = sum / n as f64;
+        // Within 10% of the configured mean.
+        assert!(
+            (observed_mean - mean_ns as f64).abs() < mean_ns as f64 * 0.1,
+            "observed mean {observed_mean} too far from expected {mean_ns}"
+        );
+    }
+
+    #[test]
+    fn draw_exponential_ns_always_positive() {
+        let mut rng = SplitMix64::new(0);
+        for _ in 0..10_000 {
+            assert!(rng.draw_exponential_ns(1_000_000) >= 1);
+        }
     }
 }
