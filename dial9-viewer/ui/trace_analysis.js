@@ -521,9 +521,15 @@
    *   spanMeta: Map<number, {spanName: string, fields: Object, parentSpanId: number|null}>,
    *   maxDepth: number,
    *   unmatchedSpans: Array<{start: number, spanId: number, workerId: number, spanName: string, fields: Object, parentSpanId: number|null}>,
+   *   childrenByParent: Map<number|null, number[]>,
    * }}
    */
   function buildSpanData(customEvents) {
+    // Events are only ordered within a single worker's stream. Cross-worker
+    // interleaving can produce globally out-of-order timestamps, so we must
+    // sort before processing to ensure close events are seen after all
+    // enter/exit pairs that precede them in wall-clock time.
+    customEvents = [...customEvents].sort((a, b) => a.timestamp - b.timestamp);
     // Key by span_id only — a span may be polled on different workers.
     const openEnters = new Map(); // spanId → {timestamp, workerId}
     // Live span records keyed by spanId. Moved to closedSpans on SpanClose.
@@ -546,8 +552,8 @@
       if (ev.name.startsWith("SpanEnter:") || ev.name === "SpanEnterEvent") {
         const v = ev.fields;
         const workerId = Number(v.worker_id);
-        const spanId = Number(v.span_id);
-        const parentSpanId = v.parent_span_id != null ? Number(v.parent_span_id) : null;
+        const spanId = String(v.span_id);
+        const parentSpanId = v.parent_span_id != null ? String(v.parent_span_id) : null;
         const spanName = v.span_name || "unknown";
         const fields = {};
         for (const [k, val] of Object.entries(v)) {
@@ -563,7 +569,7 @@
       } else if (ev.name.startsWith("SpanExit:") || ev.name === "SpanExitEvent") {
         const v = ev.fields;
         const workerId = Number(v.worker_id);
-        const spanId = Number(v.span_id);
+        const spanId = String(v.span_id);
 
         const enter = openEnters.get(spanId);
         if (enter) {
@@ -581,7 +587,7 @@
           rec.segments.push({ start: enter.timestamp, end: ev.timestamp, workerId });
         }
       } else if (ev.name === "SpanCloseEvent") {
-        const spanId = Number(ev.fields.span_id);
+        const spanId = String(ev.fields.span_id);
         openEnters.delete(spanId);
         finalizeSpan(spanId);
       }
@@ -645,7 +651,131 @@
       if (s.depth > maxDepth) maxDepth = s.depth;
     }
 
-    return { allSpans, spanMeta, maxDepth, unmatchedSpans };
+    // Build parent → children index.  Roots (parent == null) are stored under the null key.
+    // Every closed span contributes exactly one entry to its parent's bucket; childless
+    // spans have no bucket at all (callers must treat a missing key as empty).
+    const childrenByParent = new Map();
+    const addChild = (parentKey, childId) => {
+      let arr = childrenByParent.get(parentKey);
+      if (!arr) { arr = []; childrenByParent.set(parentKey, arr); }
+      arr.push(childId);
+    };
+    for (const s of allSpans) {
+      addChild(s.parentSpanId ?? null, s.spanId);
+    }
+
+    return { allSpans, spanMeta, maxDepth, unmatchedSpans, childrenByParent };
+  }
+
+  /**
+   * Collect a set of span IDs containing the given seeds plus all their descendants.
+   * Cycle-safe.
+   * @param {number[]} seedIds
+   * @param {Map<number|null, number[]>} childrenByParent
+   * @returns {Set<number>}
+   */
+  function collectDescendants(seedIds, childrenByParent) {
+    const result = new Set();
+    const stack = [...seedIds];
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (result.has(id)) continue;
+      result.add(id);
+      const children = childrenByParent.get(id);
+      if (children) {
+        for (const c of children) stack.push(c);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Select which spans to render based on focus state.
+   * - No focus: return only root-like spans (parentSpanId is null or parent not in allSpans).
+   * - Focused: return the focused span + all its descendants.
+   * @param {{ allSpans: Array, focusedSpanId: number|null, childrenByParent: Map }} opts
+   * @returns {Array}
+   */
+  function selectSpanRenderSet({ allSpans, focusedSpanId, childrenByParent }) {
+    if (focusedSpanId != null) {
+      const ids = collectDescendants([focusedSpanId], childrenByParent);
+      return allSpans.filter(s => ids.has(s.spanId));
+    }
+    // Root view: spans whose parent is null or whose parent is not in the dataset
+    const allIds = new Set(allSpans.map(s => s.spanId));
+    return allSpans.filter(s => s.parentSpanId == null || !allIds.has(s.parentSpanId));
+  }
+
+  /**
+   * Compute span panel layout with duration-based y and pixel-grid clustering.
+   * @param {{ spans: Array, viewStart: number, viewEnd: number, drawW: number, panelH: number, clusterXPx: number, barH: number }} opts
+   * @returns {{ buckets: Array<{spans: Array, representative: Object, x1: number, x2: number, y: number, h: number}> }}
+   */
+  function computeSpanLayout({ spans, viewStart, viewEnd, drawW, panelH, clusterXPx, barH }) {
+    if (spans.length === 0) return { buckets: [], minDur: 0, maxDur: 0 };
+
+    const PAD_TOP = 2;
+    const PAD_BOT = 2;
+    const usableH = panelH - PAD_TOP - PAD_BOT - barH;
+
+    // Compute duration for each span and find min/max log-duration
+    const durations = spans.map(s => s.end - s.start);
+    let minLog = Infinity, maxLog = -Infinity;
+    const logs = durations.map(d => {
+      const l = Math.log(Math.max(d, 1));
+      if (l < minLog) minLog = l;
+      if (l > maxLog) maxLog = l;
+      return l;
+    });
+    const logRange = maxLog - minLog || 1;
+
+    const nsToX = (ns) => ((ns - viewStart) / (viewEnd - viewStart)) * drawW;
+
+    // Assign each span a y based on log-duration (longer → smaller y → higher)
+    // and an x midpoint, then bucket by pixel grid.
+    const grid = new Map(); // "cellX,cellY" → {spans[], bestIdx}
+    for (let i = 0; i < spans.length; i++) {
+      const s = spans[i];
+      const normDur = (logs[i] - minLog) / logRange; // 0 = shortest, 1 = longest
+      const y = PAD_TOP + (1 - normDur) * usableH;
+      const xMid = nsToX((s.start + s.end) / 2);
+
+      const cellX = Math.floor(xMid / clusterXPx);
+      const cellY = Math.floor(y / (barH + 1));
+      const key = cellX + "," + cellY;
+
+      let cell = grid.get(key);
+      if (!cell) {
+        cell = { spans: [], bestIdx: i, y, xMin: xMid, xMax: xMid };
+        grid.set(key, cell);
+      }
+      cell.spans.push(s);
+      // Track representative as the longest span
+      if (durations[i] > durations[cell.bestIdx]) cell.bestIdx = i;
+      // Track x extent for drawing
+      const x1 = nsToX(s.start);
+      const x2 = nsToX(s.end);
+      if (x1 < cell.xMin) cell.xMin = x1;
+      if (x2 > cell.xMax) cell.xMax = x2;
+    }
+
+    // Convert grid cells to buckets
+    const buckets = [];
+    for (const cell of grid.values()) {
+      const rep = spans[cell.bestIdx] || cell.spans[0];
+      const repX1 = Math.max(0, nsToX(rep.start));
+      const repX2 = Math.min(drawW, nsToX(rep.end));
+      buckets.push({
+        spans: cell.spans,
+        representative: rep,
+        x1: repX1,
+        x2: repX2,
+        y: cell.y,
+        h: barH,
+      });
+    }
+
+    return { buckets, minDur: Math.exp(minLog), maxDur: Math.exp(maxLog) };
   }
 
   // Export for both browser and Node.js
@@ -659,6 +789,9 @@
     flattenFlamegraph,
     buildFgData,
     buildSpanData,
+    collectDescendants,
+    selectSpanRenderSet,
+    computeSpanLayout,
   };
 
   if (typeof module !== "undefined" && module.exports) {

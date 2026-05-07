@@ -14,6 +14,9 @@ const {
   flattenFlamegraph,
   buildFgData,
   buildSpanData,
+  collectDescendants,
+  selectSpanRenderSet,
+  computeSpanLayout,
 } = require("./trace_analysis.js");
 
 async function main() {
@@ -381,7 +384,7 @@ async function main() {
     if (redis.start !== 1100 || redis.end !== 1200) fail("redis_get timing wrong");
     if (redis.segments.length !== 1) fail(`Expected 1 segment, got ${redis.segments.length}`);
     if (redis.segments[0].workerId !== 0) fail("segment workerId wrong");
-    if (!spanMeta.has(1) || !spanMeta.has(2)) fail("spanMeta missing entries");
+    if (!spanMeta.has("1") || !spanMeta.has("2")) fail("spanMeta missing entries");
     // Verify sorted by start time
     if (allSpans[0].start > allSpans[1].start) fail("Spans not sorted by start time");
     pass(`${allSpans.length} spans paired correctly`);
@@ -396,7 +399,7 @@ async function main() {
     ];
     const { allSpans } = buildSpanData(customEvents);
     const child = allSpans.find(s => s.spanName === "child");
-    if (child.parentSpanId !== 10) fail(`Expected parentSpanId=10, got ${child.parentSpanId}`);
+    if (child.parentSpanId !== "10") fail(`Expected parentSpanId="10", got ${child.parentSpanId}`);
     const root = allSpans.find(s => s.spanName === "root");
     if (root.parentSpanId !== null) fail(`Expected root parentSpanId=null, got ${root.parentSpanId}`);
     pass("Parent span IDs preserved correctly");
@@ -495,8 +498,209 @@ async function main() {
     if (allSpans.length !== 1) fail(`Expected 1 matched span, got ${allSpans.length}`);
     if (!unmatchedSpans || unmatchedSpans.length !== 1) fail(`Expected 1 unmatched span, got ${unmatchedSpans?.length}`);
     if (unmatchedSpans[0].spanName !== "b") fail(`Expected unmatched span 'b', got '${unmatchedSpans[0].spanName}'`);
-    if (unmatchedSpans[0].spanId !== 2) fail(`Expected unmatched spanId 2, got ${unmatchedSpans[0].spanId}`);
+    if (unmatchedSpans[0].spanId !== "2") fail(`Expected unmatched spanId "2", got ${unmatchedSpans[0].spanId}`);
     pass("Unmatched spans (enter without exit) detected correctly");
+  }
+
+  function testBuildSpanDataChildrenIndex() {
+    // Root r1 has children c1, c2. c1 has grandchild g1. r2 is childless.
+    const customEvents = [
+      { name: "SpanEnterEvent", timestamp: 100, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "r1" } },
+      { name: "SpanEnterEvent", timestamp: 110, fields: { worker_id: 0, span_id: 2, parent_span_id: 1, span_name: "c1" } },
+      { name: "SpanEnterEvent", timestamp: 120, fields: { worker_id: 0, span_id: 3, parent_span_id: 2, span_name: "g1" } },
+      { name: "SpanExitEvent",  timestamp: 130, fields: { worker_id: 0, span_id: 3, span_name: "g1" } },
+      { name: "SpanExitEvent",  timestamp: 140, fields: { worker_id: 0, span_id: 2, span_name: "c1" } },
+      { name: "SpanEnterEvent", timestamp: 150, fields: { worker_id: 0, span_id: 4, parent_span_id: 1, span_name: "c2" } },
+      { name: "SpanExitEvent",  timestamp: 160, fields: { worker_id: 0, span_id: 4, span_name: "c2" } },
+      { name: "SpanExitEvent",  timestamp: 170, fields: { worker_id: 0, span_id: 1, span_name: "r1" } },
+      { name: "SpanEnterEvent", timestamp: 200, fields: { worker_id: 0, span_id: 5, parent_span_id: null, span_name: "r2" } },
+      { name: "SpanExitEvent",  timestamp: 210, fields: { worker_id: 0, span_id: 5, span_name: "r2" } },
+    ];
+    const { childrenByParent } = buildSpanData(customEvents);
+    if (!childrenByParent) fail("childrenByParent not exposed from buildSpanData");
+    const roots = childrenByParent.get(null) || [];
+    if (!roots.includes("1") || !roots.includes("5")) fail(`Roots should include "1" and "5", got ${[...roots]}`);
+    const c1Children = childrenByParent.get("1") || [];
+    if (!c1Children.includes("2") || !c1Children.includes("4")) fail(`r1 should have children "2" and "4", got ${[...c1Children]}`);
+    const g1Children = childrenByParent.get("2") || [];
+    if (!g1Children.includes("3")) fail(`c1 should have child "3", got ${[...g1Children]}`);
+    // Childless spans should have no entry (or empty array)
+    const r2Children = childrenByParent.get("5") || [];
+    if (r2Children.length !== 0) fail(`r2 should be childless, got ${[...r2Children]}`);
+    pass("childrenByParent index built correctly");
+  }
+
+  function testCollectDescendants() {
+    // Same tree: r1 → {c1 → g1, c2}, r2 (no children)
+    const childrenByParent = new Map([
+      [null, ["1", "5"]],
+      ["1", ["2", "4"]],
+      ["2", ["3"]],
+    ]);
+    const d1 = collectDescendants(["1"], childrenByParent);
+    // Should include 1, 2, 3, 4 (but not 5)
+    if (!d1.has("1") || !d1.has("2") || !d1.has("3") || !d1.has("4")) {
+      fail(`Expected {"1","2","3","4"} in descendants of "1", got ${[...d1]}`);
+    }
+    if (d1.has("5")) fail("r2 should not be in descendants of r1");
+    if (d1.size !== 4) fail(`Expected size 4, got ${d1.size}`);
+
+    const d5 = collectDescendants(["5"], childrenByParent);
+    if (d5.size !== 1 || !d5.has("5")) fail(`Expected only {"5"}, got ${[...d5]}`);
+
+    // Guard against cycles (children references ancestor)
+    const cyclic = new Map([
+      ["1", ["2"]],
+      ["2", ["1"]], // cycle
+    ]);
+    const dc = collectDescendants(["1"], cyclic);
+    if (!dc.has("1") || !dc.has("2")) fail("Cycle should still produce set");
+    pass("collectDescendants returns id plus all descendants (cycle-safe)");
+  }
+
+  function testSelectSpanRenderSetRoots() {
+    // When no focus, return only spans whose parent is null OR whose parent is absent
+    const spans = [
+      { spanId: "1", parentSpanId: null, spanName: "r1" },
+      { spanId: "2", parentSpanId: "1",    spanName: "c1" },
+      { spanId: "3", parentSpanId: "99",   spanName: "orphan" }, // parent not in set
+      { spanId: "5", parentSpanId: null, spanName: "r2" },
+    ];
+    const childrenByParent = new Map([
+      [null, ["1", "5"]],
+      ["1", ["2"]],
+    ]);
+    const result = selectSpanRenderSet({
+      allSpans: spans,
+      focusedSpanId: null,
+      childrenByParent,
+    });
+    const ids = new Set(result.map(s => s.spanId));
+    if (!ids.has("1") || !ids.has("5") || !ids.has("3")) fail(`Expected {"1","3","5"}, got ${[...ids]}`);
+    if (ids.has("2")) fail("Child span 2 should not be rendered in root view");
+    pass("selectSpanRenderSet returns only root-like spans when focus is null");
+  }
+
+  function testSelectSpanRenderSetFocused() {
+    const spans = [
+      { spanId: "1", parentSpanId: null, spanName: "r1" },
+      { spanId: "2", parentSpanId: "1",    spanName: "c1" },
+      { spanId: "3", parentSpanId: "2",    spanName: "g1" },
+      { spanId: "4", parentSpanId: "1",    spanName: "c2" },
+      { spanId: "5", parentSpanId: null, spanName: "r2" },
+    ];
+    const childrenByParent = new Map([
+      [null, ["1", "5"]],
+      ["1", ["2", "4"]],
+      ["2", ["3"]],
+    ]);
+    const result = selectSpanRenderSet({
+      allSpans: spans,
+      focusedSpanId: "1",
+      childrenByParent,
+    });
+    const ids = new Set(result.map(s => s.spanId));
+    // Focus on 1: should include 1 itself and all descendants (2, 3, 4). Not 5.
+    if (!ids.has("1") || !ids.has("2") || !ids.has("3") || !ids.has("4")) {
+      fail(`Expected focused set to include {"1","2","3","4"}, got ${[...ids]}`);
+    }
+    if (ids.has("5")) fail("Sibling root 5 should not be in focused set");
+    pass("selectSpanRenderSet returns focused span + descendants");
+  }
+
+  function testComputeSpanLayoutDurationY() {
+    // Three spans with very different durations. Panel: 100 px wide, 60 px tall.
+    // Longest → smallest y (near top). Shortest → largest y (near bottom).
+    const spans = [
+      { spanId: 1, start: 0,   end: 100,   spanName: "tiny",   segments: [], activeNs: 100 },
+      { spanId: 2, start: 10,  end: 1010,  spanName: "medium", segments: [], activeNs: 1000 },
+      { spanId: 3, start: 20,  end: 10020, spanName: "huge",   segments: [], activeNs: 10000 },
+    ];
+    const layout = computeSpanLayout({
+      spans,
+      viewStart: 0,
+      viewEnd: 10020,
+      drawW: 1000,
+      panelH: 60,
+      clusterXPx: 2,
+      barH: 4,
+    });
+    if (!layout || !layout.buckets) fail("computeSpanLayout must return {buckets}");
+    // Should produce one bucket per span (no clustering at this wide view).
+    if (layout.buckets.length !== 3) fail(`Expected 3 buckets, got ${layout.buckets.length}`);
+    // Find buckets by representative spanId.
+    const byId = new Map();
+    for (const b of layout.buckets) byId.set(b.representative.spanId, b);
+    const yTiny = byId.get(1).y;
+    const yMed = byId.get(2).y;
+    const yHuge = byId.get(3).y;
+    // Larger duration → smaller y (higher on screen)
+    if (!(yHuge < yMed && yMed < yTiny)) {
+      fail(`Expected y(huge) < y(medium) < y(tiny), got ${yHuge} < ${yMed} < ${yTiny}`);
+    }
+    // All y within panel
+    for (const b of layout.buckets) {
+      if (b.y < 0 || b.y + b.h > 60 + 1) fail(`Bucket y=${b.y}, h=${b.h} outside panel 60`);
+    }
+    pass("computeSpanLayout places longer spans higher (smaller y)");
+  }
+
+  function testComputeSpanLayoutClusters() {
+    // Many spans with identical duration piled at the same x — should cluster.
+    const spans = [];
+    for (let i = 0; i < 10; i++) {
+      spans.push({ spanId: i + 1, start: 100, end: 200, spanName: "same", segments: [], activeNs: 100 });
+    }
+    // Add one outlier with different duration (far away on y axis)
+    spans.push({ spanId: 100, start: 100, end: 10000, spanName: "outlier", segments: [], activeNs: 9900 });
+    const layout = computeSpanLayout({
+      spans,
+      viewStart: 0,
+      viewEnd: 10000,
+      drawW: 500,
+      panelH: 60,
+      clusterXPx: 4,
+      barH: 4,
+    });
+    // Expect the 10 identical spans to cluster into 1 bucket, plus the outlier in its own bucket.
+    if (layout.buckets.length !== 2) {
+      fail(`Expected 2 buckets (cluster + outlier), got ${layout.buckets.length}`);
+    }
+    const cluster = layout.buckets.find(b => b.spans.length > 1);
+    if (!cluster) fail("Expected a cluster bucket");
+    if (cluster.spans.length !== 10) fail(`Expected cluster size 10, got ${cluster.spans.length}`);
+    // representative should be one of the clustered spans
+    if (!cluster.spans.includes(cluster.representative)) fail("Representative should be a member of cluster.spans");
+    pass("computeSpanLayout clusters overlapping spans into single bucket");
+  }
+
+  function testComputeSpanLayoutRepresentativeIsLongest() {
+    // Several spans at the same position. Representative should be the longest.
+    // All have the same start/end (same duration → same y), so they cluster.
+    // We differentiate by activeNs to verify representative selection uses total duration.
+    const spans = [
+      { spanId: 1, start: 100, end: 200, spanName: "a", segments: [], activeNs: 50 },
+      { spanId: 2, start: 100, end: 200, spanName: "b", segments: [], activeNs: 100 },
+      { spanId: 3, start: 100, end: 200, spanName: "c", segments: [], activeNs: 80 },
+    ];
+    const layout = computeSpanLayout({
+      spans,
+      viewStart: 0,
+      viewEnd: 500,
+      drawW: 10,
+      panelH: 60,
+      clusterXPx: 100,
+      barH: 4,
+    });
+    // Same duration → same y → same cell → one cluster
+    const clustered = layout.buckets.find(b => b.spans.length === 3);
+    if (!clustered) fail(`Expected single 3-span cluster, got ${JSON.stringify(layout.buckets.map(b => b.spans.length))}`);
+    // All have same duration, so any is valid as representative (first encountered wins tie)
+    // The key property: representative is a member of the cluster
+    if (!clustered.spans.includes(clustered.representative)) {
+      fail("Representative should be a member of cluster.spans");
+    }
+    pass("computeSpanLayout picks representative from cluster members");
   }
 
   function testBuildSpanDataMultiplePolls() {
@@ -596,7 +800,16 @@ async function main() {
   testBuildSpanDataRecycledId();
   testBuildSpanDataPerCallsiteSchema();
   testBuildSpanDataUnmatched();
+  testBuildSpanDataChildrenIndex();
   testBuildSpanDataMultiplePolls();
+
+  console.log("\nspan pane layout:");
+  testCollectDescendants();
+  testSelectSpanRenderSetRoots();
+  testSelectSpanRenderSetFocused();
+  testComputeSpanLayoutDurationY();
+  testComputeSpanLayoutClusters();
+  testComputeSpanLayoutRepresentativeIsLongest();
 
   console.log("\n✓ All analysis checks passed!");
 }

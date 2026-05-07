@@ -375,7 +375,7 @@
                 flex-shrink: 0;
                 position: relative;
                 overflow: hidden;
-                padding-left: 100px;
+                padding-left: 200px;
             }
             #span-panel .chart-label {
                 position: absolute;
@@ -384,7 +384,45 @@
                 font-size: 0.75em;
                 color: #888;
                 z-index: 2;
-                pointer-events: none;
+                width: 184px;
+                max-height: 112px;
+                overflow-y: auto;
+                overflow-x: hidden;
+            }
+            #span-panel .chart-label .kv-row {
+                display: flex;
+                align-items: baseline;
+                gap: 2px;
+                margin-top: 2px;
+                line-height: 1.3;
+            }
+            #span-panel .chart-label .kv-key {
+                color: #888;
+                font-size: 0.9em;
+                white-space: nowrap;
+            }
+            #span-panel .chart-label .kv-val {
+                color: #ccc;
+                font-size: 0.9em;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                flex: 1;
+                min-width: 0;
+            }
+            #span-panel .chart-label .kv-copy {
+                background: none;
+                border: 1px solid #555;
+                color: #aaa;
+                font-size: 0.8em;
+                padding: 0 3px;
+                cursor: pointer;
+                border-radius: 2px;
+                flex-shrink: 0;
+            }
+            #span-panel .chart-label .kv-copy:hover {
+                background: #333;
+                color: #fff;
             }
             #span-panel canvas {
                 width: 100%;
@@ -650,7 +688,7 @@
                     <span id="span-legend-items"></span>
                 </div>
                 <div id="span-panel">
-                    <span class="chart-label" id="span-panel-label">Spans</span>
+                    <div class="chart-label" id="span-panel-label">Spans</div>
                     <span id="span-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
                     <canvas id="span-panel-canvas"></canvas>
                 </div>
@@ -722,7 +760,7 @@
         <script src="flamegraph.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, computeSpanLayout } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -968,12 +1006,14 @@
             // Span data from custom events (SpanEnterEvent/SpanExitEvent)
             let allSpans = []; // [{start, end, spanId, spanName, fields, parentSpanId, depth, segments: [{start, end, workerId}], activeNs}]
             let spanMeta = new Map(); // spanId → {spanName, fields, parentSpanId}
+            let childrenByParent = new Map(); // parentSpanId|null → [childSpanId, ...]
             let spanMaxDepth = 0;
             let spanFilter = ""; // free-text filter for span rendering
             let filteredSpans = []; // all spans matching current filter, sorted by time
             let filteredSpanIndex = -1;
             let selectedSpanNames = new Set(); // clicked span name chips
             let unmatchedSpans = [];
+            let focusedSpanId = null; // when set, show this span + descendants
             // Lane canvases per worker (populated by buildLanes)
             let laneCanvases = {};
 
@@ -1288,6 +1328,7 @@
                     spanMeta = spanResult2.spanMeta;
                     spanMaxDepth = spanResult2.maxDepth;
                     unmatchedSpans = spanResult2.unmatchedSpans || [];
+                    childrenByParent = spanResult2.childrenByParent || new Map();
                     const totalSegs = allSpans.reduce((s, sp) => s + sp.segments.length, 0);
                     console.log(`Span events: ${allSpans.length} spans (${totalSegs} segments), ${spanMeta.size} unique span IDs, maxDepth=${spanMaxDepth}, ${unmatchedSpans.length} unmatched`);
                 }
@@ -2050,7 +2091,7 @@
 
             // Hit regions for task detail tooltip: [{x1, x2, y1, y2, type, detail}]
             let taskDetailHitRegions = [];
-            // Span panel layout: [{span, x1, x2, y, h}] — set by renderSpanPanel, used by hit testing
+            // Span panel layout: [{spans, representative, x1, x2, y, h}] — set by renderSpanPanel, used by hit testing
             let spanPanelHits = [];
 
             function renderSpanPanel(drawW, scrollbarW) {
@@ -2058,11 +2099,8 @@
                 if (panel.style.display === "none") return;
                 const c = document.getElementById("span-panel-canvas");
                 const dpr = devicePixelRatio || 1;
-                // panel.clientWidth includes the 100px padding-left where the
-                // label sits.  The canvas lives inside that padded area, so its
-                // drawing width must exclude LABEL_W (and the scrollbar
-                // reservation) to match the lane canvases' coordinate system.
-                const pw = panel.clientWidth - LABEL_W - (scrollbarW || 0);
+                const SPAN_LABEL_W = 200;
+                const pw = panel.clientWidth - SPAN_LABEL_W - (scrollbarW || 0);
                 const ph = 120;
                 c.width = pw * dpr;
                 c.height = ph * dpr;
@@ -2073,6 +2111,7 @@
                 ctx.clearRect(0, 0, pw, ph);
                 spanPanelHits = [];
 
+                // 1. Filter to visible + matching spans
                 const visibleSpans = [];
                 for (const s of allSpans) {
                     if (s.end < viewStart || s.start > viewEnd) continue;
@@ -2087,108 +2126,200 @@
                     return;
                 }
 
-                const barW = pw;
-                if (barW <= 0) return;
-                const nsToX = (ns) => ((ns - viewStart) / (viewEnd - viewStart)) * barW;
+                // 2. Select render set (roots only, or focused + descendants)
+                const renderSet = selectSpanRenderSet({
+                    allSpans: visibleSpans,
+                    focusedSpanId,
+                    childrenByParent,
+                });
 
-                // Swim lane packing: assign each span to the first lane where it fits
-                visibleSpans.sort((a, b) => a.start - b.start);
-                const laneEnds = []; // laneEnds[i] = end timestamp of last span in lane i
-                const spanLane = new Array(visibleSpans.length);
-                for (let i = 0; i < visibleSpans.length; i++) {
-                    const s = visibleSpans[i];
-                    let placed = -1;
-                    for (let l = 0; l < laneEnds.length; l++) {
-                        if (s.start >= laneEnds[l]) { placed = l; break; }
-                    }
-                    if (placed < 0) { placed = laneEnds.length; laneEnds.push(0); }
-                    laneEnds[placed] = s.end;
-                    spanLane[i] = placed;
+                if (renderSet.length === 0) {
+                    ctx.fillStyle = "#555";
+                    ctx.font = "12px sans-serif";
+                    ctx.fillText("No root spans in view", 10, 60);
+                    return;
                 }
 
-                const totalLanes = laneEnds.length;
-                const laneH = Math.max(2, Math.min(16, Math.floor((ph - 2) / Math.max(totalLanes, 1))));
-                const maxVisibleLanes = Math.floor((ph - 2) / laneH);
+                const barW = pw;
+                if (barW <= 0) return;
 
-                // Draw
-                for (let i = 0; i < visibleSpans.length; i++) {
-                    const s = visibleSpans[i];
-                    const lane = spanLane[i];
-                    if (lane >= maxVisibleLanes) continue;
-                    const y = 1 + lane * laneH;
-                    const x1 = Math.max(0, nsToX(s.start));
-                    const x2 = Math.min(barW, nsToX(s.end));
-                    const isSelected = selectedSpanIds.has(s.spanId);
-                    const color = spanColor(s.spanName);
-                    const barH = Math.max(laneH - 1, 1);
+                // 3. Compute layout with duration-based y and clustering
+                const CLUSTER_X = 6;
+                const BAR_H = 4;
+                const layout = computeSpanLayout({
+                    spans: renderSet,
+                    viewStart,
+                    viewEnd,
+                    drawW: barW,
+                    panelH: ph,
+                    clusterXPx: CLUSTER_X,
+                    barH: BAR_H,
+                });
 
-                    // Light bar for full span lifetime
+                // When focused: pin parent at top, children packed right below
+                if (focusedSpanId != null) {
+                    const focusBucket = layout.buckets.find(b => b.representative.spanId === focusedSpanId);
+                    if (focusBucket) {
+                        const PARENT_Y = 4;
+                        const CHILD_Y = 34;
+                        focusBucket.y = PARENT_Y;
+                        for (const b of layout.buckets) {
+                            if (b !== focusBucket) b.y = CHILD_Y;
+                        }
+                    }
+                }
+
+                // 4. Draw buckets
+                const nsToX = (ns) => ((ns - viewStart) / (viewEnd - viewStart)) * barW;
+                for (const bucket of layout.buckets) {
+                    const rep = bucket.representative;
+                    const x1 = Math.max(0, nsToX(rep.start));
+                    const x2 = Math.min(barW, nsToX(rep.end));
+                    const y = bucket.y;
+                    const isSelected = selectedSpanIds.has(rep.spanId);
+                    const isFocused = rep.spanId === focusedSpanId;
+                    const color = spanColor(rep.spanName);
+                    const clusterSize = bucket.spans.length;
+
+                    // Scale height by cluster size (capped), and make focused span much taller
+                    let h = bucket.h;
+                    if (isFocused) {
+                        h = Math.min(h * 6, ph / 3);
+                    } else if (focusedSpanId != null) {
+                        // Child spans in focused view: make them taller so they're visible
+                        h = Math.max(h * 3, 12);
+                        if (clusterSize > 1) h = Math.min(h + Math.log2(clusterSize) * 3, ph / 4);
+                    } else if (clusterSize > 1) {
+                        h = Math.min(h + Math.log2(clusterSize) * 3, ph / 4);
+                    }
+
+                    // Draw representative bar
                     ctx.fillStyle = color;
-                    ctx.globalAlpha = isSelected ? 0.3 : (selectedSpanIds.size > 0 ? 0.06 : 0.12);
-                    ctx.fillRect(x1, y, Math.max(x2 - x1, 1), barH);
+                    ctx.globalAlpha = isSelected ? 0.4 : (selectedSpanIds.size > 0 ? 0.08 : 0.15);
+                    ctx.fillRect(x1, y, Math.max(x2 - x1, 1), h);
 
-                    // Filled segments for active periods
-                    ctx.globalAlpha = isSelected ? 1.0 : (selectedSpanIds.size > 0 ? 0.25 : 0.7);
-                    for (const seg of s.segments) {
+                    // Active segments of representative
+                    ctx.globalAlpha = isSelected ? 1.0 : (selectedSpanIds.size > 0 ? 0.3 : 0.8);
+                    for (const seg of rep.segments) {
                         if (seg.end < viewStart || seg.start > viewEnd) continue;
                         const sx1 = Math.max(0, nsToX(seg.start));
                         const sx2 = Math.min(barW, nsToX(seg.end));
-                        ctx.fillRect(sx1, y, Math.max(sx2 - sx1, 1), barH);
+                        ctx.fillRect(sx1, y, Math.max(sx2 - sx1, 1), h);
                     }
 
-                    if (isSelected) {
-                        ctx.globalAlpha = 1.0;
-                        ctx.strokeStyle = "#fff";
-                        ctx.lineWidth = 1;
-                        ctx.strokeRect(x1, y, Math.max(x2 - x1, 2), barH);
-                    }
-
-                    spanPanelHits.push({ span: s, x1, x2, y, h: barH });
+                    spanPanelHits.push({ spans: bucket.spans, representative: rep, x1, x2: Math.max(x2, x1 + 4), y, h });
                 }
                 ctx.globalAlpha = 1.0;
 
+                // Y-axis duration ticks (log scale)
+                if (layout.minDur > 0 && layout.maxDur > 0) {
+                    const PAD_TOP = 2, BAR_H_TICK = 4;
+                    const usableH = ph - PAD_TOP - 2 - BAR_H_TICK;
+                    const minL = Math.log(layout.minDur), maxL = Math.log(layout.maxDur);
+                    const range = maxL - minL || 1;
+                    ctx.fillStyle = "#666";
+                    ctx.font = "9px sans-serif";
+                    ctx.textAlign = "left";
+                    // Pick ~3-4 nice tick values between minDur and maxDur
+                    const ticks = [];
+                    const decades = [1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9];
+                    for (const d of decades) {
+                        if (d >= layout.minDur && d <= layout.maxDur) ticks.push(d);
+                    }
+                    if (ticks.length < 2) { ticks.push(layout.minDur); ticks.push(layout.maxDur); }
+                    for (const dur of ticks) {
+                        const norm = (Math.log(dur) - minL) / range;
+                        let y = PAD_TOP + (1 - norm) * usableH;
+                        if (y < 2 || y > ph - 8) continue;
+                        ctx.globalAlpha = 0.4;
+                        ctx.fillRect(0, y, barW, 0.5); // faint horizontal line
+                        ctx.globalAlpha = 0.7;
+                        ctx.fillText(formatHumanDuration(dur), 2, y - 2);
+                    }
+                }
+
                 const info = document.getElementById("span-panel-info");
-                const overflow = totalLanes > maxVisibleLanes ? ` (${totalLanes - maxVisibleLanes} lanes hidden)` : "";
-                info.textContent = `${visibleSpans.length} spans · ${totalLanes} lanes${overflow}`;
+                const focusNote = focusedSpanId != null ? " (focused)" : "";
+                info.textContent = `${renderSet.length} spans · ${layout.buckets.length} clusters${focusNote}`;
+
+                // Update left label: show focused span's fields or default "Spans"
+                const label = document.getElementById("span-panel-label");
+                if (focusedSpanId != null) {
+                    const meta = spanMeta.get(focusedSpanId);
+                    const focusedSpan = allSpans.find(s => s.spanId === focusedSpanId);
+                    const fields = focusedSpan?.fields || meta?.fields || {};
+                    const name = meta?.spanName || focusedSpan?.spanName || "Span";
+                    let html = `<div style="color:#ccc;margin-bottom:3px">${esc(name)}</div>`;
+                    for (const [k, v] of Object.entries(fields)) {
+                        const val = String(v);
+                        html += `<div class="kv-row"><span class="kv-key">${esc(k)}:</span><span class="kv-val" title="${esc(val)}">${esc(val)}</span><button class="kv-copy" data-val="${esc(val)}">⎘</button></div>`;
+                    }
+                    label.innerHTML = html;
+                } else {
+                    label.textContent = "Spans";
+                }
             }
 
-            // Find the nearest span to a given timestamp within a pixel threshold
-            // Find the span at a given (x, y) position in the span panel canvas
-            function findSpanAtXY(mx, my) {
+            // Find the bucket at a given (x, y) position in the span panel canvas
+            function findBucketAtXY(mx, my) {
                 for (let i = spanPanelHits.length - 1; i >= 0; i--) {
                     const h = spanPanelHits[i];
                     if (mx >= h.x1 && mx <= h.x2 && my >= h.y && my <= h.y + h.h) {
-                        return h.span;
+                        return h;
                     }
                 }
                 return null;
             }
 
-            // Span panel hover: show tooltip with span details
+            // Span panel hover: show tooltip with cluster/span details
             document.getElementById("span-panel-canvas").addEventListener("mousemove", (e) => {
                 const c = document.getElementById("span-panel-canvas");
                 const rect = c.getBoundingClientRect();
                 const mx = e.clientX - rect.left;
                 const my = e.clientY - rect.top;
 
-                const hit = findSpanAtXY(mx, my);
-                if (hit) {
-                    const dur = hit.end - hit.start;
-                    const idle = dur - hit.activeNs;
-                    const pct = spanPercentileRank(hit);
-                    const pctStr = pct != null ? ` (P${pct})` : "";
-                    const nSegs = hit.segments.length;
-                    let html = `<span class="label">Span:</span> <span class="value">${esc(hit.spanName)}</span> <span style="color:#888">${formatHumanDuration(dur)}${pctStr}</span>`;
-                    html += `<br><span class="label">Active:</span> <span class="value">${formatHumanDuration(hit.activeNs)}</span>`;
-                    if (idle > 0) html += ` · <span class="label">Idle:</span> <span class="value">${formatHumanDuration(idle)}</span>`;
-                    if (nSegs > 1) html += ` · <span class="label">Polls:</span> <span class="value">${nSegs}</span>`;
-                    const workers = [...new Set(hit.segments.map(s => s.workerId))].sort();
-                    html += `<br><span class="label">Worker${workers.length > 1 ? "s" : ""}:</span> <span class="value">${workers.join(", ")}</span>`;
-                    if (hit.fields && typeof hit.fields === "object") {
-                        const entries = Object.entries(hit.fields);
-                        if (entries.length > 0) {
-                            html += `<br><span class="label">Fields:</span> <span class="value">${entries.map(([k, v]) => esc(k) + "=" + esc(String(v))).join(", ")}</span>`;
+                const bucket = findBucketAtXY(mx, my);
+                if (bucket) {
+                    const spans = bucket.spans;
+                    const rep = bucket.representative;
+                    let html = "";
+                    if (spans.length === 1) {
+                        // Single span tooltip (same as before)
+                        const dur = rep.end - rep.start;
+                        const idle = dur - rep.activeNs;
+                        const pct = spanPercentileRank(rep);
+                        const pctStr = pct != null ? ` (P${pct})` : "";
+                        const nSegs = rep.segments.length;
+                        html = `<span class="label">Span:</span> <span class="value">${esc(rep.spanName)}</span> <span style="color:#888">${formatHumanDuration(dur)}${pctStr}</span>`;
+                        html += `<br><span class="label">Active:</span> <span class="value">${formatHumanDuration(rep.activeNs)}</span>`;
+                        if (idle > 0) html += ` · <span class="label">Idle:</span> <span class="value">${formatHumanDuration(idle)}</span>`;
+                        if (nSegs > 1) html += ` · <span class="label">Polls:</span> <span class="value">${nSegs}</span>`;
+                        const workers = [...new Set(rep.segments.map(s => s.workerId))].sort();
+                        html += `<br><span class="label">Worker${workers.length > 1 ? "s" : ""}:</span> <span class="value">${workers.join(", ")}</span>`;
+                        if (rep.fields && typeof rep.fields === "object") {
+                            const entries = Object.entries(rep.fields);
+                            if (entries.length > 0) {
+                                html += `<br><span class="label">Fields:</span> <span class="value">${entries.map(([k, v]) => esc(k) + "=" + esc(String(v))).join(", ")}</span>`;
+                            }
                         }
+                    } else {
+                        // Cluster tooltip
+                        const nameCounts = {};
+                        let minDur = Infinity, maxDur = 0;
+                        for (const s of spans) {
+                            nameCounts[s.spanName] = (nameCounts[s.spanName] || 0) + 1;
+                            const d = s.end - s.start;
+                            if (d < minDur) minDur = d;
+                            if (d > maxDur) maxDur = d;
+                        }
+                        const nameList = Object.entries(nameCounts)
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 5)
+                            .map(([n, c]) => `${esc(n)}${c > 1 ? " ×" + c : ""}`)
+                            .join(", ");
+                        html = `<span class="label">Cluster:</span> <span class="value">${spans.length} spans</span>`;
+                        html += `<br><span class="label">Names:</span> <span class="value">${nameList}</span>`;
+                        html += `<br><span class="label">Duration:</span> <span class="value">${formatHumanDuration(minDur)} – ${formatHumanDuration(maxDur)}</span>`;
                     }
                     tooltip.innerHTML = html;
                     tooltip.style.display = "block";
@@ -2202,39 +2333,54 @@
                 tooltip.style.display = "none";
             });
 
-            // Span panel click: select a span, highlight polls and task
+            // Copy button handler for span field values
+            document.getElementById("span-panel-label").addEventListener("click", (e) => {
+                const btn = e.target.closest(".kv-copy");
+                if (btn) {
+                    navigator.clipboard.writeText(btn.dataset.val);
+                    btn.textContent = "✓";
+                    setTimeout(() => { btn.textContent = "⎘"; }, 800);
+                }
+            });
+
+            // Span panel click: pick representative from cluster, focus to reveal children
             document.getElementById("span-panel-canvas").addEventListener("click", (e) => {
                 const c = document.getElementById("span-panel-canvas");
                 const rect = c.getBoundingClientRect();
                 const mx = e.clientX - rect.left;
                 const my = e.clientY - rect.top;
 
-                const hit = findSpanAtXY(mx, my);
+                const bucket = findBucketAtXY(mx, my);
 
-                if (hit) {
-                    selectedSpanId = (hit.spanId !== selectedSpanId) ? hit.spanId : null;
-                    selectedSpanIds = new Set();
-                    if (selectedSpanId != null) {
-                        // Build parent chain
-                        selectedSpanIds.add(selectedSpanId);
+                if (bucket) {
+                    const hit = bucket.representative;
+                    // Toggle focus: clicking same span clears focus
+                    if (hit.spanId === focusedSpanId) {
+                        focusedSpanId = null;
+                        selectedSpanId = null;
+                        selectedSpanIds = new Set();
+                        selectedTaskId = null;
+                    } else {
+                        focusedSpanId = hit.spanId;
+                        selectedSpanId = hit.spanId;
+                        selectedSpanIds = new Set();
+                        selectedSpanIds.add(hit.spanId);
                         let parentId = hit.parentSpanId;
                         while (parentId != null && !selectedSpanIds.has(parentId)) {
                             selectedSpanIds.add(parentId);
                             const parent = spanMeta.get(parentId);
                             parentId = parent?.parentSpanId ?? null;
                         }
-                    }
-                    // Find the task that was polling when this span's first segment ran
-                    if (selectedSpanId != null) {
+                        // Find the task that was polling when this span's first segment ran
                         const firstSeg = hit.segments[0];
                         if (firstSeg) {
                             const polls = workerSpans[firstSeg.workerId]?.polls;
                             if (polls) {
-                                const poll = polls.find(p => p.start <= firstSeg.start && p.end >= firstSeg.end);
+                                const poll = polls.find(p => p.start <= firstSeg.start && p.end >= firstSeg.start);
                                 if (poll && poll.taskId) selectedTaskId = poll.taskId;
                             }
                         }
-                        // Show percentile info (total lifetime)
+                        // Show percentile info
                         const durations = allSpans
                             .filter(s => s.spanName === hit.spanName)
                             .map(s => s.end - s.start)
@@ -2246,11 +2392,13 @@
                         const p99 = durations[Math.floor(durations.length * 0.99)];
                         document.getElementById("span-panel-info").textContent =
                             `${hit.spanName}: ${formatHumanDuration(dur)} (P${pct} of ${durations.length}) · P50=${formatHumanDuration(p50)} P99=${formatHumanDuration(p99)}`;
-                    } else {
-                        selectedTaskId = null;
                     }
                 } else {
+                    // Click empty area: clear focus and selection
+                    focusedSpanId = null;
                     selectedSpanId = null;
+                    selectedSpanIds = new Set();
+                    selectedTaskId = null;
                 }
                 renderAll();
             });
@@ -3150,6 +3298,7 @@
                     selectedSpanId = (clickedSpanId !== selectedSpanId) ? clickedSpanId : null;
                     selectedSpanIds = new Set();
                     if (selectedSpanId != null) selectedSpanIds.add(selectedSpanId);
+                    focusedSpanId = null;
                     selectedTaskId = null;
                     renderAll();
                     return;
@@ -3157,6 +3306,7 @@
 
                 selectedSpanId = null;
                 selectedSpanIds = new Set();
+                focusedSpanId = null;
                 selectedTaskId = (found && found !== selectedTaskId) ? found : null;
                 renderAll();
             });
