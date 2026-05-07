@@ -71,7 +71,7 @@ fn nested_spans(depth: usize) {
     nested_spans(depth - 1);
 }
 
-const ITERATIONS_PER_BENCH: usize = 1000;
+const ITERATIONS_PER_BENCH: usize = 10000;
 
 #[inline(never)]
 fn run_baseline(h: &Harness) -> i32 {
