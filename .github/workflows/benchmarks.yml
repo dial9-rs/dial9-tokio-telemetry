@@ -198,6 +198,7 @@ jobs:
               --adapter rust_iai_callgrind \
               --threshold-measure instructions \
               --threshold-test percentage \
+              --threshold-max-sample-size 1 \
               --threshold-upper-boundary 0.01 \
               --ci-only-thresholds \
               --error-on-alert \
