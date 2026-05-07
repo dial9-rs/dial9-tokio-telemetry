@@ -17,6 +17,12 @@ on:
     branches:
       - main
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'examples/**'
+      - 'dial9-viewer/**'
+      - '.github/ISSUE_TEMPLATE/**'
   workflow_dispatch:
     inputs:
       bencher_branch:
@@ -27,6 +33,11 @@ on:
 permissions:
   checks: write
   pull-requests: write
+
+# Cancel stale runs when a PR gets new pushes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # Disabled until a dedicated runner exists. Wall-clock criterion +
@@ -103,9 +114,12 @@ jobs:
         with:
           path: ~/.cargo/bin/iai-callgrind-runner
           key: iai-runner-${{ env.IAI_CALLGRIND_VERSION }}
-      - name: Install iai-callgrind-runner
+      - name: Install cargo-binstall
         if: steps.runner_cache.outputs.cache-hit != 'true'
-        run: cargo install iai-callgrind-runner --version ${{ env.IAI_CALLGRIND_VERSION }} --locked
+        uses: cargo-bins/cargo-binstall@main
+      - name: Install iai-callgrind-runner (prebuilt via binstall)
+        if: steps.runner_cache.outputs.cache-hit != 'true'
+        run: cargo binstall iai-callgrind-runner --version ${{ env.IAI_CALLGRIND_VERSION }} --no-confirm --locked
       - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
       - name: Run iai benches → Bencher
         env:
@@ -159,9 +173,12 @@ jobs:
         with:
           path: ~/.cargo/bin/iai-callgrind-runner
           key: iai-runner-${{ env.IAI_CALLGRIND_VERSION }}
-      - name: Install iai-callgrind-runner
+      - name: Install cargo-binstall
         if: steps.runner_cache.outputs.cache-hit != 'true'
-        run: cargo install iai-callgrind-runner --version ${{ env.IAI_CALLGRIND_VERSION }} --locked
+        uses: cargo-bins/cargo-binstall@main
+      - name: Install iai-callgrind-runner (prebuilt via binstall)
+        if: steps.runner_cache.outputs.cache-hit != 'true'
+        run: cargo binstall iai-callgrind-runner --version ${{ env.IAI_CALLGRIND_VERSION }} --no-confirm --locked
       - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
       - name: Run iai benches → Bencher (gated vs main)
         run: |
