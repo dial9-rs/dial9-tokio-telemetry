@@ -41,12 +41,6 @@ jobs:
       fail-fast: false
       matrix:
         bench:
-          - name: writer_encode
-            adapter: rust_criterion
-            command: cargo bench --package dial9-tokio-telemetry --bench writer_encode
-          - name: codec
-            adapter: rust_criterion
-            command: cargo bench --package dial9-trace-format --bench codec
           - name: overhead_bench
             adapter: json
             command: cargo bench --bench overhead_bench -- --bmf 10
@@ -117,19 +111,19 @@ jobs:
           BENCHER_BRANCH: ${{ github.event.inputs.bencher_branch != '' && github.event.inputs.bencher_branch || github.ref_name }}
         run: |
           set -euo pipefail
-          for entry in \
-              "dial9-tokio-telemetry:writer_encode_iai" \
-              "dial9-tokio-telemetry:writer_write_encoded_iai" \
-              "dial9-tokio-telemetry:threadlocal_encode_iai" \
-              "dial9-trace-format:codec_iai"; do
-            pkg="${entry%:*}"; bench="${entry#*:}"
+          for cmd in \
+              "cargo bench -p dial9-tokio-telemetry --bench writer_encode_iai" \
+              "cargo bench -p dial9-tokio-telemetry --bench writer_write_encoded_iai" \
+              "cargo bench -p dial9-tokio-telemetry --bench threadlocal_encode_iai" \
+              "cargo bench -p dial9-tokio-telemetry --bench tracing_layer_iai --features tracing-layer" \
+              "cargo bench -p dial9-trace-format --bench codec_iai"; do
             bencher run \
               --token '${{ secrets.BENCHER_API_TOKEN }}' \
               --branch "$BENCHER_BRANCH" \
               --testbed ubuntu-latest \
               --adapter rust_iai_callgrind \
               --ci-only-thresholds \
-              "cargo bench -p $pkg --bench $bench"
+              "$cmd"
           done
 
   # iai micro tier on PRs: regression gate against main baseline on
@@ -167,12 +161,12 @@ jobs:
       - name: Run iai benches → Bencher (gated vs main)
         run: |
           set -euo pipefail
-          for entry in \
-              "dial9-tokio-telemetry:writer_encode_iai" \
-              "dial9-tokio-telemetry:writer_write_encoded_iai" \
-              "dial9-tokio-telemetry:threadlocal_encode_iai" \
-              "dial9-trace-format:codec_iai"; do
-            pkg="${entry%:*}"; bench="${entry#*:}"
+          for cmd in \
+              "cargo bench -p dial9-tokio-telemetry --bench writer_encode_iai" \
+              "cargo bench -p dial9-tokio-telemetry --bench writer_write_encoded_iai" \
+              "cargo bench -p dial9-tokio-telemetry --bench threadlocal_encode_iai" \
+              "cargo bench -p dial9-tokio-telemetry --bench tracing_layer_iai --features tracing-layer" \
+              "cargo bench -p dial9-trace-format --bench codec_iai"; do
             bencher run \
               --token '${{ secrets.BENCHER_API_TOKEN }}' \
               --branch '${{ github.head_ref }}' \
@@ -186,5 +180,5 @@ jobs:
               --ci-only-thresholds \
               --error-on-alert \
               --github-actions '${{ secrets.GITHUB_TOKEN }}' \
-              "cargo bench -p $pkg --bench $bench"
+              "$cmd"
           done

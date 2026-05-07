@@ -123,15 +123,12 @@ name = "thread_per_core"
 required-features = ["analysis"]
 
 [[bench]]
-name = "writer_encode"
-harness = false
-
-[[bench]]
-name = "threadlocal_encode"
-harness = false
-
-[[bench]]
 name = "tracing_layer_bench"
+harness = false
+required-features = ["tracing-layer"]
+
+[[bench]]
+name = "tracing_layer_iai"
 harness = false
 required-features = ["tracing-layer"]
 
