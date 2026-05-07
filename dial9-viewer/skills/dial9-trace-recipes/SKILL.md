@@ -1,6 +1,11 @@
+---
+name: dial9-trace-recipes
+description: Diagnostic recipes for common questions about dial9 Tokio runtime traces. Covers finding long polls, task leaks, worker utilization, blocking calls, wake chains, span analysis, and time-window debugging. Use when answering specific diagnostic questions about trace data.
+---
+
 # Diagnostic Recipes
 
-Concrete code snippets for answering common questions about trace data. All recipes assume the standard pipeline has been run (see `analysis` segment).
+Concrete code snippets for answering common questions about trace data.
 
 ## Setup boilerplate
 
@@ -26,7 +31,7 @@ for await (const trace of parseTrace('/path/to/traces/')) {
     trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent)
       .map(e => e.workerId)
   )].sort((a, b) => a - b);
-  const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
+  const maxTs = trace.maxTs;
   const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
   attachCpuSamples(trace.cpuSamples, spans.workerSpans);
   const schedDelays = computeSchedulingDelays(spans.workerSpans, workerIds, spans.wakesByTask);
@@ -117,7 +122,7 @@ for (const g of groups.slice(0, 10)) {
 }
 ```
 
-Note: `spawnLoc` is set on samples by `attachCpuSamples()` — you must call it first.
+Note: `spawnLoc` is set on samples by `attachCpuSamples()`.
 
 ## What's happening at a specific time?
 
@@ -176,7 +181,7 @@ for (const w of result.workerIds) {
 
 ## Blocking call detection
 
-Scheduling samples (source=1) capture stack traces when the OS deschedules a worker thread. These reveal blocking calls (file I/O, DNS, locks, etc.).
+Scheduling samples (source=1) capture stack traces when the OS deschedules a worker thread.
 
 ```javascript
 const { analyzeTraces } = require('./analyze.js');
@@ -193,8 +198,6 @@ for (const g of result.schedGroups.slice(0, 10)) {
 
 ## Wake chain analysis
 
-Trace the chain of wakes that led to a specific task being polled:
-
 ```javascript
 function traceWakeChain(taskId, wakesByTask, taskSpawnLocs, depth = 0, seen = new Set()) {
   if (seen.has(taskId)) return;
@@ -207,20 +210,24 @@ function traceWakeChain(taskId, wakesByTask, taskSpawnLocs, depth = 0, seen = ne
   if (depth < 5) traceWakeChain(lastWake.wakerTaskId, wakesByTask, taskSpawnLocs, depth + 1, seen);
 }
 
-// Example: pick a task ID of interest and trace its wake chain
+// Example: trace a task's wake chain
 const taskId = 42; // replace with a task ID from your trace
 traceWakeChain(taskId, spans.wakesByTask, trace.taskSpawnLocs);
 ```
 
----
+## Span duration percentiles by name
 
-# Span Recipes
+Requires `Dial9TokioLayer` in the subscriber.
 
-Requires `Dial9TokioLayer` in the subscriber (see `tracing-layer` feature).
+```javascript
+const { analyzeTraces } = require('./analyze.js');
+const result = await analyzeTraces('/path/to/traces/');
+for (const [name, h] of result.spanStats) {
+  console.log(`${name}: count=${h.count} p50=${(h.percentile(50)/1e3).toFixed(1)}µs p99=${(h.percentile(99)/1e3).toFixed(1)}µs max=${(h.max/1e3).toFixed(1)}µs`);
+}
+```
 
 ## What spans happened inside a long poll?
-
-Requires `Dial9TokioLayer` in the subscriber (see `tracing-layer` feature).
 
 ```javascript
 const { buildSpanData } = require('./trace_analysis.js');
@@ -247,16 +254,6 @@ for (const [name, count] of Object.entries(byName)) {
 }
 ```
 
-## Span duration percentiles by name
-
-```javascript
-const { analyzeTraces } = require('./analyze.js');
-const result = await analyzeTraces('/path/to/traces/');
-for (const [name, h] of result.spanStats) {
-  console.log(`${name}: count=${h.count} p50=${(h.percentile(50)/1e3).toFixed(1)}µs p99=${(h.percentile(99)/1e3).toFixed(1)}µs max=${(h.max/1e3).toFixed(1)}µs`);
-}
-```
-
 ## Filter spans by field value
 
 ```javascript
@@ -271,7 +268,7 @@ for (const s of matches) {
 }
 ```
 
-## How many spans per poll? (detect tight loops)
+## Detect tight loops (many spans per poll)
 
 ```javascript
 const { buildSpanData } = require('./trace_analysis.js');
@@ -291,69 +288,7 @@ for (const w of workerIds) {
 }
 ```
 
-## What else was happening during a slow span?
-
-Find a slow span and see what other spans and polls overlap on the same and other workers.
-
-```javascript
-const { buildSpanData } = require('./trace_analysis.js');
-const { spansByWorker } = buildSpanData(trace.customEvents);
-
-// Find the slowest query_metric span
-const allSpans = Object.values(spansByWorker).flat();
-const slowest = allSpans
-  .filter(s => s.spanName === 'query_metric')
-  .sort((a, b) => (b.end - b.start) - (a.end - a.start))[0];
-
-if (slowest) {
-  console.log(`Slowest query_metric: ${((slowest.end - slowest.start) / 1e6).toFixed(2)}ms`);
-  console.log(`Fields: ${JSON.stringify(slowest.fields)}`);
-
-  // What other spans overlapped on all workers?
-  for (const [w, wSpans] of Object.entries(spansByWorker)) {
-    const overlapping = wSpans.filter(s => s.start < slowest.end && s.end > slowest.start && s !== slowest);
-    if (overlapping.length > 0) {
-      const byName = {};
-      for (const s of overlapping) byName[s.spanName] = (byName[s.spanName] || 0) + 1;
-      console.log(`  Worker ${w}: ${Object.entries(byName).map(([n, c]) => `${n}×${c}`).join(', ')}`);
-    }
-  }
-}
-```
-
-## Where does a specific span rank among its peers?
-
-Given a span, show its percentile rank compared to all spans of the same name.
-
-```javascript
-const { buildSpanData } = require('./trace_analysis.js');
-const { spansByWorker } = buildSpanData(trace.customEvents);
-
-function spanPercentile(span) {
-  const allSpans = Object.values(spansByWorker).flat();
-  const peers = allSpans.filter(s => s.spanName === span.spanName).map(s => s.end - s.start);
-  peers.sort((a, b) => a - b);
-  const dur = span.end - span.start;
-  const rank = peers.filter(d => d <= dur).length;
-  const pct = (rank / peers.length * 100).toFixed(1);
-  const p50 = peers[Math.floor(peers.length * 0.5)];
-  const p90 = peers[Math.floor(peers.length * 0.9)];
-  const p99 = peers[Math.floor(peers.length * 0.99)];
-  console.log(`${span.spanName} duration: ${(dur / 1e3).toFixed(1)}µs (P${pct} of ${peers.length})`);
-  console.log(`  p0=${(peers[0] / 1e3).toFixed(1)}µs p50=${(p50 / 1e3).toFixed(1)}µs p90=${(p90 / 1e3).toFixed(1)}µs p99=${(p99 / 1e3).toFixed(1)}µs p100=${(peers[peers.length - 1] / 1e3).toFixed(1)}µs`);
-}
-
-// Example: rank the slowest query_metric
-const allSpans = Object.values(spansByWorker).flat();
-const slowest = allSpans
-  .filter(s => s.spanName === 'query_metric')
-  .sort((a, b) => (b.end - b.start) - (a.end - a.start))[0];
-if (slowest) spanPercentile(slowest);
-```
-
 ## Trace a request across workers
-
-Show the full timeline of a request by field value, including which workers handled it.
 
 ```javascript
 const { buildSpanData } = require('./trace_analysis.js');

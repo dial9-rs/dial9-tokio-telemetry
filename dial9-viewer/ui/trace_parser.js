@@ -154,9 +154,10 @@
     return parseTraceBuffer(input, options);
   }
 
-  /** Wrap a Promise<ParsedTrace> as an async iterable that yields once. */
+  /** Wrap a Promise<ParsedTrace> as an async iterable that yields once.
+   *  Also thenable, so `await parseTrace('file.bin')` works directly. */
   function wrapSingle(promise) {
-    return {
+    const iterable = {
       [Symbol.asyncIterator]() {
         let done = false;
         return { async next() {
@@ -164,8 +165,11 @@
           done = true;
           return { done: false, value: await promise };
         }};
-      }
+      },
+      then(resolve, reject) { return promise.then(resolve, reject); },
+      catch(reject) { return promise.catch(reject); },
     };
+    return iterable;
   }
 
   /** @private Parse a binary trace buffer. */
@@ -470,10 +474,20 @@
     }
     const hasTimeFilter = startTime > 0 || endTime < Infinity;
 
+    // Compute timestamp bounds from events (safe for large arrays)
+    let evMinTs = Infinity, evMaxTs = -Infinity;
+    for (let i = 0; i < events.length; i++) {
+      const t = events[i].timestamp;
+      if (t < evMinTs) evMinTs = t;
+      if (t > evMaxTs) evMaxTs = t;
+    }
+
     return {
       magic: "D9TF",
       version: dec.version,
       events,
+      minTs: events.length > 0 ? evMinTs : null,
+      maxTs: events.length > 0 ? evMaxTs : null,
       truncated: events.length >= maxEvents,
       timeFiltered: hasTimeFilter,
       filterStartTime: hasTimeFilter ? startTime : null,
@@ -596,7 +610,7 @@
 
     const concurrency = (opts.parallel === false) ? 1 : Math.min(os.cpus().length, 32);
     const workerCandidate = path.resolve(__dirname, 'analyze.js');
-    const workerFallback = path.resolve(__dirname, '..', 'skills', 'analyze.js');
+    const workerFallback = path.resolve(__dirname, '..', 'skills', 'dial9-toolkit', 'scripts', 'analyze.js');
     const workerScript = fs.existsSync(workerCandidate) ? workerCandidate : workerFallback;
 
     function cachePathFor(file) {
@@ -827,11 +841,28 @@
     return [...groups.values()].sort((a, b) => b.count - a.count);
   }
 
+  /**
+   * Parse a single trace file and return the ParsedTrace directly.
+   * Accepts a file path (string) or a Buffer. Always returns Promise<ParsedTrace>.
+   */
+  async function parseOne(input, options) {
+    if (typeof input === 'string' && typeof require !== 'undefined') {
+      const fs = require('fs');
+      const stat = fs.statSync(input);
+      if (stat.isDirectory()) {
+        throw new Error('parseOne expects a single file, not a directory. Use parseTrace for directories.');
+      }
+      return parseTraceBuffer(fs.readFileSync(input), options);
+    }
+    return parseTraceBuffer(input, options);
+  }
+
   // Export for both browser and Node.js
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       EVENT_TYPES,
       parseTrace,
+      parseOne,
       formatFrame,
       symbolizeChain,
       deduplicateSamples,

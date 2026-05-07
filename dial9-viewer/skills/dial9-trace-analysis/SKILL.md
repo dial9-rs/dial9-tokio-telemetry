@@ -1,3 +1,8 @@
+---
+name: dial9-trace-analysis
+description: Analysis pipeline API for dial9 traces. Covers analyzeTraces() aggregation, buildWorkerSpans, attachCpuSamples, scheduling delays, flamegraphs, span data, and the full return schema. Use when analyzing parsed traces or building custom analysis pipelines.
+---
+
 # Analysis Pipeline
 
 After parsing, run the analysis pipeline to derive higher-level structures. All functions are in `trace_analysis.js`.
@@ -23,32 +28,16 @@ for await (const trace of parseTrace('/path/to/traces/')) {
 }
 ```
 
-For directories with 1000+ files, `{ sample: 50 }` gives a quick initial overview (a few seconds). Follow up without `sample` for accurate percentiles and tail latency.
+For directories with 1000+ files, `{ sample: 50 }` gives a quick overview. Follow up without `sample` for accurate percentiles.
 
-For progress on large directories, pass `onParseProgress` and `onAnalysisProgress` callbacks:
+## Pipeline steps
 
-```javascript
-const result = await analyzeTraces('/path/to/traces/', {
-  onParseProgress: ({ done, total, cached }) => process.stderr.write(`\rparsing: [${done}/${total}]${cached ? ` (${cached} cached)` : ''}`),
-  onParseComplete: () => process.stderr.write('\n'),
-  onAnalysisProgress: ({ done, total }) => process.stderr.write(`\ranalyzing: [${done}/${total}]`),
-});
-process.stderr.write('\n');
-```
-
-## Standard pipeline
-
-Use `analyzeTraces(path)` from `analyze.js` to run the full pipeline over a single file or directory. It returns an aggregated result object (see [analyzeTraces return schema](#analyzetraces-return-schema) below). Use it as-is or follow the steps below individually.
-
-Pipeline steps:
-1. Parse the trace: `for await (const trace of parseTrace(path))` yields one `ParsedTrace` per file
+1. Parse: `for await (const trace of parseTrace(path))` yields one `ParsedTrace` per file
 2. Extract worker IDs from non-queue, non-wake events
-3. `buildWorkerSpans(events, workerIds, maxTs)` → reconstructs poll/park/active spans
-4. `attachCpuSamples(cpuSamples, workerSpans)` → attaches profiling data to poll spans
-5. `buildActiveTaskTimeline(taskSpawnTimes, taskTerminateTimes)` → task count over time
-6. `computeSchedulingDelays(workerSpans, workerIds, wakesByTask)` → wake-to-poll latencies
-
-For directories, `parseTrace` yields one `ParsedTrace` per file. See the `recipes` segment for the boilerplate.
+3. `buildWorkerSpans(events, workerIds, maxTs)` reconstructs poll/park/active spans
+4. `attachCpuSamples(cpuSamples, workerSpans)` attaches profiling data to poll spans
+5. `buildActiveTaskTimeline(taskSpawnTimes, taskTerminateTimes)` builds task count over time
+6. `computeSchedulingDelays(workerSpans, workerIds, wakesByTask)` computes wake-to-poll latencies
 
 ## analyzeTraces return schema
 
@@ -120,13 +109,12 @@ For directories, `parseTrace` yields one `ParsedTrace` per file. See the `recipe
 }
 ```
 
-Histogram objects are Node.js `perf_hooks.createHistogram()` instances. Key methods: `h.count`, `h.min`, `h.max`, `h.mean`, `h.percentile(p)` (where p is 0..100).
+Histogram objects are Node.js `perf_hooks.createHistogram()` instances. Key methods: `h.count`, `h.min`, `h.max`, `h.mean`, `h.percentile(p)` (p is 0..100).
 
 ## buildWorkerSpans(events, workerIds, maxTs)
 
-Reconstructs structured spans from raw events using a state machine.
+Reconstructs structured spans from raw events. Returns:
 
-Returns:
 ```
 {
   workerSpans: {
@@ -145,58 +133,36 @@ Returns:
 }
 ```
 
-Key concepts:
-- **Poll span**: PollStart → PollEnd. Duration is how long a single `.poll()` call took.
-- **Park span**: WorkerPark → WorkerUnpark. Worker had no work and went to sleep.
-- **Active span**: WorkerUnpark → WorkerPark. Worker was awake and processing tasks. `ratio` is CPU utilization (1.0 = fully on-CPU, <1.0 = some time descheduled by kernel).
-- **schedWait**: On Unpark events, how long the kernel took to reschedule the worker thread after it was woken.
+- **Poll span**: PollStart to PollEnd. Duration is how long `.poll()` took.
+- **Park span**: WorkerPark to WorkerUnpark. Worker had no work.
+- **Active span**: WorkerUnpark to WorkerPark. `ratio` is CPU utilization (1.0 = fully on-CPU).
 
 ## attachCpuSamples(cpuSamples, workerSpans)
 
-Attaches each CPU sample to the poll span it falls within (binary search). After calling:
-- `poll.cpuSamples` — array of CPU profiling samples (source=0) during this poll
-- `poll.schedSamples` — array of scheduling/off-CPU samples (source=1) during this poll
-- `sample.spawnLoc` — set to the spawn location of the task being polled
+Attaches each CPU sample to the poll span it falls within. After calling:
+- `poll.cpuSamples`: CPU profiling samples (source=0) during this poll
+- `poll.schedSamples`: scheduling/off-CPU samples (source=1) during this poll
+- `sample.spawnLoc`: spawn location of the task being polled
 
 ## buildActiveTaskTimeline(taskSpawnTimes, taskTerminateTimes)
 
-Returns `{activeTaskSamples: [{t, count}], taskFirstPoll}`. The count at each point is the number of tasks that have been spawned but not yet terminated. Useful for detecting task leaks.
+Returns `{activeTaskSamples: [{t, count}]}`. Count at each point is tasks spawned but not yet terminated.
 
 ## computeSchedulingDelays(workerSpans, workerIds, wakesByTask)
 
-For each poll, finds the most recent wake event for that task before the poll started. The delay is `pollStart - wakeTime`. Returns:
-```
-[{wakeTime, pollTime, delay, taskId, wakerTaskId, worker, poll}]
-```
-Sorted by wakeTime. Large delays mean a task was woken but had to wait before being polled (workers were busy).
+Returns `[{wakeTime, pollTime, delay, taskId, wakerTaskId, worker, poll}]` sorted by wakeTime. Delay is `pollStart - wakeTime`.
 
 ## filterPointsOfInterest(filterType, workerSpans, workerIds, schedDelays, opts)
 
-Filters for notable events. `filterType` is one of:
-- `"sched"` — Kernel scheduling delays >100µs on worker unpark
-- `"long-poll"` — Polls longer than 1ms
-- `"cpu-sampled"` — Polls that have CPU or scheduling samples attached
-- `"wake-delay"` — Wake-to-poll delays >100µs
-
-`opts`:
-- `hasSchedWait: true` — enables the `"sched"` filter (requires schedWait data in trace)
-- `sortByWorst: true` — sorts by severity instead of time
-
-Returns `[{time, worker, type, value, span, schedDelay?}]`.
+Filters for notable events. `filterType`: `"sched"`, `"long-poll"`, `"cpu-sampled"`, or `"wake-delay"`.
 
 ## buildFgData(samples, callframeSymbols)
 
-Builds a flamegraph from CPU samples. Returns `{nodes, maxDepth, totalSamples}` where each node has `{name, depth, x, w, count, self}`. `x` and `w` are fractions of total width (0–1).
-
-Filter samples before passing to get per-spawn-location or per-worker flamegraphs:
-```javascript
-const workerSamples = trace.cpuSamples.filter(s => s.workerId === 0);
-const fgData = buildFgData(workerSamples, trace.callframeSymbols);
-```
+Builds a flamegraph from CPU samples. Returns `{nodes, maxDepth, totalSamples}`.
 
 ## buildSpanData(customEvents)
 
-Pairs `SpanEnter`/`SpanExit` custom events into span intervals per worker. Requires the `tracing-layer` feature on `dial9-tokio-telemetry` and `Dial9TokioLayer` in the subscriber.
+Pairs SpanEnter/SpanExit custom events into span intervals per worker. Requires `Dial9TokioLayer`.
 
 ```javascript
 const { spansByWorker, spanMeta, maxDepth } = buildSpanData(trace.customEvents);
@@ -212,10 +178,3 @@ Returns:
   maxDepth: number,
 }
 ```
-
-Key concepts:
-- **Span interval**: One enter/exit pair. A span re-entered across multiple polls produces multiple intervals with the same `spanId`.
-- **fields**: User-defined span fields (e.g., `{request_id: "abc", metric_name: "cpu"}`). Base fields (`worker_id`, `span_id`, `span_name`) are excluded.
-- **parentSpanId**: Only set for explicit parents (`span!(parent: &x, ..)`). Most `#[instrument]` spans have `null`. Use timestamp containment to infer nesting.
-- **depth**: Computed from the parent chain. 0 for root spans, incremented for each ancestor.
-- Schema names follow the pattern `SpanEnter:{target}::{name}:{file}:{line}` (one schema per callsite).

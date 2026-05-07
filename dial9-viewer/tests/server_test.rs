@@ -708,3 +708,159 @@ async fn local_path_traversal_rejected() {
     // Should fail — either not found or error, but not 200
     check!(resp.status().as_u16() != 200);
 }
+
+#[cfg(test)]
+mod skills_unpack_tests {
+    use std::process::Command;
+
+    /// Validates that `agents skills <dir>` produces a valid Agent Skills directory.
+    /// Each skill must have a SKILL.md with valid frontmatter (name + description).
+    #[test]
+    fn unpack_produces_valid_agent_skills_layout() {
+        let bin = env!("CARGO_BIN_EXE_dial9-viewer");
+        let dir = tempfile::tempdir().unwrap();
+        let output = Command::new(bin)
+            .args(["agents", "skills", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "agents skills failed: {:?}",
+            output
+        );
+
+        // Each subdirectory must have a SKILL.md with valid frontmatter
+        let mut skill_count = 0;
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let entry = entry.unwrap();
+            if !entry.path().is_dir() {
+                continue;
+            }
+            skill_count += 1;
+            let skill_md = entry.path().join("SKILL.md");
+            assert!(skill_md.exists(), "Missing SKILL.md in {:?}", entry.path());
+
+            let content = std::fs::read_to_string(&skill_md).unwrap();
+            assert!(
+                content.starts_with("---\n"),
+                "SKILL.md in {:?} missing frontmatter delimiter",
+                entry.path()
+            );
+
+            // Validate name field matches directory name
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            let name_line = content
+                .lines()
+                .find(|l| l.starts_with("name:"))
+                .unwrap_or_else(|| panic!("SKILL.md in {:?} missing name field", entry.path()));
+            let name = name_line.strip_prefix("name:").unwrap().trim();
+            assert_eq!(
+                name, dir_name,
+                "name field {:?} doesn't match directory {:?}",
+                name, dir_name
+            );
+
+            // Validate name format: lowercase + hyphens, no leading/trailing/consecutive hyphens
+            assert!(
+                !name.is_empty() && name.len() <= 64,
+                "name {:?} invalid length",
+                name
+            );
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "name {:?} contains invalid characters",
+                name
+            );
+            assert!(
+                !name.starts_with('-') && !name.ends_with('-'),
+                "name {:?} has leading/trailing hyphen",
+                name
+            );
+            assert!(
+                !name.contains("--"),
+                "name {:?} has consecutive hyphens",
+                name
+            );
+
+            // Validate description field exists and is non-empty
+            let desc_line = content
+                .lines()
+                .find(|l| l.starts_with("description:"))
+                .unwrap_or_else(|| {
+                    panic!("SKILL.md in {:?} missing description field", entry.path())
+                });
+            let desc = desc_line.strip_prefix("description:").unwrap().trim();
+            assert!(!desc.is_empty(), "empty description in {:?}", entry.path());
+            assert!(
+                desc.len() <= 1024,
+                "description too long ({}) in {:?}",
+                desc.len(),
+                entry.path()
+            );
+        }
+        assert!(
+            skill_count >= 6,
+            "expected at least 6 skills, got {skill_count}"
+        );
+    }
+
+    /// Validates that `agents toolkit <dir>` produces the expected JS files.
+    #[test]
+    fn toolkit_produces_expected_files() {
+        let bin = env!("CARGO_BIN_EXE_dial9-viewer");
+        let dir = tempfile::tempdir().unwrap();
+        let output = Command::new(bin)
+            .args(["agents", "toolkit", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "agents toolkit failed: {:?}",
+            output
+        );
+
+        let expected = [
+            "analyze.js",
+            "decode.js",
+            "trace_parser.js",
+            "trace_analysis.js",
+        ];
+        for name in &expected {
+            let path = dir.path().join(name);
+            assert!(path.exists(), "missing toolkit file: {name}");
+            assert!(
+                std::fs::metadata(&path).unwrap().len() > 0,
+                "empty toolkit file: {name}"
+            );
+        }
+    }
+
+    /// Validates that scripts in unpacked skills can find their dependencies.
+    /// The red_flag_scan.js should be able to resolve trace_parser.js from the toolkit skill.
+    #[test]
+    fn unpacked_scripts_resolve_dependencies() {
+        let bin = env!("CARGO_BIN_EXE_dial9-viewer");
+        let dir = tempfile::tempdir().unwrap();
+        let output = Command::new(bin)
+            .args(["agents", "skills", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        // The toolkit skill must have all 4 scripts
+        let toolkit_scripts = dir.path().join("dial9-toolkit").join("scripts");
+        assert!(toolkit_scripts.join("analyze.js").exists());
+        assert!(toolkit_scripts.join("decode.js").exists());
+        assert!(toolkit_scripts.join("trace_parser.js").exists());
+        assert!(toolkit_scripts.join("trace_analysis.js").exists());
+
+        // The red-flags skill must have its script
+        let red_flags_script = dir
+            .path()
+            .join("dial9-red-flags")
+            .join("scripts")
+            .join("red_flag_scan.js");
+        assert!(red_flags_script.exists());
+    }
+}
