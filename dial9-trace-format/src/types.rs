@@ -471,10 +471,10 @@ pub enum FieldValueRef<'a> {
     PooledStackFrames(InternedStackFrames),
     Varint(u64),
     StringMap(StringMapRef<'a>),
-    /// Self-describing list. Elements are decoded eagerly since each carries its own tag.
-    List(Vec<FieldValueRef<'a>>),
-    /// Self-describing map. Entries are decoded eagerly since each carries its own tags.
-    Map(Vec<(FieldValueRef<'a>, FieldValueRef<'a>)>),
+    /// Self-describing list. Use [`DynamicListRef::iter`] to access elements.
+    List(DynamicListRef<'a>),
+    /// Self-describing map. Use [`DynamicMapRef::iter`] to access entries.
+    Map(DynamicMapRef<'a>),
     /// Absent optional field.
     None,
 }
@@ -534,6 +534,48 @@ impl<'a> StringMapRef<'a> {
     /// Raw packed bytes (length-prefixed key-value pairs). Used for zero-copy re-encoding.
     pub fn raw_data(&self) -> &'a [u8] {
         self.data
+    }
+}
+
+/// Opaque wrapper for a decoded dynamic list. Access elements via [`Self::iter`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DynamicListRef<'a>(Vec<FieldValueRef<'a>>);
+
+impl<'a> DynamicListRef<'a> {
+    /// Iterate the list elements.
+    pub fn iter(&self) -> impl Iterator<Item = &FieldValueRef<'a>> {
+        self.0.iter()
+    }
+
+    /// Number of elements.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Opaque wrapper for a decoded dynamic map. Access entries via [`Self::iter`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DynamicMapRef<'a>(Vec<(FieldValueRef<'a>, FieldValueRef<'a>)>);
+
+impl<'a> DynamicMapRef<'a> {
+    /// Iterate the map entries as `(key, value)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&FieldValueRef<'a>, &FieldValueRef<'a>)> {
+        self.0.iter().map(|(k, v)| (k, v))
+    }
+
+    /// Number of entries.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -627,7 +669,7 @@ impl<'a> FieldValueRef<'a> {
                     pos += consumed;
                     items.push(val);
                 }
-                Some((FieldValueRef::List(items), pos))
+                Some((FieldValueRef::List(DynamicListRef(items)), pos))
             }
             FieldType::DynamicMap | FieldType::OptionalDynamicMap => {
                 let count = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
@@ -648,7 +690,7 @@ impl<'a> FieldValueRef<'a> {
 
                     pairs.push((key, val));
                 }
-                Some((FieldValueRef::Map(pairs), pos))
+                Some((FieldValueRef::Map(DynamicMapRef(pairs)), pos))
             }
             // Optional variants: decode using the inner type.
             _ => Self::decode(field_type.inner(), data, offset),
@@ -672,12 +714,9 @@ impl<'a> FieldValueRef<'a> {
                     .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
                     .collect(),
             ),
-            FieldValueRef::List(items) => {
-                FieldValue::List(items.iter().map(|v| v.to_owned()).collect())
-            }
-            FieldValueRef::Map(pairs) => FieldValue::Map(
-                pairs
-                    .iter()
+            FieldValueRef::List(lr) => FieldValue::List(lr.iter().map(|v| v.to_owned()).collect()),
+            FieldValueRef::Map(mr) => FieldValue::Map(
+                mr.iter()
                     .map(|(k, v)| (k.to_owned(), v.to_owned()))
                     .collect(),
             ),
