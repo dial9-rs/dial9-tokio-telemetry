@@ -1,5 +1,5 @@
 //! `TaskDumped<F>` wraps a future and captures async backtraces at yield
-//! points when the task stays idle longer than the configured threshold.
+//! points using geometric (Poisson) sampling keyed on idle duration.
 //!
 //! This wrapper is intentionally separate from [`crate::traced::Traced`]: the
 //! wake-event capture in `Traced` runs on every instrumented spawn regardless
@@ -7,20 +7,25 @@
 //! `taskdump` feature and its own runtime toggle.  Typical stacking is
 //! `Traced<TaskDumped<F>>`.
 //!
-//! # Capture model
+//! # Sampling model
 //!
-//! On each poll, the wrapper inspects the elapsed time since the last capture
-//! point (i.e., the task's idle duration leading up to this poll). If that
-//! idle exceeded the configured threshold, frames captured at the *previous*
-//! yield point are emitted as `TaskDump` events. If the current poll returns
-//! `Pending`, a fresh capture is taken via [`tokio::runtime::dump::trace_with`]
-//! so that the next poll's decision has fresh data.
+//! Instead of a hard time cutoff, each task maintains a byte-counter–style
+//! `next_sample_ns` drawn from an exponential distribution with mean equal to
+//! the configured `idle_threshold`. On each poll, the preceding idle duration
+//! is subtracted from the counter. When the counter reaches zero or below, the
+//! captured frames are emitted and a new gap is drawn. This gives unbiased
+//! Poisson sampling: longer idles are more likely to trigger a dump, but even
+//! short idles have a non-zero (if small) probability.
 //!
-//! The capture runs a second `poll` of the inner future under a no-op waker
-//! inside `trace_with`. Tokio yield points use the *inner* context's waker
-//! (noop) rather than the real executor waker, so this does not produce a
-//! duplicate `WakeEvent`, and the `PollStart`/`PollEnd` hooks run only on the
-//! outer scheduler call, not on the trace_with sub-poll.
+//! # Capture mechanics
+//!
+//! If the current poll returns `Pending`, a fresh capture is taken via
+//! [`tokio::runtime::dump::trace_with`] so that the next poll's sampling
+//! decision has fresh data. The capture runs a second `poll` of the inner
+//! future under a no-op waker inside `trace_with`. Tokio yield points use the
+//! *inner* context's waker (noop) rather than the real executor waker, so this
+//! does not produce a duplicate `WakeEvent`, and the `PollStart`/`PollEnd`
+//! hooks run only on the outer scheduler call, not on the trace_with sub-poll.
 //!
 //! # Allocation
 //!
@@ -44,9 +49,41 @@ use std::task::{Context, Poll, Waker};
 /// Initial heap reservation for the instruction-pointer buffer on first capture.
 const FRAME_BUF_INITIAL_CAPACITY: usize = 256;
 
+// ─── Minimal PRNG (splitmix64) ──────────────────────────────────────────────
+
+/// Minimal splitmix64 PRNG. Fast, no dependencies, good enough for sampling.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+
+    /// Draw from exponential distribution with given mean (in nanoseconds).
+    /// Returns at least 1 to avoid immediate re-trigger.
+    fn draw_exponential_ns(&mut self, mean_ns: u64) -> i64 {
+        // Generate a uniform float in (0, 1] — avoid exact 0 to prevent ln(0).
+        let u = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
+        let u = if u == 0.0 { f64::MIN_POSITIVE } else { u };
+        let sample = -u.ln() * (mean_ns as f64);
+        // Clamp to at least 1ns so we never immediately re-trigger.
+        (sample as i64).max(1)
+    }
+}
+
+// ─── TaskDumped future wrapper ──────────────────────────────────────────────
+
 pin_project! {
-    /// Future wrapper that captures async backtraces at yield points when
-    /// the enclosing task has been idle longer than the configured threshold.
+    /// Future wrapper that captures async backtraces at yield points using
+    /// geometric (Poisson) sampling keyed on idle duration.
     pub(crate) struct TaskDumped<F> {
         #[pin]
         inner: F,
@@ -56,22 +93,34 @@ pin_project! {
         // Monotonic nanoseconds when the frames in `frames` were captured.
         // Only meaningful when `frames.has_data()`.
         pending_capture_ts: Option<NonZeroU64>,
-        // Snapshot of SharedState::task_dump_idle_threshold_ns at construction;
-        // promotes the atomic load off the poll hot path.
-        idle_threshold_ns: u64,
+        // Geometric sampling state: remaining nanoseconds of idle time before
+        // the next sample triggers. Signed so subtracting a large idle from a
+        // small remaining value goes negative rather than wrapping.
+        next_sample_ns: i64,
+        // Mean of the exponential distribution (nanoseconds).
+        sample_mean_ns: u64,
+        // Per-task PRNG for drawing exponential gaps.
+        rng: SplitMix64,
     }
 }
 
 impl<F> TaskDumped<F> {
     pub(crate) fn new(inner: F, shared: Arc<SharedState>, task_id: TaskId) -> Self {
-        let idle_threshold_ns = shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed);
+        let sample_mean_ns = shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed);
+        // Seed the PRNG from the task ID + a timestamp for uniqueness across tasks.
+        let seed = (task_id.to_u64()).wrapping_mul(0x517cc1b727220a95)
+            ^ crate::telemetry::events::clock_monotonic_ns();
+        let mut rng = SplitMix64::new(seed);
+        let next_sample_ns = rng.draw_exponential_ns(sample_mean_ns);
         Self {
             inner,
             shared,
             task_id,
             frames: FrameBuf::new(),
             pending_capture_ts: None,
-            idle_threshold_ns,
+            next_sample_ns,
+            sample_mean_ns,
+            rng,
         }
     }
 }
@@ -83,13 +132,8 @@ impl<F: Future> Future for TaskDumped<F> {
         let mut this = self.project();
 
         // Fast path: forward without any capture work when either task dumps
-        // are disabled, or telemetry as a whole is paused. Checking both here
-        // skips the re-poll under `trace_with` (not just the emit), so a
-        // paused guard imposes no overhead beyond two relaxed atomic loads.
+        // are disabled, or telemetry as a whole is paused.
         if !this.shared.task_dumps_enabled.load(Ordering::Relaxed) || !this.shared.is_enabled() {
-            // Stale pending frames become meaningless if we stopped capturing —
-            // drop them so we don't emit a dump attributed to an old idle gap
-            // after capture resumes.
             if this.frames.has_data() {
                 this.frames.clear();
                 *this.pending_capture_ts = None;
@@ -97,12 +141,14 @@ impl<F: Future> Future for TaskDumped<F> {
             return this.inner.poll(cx);
         }
 
-        // If we have captured frames from a previous idle, decide whether
-        // that idle was long enough to emit.
+        // Geometric sampling: subtract the idle duration from the counter.
+        // If it goes to zero or below, we should emit.
         let poll_start = crate::telemetry::recorder::poll_start_ts_or_now();
         let should_emit = match *this.pending_capture_ts {
             Some(ts) if this.frames.has_data() => {
-                poll_start.saturating_sub(ts.get()) > *this.idle_threshold_ns
+                let idle_ns = poll_start.saturating_sub(ts.get()) as i64;
+                *this.next_sample_ns -= idle_ns;
+                *this.next_sample_ns <= 0
             }
             _ => false,
         };
@@ -115,17 +161,19 @@ impl<F: Future> Future for TaskDumped<F> {
                 *this.task_id,
                 this.pending_capture_ts.unwrap().get(),
             );
+            // Redraw: loop in case the draw is smaller than the deficit
+            // (rare, but possible for very large idles / small means).
+            while *this.next_sample_ns <= 0 {
+                *this.next_sample_ns += this.rng.draw_exponential_ns(*this.sample_mean_ns);
+            }
         }
 
         match &result {
             Poll::Ready(_) => {
-                // Terminal. Nothing more to capture; discard stale frames.
                 this.frames.clear();
                 *this.pending_capture_ts = None;
             }
             Poll::Pending => {
-                // Capture the yield point we just landed on, for the next
-                // poll's threshold check.
                 this.frames.capture(this.inner.as_mut());
                 *this.pending_capture_ts = NonZeroU64::new(poll_start);
             }
