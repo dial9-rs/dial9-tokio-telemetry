@@ -196,7 +196,6 @@ jobs:
               --start-point-reset \
               --testbed ubuntu-latest \
               --adapter rust_iai_callgrind \
-              --thresholds-reset \
               --threshold-measure instructions \
               --threshold-test percentage \
               --threshold-max-sample-size 1 \
