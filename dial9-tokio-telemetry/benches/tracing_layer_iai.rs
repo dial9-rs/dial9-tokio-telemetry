@@ -71,29 +71,39 @@ fn nested_spans(depth: usize) {
     nested_spans(depth - 1);
 }
 
+const ITERATIONS_PER_BENCH: usize = 1000;
+
 #[inline(never)]
 fn run_baseline(h: &Harness) -> i32 {
-    h.runtime.block_on(async { black_box(42) })
+    let mut sum = 0i32;
+    for _ in 0..ITERATIONS_PER_BENCH {
+        sum = sum.wrapping_add(h.runtime.block_on(async { black_box(42) }));
+    }
+    sum
 }
 
 #[inline(never)]
 fn run_depth(h: &Harness, depth: usize) {
-    h.runtime.block_on(async {
-        nested_spans(black_box(depth));
-    });
+    for _ in 0..ITERATIONS_PER_BENCH {
+        h.runtime.block_on(async {
+            nested_spans(black_box(depth));
+        });
+    }
 }
 
 #[inline(never)]
 fn run_fields(h: &Harness) {
-    h.runtime.block_on(async {
-        let span = tracing::info_span!(
-            "fielded",
-            user_id = 42,
-            method = "GET",
-            path = "/api/v1/users"
-        );
-        let _enter = span.enter();
-    });
+    for _ in 0..ITERATIONS_PER_BENCH {
+        h.runtime.block_on(async {
+            let span = tracing::info_span!(
+                "fielded",
+                user_id = 42,
+                method = "GET",
+                path = "/api/v1/users"
+            );
+            let _enter = span.enter();
+        });
+    }
 }
 
 #[library_benchmark]
