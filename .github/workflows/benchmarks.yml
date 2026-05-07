@@ -122,7 +122,6 @@ jobs:
               --branch "$BENCHER_BRANCH" \
               --testbed ubuntu-latest \
               --adapter rust_iai_callgrind \
-              --ci-only-thresholds \
               "$cmd"
           done
 
