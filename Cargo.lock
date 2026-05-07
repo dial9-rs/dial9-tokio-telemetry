@@ -1457,6 +1457,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dial9"
+version = "0.3.7"
+dependencies = [
+ "anyhow",
+ "dial9-viewer",
+ "tokio",
+]
+
+[[package]]
 name = "dial9-macro"
 version = "0.3.6"
 dependencies = [

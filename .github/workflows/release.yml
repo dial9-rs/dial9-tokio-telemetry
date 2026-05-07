@@ -74,7 +74,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - run: cargo build --release --target ${{ matrix.target }} -p dial9-viewer
+      - run: cargo build --release --target ${{ matrix.target }} -p dial9-viewer -p dial9
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
 
@@ -92,14 +92,14 @@ jobs:
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          tar -czvf ../../../dial9-viewer-${{ matrix.target }}-${{ steps.version.outputs.version }}.tar.gz dial9-viewer
+          tar -czvf ../../../dial9-viewer-${{ matrix.target }}-${{ steps.version.outputs.version }}.tar.gz dial9-viewer dial9
 
       - name: Package (Windows)
         if: ${{ matrix.archive == 'zip' }}
         shell: pwsh
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path dial9-viewer.exe -DestinationPath ../../../dial9-viewer-${{ matrix.target }}-${{ steps.version.outputs.version }}.zip
+          Compress-Archive -Path dial9-viewer.exe,dial9.exe -DestinationPath ../../../dial9-viewer-${{ matrix.target }}-${{ steps.version.outputs.version }}.zip
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
