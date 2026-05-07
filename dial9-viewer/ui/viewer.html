@@ -375,7 +375,6 @@
                 flex-shrink: 0;
                 position: relative;
                 overflow: hidden;
-                padding-left: 200px;
             }
             #span-panel .chart-label {
                 position: absolute;
@@ -758,6 +757,7 @@
         <script src="trace_analysis.js"></script>
         <script src="format.js"></script>
         <script src="flamegraph.js"></script>
+        <script src="panel_layout.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
             const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, computeSpanLayout } = TraceAnalysis;
@@ -1005,6 +1005,7 @@
             let schedDelays = []; // [{wakeTime, pollTime, delay, taskId, wakerTaskId, worker}]
             // Span data from custom events (SpanEnterEvent/SpanExitEvent)
             let allSpans = []; // [{start, end, spanId, spanName, fields, parentSpanId, depth, segments: [{start, end, workerId}], activeNs}]
+            let spansById = new Map(); // spanId → entry in allSpans (for O(1) ancestor walks)
             let spanMeta = new Map(); // spanId → {spanName, fields, parentSpanId}
             let childrenByParent = new Map(); // parentSpanId|null → [childSpanId, ...]
             let spanMaxDepth = 0;
@@ -1017,6 +1018,36 @@
             // Lane canvases per worker (populated by buildLanes)
             let laneCanvases = {};
 
+            // ─────────────────────────────────────────────────────────────
+            // TIME-PANEL LAYOUT INVARIANT
+            //
+            // All time-based panels in the viewer share the same horizontal
+            // layout so their time axes line up vertically:
+            //
+            //   ┌──────────────┬──────────────────────────────┬────────┐
+            //   │  label area  │       draw area              │ scroll │
+            //   │   LABEL_W    │   drawW = W - LABEL_W - sb   │   sb   │
+            //   └──────────────┴──────────────────────────────┴────────┘
+            //   x=0          x=LABEL_W                     x=W-sb    x=W
+            //
+            // Panels that follow this layout:
+            //   • Timeline header  (renderTimeline)
+            //   • Worker lanes     (renderLane)           — uses DOM flex instead of canvas offset
+            //   • Span panel       (renderSpanPanel)
+            //   • Task detail      (renderTaskDetail)
+            //   • Queue chart      (renderQueueChart)
+            //
+            // Any new time-based panel MUST:
+            //   1. Let its canvas fill the full parent width (no CSS padding)
+            //      so the draw-area offset stays consistent with everything else.
+            //   2. Use `timePanelLayout()` (below) to get `drawW` and the
+            //      nsToPanelX / panelXToNs converters — do NOT reinvent the
+            //      LABEL_W offset math inline.
+            //
+            // This invariant was silently broken once (span panel was padded
+            // by 200px instead of 100px), producing a ~100px horizontal
+            // misalignment.  See `timePanelLayout` for the enforcement point.
+            // ─────────────────────────────────────────────────────────────
             const LABEL_W = 100;
             const LANE_H = 60;
 
@@ -1320,15 +1351,27 @@
                 schedDelays = computeSchedulingDelays(workerSpans, workerIds, wakesByTask);
                 console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);
 
-                // Build span data from custom events
+                // Build span data from custom events.  Reset span state
+                // unconditionally here so a trace with no spans doesn't
+                // inherit stale state from a previously-loaded trace.
+                allSpans = [];
+                spansById = new Map();
+                spanMeta = new Map();
+                childrenByParent = new Map();
+                unmatchedSpans = [];
+                spanMaxDepth = 0;
+                _spanDurCache = null;
                 if (trace.customEvents && trace.customEvents.length > 0) {
                     const spanResult2 = buildSpanData(trace.customEvents);
                     allSpans = spanResult2.allSpans;
-                    _spanDurCache = null;
                     spanMeta = spanResult2.spanMeta;
                     spanMaxDepth = spanResult2.maxDepth;
                     unmatchedSpans = spanResult2.unmatchedSpans || [];
                     childrenByParent = spanResult2.childrenByParent || new Map();
+                    // Build spanId → span index for O(1) ancestor walks
+                    // (used by the lane-click handler and anywhere else that
+                    // needs to navigate by parentSpanId).
+                    for (const s of allSpans) spansById.set(s.spanId, s);
                     const totalSegs = allSpans.reduce((s, sp) => s + sp.segments.length, 0);
                     console.log(`Span events: ${allSpans.length} spans (${totalSegs} segments), ${spanMeta.size} unique span IDs, maxDepth=${spanMaxDepth}, ${unmatchedSpans.length} unmatched`);
                 }
@@ -1713,7 +1756,7 @@
 
                 renderTimeline(drawW - scrollbarW);
                 for (const w of workerIds) renderLane(w, drawW);
-                renderSpanPanel(drawW, scrollbarW);
+                renderSpanPanel(scrollbarW);
                 renderTaskDetail(scrollbarW);
                 renderQueueChart(drawW, scrollbarW);
 
@@ -1734,6 +1777,76 @@
                 return ((ns - viewStart) / (viewEnd - viewStart)) * drawW;
             }
 
+            // `makeTimePanelLayout` is defined in panel_layout.js and exposed
+            // globally via `window.PanelLayout`.  It's kept out of this file so
+            // it can be unit-tested from Node without a browser.  See
+            // `test_panel_layout.js`.
+            const { makeTimePanelLayout } = window.PanelLayout;
+
+            /**
+             * Build a layout view for a time-based panel.
+             *
+             * Thin DOM wrapper around `makeTimePanelLayout` (panel_layout.js)
+             * that reads `panel.clientWidth` and the global `viewStart` /
+             * `viewEnd`, and adds canvas-resize convenience.  Encapsulates
+             * the LABEL_W / scrollbar invariant documented at the `LABEL_W`
+             * constant so callers never have to add `LABEL_W` to an
+             * x-coordinate by hand.
+             *
+             * Usage in a render function:
+             *
+             *     const layout = timePanelLayout(panelEl, scrollbarW);
+             *     layout.resizeCanvas(canvas, panelHeight);
+             *     if (layout.drawW <= 0) return;
+             *     // Draw a span from timestamp `start` to `end`:
+             *     ctx.fillRect(
+             *         layout.nsToPanelX(start),
+             *         y,
+             *         layout.nsToPanelX(end) - layout.nsToPanelX(start),
+             *         h,
+             *     );
+             *     // Mouse → ns (pass the event x relative to the canvas):
+             *     const ns = layout.panelXToNs(mouseX);
+             *
+             * @param {HTMLElement} panel The panel element whose clientWidth
+             *   provides the full canvas width.
+             * @param {number=} scrollbarW Width of the vertical scrollbar on
+             *   the main lanes area.  Subtracted from `drawW` so the right
+             *   edge of the time axis matches the worker lanes.
+             */
+            function timePanelLayout(panel, scrollbarW) {
+                const base = makeTimePanelLayout(
+                    panel.clientWidth, LABEL_W, scrollbarW, viewStart, viewEnd,
+                );
+                return {
+                    ...base,
+                    /**
+                     * Size a canvas to fill the full panel width at the given
+                     * height, accounting for devicePixelRatio. Returns the
+                     * canvas's 2D context with the DPR transform applied.
+                     */
+                    resizeCanvas(canvas, height) {
+                        const dpr = devicePixelRatio || 1;
+                        canvas.width = base.pw * dpr;
+                        canvas.height = height * dpr;
+                        canvas.style.width = base.pw + "px";
+                        canvas.style.height = height + "px";
+                        const ctx = canvas.getContext("2d");
+                        ctx.scale(dpr, dpr);
+                        return ctx;
+                    },
+                };
+            }
+
+            /**
+             * Render the top-of-viewer timeline ruler with time-axis tick marks.
+             *
+             * Adheres to the TIME-PANEL LAYOUT INVARIANT: ticks start at
+             * x=LABEL_W so they align with the worker lanes, span panel,
+             * task detail, and queue chart below.  See `timePanelLayout` for
+             * the shared helper (this function predates it and still offsets
+             * LABEL_W inline).
+             */
             function renderTimeline(drawW) {
                 const c = timelineCanvas;
                 const parent = c.parentElement;
@@ -1776,6 +1889,20 @@
                 }
             }
 
+            /**
+             * Render one worker lane (polls, parks, CPU samples, wakes).
+             *
+             * Lanes use a DOM flex layout: a `lane-label` div (width=LABEL_W)
+             * sits to the left of a `lane-content` div that hosts the canvas.
+             * Because the canvas itself is shifted by LABEL_W in the DOM,
+             * rendering inside the canvas starts at x=0 — NO LABEL_W offset
+             * should be added inside this function.  The time axis still lines
+             * up with `timePanelLayout`-based panels because the DOM flex does
+             * the same job that the LABEL_W-offset does for those panels.
+             *
+             * New panels should prefer `timePanelLayout` (single canvas with
+             * internal offset) rather than the flex layout used here.
+             */
             function renderLane(workerId, drawW) {
                 const c = laneCanvases[workerId];
                 if (!c) {
@@ -2094,22 +2221,26 @@
             // Span panel layout: [{spans, representative, x1, x2, y, h}] — set by renderSpanPanel, used by hit testing
             let spanPanelHits = [];
 
-            function renderSpanPanel(drawW, scrollbarW) {
+            function renderSpanPanel(scrollbarW) {
                 const panel = document.getElementById("span-panel");
                 if (panel.style.display === "none") return;
                 const c = document.getElementById("span-panel-canvas");
-                const dpr = devicePixelRatio || 1;
-                const SPAN_LABEL_W = 200;
-                const pw = panel.clientWidth - SPAN_LABEL_W - (scrollbarW || 0);
                 const ph = 120;
-                c.width = pw * dpr;
-                c.height = ph * dpr;
-                c.style.width = pw + "px";
-                c.style.height = ph + "px";
-                const ctx = c.getContext("2d");
-                ctx.scale(dpr, dpr);
+
+                // Shared time-panel layout: keeps the draw area aligned with
+                // the worker lanes and task detail.  See TIME-PANEL LAYOUT
+                // INVARIANT near the LABEL_W declaration.
+                //
+                // The K-V focus-label is absolutely positioned over this
+                // panel's left LABEL_W area.  Spans whose x1 falls under the
+                // label are obscured by design (confirmed in design review).
+                const layout = timePanelLayout(panel, scrollbarW);
+                const { pw, drawW, nsToPanelX, nsToPanelXClamped } = layout;
+                const ctx = layout.resizeCanvas(c, ph);
                 ctx.clearRect(0, 0, pw, ph);
                 spanPanelHits = [];
+
+                if (drawW <= 0) return;
 
                 // 1. Filter to visible + matching spans
                 const visibleSpans = [];
@@ -2122,7 +2253,7 @@
                 if (visibleSpans.length === 0) {
                     ctx.fillStyle = "#555";
                     ctx.font = "12px sans-serif";
-                    ctx.fillText("No spans in view" + (spanFilter ? ` (filter: "${spanFilter}")` : ""), 10, 60);
+                    ctx.fillText("No spans in view" + (spanFilter ? ` (filter: "${spanFilter}")` : ""), LABEL_W + 10, 60);
                     return;
                 }
 
@@ -2136,21 +2267,18 @@
                 if (renderSet.length === 0) {
                     ctx.fillStyle = "#555";
                     ctx.font = "12px sans-serif";
-                    ctx.fillText("No root spans in view", 10, 60);
+                    ctx.fillText("No root spans in view", LABEL_W + 10, 60);
                     return;
                 }
-
-                const barW = pw;
-                if (barW <= 0) return;
 
                 // 3. Compute layout with duration-based y and clustering
                 const CLUSTER_X = 6;
                 const BAR_H = 4;
-                const layout = computeSpanLayout({
+                const spanLayout = computeSpanLayout({
                     spans: renderSet,
                     viewStart,
                     viewEnd,
-                    drawW: barW,
+                    drawW,
                     panelH: ph,
                     clusterXPx: CLUSTER_X,
                     barH: BAR_H,
@@ -2158,23 +2286,23 @@
 
                 // When focused: pin parent at top, children packed right below
                 if (focusedSpanId != null) {
-                    const focusBucket = layout.buckets.find(b => b.representative.spanId === focusedSpanId);
+                    const focusBucket = spanLayout.buckets.find(b => b.representative.spanId === focusedSpanId);
                     if (focusBucket) {
                         const PARENT_Y = 4;
                         const CHILD_Y = 34;
                         focusBucket.y = PARENT_Y;
-                        for (const b of layout.buckets) {
+                        for (const b of spanLayout.buckets) {
                             if (b !== focusBucket) b.y = CHILD_Y;
                         }
                     }
                 }
 
-                // 4. Draw buckets
-                const nsToX = (ns) => ((ns - viewStart) / (viewEnd - viewStart)) * barW;
-                for (const bucket of layout.buckets) {
+                // 4. Draw buckets using shared panel-layout coordinates so the
+                //    time axis lines up with the worker lanes and task detail.
+                for (const bucket of spanLayout.buckets) {
                     const rep = bucket.representative;
-                    const x1 = Math.max(0, nsToX(rep.start));
-                    const x2 = Math.min(barW, nsToX(rep.end));
+                    const x1 = nsToPanelXClamped(rep.start);
+                    const x2 = nsToPanelXClamped(rep.end);
                     const y = bucket.y;
                     const isSelected = selectedSpanIds.has(rep.spanId);
                     const isFocused = rep.spanId === focusedSpanId;
@@ -2202,8 +2330,8 @@
                     ctx.globalAlpha = isSelected ? 1.0 : (selectedSpanIds.size > 0 ? 0.3 : 0.8);
                     for (const seg of rep.segments) {
                         if (seg.end < viewStart || seg.start > viewEnd) continue;
-                        const sx1 = Math.max(0, nsToX(seg.start));
-                        const sx2 = Math.min(barW, nsToX(seg.end));
+                        const sx1 = nsToPanelXClamped(seg.start);
+                        const sx2 = nsToPanelXClamped(seg.end);
                         ctx.fillRect(sx1, y, Math.max(sx2 - sx1, 1), h);
                     }
 
@@ -2212,10 +2340,10 @@
                 ctx.globalAlpha = 1.0;
 
                 // Y-axis duration ticks (log scale)
-                if (layout.minDur > 0 && layout.maxDur > 0) {
+                if (spanLayout.minDur > 0 && spanLayout.maxDur > 0) {
                     const PAD_TOP = 2, BAR_H_TICK = 4;
                     const usableH = ph - PAD_TOP - 2 - BAR_H_TICK;
-                    const minL = Math.log(layout.minDur), maxL = Math.log(layout.maxDur);
+                    const minL = Math.log(spanLayout.minDur), maxL = Math.log(spanLayout.maxDur);
                     const range = maxL - minL || 1;
                     ctx.fillStyle = "#666";
                     ctx.font = "9px sans-serif";
@@ -2224,23 +2352,23 @@
                     const ticks = [];
                     const decades = [1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9];
                     for (const d of decades) {
-                        if (d >= layout.minDur && d <= layout.maxDur) ticks.push(d);
+                        if (d >= spanLayout.minDur && d <= spanLayout.maxDur) ticks.push(d);
                     }
-                    if (ticks.length < 2) { ticks.push(layout.minDur); ticks.push(layout.maxDur); }
+                    if (ticks.length < 2) { ticks.push(spanLayout.minDur); ticks.push(spanLayout.maxDur); }
                     for (const dur of ticks) {
                         const norm = (Math.log(dur) - minL) / range;
                         let y = PAD_TOP + (1 - norm) * usableH;
                         if (y < 2 || y > ph - 8) continue;
                         ctx.globalAlpha = 0.4;
-                        ctx.fillRect(0, y, barW, 0.5); // faint horizontal line
+                        ctx.fillRect(LABEL_W, y, drawW, 0.5); // faint horizontal line
                         ctx.globalAlpha = 0.7;
-                        ctx.fillText(formatHumanDuration(dur), 2, y - 2);
+                        ctx.fillText(formatHumanDuration(dur), LABEL_W + 2, y - 2);
                     }
                 }
 
                 const info = document.getElementById("span-panel-info");
                 const focusNote = focusedSpanId != null ? " (focused)" : "";
-                info.textContent = `${renderSet.length} spans · ${layout.buckets.length} clusters${focusNote}`;
+                info.textContent = `${renderSet.length} spans · ${spanLayout.buckets.length} clusters${focusNote}`;
 
                 // Update left label: show focused span's fields or default "Spans"
                 const label = document.getElementById("span-panel-label");
@@ -2403,6 +2531,16 @@
                 renderAll();
             });
 
+            /**
+             * Render the per-task detail panel (polls, wake→poll delays,
+             * lifespan) for the currently selected task.
+             *
+             * Adheres to the TIME-PANEL LAYOUT INVARIANT: the canvas fills
+             * the panel, drawing is shifted by LABEL_W.  This function still
+             * uses the inline LABEL_W-offset pattern rather than
+             * `timePanelLayout`; both produce identical output as long as the
+             * invariant is preserved.
+             */
             function renderTaskDetail(scrollbarW) {
                 const panel = document.getElementById("task-detail");
                 const c = document.getElementById("task-detail-canvas");
@@ -2683,6 +2821,13 @@
                 ctx.fillText("▲ = wake", 12, bandTop + bandH + 18);
             }
 
+            /**
+             * Render the global + per-worker queue depth chart at the bottom.
+             *
+             * Adheres to the TIME-PANEL LAYOUT INVARIANT: LABEL_W reserved on
+             * the left for the axis labels, `scrollbarW` on the right so the
+             * chart's right edge matches the worker lanes.
+             */
             function renderQueueChart(drawW, scrollbarW) {
                 const c = queueCanvas;
                 const parent = c.parentElement;
@@ -3281,33 +3426,73 @@
                     hideStackPopup();
                 }
 
-                // Check if a span bar was clicked
-                let clickedSpanId = null;
+                // A click in a worker lane selects the task (task detail
+                // pane pops up) and, as a bonus, focuses the span panel on
+                // the outermost span containing the clicked instant — so the
+                // user sees the span hierarchy for that poll without having
+                // to click into the span panel separately.
+                //
+                // Regression note: an earlier version of this handler
+                // treated ANY overlapping span as a "span bar click" and
+                // silently cleared `selectedTaskId`, which broke the
+                // task-selection flow once every poll had overlapping spans.
+                // Always select the task here; the span-focus logic is
+                // purely additive.
+
+                // Find a span on this worker whose time range contains `ns`,
+                // then walk up the parent chain to the outermost ancestor
+                // that still contains `ns` — that's the span we focus on.
+                let containingSpan = null;
                 for (const s of allSpans) {
                     if (s.end < ns || s.start > ns) continue;
                     for (const seg of s.segments) {
                         if (seg.workerId === w && seg.start <= ns && seg.end >= ns) {
-                            clickedSpanId = s.spanId;
+                            containingSpan = s;
                             break;
                         }
                     }
-                    if (clickedSpanId != null) break;
+                    if (containingSpan) break;
                 }
 
-                if (clickedSpanId != null) {
-                    selectedSpanId = (clickedSpanId !== selectedSpanId) ? clickedSpanId : null;
-                    selectedSpanIds = new Set();
-                    if (selectedSpanId != null) selectedSpanIds.add(selectedSpanId);
-                    focusedSpanId = null;
+                let newFocusedSpanId = null;
+                const newSelectedSpanIds = new Set();
+                if (containingSpan) {
+                    // Walk up to the outermost ancestor whose [start,end]
+                    // still contains the click.  Build the highlight set
+                    // along the way.
+                    let cur = containingSpan;
+                    let outermost = containingSpan;
+                    newSelectedSpanIds.add(cur.spanId);
+                    while (cur.parentSpanId != null) {
+                        const parentSpan = spansById.get(cur.parentSpanId);
+                        if (!parentSpan) break;
+                        if (parentSpan.start <= ns && parentSpan.end >= ns) {
+                            outermost = parentSpan;
+                            newSelectedSpanIds.add(parentSpan.spanId);
+                            cur = parentSpan;
+                        } else {
+                            break;
+                        }
+                        // Defense against cycles in malformed data:
+                        if (newSelectedSpanIds.size > 1024) break;
+                    }
+                    newFocusedSpanId = outermost.spanId;
+                }
+
+                // Toggle task selection: clicking the same task again clears
+                // both the task and the span focus (a single un-click).
+                const togglingOff = found && found === selectedTaskId;
+                if (togglingOff) {
                     selectedTaskId = null;
-                    renderAll();
-                    return;
+                    selectedSpanId = null;
+                    selectedSpanIds = new Set();
+                    focusedSpanId = null;
+                } else {
+                    selectedTaskId = found || null;
+                    selectedSpanId = newFocusedSpanId;
+                    selectedSpanIds = newSelectedSpanIds;
+                    focusedSpanId = newFocusedSpanId;
                 }
-
-                selectedSpanId = null;
-                selectedSpanIds = new Set();
-                focusedSpanId = null;
-                selectedTaskId = (found && found !== selectedTaskId) ? found : null;
                 renderAll();
             });
 
@@ -3908,6 +4093,32 @@
             });
 
             // ── Tooltip ──
+            /**
+             * Convert a clientX from a mousemove event into the timestamp at
+             * that horizontal position on the shared time axis.  Uses the
+             * lanes container's geometry since every time-based panel has the
+             * same horizontal layout (see TIME-PANEL LAYOUT INVARIANT).
+             *
+             * Returns null if the x falls outside the draw area.
+             */
+            function eventToTimelineNs(clientX) {
+                const rect = lanesContainer.getBoundingClientRect();
+                const mouseX = clientX - rect.left - LABEL_W;
+                const drawW = rect.width - LABEL_W;
+                if (mouseX < 0 || mouseX > drawW) return null;
+                return viewStart + (mouseX / drawW) * (viewEnd - viewStart);
+            }
+
+            /** Schedule a crosshair redraw on the next animation frame. */
+            function scheduleCrosshairRedraw() {
+                if (!queueChartRafId) {
+                    queueChartRafId = requestAnimationFrame(() => {
+                        renderCrosshair();
+                        queueChartRafId = null;
+                    });
+                }
+            }
+
             document
                 .getElementById("main-area")
                 .addEventListener("mousemove", (e) => {
@@ -3916,10 +4127,13 @@
                         mouseNs = null;
                         return;
                     }
-                    // Don't override span panel tooltip
+                    // Over the span panel: it owns its own tooltip, but we
+                    // still want the crosshair to follow the mouse so users
+                    // can correlate spans with the task detail / lanes below.
                     if (e.target.closest && e.target.closest("#span-panel")) {
-                        mouseNs = null;
+                        mouseNs = eventToTimelineNs(e.clientX);
                         lanesContainer.style.cursor = "";
+                        scheduleCrosshairRedraw();
                         return;
                     }
                     const rect = lanesContainer.getBoundingClientRect();
@@ -3938,12 +4152,7 @@
                     mouseNs = ns;
 
                     // Throttle crosshair redraw with RAF
-                    if (!queueChartRafId) {
-                        queueChartRafId = requestAnimationFrame(() => {
-                            renderCrosshair();
-                            queueChartRafId = null;
-                        });
-                    }
+                    scheduleCrosshairRedraw();
 
                     const laneIdx = Math.floor(
                         (mouseY + lanesContainer.scrollTop) / LANE_H,
