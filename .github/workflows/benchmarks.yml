@@ -128,14 +128,18 @@ jobs:
               --branch "$BENCHER_BRANCH" \
               --testbed ubuntu-latest \
               --adapter rust_iai_callgrind \
+              --ci-only-thresholds \
               "cargo bench -p $pkg --bench $bench"
           done
 
   # iai micro tier on PRs: regression gate against main baseline on
   # Bencher (>1% instruction-count delta fails + PR comment + dashboard
   # alarm). Same-repo PRs only (requires BENCHER_API_TOKEN).
+  # Skipped on PRs labeled `skip-bench`: escape hatch for changes that
+  # knowingly regress (e.g. correctness fixes, intentional cost added).
+  # After such a PR merges, iai_main posts the new main values updating the baseline.
   iai_micro:
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && !contains(github.event.pull_request.labels.*.name, 'skip-bench')
     name: iai micro benches (PR gate)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -179,6 +183,7 @@ jobs:
               --threshold-measure instructions \
               --threshold-test percentage \
               --threshold-upper-boundary 0.01 \
+              --ci-only-thresholds \
               --error-on-alert \
               --github-actions '${{ secrets.GITHUB_TOKEN }}' \
               "cargo bench -p $pkg --bench $bench"
