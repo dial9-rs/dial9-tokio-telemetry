@@ -106,34 +106,18 @@ fn run_fields(h: &Harness) {
     }
 }
 
-#[library_benchmark]
-#[bench::baseline(setup_tracing_only())]
-fn tracing_only_baseline(h: Harness) -> i32 {
-    black_box(run_baseline(&h))
+// Each bench fn returns its Harness so iai-callgrind's `teardown` callback
+// drops it outside the measurement region.
+fn drop_harness(h: Harness) {
+    drop(h);
+}
+
+fn drop_harness_with_depth(input: (Harness, usize)) {
+    drop(input);
 }
 
 fn setup_tracing_only_with_depth(depth: usize) -> (Harness, usize) {
     (setup_tracing_only(), depth)
-}
-
-#[library_benchmark]
-#[bench::depth_1(setup_tracing_only_with_depth(1))]
-#[bench::depth_3(setup_tracing_only_with_depth(3))]
-#[bench::depth_5(setup_tracing_only_with_depth(5))]
-fn tracing_only_depth((h, depth): (Harness, usize)) {
-    run_depth(&h, depth)
-}
-
-#[library_benchmark]
-#[bench::with_fields(setup_tracing_only())]
-fn tracing_only_with_fields(h: Harness) {
-    run_fields(&h)
-}
-
-#[library_benchmark]
-#[bench::baseline(setup_with_dial9())]
-fn with_dial9_baseline(h: Harness) -> i32 {
-    black_box(run_baseline(&h))
 }
 
 fn setup_with_dial9_with_depth(depth: usize) -> (Harness, usize) {
@@ -141,17 +125,49 @@ fn setup_with_dial9_with_depth(depth: usize) -> (Harness, usize) {
 }
 
 #[library_benchmark]
-#[bench::depth_1(setup_with_dial9_with_depth(1))]
-#[bench::depth_3(setup_with_dial9_with_depth(3))]
-#[bench::depth_5(setup_with_dial9_with_depth(5))]
-fn with_dial9_depth((h, depth): (Harness, usize)) {
-    run_depth(&h, depth)
+#[bench::baseline(setup = setup_tracing_only, teardown = drop_harness)]
+fn tracing_only_baseline(h: Harness) -> Harness {
+    let _ = black_box(run_baseline(&h));
+    h
 }
 
 #[library_benchmark]
-#[bench::with_fields(setup_with_dial9())]
-fn with_dial9_with_fields(h: Harness) {
-    run_fields(&h)
+#[bench::depth_1(args = (1,), setup = setup_tracing_only_with_depth, teardown = drop_harness_with_depth)]
+#[bench::depth_3(args = (3,), setup = setup_tracing_only_with_depth, teardown = drop_harness_with_depth)]
+#[bench::depth_5(args = (5,), setup = setup_tracing_only_with_depth, teardown = drop_harness_with_depth)]
+fn tracing_only_depth(input: (Harness, usize)) -> (Harness, usize) {
+    run_depth(&input.0, input.1);
+    input
+}
+
+#[library_benchmark]
+#[bench::with_fields(setup = setup_tracing_only, teardown = drop_harness)]
+fn tracing_only_with_fields(h: Harness) -> Harness {
+    run_fields(&h);
+    h
+}
+
+#[library_benchmark]
+#[bench::baseline(setup = setup_with_dial9, teardown = drop_harness)]
+fn with_dial9_baseline(h: Harness) -> Harness {
+    let _ = black_box(run_baseline(&h));
+    h
+}
+
+#[library_benchmark]
+#[bench::depth_1(args = (1,), setup = setup_with_dial9_with_depth, teardown = drop_harness_with_depth)]
+#[bench::depth_3(args = (3,), setup = setup_with_dial9_with_depth, teardown = drop_harness_with_depth)]
+#[bench::depth_5(args = (5,), setup = setup_with_dial9_with_depth, teardown = drop_harness_with_depth)]
+fn with_dial9_depth(input: (Harness, usize)) -> (Harness, usize) {
+    run_depth(&input.0, input.1);
+    input
+}
+
+#[library_benchmark]
+#[bench::with_fields(setup = setup_with_dial9, teardown = drop_harness)]
+fn with_dial9_with_fields(h: Harness) -> Harness {
+    run_fields(&h);
+    h
 }
 
 library_benchmark_group!(
