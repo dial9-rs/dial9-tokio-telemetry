@@ -72,7 +72,7 @@ jobs:
         run: |
           sudo sysctl kernel.perf_event_paranoid=1
           sudo sysctl kernel.kptr_restrict=0
-      - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
+      - uses: bencherdev/bencher@fa25a72c516046b4c0e31659bef70c5266b0f94d # v0.6.4
       - name: Run benchmark
         run: |
           bencher run \
@@ -120,7 +120,7 @@ jobs:
       - name: Install iai-callgrind-runner (prebuilt via binstall)
         if: steps.runner_cache.outputs.cache-hit != 'true'
         run: cargo binstall iai-callgrind-runner --version ${{ env.IAI_CALLGRIND_VERSION }} --no-confirm --locked
-      - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
+      - uses: bencherdev/bencher@fa25a72c516046b4c0e31659bef70c5266b0f94d # v0.6.4
       - name: Run iai benches → Bencher
         env:
           # workflow_dispatch can override target branch (e.g. seed Bencher's
@@ -179,7 +179,7 @@ jobs:
       - name: Install iai-callgrind-runner (prebuilt via binstall)
         if: steps.runner_cache.outputs.cache-hit != 'true'
         run: cargo binstall iai-callgrind-runner --version ${{ env.IAI_CALLGRIND_VERSION }} --no-confirm --locked
-      - uses: bencherdev/bencher@0f8f620172ccd6225d40a7590598eb7b41718af8 # v0.6.2
+      - uses: bencherdev/bencher@fa25a72c516046b4c0e31659bef70c5266b0f94d # v0.6.4
       - name: Run iai benches → Bencher (gated vs main)
         run: |
           set -euo pipefail
