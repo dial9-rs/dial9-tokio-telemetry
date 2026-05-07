@@ -17,7 +17,7 @@ This design depends on the entry descriptor system in metrique (see `docs/entry-
 - **`dial9::Context`**: a `#[doc(hidden)]` dial9-internal field tag carried by `Dial9Context`'s own fields. Users do not interact with it directly; they flatten `Dial9Context` into their entry, and the sink walks the descriptor on first-use to find fields tagged `Context`. The name is not a stable guarantee; a future typed source-extraction mechanism would replace this tag-based discovery.
 - **`Dial9EntryWriter`**: the dial9 adapter that walks `Entry::write` on the flush thread. Uses the cached context- and payload-field index sets to route each callback to either the event header (context) or the payload encoder (Emit), or to skip.
 - **First-use per-descriptor**: the moment a `Dial9Stream` first sees an entry with a given `DescriptorId`. Dial9 walks the descriptor once, caches the index sets and any diagnostics, and uses the cache for every subsequent entry of that type.
-- **Trace format**: dial9's wire format, defined in `dial9-trace-format`. Carries schema frames (one per entry type), event frames (one per emission), and pool frames (deduplicated strings and stack frames). Extended in this design with schema-level annotations and two new field type variants (`List`, `Map`).
+- **Trace format**: dial9's wire format, defined in `dial9-trace-format/SPEC.md`. Carries schema frames (one per entry type), event frames (one per emission), pool frames (deduplicated strings and stack frames), and schema-annotation frames (per-field metadata). This design relies on two format features that ship independently of the integration: `TAG_SCHEMA_ANNOTATIONS` and the `List` / `Map` field types.
 
 ## User-facing API
 
@@ -272,22 +272,12 @@ The viewer is free to render this data however fits: timeline spans, grouped lan
 
 ## Trace format additions
 
-Two additions to `dial9-trace-format` enable the integration without per-sink extensions:
+The integration depends on two trace-format extensions, both now tracked in `dial9-trace-format/SPEC.md`:
 
-### Schema-level annotations
+- **Schema annotations frame** (`TAG_SCHEMA_ANNOTATIONS = 0x07`): carries per-field `(key, value)` string tuples attached to a previously-registered schema by `type_id` and `field_index`. Dial9 uses it for units today (`metrique.unit` = `microseconds`) and will use it for future display hints, semantic-convention labels, privacy tiers, and `dial9.kpi` markers without further format changes. See `dial9-trace-format/SPEC.md` section "Schema Annotations Frame" for the wire layout.
+- **Typed list and map field types** (`FieldType::List`, `FieldType::Map`, and their `Optional` forms): model `Vec<T>` and `Flex<(String, T)>` respectively, producing one schema per entry type regardless of runtime cardinality. Inner types (including inner `Optional` and nested containers) are expressed recursively in the schema encoding. See `dial9-trace-format/SPEC.md` sections "Field Types" and "List Encoding" / "Map Encoding" for the wire layout.
 
-A new annotation section on `SchemaEntry` that carries repeated `(field_index, key, value)` tuples. Used for units today, usable for future display hints, semantic-convention labels, aggregation hints, and privacy labels without further format changes.
-
-Units encode as `("metrique.unit", "microseconds")` on the annotated field. Fields without annotations cost nothing.
-
-### Typed lists and maps
-
-Two new `FieldType` variants cover the metrique shapes that cannot be represented as scalars:
-
-- `FieldType::List(FieldType)` carries `[T]`-style list data. The element type is sealed at schema registration; the encoder does not write per-element type tags, and the decoder reads each element using the schema-bound element type. A producer that writes data inconsistent with the schema produces a corrupt stream, the same guarantee the rest of the format relies on for existing fields. Recursion is forbidden: `FieldType::List` is not a valid element type.
-- `FieldType::Map { key: FieldType, value: FieldType }` represents a metrique `Flex<(String, T)>` as one schema field carrying a map at encode time, instead of one schema per runtime key. Wire layout: `<count> <repeated key value>`, using the existing scalar encodings determined by the `key` and `value` types declared in the schema. Keys and values are sealed at schema registration. Recursion is forbidden.
-
-Pooled-string positions are expressed by setting `FieldType::PooledString` as the key, value, or list element type. The `dial9::Interned` field tag on a metrique `Flex` or list field selects the pooled variant per-position as needed.
+Pooled-string positions are selected per-position by using the existing pooled-string field type as the list element or map value. The `dial9::Interned` field tag on a `Vec` or `Flex` field drives that choice during schema registration.
 
 ## Error handling and resilience
 
@@ -335,4 +325,4 @@ Note: the initial release does not have a binary-wide "sink attached, no dial9-c
 - **Per-sink compile-time wire plans**, once metrique can emit them, to replace the flush-thread `Entry::write` walk with a direct encode.
 - **More schema annotations**: display hints, aggregation hints, privacy labels, `dial9.kpi` markers for fields that should be graphed. Same mechanism as units.
 - **Heterogeneous `Flex` values** once metrique carries a tagged runtime value model for them.
-- **Nested container widening**: once metrique lifts its one-optional-layer restriction on `List` and `Flex.value`, dial9's `FieldType::List` and `FieldType::Map` wire variants accept the richer shapes with no format change (they already recurse at the type level).
+- **Nested container widening**: once metrique lifts its one-optional-layer restriction on `List` and `Flex.value`, dial9's `List` and `Map` wire variants already accept the richer shapes (they recurse at the type level).
