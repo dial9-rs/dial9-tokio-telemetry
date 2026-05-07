@@ -23,11 +23,7 @@ pub struct FieldAnnotation {
 
 impl FieldAnnotation {
     /// Create a new field annotation.
-    pub fn new(
-        field_index: u16,
-        key: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn new(field_index: u16, key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             field_index,
             key: Cow::Owned(key.into()),
