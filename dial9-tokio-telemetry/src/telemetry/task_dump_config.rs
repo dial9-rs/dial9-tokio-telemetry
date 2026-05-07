@@ -24,6 +24,12 @@ pub struct TaskDumpConfig {
     /// longer idles are very likely to trigger. Defaults to 10ms.
     #[builder(default = DEFAULT_IDLE_THRESHOLD)]
     idle_threshold: Duration,
+
+    /// Optional fixed seed for the per-task PRNG. When set, task dump sampling
+    /// becomes deterministic (given the same task IDs and idle durations).
+    /// Intended for testing. When `None` (default), each task seeds its PRNG
+    /// from a timestamp for production uniqueness.
+    rng_seed: Option<u64>,
 }
 
 impl Default for TaskDumpConfig {
@@ -36,5 +42,10 @@ impl TaskDumpConfig {
     /// Mean idle duration for geometric sampling.
     pub fn idle_threshold(&self) -> Duration {
         self.idle_threshold
+    }
+
+    /// Optional fixed RNG seed for deterministic sampling.
+    pub fn rng_seed(&self) -> Option<u64> {
+        self.rng_seed
     }
 }

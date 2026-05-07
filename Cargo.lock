@@ -1490,7 +1490,6 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-sdk-s3-transfer-manager",
- "backtrace",
  "bon",
  "bytes",
  "clap",

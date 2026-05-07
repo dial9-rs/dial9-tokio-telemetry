@@ -107,9 +107,16 @@ pin_project! {
 impl<F> TaskDumped<F> {
     pub(crate) fn new(inner: F, shared: Arc<SharedState>, task_id: TaskId) -> Self {
         let sample_mean_ns = shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed);
-        // Seed the PRNG from the task ID + a timestamp for uniqueness across tasks.
-        let seed = (task_id.to_u64()).wrapping_mul(0x517cc1b727220a95)
-            ^ crate::telemetry::events::clock_monotonic_ns();
+        let base_seed = shared.task_dump_rng_seed.load(Ordering::Relaxed);
+        // When a fixed seed is configured (non-zero), use it directly for
+        // deterministic tests. Otherwise use task_id + timestamp for
+        // production uniqueness across tasks.
+        let seed = if base_seed != 0 {
+            base_seed
+        } else {
+            (task_id.to_u64()).wrapping_mul(0x517cc1b727220a95)
+                ^ crate::telemetry::events::clock_monotonic_ns()
+        };
         let mut rng = SplitMix64::new(seed);
         let next_sample_ns = rng.draw_exponential_ns(sample_mean_ns);
         Self {

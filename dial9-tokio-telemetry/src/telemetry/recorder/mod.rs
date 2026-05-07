@@ -1479,6 +1479,9 @@ impl TelemetryCore {
             shared
                 .task_dump_idle_threshold_ns
                 .store(cfg.idle_threshold().as_nanos() as u64, Ordering::Relaxed);
+            if let Some(seed) = cfg.rng_seed() {
+                shared.task_dump_rng_seed.store(seed, Ordering::Relaxed);
+            }
         }
         #[allow(unused_mut)]
         let mut event_writer = EventWriter::new(Box::new(writer));
