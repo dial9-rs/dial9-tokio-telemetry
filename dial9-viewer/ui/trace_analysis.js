@@ -517,11 +517,11 @@
    * SpanCloseEvent finalizes a span and enables span ID recycling.
    * @param {Array<{name: string, timestamp: number, fields: Object}>} customEvents
    * @returns {{
-   *   allSpans: Array<{start: number, end: number, spanId: number, spanName: string, fields: Object, parentSpanId: number|null, segments: Array<{start: number, end: number, workerId: number}>, activeNs: number, depth: number}>,
-   *   spanMeta: Map<number, {spanName: string, fields: Object, parentSpanId: number|null}>,
+   *   allSpans: Array<{start: number, end: number, spanId: string, spanName: string, fields: Object, parentSpanId: string|null, segments: Array<{start: number, end: number, workerId: number}>, activeNs: number, depth: number}>,
+   *   spanMeta: Map<string, {spanName: string, fields: Object, parentSpanId: string|null}>,
    *   maxDepth: number,
-   *   unmatchedSpans: Array<{start: number, spanId: number, workerId: number, spanName: string, fields: Object, parentSpanId: number|null}>,
-   *   childrenByParent: Map<number|null, number[]>,
+   *   unmatchedSpans: Array<{start: number, spanId: string, workerId: number, spanName: string, fields: Object, parentSpanId: string|null}>,
+   *   childrenByParent: Map<string|null, string[]>,
    * }}
    */
   function buildSpanData(customEvents) {
@@ -559,6 +559,10 @@
         for (const [k, val] of Object.entries(v)) {
           if (!BASE_ENTER_FIELDS.has(k)) fields[k] = val;
         }
+
+        // Guard: if this span already has an open enter (e.g. entered on a
+        // different worker before exiting), skip to avoid losing the first enter.
+        if (openEnters.has(spanId)) continue;
 
         openEnters.set(spanId, { timestamp: ev.timestamp, workerId });
 
@@ -670,9 +674,9 @@
   /**
    * Collect a set of span IDs containing the given seeds plus all their descendants.
    * Cycle-safe.
-   * @param {number[]} seedIds
-   * @param {Map<number|null, number[]>} childrenByParent
-   * @returns {Set<number>}
+   * @param {string[]} seedIds
+   * @param {Map<string|null, string[]>} childrenByParent
+   * @returns {Set<string>}
    */
   function collectDescendants(seedIds, childrenByParent) {
     const result = new Set();
@@ -693,7 +697,7 @@
    * Select which spans to render based on focus state.
    * - No focus: return only root-like spans (parentSpanId is null or parent not in allSpans).
    * - Focused: return the focused span + all its descendants.
-   * @param {{ allSpans: Array, focusedSpanId: number|null, childrenByParent: Map }} opts
+   * @param {{ allSpans: Array, focusedSpanId: string|null, childrenByParent: Map }} opts
    * @returns {Array}
    */
   function selectSpanRenderSet({ allSpans, focusedSpanId, childrenByParent }) {
@@ -713,6 +717,7 @@
    */
   function computeSpanLayout({ spans, viewStart, viewEnd, drawW, panelH, clusterXPx, barH }) {
     if (spans.length === 0) return { buckets: [], minDur: 0, maxDur: 0 };
+    if (viewEnd === viewStart) return { buckets: [], minDur: 0, maxDur: 0 };
 
     const PAD_TOP = 2;
     const PAD_BOT = 2;

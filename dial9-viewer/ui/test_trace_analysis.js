@@ -728,6 +728,38 @@ async function main() {
     pass("Multiple polls grouped into single span with segments");
   }
 
+  function testBuildSpanDataOutOfOrder() {
+    // Events arrive out of order across workers — buildSpanData sorts by timestamp.
+    // Also tests the defensive guard: span 1 enters on worker 0, then enters again
+    // on worker 1 before exiting on worker 0 (the second enter should be ignored).
+    const customEvents = [
+      // Worker 1 events arrive first in the array but have later timestamps
+      { name: "SpanEnterEvent", timestamp: 2000, fields: { worker_id: 1, span_id: 2, parent_span_id: null, span_name: "b" } },
+      { name: "SpanExitEvent",  timestamp: 2500, fields: { worker_id: 1, span_id: 2, span_name: "b" } },
+      // Worker 0 events arrive second but have earlier timestamps
+      { name: "SpanEnterEvent", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "a" } },
+      // Duplicate enter on worker 1 before exit on worker 0 (should be ignored)
+      { name: "SpanEnterEvent", timestamp: 1200, fields: { worker_id: 1, span_id: 1, parent_span_id: null, span_name: "a" } },
+      { name: "SpanExitEvent",  timestamp: 1500, fields: { worker_id: 0, span_id: 1, span_name: "a" } },
+      { name: "SpanCloseEvent", timestamp: 3000, fields: { span_id: 1 } },
+      { name: "SpanCloseEvent", timestamp: 3001, fields: { span_id: 2 } },
+    ];
+    const { allSpans } = buildSpanData(customEvents);
+    if (allSpans.length !== 2) fail(`Expected 2 spans, got ${allSpans.length}`);
+    const spanA = allSpans.find(s => s.spanName === "a");
+    const spanB = allSpans.find(s => s.spanName === "b");
+    if (!spanA || !spanB) fail("Expected spans 'a' and 'b'");
+    // Span A: entered at 1000, exited at 1500 (duplicate enter at 1200 ignored)
+    if (spanA.segments.length !== 1) fail(`Expected 1 segment for 'a', got ${spanA.segments.length}`);
+    if (spanA.segments[0].start !== 1000) fail(`Expected segment start=1000, got ${spanA.segments[0].start}`);
+    if (spanA.segments[0].end !== 1500) fail(`Expected segment end=1500, got ${spanA.segments[0].end}`);
+    // Span B: entered at 2000, exited at 2500
+    if (spanB.segments[0].start !== 2000 || spanB.segments[0].end !== 2500) {
+      fail(`Span B segment wrong: ${spanB.segments[0].start}-${spanB.segments[0].end}`);
+    }
+    pass("Out-of-order events sorted correctly; duplicate enter on different worker ignored");
+  }
+
   // ── Regression: open PollStart at trace end must not create phantom poll (#194) ──
 
   function testOpenPollStartDiscarded() {
@@ -802,6 +834,7 @@ async function main() {
   testBuildSpanDataUnmatched();
   testBuildSpanDataChildrenIndex();
   testBuildSpanDataMultiplePolls();
+  testBuildSpanDataOutOfOrder();
 
   console.log("\nspan pane layout:");
   testCollectDescendants();
