@@ -90,9 +90,9 @@ fn tracepoint_sched_switch_e2e() {
     for frame in &frames {
         match frame {
             DecodedFrame::Schema(entry) => {
-                assert_eq!(entry.name, "sched_switch");
-                assert!(entry.has_timestamp);
-                assert_eq!(entry.fields.len(), tp.fields.len());
+                assert_eq!(entry.name(), "sched_switch");
+                assert!(entry.has_timestamp());
+                assert_eq!(entry.fields().len(), tp.fields.len());
                 schema_count += 1;
             }
             DecodedFrame::Event {

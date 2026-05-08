@@ -13,6 +13,7 @@ pub mod cpu_profile;
 pub(crate) mod events;
 pub(crate) mod format;
 pub(crate) mod recorder;
+pub mod task_dump_config;
 pub(crate) mod task_metadata;
 pub(crate) mod writer;
 
@@ -23,10 +24,11 @@ pub use format::{
     WorkerUnparkEvent,
 };
 pub use recorder::{
-    HasTracePath, NoTracePath, RuntimeTelemetryHandle, TelemetryCore, TelemetryCoreBuilder,
-    TelemetryGuard, TelemetryHandle, TelemetryRuntimeError, TraceRuntimeCoreBuilder, TracedRuntime,
-    TracedRuntimeBuilder, current_worker_id, spawn,
+    HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset, RuntimeTelemetryHandle,
+    TelemetryCore, TelemetryCoreBuilder, TelemetryGuard, TelemetryHandle, TelemetryRuntimeError,
+    TraceRuntimeCoreBuilder, TracedRuntime, TracedRuntimeBuilder, current_worker_id, spawn,
 };
+pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
 pub use writer::{NullWriter, RotatingWriter, TraceWriter};
 

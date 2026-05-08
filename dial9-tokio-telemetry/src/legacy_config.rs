@@ -16,9 +16,29 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::telemetry::recorder::{
-    HasTracePath, TelemetryGuard, TracedRuntime, TracedRuntimeBuilder,
+    HasTracePath, PipelineUnset, TelemetryGuard, TracedRuntime, TracedRuntimeBuilder,
 };
 use crate::telemetry::writer::RotatingWriter;
+
+/// Type-erased terminal step for a [`TracedRuntimeBuilder`]: hides the
+/// pipeline-mode marker `M` so [`Dial9Config`] can stay non-generic.
+trait BuildTracedRuntime: Send {
+    fn build_and_start(
+        self: Box<Self>,
+        tokio_builder: tokio::runtime::Builder,
+        writer: RotatingWriter,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>;
+}
+
+impl<M: Send + 'static> BuildTracedRuntime for TracedRuntimeBuilder<HasTracePath, M> {
+    fn build_and_start(
+        self: Box<Self>,
+        tokio_builder: tokio::runtime::Builder,
+        writer: RotatingWriter,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        TracedRuntimeBuilder::<HasTracePath, M>::build_and_start(*self, tokio_builder, writer)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Dial9Config — opaque value the macro consumes
@@ -39,7 +59,7 @@ enum Inner {
         max_total_size: u64,
         rotation_period: Option<Duration>,
         tokio_builder: tokio::runtime::Builder,
-        runtime_builder: TracedRuntimeBuilder<HasTracePath>,
+        runtime_builder: Box<dyn BuildTracedRuntime>,
     },
     Disabled {
         tokio_builder: tokio::runtime::Builder,
@@ -86,14 +106,20 @@ impl Dial9Config {
 ///
 /// Created via [`Dial9ConfigBuilder::new`]. Exposes both tokio and dial9
 /// runtime knobs. Call [`.build()`](Self::build) to produce a [`Dial9Config`].
+///
+/// The `M` parameter mirrors the inner [`TracedRuntimeBuilder`]'s
+/// pipeline-mode marker. It defaults to
+/// [`PipelineUnset`](crate::telemetry::PipelineUnset) and transitions when
+/// `with_runtime` returns a builder in a different mode (e.g. after
+/// `.with_s3_uploader(...)` or `.with_custom_pipeline(...)`).
 #[derive(Debug)]
-pub struct Dial9ConfigBuilder {
+pub struct Dial9ConfigBuilder<M = PipelineUnset> {
     base_path: PathBuf,
     max_file_size: u64,
     max_total_size: u64,
     rotation_period: Option<Duration>,
     tokio_builder: tokio::runtime::Builder,
-    runtime_builder: TracedRuntimeBuilder<HasTracePath>,
+    runtime_builder: TracedRuntimeBuilder<HasTracePath, M>,
 }
 
 impl Dial9ConfigBuilder {
@@ -122,7 +148,9 @@ impl Dial9ConfigBuilder {
     pub fn disabled() -> DisabledDial9ConfigBuilder {
         DisabledDial9ConfigBuilder::new()
     }
+}
 
+impl<M: Send + 'static> Dial9ConfigBuilder<M> {
     /// Set the time-based rotation period for the writer.
     pub fn rotation_period(mut self, period: Duration) -> Self {
         self.rotation_period = Some(period);
@@ -133,16 +161,28 @@ impl Dial9ConfigBuilder {
     ///
     /// The closure receives the staged builder by value and must return it.
     /// Use this to access runtime configuration methods like
-    /// `with_runtime_name` and `with_task_tracking`; see
-    /// [`TracedRuntimeBuilder`] for the full list.
+    /// `with_runtime_name`, `with_task_tracking`, `with_s3_uploader`, or
+    /// `with_custom_pipeline`; see [`TracedRuntimeBuilder`] for the full list.
+    ///
+    /// Closures may transition the pipeline-mode marker (`M`) — e.g. calling
+    /// `.with_s3_uploader(...)` returns a builder in
+    /// [`PipelineS3`](crate::telemetry::PipelineS3) mode. The transition is
+    /// reflected on the returned `Dial9ConfigBuilder<N>`.
     ///
     /// Can be called multiple times; each call composes onto the prior state.
-    pub fn with_runtime<F>(mut self, f: F) -> Self
+    pub fn with_runtime<F, N>(self, f: F) -> Dial9ConfigBuilder<N>
     where
-        F: FnOnce(TracedRuntimeBuilder<HasTracePath>) -> TracedRuntimeBuilder<HasTracePath>,
+        F: FnOnce(TracedRuntimeBuilder<HasTracePath, M>) -> TracedRuntimeBuilder<HasTracePath, N>,
+        N: Send + 'static,
     {
-        self.runtime_builder = f(self.runtime_builder);
-        self
+        Dial9ConfigBuilder {
+            base_path: self.base_path,
+            max_file_size: self.max_file_size,
+            max_total_size: self.max_total_size,
+            rotation_period: self.rotation_period,
+            tokio_builder: self.tokio_builder,
+            runtime_builder: f(self.runtime_builder),
+        }
     }
 
     /// Customize the underlying [`tokio::runtime::Builder`].
@@ -171,7 +211,7 @@ impl Dial9ConfigBuilder {
             max_total_size: self.max_total_size,
             rotation_period: self.rotation_period,
             tokio_builder: self.tokio_builder,
-            runtime_builder: self.runtime_builder,
+            runtime_builder: Box::new(self.runtime_builder),
         })
     }
 }

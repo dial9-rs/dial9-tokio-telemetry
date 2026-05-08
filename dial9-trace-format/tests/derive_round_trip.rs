@@ -126,7 +126,7 @@ fn kitchen_sink_all_field_types() {
         .unwrap();
 
     let schema = schema::<KitchenSink>();
-    let decoded = KitchenSink::decode(ts, event, &schema.fields).unwrap();
+    let decoded = KitchenSink::decode(ts, event, schema.fields()).unwrap();
 
     assert_eq!(decoded.a_u8, 255);
     assert_eq!(decoded.b_u16, 65535);
@@ -187,7 +187,7 @@ fn kitchen_sink_zero_and_empty_values() {
         .unwrap();
 
     let schema = schema::<KitchenSink>();
-    let decoded = KitchenSink::decode(ts, event, &schema.fields).unwrap();
+    let decoded = KitchenSink::decode(ts, event, schema.fields()).unwrap();
 
     assert_eq!(decoded.a_u8, 0);
     assert_eq!(decoded.b_u16, 0);
@@ -219,7 +219,7 @@ fn empty_struct_round_trip() {
     assert_eq!(events.len(), 2);
     let schema = schema::<Empty>();
     for (ts, values) in &events {
-        let decoded = Empty::decode(*ts, values, &schema.fields).unwrap();
+        let decoded = Empty::decode(*ts, values, schema.fields()).unwrap();
         let _ = decoded; // just verify it decodes
     }
 }
@@ -240,7 +240,7 @@ fn multi_event_stream_preserves_order() {
     assert_eq!(events.len(), 100);
     let schema = schema::<SingleVarint>();
     for (i, (ts, values)) in events.iter().enumerate() {
-        let decoded = SingleVarint::decode(*ts, values, &schema.fields).unwrap();
+        let decoded = SingleVarint::decode(*ts, values, schema.fields()).unwrap();
         assert_eq!(decoded.v, i as u64);
     }
 }
@@ -290,12 +290,12 @@ fn interleaved_event_types() {
     for i in 0..20 {
         let (tid, ts, vals) = &events[i * 2];
         assert_eq!(*tid, varint_tid);
-        let sv = SingleVarint::decode(*ts, vals, &sv_schema.fields).unwrap();
+        let sv = SingleVarint::decode(*ts, vals, sv_schema.fields()).unwrap();
         assert_eq!(sv.v, i as u64);
 
         let (tid, ts, vals) = &events[i * 2 + 1];
         assert_eq!(*tid, strings_tid);
-        let decoded = TwoStrings::decode(*ts, vals, &ts_schema.fields).unwrap();
+        let decoded = TwoStrings::decode(*ts, vals, ts_schema.fields()).unwrap();
         assert_eq!(decoded.a, format!("a{i}"));
         assert_eq!(decoded.b, format!("b{i}"));
     }
@@ -351,17 +351,17 @@ fn interleaved_string_pools() {
     assert_eq!(events.len(), 3);
 
     let schema = schema::<MultiPool>();
-    let e0 = MultiPool::decode(events[0].0, events[0].1, &schema.fields).unwrap();
+    let e0 = MultiPool::decode(events[0].0, events[0].1, schema.fields()).unwrap();
     assert_eq!(e0.x, id_a);
     assert_eq!(e0.y, id_a);
     assert_eq!(e0.z, id_a);
 
-    let e1 = MultiPool::decode(events[1].0, events[1].1, &schema.fields).unwrap();
+    let e1 = MultiPool::decode(events[1].0, events[1].1, schema.fields()).unwrap();
     assert_eq!(e1.x, id_a);
     assert_eq!(e1.y, id_b);
     assert_eq!(e1.z, id_a);
 
-    let e2 = MultiPool::decode(events[2].0, events[2].1, &schema.fields).unwrap();
+    let e2 = MultiPool::decode(events[2].0, events[2].1, schema.fields()).unwrap();
     assert_eq!(e2.x, id_c);
     assert_eq!(e2.y, id_b);
     assert_eq!(e2.z, id_a);
@@ -405,7 +405,7 @@ fn string_pool_deduplication() {
         .unwrap();
 
     let schema = schema::<MultiPool>();
-    let decoded = MultiPool::decode(ts, event, &schema.fields).unwrap();
+    let decoded = MultiPool::decode(ts, event, schema.fields()).unwrap();
     assert_eq!(decoded.x, decoded.y); // same pool ID
     assert_ne!(decoded.x, decoded.z);
 }
@@ -453,7 +453,7 @@ fn stack_frames_edge_cases() {
             .unwrap();
 
         let schema = schema::<FrameEvent>();
-        let decoded = FrameEvent::decode(ts, event, &schema.fields).unwrap();
+        let decoded = FrameEvent::decode(ts, event, schema.fields()).unwrap();
         let decoded_addrs: Vec<u64> = decoded.frames.iter().collect();
         assert_eq!(&decoded_addrs, addrs, "failed for input {addrs:?}");
     }
@@ -497,7 +497,7 @@ fn f64_special_values_round_trip() {
         .unwrap();
 
     let schema = schema::<Floats>();
-    let decoded = Floats::decode(ts, event, &schema.fields).unwrap();
+    let decoded = Floats::decode(ts, event, schema.fields()).unwrap();
     assert_eq!(decoded.a, f64::INFINITY);
     assert_eq!(decoded.b, f64::NEG_INFINITY);
     assert!(decoded.c.is_sign_negative() && decoded.c == 0.0);
@@ -536,7 +536,7 @@ fn f64_nan_round_trip() {
         .unwrap();
 
     let schema = schema::<NanEvent>();
-    let decoded = NanEvent::decode(ts, event, &schema.fields).unwrap();
+    let decoded = NanEvent::decode(ts, event, schema.fields()).unwrap();
     assert!(decoded.v.is_nan());
 }
 
@@ -566,7 +566,7 @@ fn unicode_string_round_trip() {
         .unwrap();
 
     let schema = schema::<TwoStrings>();
-    let decoded = TwoStrings::decode(ts, event, &schema.fields).unwrap();
+    let decoded = TwoStrings::decode(ts, event, schema.fields()).unwrap();
     assert_eq!(decoded.a, "日本語テスト 🎌");
     assert_eq!(decoded.b, "émojis: 🦀🔥💯 and ñ");
 }
@@ -604,7 +604,7 @@ fn large_bytes_field() {
         .unwrap();
 
     let schema = schema::<BlobEvent>();
-    let decoded = BlobEvent::decode(ts, event, &schema.fields).unwrap();
+    let decoded = BlobEvent::decode(ts, event, schema.fields()).unwrap();
     assert_eq!(decoded.data.len(), 64 * 1024);
     assert!(decoded.data.iter().all(|&b| b == 0xAB));
 }
@@ -653,16 +653,16 @@ fn varint_boundary_values() {
     assert_eq!(events.len(), 3);
 
     let schema = schema::<Boundaries>();
-    let d0 = Boundaries::decode(events[0].0, &events[0].1, &schema.fields).unwrap();
+    let d0 = Boundaries::decode(events[0].0, &events[0].1, schema.fields()).unwrap();
     assert_eq!((d0.a, d0.b, d0.c, d0.d), (127, 128, 16383, 16384));
 
-    let d1 = Boundaries::decode(events[1].0, &events[1].1, &schema.fields).unwrap();
+    let d1 = Boundaries::decode(events[1].0, &events[1].1, schema.fields()).unwrap();
     assert_eq!(
         (d1.a, d1.b, d1.c, d1.d),
         (u8::MAX, u16::MAX, u32::MAX, u64::MAX)
     );
 
-    let d2 = Boundaries::decode(events[2].0, &events[2].1, &schema.fields).unwrap();
+    let d2 = Boundaries::decode(events[2].0, &events[2].1, schema.fields()).unwrap();
     assert_eq!((d2.a, d2.b, d2.c, d2.d), (0, 0, 0, 0));
 }
 
@@ -672,10 +672,10 @@ fn decode_wrong_field_count_returns_none() {
     let vals: Vec<FieldValueRef<'_>> = vec![FieldValueRef::Varint(1)];
     let ts_schema = schema::<TwoStrings>();
     // TwoStrings expects 2 fields, giving it 1 should fail
-    assert!(TwoStrings::decode(None, &vals, &ts_schema.fields).is_none());
+    assert!(TwoStrings::decode(None, &vals, ts_schema.fields()).is_none());
     // Empty slice
     let sv_schema = schema::<SingleVarint>();
-    assert!(SingleVarint::decode(None, &[], &sv_schema.fields).is_none());
+    assert!(SingleVarint::decode(None, &[], sv_schema.fields()).is_none());
 }
 
 #[test]
@@ -715,7 +715,7 @@ fn string_map_round_trip() {
     assert_eq!(events.len(), 3);
 
     let schema = schema::<MapEvent>();
-    let d0 = MapEvent::decode(events[0].0, &events[0].1, &schema.fields).unwrap();
+    let d0 = MapEvent::decode(events[0].0, &events[0].1, schema.fields()).unwrap();
     let pairs0: Vec<_> = d0.tags.iter().collect();
     assert_eq!(
         pairs0,
@@ -726,10 +726,10 @@ fn string_map_round_trip() {
         ]
     );
 
-    let d1 = MapEvent::decode(events[1].0, &events[1].1, &schema.fields).unwrap();
+    let d1 = MapEvent::decode(events[1].0, &events[1].1, schema.fields()).unwrap();
     assert_eq!(d1.tags.count(), 0);
 
-    let d2 = MapEvent::decode(events[2].0, &events[2].1, &schema.fields).unwrap();
+    let d2 = MapEvent::decode(events[2].0, &events[2].1, schema.fields()).unwrap();
     let pairs2: Vec<_> = d2.tags.iter().collect();
     assert_eq!(pairs2, vec![("名前", "テスト")]);
 }
@@ -812,23 +812,23 @@ fn many_events_many_types_stress() {
     let c_schema = schema::<TypeC>();
 
     for (idx, (tid, ts, vals)) in events.iter().enumerate() {
-        let schema_name = &dec.registry().get(*tid).unwrap().name;
+        let schema_name = dec.registry().get(*tid).unwrap().name();
         match idx % 3 {
             0 => {
                 assert_eq!(schema_name, a_name);
-                let d = TypeA::decode(*ts, vals, &a_schema.fields).unwrap();
+                let d = TypeA::decode(*ts, vals, a_schema.fields()).unwrap();
                 assert_eq!(d.ts, idx as u64 * 1000);
                 assert_eq!(d.val, idx as u32);
             }
             1 => {
                 assert_eq!(schema_name, b_name);
-                let d = TypeB::decode(*ts, vals, &b_schema.fields).unwrap();
+                let d = TypeB::decode(*ts, vals, b_schema.fields()).unwrap();
                 assert_eq!(d.name, format!("ev{idx}"));
                 assert_eq!(d.flag, idx % 2 == 0);
             }
             2 => {
                 assert_eq!(schema_name, c_name);
-                let d = TypeC::decode(*ts, vals, &c_schema.fields).unwrap();
+                let d = TypeC::decode(*ts, vals, c_schema.fields()).unwrap();
                 assert!((d.x - idx as f64 * 0.1).abs() < f64::EPSILON);
                 assert!((d.y - -(idx as f64)).abs() < f64::EPSILON);
             }
@@ -899,7 +899,7 @@ fn encoder_new_to_with_preallocated_buffer() {
     let (_, events) = decode_events(&data);
     assert_eq!(events.len(), 1);
     let schema = schema::<SingleVarint>();
-    let decoded = SingleVarint::decode(events[0].0, &events[0].1, &schema.fields).unwrap();
+    let decoded = SingleVarint::decode(events[0].0, &events[0].1, schema.fields()).unwrap();
     assert_eq!(decoded.v, 42);
 }
 
@@ -984,7 +984,7 @@ fn for_each_event_with_derive_types() {
     let mut dec = Decoder::new(&bytes).unwrap();
     let mut results = Vec::new();
     dec.for_each_event(|ev| {
-        let decoded = Ev::decode(ev.timestamp_ns, ev.fields, &ev.schema.fields).unwrap();
+        let decoded = Ev::decode(ev.timestamp_ns, ev.fields, ev.schema.fields()).unwrap();
         results.push((
             decoded.timestamp_ns,
             decoded.worker_id,
@@ -1035,7 +1035,7 @@ fn for_each_event_resolves_interned_strings() {
     let mut results = Vec::new();
     dec.for_each_event(|ev| {
         assert_eq!(ev.name, "TaskStart");
-        let decoded = TaskStart::decode(ev.timestamp_ns, ev.fields, &ev.schema.fields).unwrap();
+        let decoded = TaskStart::decode(ev.timestamp_ns, ev.fields, ev.schema.fields()).unwrap();
         // Resolve InternedString → &str via the string pool on RawEvent
         let location = ev.string_pool.get(decoded.spawn_location).unwrap();
         results.push((decoded.task_id, location.to_string()));
@@ -1068,12 +1068,12 @@ fn derive_event_name() {
 fn derive_field_defs() {
     let defs = SpanEvent::field_defs();
     assert_eq!(defs.len(), 3);
-    assert_eq!(defs[0].name, "parent_id");
-    assert_eq!(defs[0].field_type, FieldType::Varint);
-    assert_eq!(defs[1].name, "name");
-    assert_eq!(defs[1].field_type, FieldType::String);
-    assert_eq!(defs[2].name, "duration_ns");
-    assert_eq!(defs[2].field_type, FieldType::Varint);
+    assert_eq!(defs[0].name(), "parent_id");
+    assert_eq!(defs[0].field_type(), FieldType::Varint);
+    assert_eq!(defs[1].name(), "name");
+    assert_eq!(defs[1].field_type(), FieldType::String);
+    assert_eq!(defs[2].name(), "duration_ns");
+    assert_eq!(defs[2].field_type(), FieldType::Varint);
 }
 
 #[derive(TraceEvent)]
@@ -1089,11 +1089,11 @@ struct SmallTypes {
 #[test]
 fn derive_small_int_types_use_fixed_width() {
     let defs = SmallTypes::field_defs();
-    assert_eq!(defs[0].field_type, FieldType::U8, "u8 should be U8");
-    assert_eq!(defs[1].field_type, FieldType::U16, "u16 should be U16");
-    assert_eq!(defs[2].field_type, FieldType::U32, "u32 should be U32");
+    assert_eq!(defs[0].field_type(), FieldType::U8, "u8 should be U8");
+    assert_eq!(defs[1].field_type(), FieldType::U16, "u16 should be U16");
+    assert_eq!(defs[2].field_type(), FieldType::U32, "u32 should be U32");
     assert_eq!(
-        defs[3].field_type,
+        defs[3].field_type(),
         FieldType::Varint,
         "u64 should be Varint"
     );
@@ -1135,14 +1135,14 @@ struct WithOptionalStack {
 fn optional_field_schema_has_optional_flag() {
     let defs = WithOptionalString::field_defs();
     assert!(
-        !defs[0].field_type.is_optional(),
+        !defs[0].field_type().is_optional(),
         "required_id should not be optional"
     );
     assert!(
-        defs[1].field_type.is_optional(),
+        defs[1].field_type().is_optional(),
         "optional_name should be optional"
     );
-    assert_eq!(defs[1].field_type, FieldType::OptionalPooledString);
+    assert_eq!(defs[1].field_type(), FieldType::OptionalPooledString);
 }
 
 #[test]
@@ -1252,7 +1252,7 @@ fn optional_interned_stack_frames_round_trip() {
     assert_eq!(events, vec![(1000, Some(stack)), (2000, None)]);
 
     let defs = WithOptionalStack::field_defs();
-    assert_eq!(defs[0].field_type, FieldType::OptionalPooledStackFrames);
+    assert_eq!(defs[0].field_type(), FieldType::OptionalPooledStackFrames);
 }
 
 #[test]
@@ -1278,12 +1278,12 @@ fn named_decode_missing_optional_field_returns_none() {
         // This should fail because the wire data has field defs from WithoutOptional,
         // not WithOptionalString. The field defs from the wire are ["required_id"],
         // but we're passing WithOptionalString's defs ["required_id", "optional_name"].
-        // The named lookup finds "required_id" in ev.schema.fields, and "optional_name"
-        // is missing from ev.schema.fields, so it calls decode_missing() -> Some(None).
+        // The named lookup finds "required_id" in ev.schema.fields(), and "optional_name"
+        // is missing from ev.schema.fields(), so it calls decode_missing() -> Some(None).
         //
-        // Actually, ev.schema.fields comes from the wire schema (WithoutOptional),
+        // Actually, ev.schema.fields() comes from the wire schema (WithoutOptional),
         // which only has ["required_id"]. The defs we pass are the reader's expected
-        // defs. The decode zips ev.schema.fields with ev.fields, then looks up each
+        // defs. The decode zips ev.schema.fields() with ev.fields, then looks up each
         // expected name. "required_id" is found, "optional_name" is not -> None.
         let decoded = decoded.unwrap();
         assert_eq!(decoded.required_id, 77);

@@ -251,7 +251,7 @@ impl S3Uploader {
     pub(crate) async fn upload_and_delete(
         &self,
         segment: &SealedSegment,
-        data: Vec<u8>,
+        payload: super::Payload,
         metadata: &HashMap<String, String>,
     ) -> Result<String, ProcessErrorKind> {
         let key = self.config.object_key(segment, metadata);
@@ -280,7 +280,7 @@ impl S3Uploader {
                     .unwrap_or("0"),
             )
             .metadata("host", self.config.instance_path.as_str())
-            .body(data.into())
+            .body(payload.into_bytes().into())
             .initiate_with(&self.client)?;
 
         handle.join().await?;
@@ -299,6 +299,7 @@ impl S3Uploader {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Payload;
     use super::*;
     use crate::background_task::sealed::SealedSegment;
     use assert2::check;
@@ -537,7 +538,7 @@ mod tests {
         let compressed = gzip_compress_file_sync(&segment_path).unwrap();
         let metadata = make_metadata(1741209000);
         let key = uploader
-            .upload_and_delete(&segment, compressed, &metadata)
+            .upload_and_delete(&segment, Payload::from_vec(compressed), &metadata)
             .await
             .unwrap();
 
@@ -583,7 +584,7 @@ mod tests {
         let compressed = gzip_compress_file_sync(&segment_path).unwrap();
         let metadata = make_metadata(1741209000);
         let _key = uploader
-            .upload_and_delete(&segment, compressed, &metadata)
+            .upload_and_delete(&segment, Payload::from_vec(compressed), &metadata)
             .await
             .unwrap();
 
@@ -630,7 +631,7 @@ mod tests {
         let compressed = gzip_compress_file_sync(&segment_path).unwrap();
         let metadata = make_metadata(1741209000);
         let key = uploader
-            .upload_and_delete(&segment, compressed, &metadata)
+            .upload_and_delete(&segment, Payload::from_vec(compressed), &metadata)
             .await
             .unwrap();
 
@@ -672,7 +673,7 @@ mod tests {
         drop(s3_root);
 
         let result = uploader
-            .upload_and_delete(&segment, compressed, &metadata)
+            .upload_and_delete(&segment, Payload::from_vec(compressed), &metadata)
             .await;
 
         check!(result.is_err());

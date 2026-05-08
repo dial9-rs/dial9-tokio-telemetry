@@ -15,10 +15,10 @@ impl ::dial9_trace_format::TraceEvent for PollStart {
     }
     fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
         vec![
-            ::dial9_trace_format::schema::FieldDef { name : "worker_id".to_string(),
-            field_type : < u64 as ::dial9_trace_format::TraceField > ::field_type(), },
-            ::dial9_trace_format::schema::FieldDef { name : "task_id".to_string(),
-            field_type : < u64 as ::dial9_trace_format::TraceField > ::field_type(), }
+            ::dial9_trace_format::schema::FieldDef::new("worker_id", < u64 as
+            ::dial9_trace_format::TraceField > ::field_type(),),
+            ::dial9_trace_format::schema::FieldDef::new("task_id", < u64 as
+            ::dial9_trace_format::TraceField > ::field_type(),)
         ]
     }
     fn timestamp(&self) -> u64 {
@@ -43,7 +43,7 @@ impl ::dial9_trace_format::TraceEvent for PollStart {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "worker_id")
+                    .find(|(f, _)| f.name() == "worker_id")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
@@ -54,7 +54,7 @@ impl ::dial9_trace_format::TraceEvent for PollStart {
                 let val = field_defs
                     .iter()
                     .zip(fields.iter())
-                    .find(|(f, _)| f.name == "task_id")
+                    .find(|(f, _)| f.name() == "task_id")
                     .map(|(_, v)| v);
                 match val {
                     Some(v) => <u64 as ::dial9_trace_format::TraceField>::decode_ref(v)?,

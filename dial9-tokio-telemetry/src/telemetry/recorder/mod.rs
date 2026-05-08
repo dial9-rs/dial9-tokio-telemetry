@@ -4,6 +4,8 @@ mod shared_state;
 
 pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
+#[cfg(feature = "taskdump")]
+pub(crate) use runtime_context::poll_start_ts_or_now;
 pub(crate) use shared_state::SharedState;
 
 use event_writer::EventWriter;
@@ -507,12 +509,39 @@ impl TelemetryHandle {
                 let _guard = InstrumentedSpawnGuard::set();
                 tokio::spawn(async move {
                     let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-                    crate::traced::Traced::new(future, traced_handle, task_id).await
+                    let inner = wrap_task_dumped(future, traced_handle.shared.clone(), task_id);
+                    crate::traced::Traced::new(inner, traced_handle, task_id).await
                 })
             }
             None => tokio::spawn(future),
         }
     }
+}
+
+/// If the `taskdump` feature is on, wrap `future` in `TaskDumped<F>`; otherwise
+/// pass through unchanged. Factored so `TelemetryHandle::spawn` stays readable.
+#[cfg(feature = "taskdump")]
+fn wrap_task_dumped<F>(
+    future: F,
+    shared: Arc<crate::telemetry::recorder::SharedState>,
+    task_id: TaskId,
+) -> crate::task_dumped::TaskDumped<F>
+where
+    F: std::future::Future,
+{
+    crate::task_dumped::TaskDumped::new(future, shared, task_id)
+}
+
+#[cfg(not(feature = "taskdump"))]
+fn wrap_task_dumped<F>(
+    future: F,
+    _shared: Arc<crate::telemetry::recorder::SharedState>,
+    _task_id: TaskId,
+) -> F
+where
+    F: std::future::Future,
+{
+    future
 }
 
 /// Spawn a traced task on the current tokio runtime.
@@ -834,39 +863,69 @@ impl Drop for TelemetryGuard {
 
 /// Marker: no trace path has been set yet.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct NoTracePath;
 /// Marker: a trace path has been set.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct HasTracePath;
 
+/// Marker: no pipeline strategy has been chosen yet. From this state the
+/// builder can transition to either S3 (via `with_s3_uploader`) or a custom
+/// pipeline (via `with_custom_pipeline`).
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct PipelineUnset;
+
+/// Marker: the S3 preset has been selected. `with_s3_client` is available
+/// to bind a pre-built client; `with_custom_pipeline` is not in scope.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct PipelineS3;
+
+/// Marker: a custom pipeline has been configured. No further pipeline
+/// methods are available.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct PipelineCustom;
+
+enum PipelineConfig {
+    Unset,
+    #[cfg(feature = "worker-s3")]
+    S3(crate::background_task::S3PipelineUploader),
+    Custom(Vec<Box<dyn crate::background_task::SegmentProcessor>>),
+}
+
 /// Builder for configuring a traced Tokio runtime.
-pub struct TracedRuntimeBuilder<P = NoTracePath> {
+pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset> {
     enabled: bool,
     task_tracking_enabled: bool,
+    task_dump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
     trace_path: Option<PathBuf>,
     runtime_name: Option<String>,
     #[cfg(feature = "cpu-profiling")]
     cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
     #[cfg(feature = "cpu-profiling")]
     sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
-    #[cfg(feature = "worker-s3")]
-    s3_config: Option<crate::background_task::s3::S3Config>,
-    #[cfg(feature = "worker-s3")]
-    s3_client: Option<aws_sdk_s3::Client>,
+    pipeline: PipelineConfig,
+    /// Static segment metadata to inject into every rotated segment's
+    /// header. The S3 preset populates this from `S3Config::as_metadata`
+    /// so traces stay self-describing.
+    segment_metadata: Vec<(String, String)>,
     worker_poll_interval: Option<Duration>,
     worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
-    _marker: std::marker::PhantomData<P>,
+    _marker: std::marker::PhantomData<(P, M)>,
 }
 
-impl<P> std::fmt::Debug for TracedRuntimeBuilder<P> {
+impl<P, M> std::fmt::Debug for TracedRuntimeBuilder<P, M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TracedRuntimeBuilder")
             .finish_non_exhaustive()
     }
 }
 
-// Methods available on both NoTracePath and HasTracePath.
-impl<P> TracedRuntimeBuilder<P> {
+// Methods available regardless of trace-path or pipeline state.
+impl<P, M> TracedRuntimeBuilder<P, M> {
     /// Set to `false` to build a plain runtime with no telemetry
     /// installed and a dummy [`TelemetryGuard`]. Defaults to `true`.
     ///
@@ -884,10 +943,46 @@ impl<P> TracedRuntimeBuilder<P> {
         self
     }
 
+    /// Capture async backtraces at yield points for tasks that stay idle
+    /// longer than the configured threshold.
+    ///
+    /// Requires the `taskdump` crate feature to actually record events
+    pub fn with_task_dumps(
+        mut self,
+        config: crate::telemetry::task_dump_config::TaskDumpConfig,
+    ) -> Self {
+        if cfg!(not(feature = "taskdump")) {
+            tracing::warn!(
+                "taskdumps enabled but `taskdump` feature was not. No task dumps will be captured."
+            )
+        }
+        self.task_dump_config = Some(config);
+        self
+    }
+
     /// Set a human-readable name for this runtime. Used in segment metadata
     /// to map runtime indices to names for the trace viewer.
     pub fn with_runtime_name(mut self, name: impl Into<String>) -> Self {
         self.runtime_name = Some(name.into());
+        self
+    }
+
+    /// Set static metadata embedded as a `SegmentMetadata` event in every
+    /// sealed segment file. Read back during analysis and attached to every
+    /// Span.
+    ///
+    /// [`with_s3_uploader`](Self::with_s3_uploader) injects bucket /
+    /// service_name / instance_path / boot_id automatically; call this
+    /// method when using [`with_custom_pipeline`](Self::with_custom_pipeline)
+    /// (or no pipeline) and you still want those entries — or when you want
+    /// to override the preset's defaults.
+    ///
+    /// Repeated calls **replace** the metadata, matching how
+    /// `with_s3_uploader` overwrites on a second call. The last call wins,
+    /// so `with_segment_metadata` placed *after* `with_s3_uploader`
+    /// overrides the preset's injection.
+    pub fn with_segment_metadata(mut self, entries: Vec<(String, String)>) -> Self {
+        self.segment_metadata = entries;
         self
     }
 
@@ -908,20 +1003,6 @@ impl<P> TracedRuntimeBuilder<P> {
         config: crate::telemetry::cpu_profile::SchedEventConfig,
     ) -> Self {
         self.sched_event_config = Some(config);
-        self
-    }
-
-    /// Configure S3 upload for sealed trace segments.
-    #[cfg(feature = "worker-s3")]
-    pub fn with_s3_uploader(mut self, config: crate::background_task::s3::S3Config) -> Self {
-        self.s3_config = Some(config);
-        self
-    }
-
-    /// Provide a pre-built S3 client (for custom credentials or endpoints).
-    #[cfg(feature = "worker-s3")]
-    pub fn with_s3_client(mut self, client: aws_sdk_s3::Client) -> Self {
-        self.s3_client = Some(client);
         self
     }
 
@@ -962,20 +1043,19 @@ impl<P> TracedRuntimeBuilder<P> {
         )
     }
 
-    fn into_state<Q>(self) -> TracedRuntimeBuilder<Q> {
+    fn into_state<Q, N>(self) -> TracedRuntimeBuilder<Q, N> {
         TracedRuntimeBuilder {
             enabled: self.enabled,
             task_tracking_enabled: self.task_tracking_enabled,
+            task_dump_config: self.task_dump_config,
             trace_path: self.trace_path,
             runtime_name: self.runtime_name,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: self.cpu_profiling_config,
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: self.sched_event_config,
-            #[cfg(feature = "worker-s3")]
-            s3_config: self.s3_config,
-            #[cfg(feature = "worker-s3")]
-            s3_client: self.s3_client,
+            pipeline: self.pipeline,
+            segment_metadata: self.segment_metadata,
             worker_poll_interval: self.worker_poll_interval,
             worker_metrics_sink: self.worker_metrics_sink,
             _marker: std::marker::PhantomData,
@@ -983,13 +1063,98 @@ impl<P> TracedRuntimeBuilder<P> {
     }
 }
 
-impl TracedRuntimeBuilder<NoTracePath> {
+// Pipeline-strategy entry points: only available before a strategy has
+// been chosen, so the user picks S3 OR a custom pipeline, not both.
+impl<P> TracedRuntimeBuilder<P, PipelineUnset> {
+    /// Configure the S3 upload preset for sealed trace segments.
+    ///
+    /// The resulting pipeline is `[Gzip, S3]` (with `[Symbolize, ...]`
+    /// prepended when CPU profiling is enabled). After this call, only
+    /// [`with_s3_client`](TracedRuntimeBuilder::with_s3_client) and a
+    /// repeated [`with_s3_uploader`](TracedRuntimeBuilder::with_s3_uploader)
+    /// override are available — `with_custom_pipeline` is no longer in scope.
+    #[cfg(feature = "worker-s3")]
+    pub fn with_s3_uploader(
+        mut self,
+        config: crate::background_task::s3::S3Config,
+    ) -> TracedRuntimeBuilder<P, PipelineS3> {
+        self.segment_metadata = config
+            .as_metadata()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        self.pipeline = PipelineConfig::S3(crate::background_task::S3PipelineUploader::new(
+            config, None,
+        ));
+        self.into_state()
+    }
+
+    /// Configure a fully custom processor pipeline. The closure receives a
+    /// [`PipelineBuilder`](crate::background_task::PipelineBuilder); chain
+    /// methods like `.gzip()`, `.write_back()`, `.s3(cfg)` for built-ins
+    /// and `.pipe(processor)` for user-supplied processors.
+    ///
+    /// Mutually exclusive with [`with_s3_uploader`](Self::with_s3_uploader).
+    ///
+    /// This is the "full control" path: the resulting pipeline is exactly
+    /// what the closure builds, with nothing prepended or appended. In
+    /// particular, unlike the S3 preset, this path does **not**:
+    /// - auto-populate writer-side segment metadata — call
+    ///   [`with_segment_metadata`](Self::with_segment_metadata) if you want
+    ///   identity entries (service, host, etc.) embedded in trace files.
+    /// - auto-prepend the `Symbolize` step when CPU profiling is enabled.
+    ///   Chain
+    ///   [`.symbolize()`](crate::background_task::PipelineBuilder::symbolize)
+    ///   first if you want symbolized stack frames.
+    pub fn with_custom_pipeline<F>(mut self, build: F) -> TracedRuntimeBuilder<P, PipelineCustom>
+    where
+        F: FnOnce(
+            crate::background_task::PipelineBuilder,
+        ) -> crate::background_task::PipelineBuilder,
+    {
+        let pipeline = build(crate::background_task::PipelineBuilder::new());
+        self.pipeline = PipelineConfig::Custom(pipeline.into_processors());
+        self.into_state()
+    }
+}
+
+// S3 mode — once the S3 preset is chosen, only S3-specific tweaks remain.
+#[cfg(feature = "worker-s3")]
+impl<P> TracedRuntimeBuilder<P, PipelineS3> {
+    /// Provide a pre-built S3 client (for custom credentials or endpoints).
+    /// Replaces any client previously bound to the configured S3 uploader.
+    pub fn with_s3_client(mut self, client: aws_sdk_s3::Client) -> Self {
+        if let PipelineConfig::S3(ref mut uploader) = self.pipeline {
+            uploader.set_client(client);
+        }
+        self
+    }
+
+    /// Replace the configured S3 uploader. A client previously bound via
+    /// [`with_s3_client`](Self::with_s3_client) is carried over to the new
+    /// uploader so that call order between the two is irrelevant.
+    pub fn with_s3_uploader(mut self, config: crate::background_task::s3::S3Config) -> Self {
+        self.segment_metadata = config
+            .as_metadata()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let carried = match &mut self.pipeline {
+            PipelineConfig::S3(uploader) => uploader.take_client(),
+            _ => None,
+        };
+        self.pipeline = PipelineConfig::S3(crate::background_task::S3PipelineUploader::new(
+            config, carried,
+        ));
+        self
+    }
+}
+
+impl<M> TracedRuntimeBuilder<NoTracePath, M> {
     /// Set the trace output path. This transitions the builder to
     /// `HasTracePath`, enabling `build()` and `build_and_start()`.
     pub fn with_trace_path(
         mut self,
         path: impl Into<PathBuf>,
-    ) -> TracedRuntimeBuilder<HasTracePath> {
+    ) -> TracedRuntimeBuilder<HasTracePath, M> {
         self.trace_path = Some(path.into());
         self.into_state()
     }
@@ -1001,7 +1166,7 @@ impl TracedRuntimeBuilder<NoTracePath> {
         builder: tokio::runtime::Builder,
         writer: impl TraceWriter + 'static,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        self.into_state::<HasTracePath>()
+        self.into_state::<HasTracePath, M>()
             .build_inner(builder, Box::new(writer))
     }
 
@@ -1036,7 +1201,7 @@ impl TracedRuntimeBuilder<NoTracePath> {
     }
 }
 
-impl TracedRuntimeBuilder<HasTracePath> {
+impl<M> TracedRuntimeBuilder<HasTracePath, M> {
     /// Set the trace output path (no-op, already set).
     pub fn with_trace_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.trace_path = Some(path.into());
@@ -1045,9 +1210,10 @@ impl TracedRuntimeBuilder<HasTracePath> {
 
     /// Build the traced runtime with a `RotatingWriter`.
     ///
-    /// The background worker is auto-spawned when cpu-profiling or S3 is
-    /// configured. Recording starts disabled; call [`TelemetryGuard::enable`]
-    /// to begin, or use [`build_and_start`](Self::build_and_start).
+    /// The background worker is auto-spawned when cpu-profiling or any
+    /// pipeline strategy is configured. Recording starts disabled; call
+    /// [`TelemetryGuard::enable`] to begin, or use
+    /// [`build_and_start`](Self::build_and_start).
     pub fn build(
         self,
         builder: tokio::runtime::Builder,
@@ -1068,8 +1234,8 @@ impl TracedRuntimeBuilder<HasTracePath> {
     }
 
     /// Build with a custom writer (for tests). The background worker is
-    /// still spawned if cpu-profiling or S3 is configured and `trace_path`
-    /// is set.
+    /// still spawned if cpu-profiling or any pipeline strategy is configured
+    /// and `trace_path` is set.
     pub fn build_with_writer(
         self,
         builder: tokio::runtime::Builder,
@@ -1098,21 +1264,25 @@ impl TracedRuntimeBuilder<HasTracePath> {
             return TracedRuntime::build_disabled(builder);
         }
 
+        let processors = assemble_processors(
+            #[cfg(feature = "cpu-profiling")]
+            self.cpu_profiling_config.is_some(),
+            self.pipeline,
+        );
+
         let core_builder = TelemetryCore::builder()
             .writer(writer)
             .maybe_trace_path(self.trace_path)
+            .maybe_task_dump_config(self.task_dump_config)
             .maybe_worker_poll_interval(self.worker_poll_interval)
-            .maybe_worker_metrics_sink(self.worker_metrics_sink);
+            .maybe_worker_metrics_sink(self.worker_metrics_sink)
+            .processors(processors)
+            .segment_metadata(self.segment_metadata);
 
         #[cfg(feature = "cpu-profiling")]
         let core_builder = core_builder
             .maybe_cpu_profiling(self.cpu_profiling_config)
             .maybe_sched_events(self.sched_event_config);
-
-        #[cfg(feature = "worker-s3")]
-        let core_builder = core_builder
-            .maybe_s3_config(self.s3_config)
-            .maybe_s3_client(self.s3_client);
 
         let guard = core_builder.build()?;
         let control_tx = guard
@@ -1131,6 +1301,58 @@ impl TracedRuntimeBuilder<HasTracePath> {
         )?;
         Ok((runtime, guard))
     }
+}
+
+/// Build the final processor pipeline.
+///
+/// `Symbolize` is auto-prepended for the built-in presets (`Unset`, `S3`)
+/// when CPU profiling is enabled. The `Custom` path is "full control" — the
+/// user's processor list is passed through verbatim, and they're expected to
+/// chain [`PipelineBuilder::symbolize`](crate::background_task::PipelineBuilder::symbolize)
+/// themselves if they want symbolization.
+///
+/// Behaviour matrix:
+///
+/// | strategy | CPU profiling on               | CPU profiling off |
+/// |----------|--------------------------------|-------------------|
+/// | Unset    | `[Symbolize, Gzip, WriteBack]` | (worker skipped)  |
+/// | S3       | `[Symbolize, Gzip, S3]`        | `[Gzip, S3]`      |
+/// | Custom   | `[...user]`                    | `[...user]`       |
+fn assemble_processors(
+    #[cfg(feature = "cpu-profiling")] cpu_profiling_enabled: bool,
+    pipeline: PipelineConfig,
+) -> Vec<Box<dyn crate::background_task::SegmentProcessor>> {
+    #[cfg(not(feature = "cpu-profiling"))]
+    let cpu_profiling_enabled = false;
+
+    if matches!(pipeline, PipelineConfig::Unset) && !cpu_profiling_enabled {
+        return Vec::new();
+    }
+
+    let mut processors: Vec<Box<dyn crate::background_task::SegmentProcessor>> = Vec::new();
+    match pipeline {
+        PipelineConfig::Unset => {
+            #[cfg(feature = "cpu-profiling")]
+            if cpu_profiling_enabled {
+                processors.push(Box::new(crate::background_task::SymbolizeProcessor));
+            }
+            processors.push(Box::new(crate::background_task::GzipCompressor));
+            processors.push(Box::new(crate::background_task::WriteBackProcessor));
+        }
+        #[cfg(feature = "worker-s3")]
+        PipelineConfig::S3(uploader) => {
+            #[cfg(feature = "cpu-profiling")]
+            if cpu_profiling_enabled {
+                processors.push(Box::new(crate::background_task::SymbolizeProcessor));
+            }
+            processors.push(Box::new(crate::background_task::GzipCompressor));
+            processors.push(Box::new(uploader));
+        }
+        PipelineConfig::Custom(user) => {
+            processors.extend(user);
+        }
+    }
+    processors
 }
 
 /// Builder for attaching a runtime to an existing telemetry session.
@@ -1222,39 +1444,48 @@ impl TelemetryCore {
     pub fn new(
         /// The trace writer (e.g. [`RotatingWriter`], [`NullWriter`]).
         writer: impl TraceWriter + 'static,
-        /// Path for trace output. Enables the background worker when
-        /// cpu-profiling or S3 is configured.
+        /// Path for trace output. Enables the background worker when any
+        /// segment processors are configured.
         #[builder(into)]
         trace_path: Option<PathBuf>,
+        /// Capture async backtraces at yield points. Requires the `taskdump`
+        /// crate feature to actually record events.
+        task_dump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
         /// Enable CPU profiling (Linux only).
         #[cfg(feature = "cpu-profiling")]
         cpu_profiling: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
         /// Enable scheduler event capture (Linux only).
         #[cfg(feature = "cpu-profiling")]
         sched_events: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
-        /// S3 upload configuration.
-        #[cfg(feature = "worker-s3")]
-        s3_config: Option<crate::background_task::s3::S3Config>,
-        /// Pre-built S3 client.
-        #[cfg(feature = "worker-s3")]
-        s3_client: Option<aws_sdk_s3::Client>,
+        /// The pipeline of [`SegmentProcessor`](crate::background_task::SegmentProcessor)s
+        /// to run on each sealed segment. When empty the background worker
+        /// is not spawned.
+        #[builder(default)]
+        processors: Vec<Box<dyn crate::background_task::SegmentProcessor>>,
+        /// Static segment metadata injected into every rotated segment's
+        /// header. Empty by default; the S3 preset populates it from the
+        /// configured `S3Config` so traces stay self-describing.
+        #[builder(default)]
+        segment_metadata: Vec<(String, String)>,
         /// How often the background worker polls for sealed segments.
         worker_poll_interval: Option<Duration>,
         /// Metrics sink for the flush/worker threads.
         worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
     ) -> std::io::Result<TelemetryGuard> {
         let start_mono_ns = crate::telemetry::events::clock_monotonic_ns();
-        let shared = Arc::new(SharedState::new(start_mono_ns));
+        let rng_seed = task_dump_config.as_ref().and_then(|cfg| cfg.rng_seed());
+        let shared = Arc::new(SharedState::new(start_mono_ns, rng_seed));
+        if let Some(cfg) = task_dump_config.as_ref() {
+            shared.task_dumps_enabled.store(true, Ordering::Relaxed);
+            shared
+                .task_dump_idle_threshold_ns
+                .store(cfg.idle_threshold().as_nanos() as u64, Ordering::Relaxed);
+        }
         #[allow(unused_mut)]
         let mut event_writer = EventWriter::new(Box::new(writer));
-        #[cfg(feature = "worker-s3")]
-        if let Some(s3_config) = s3_config.as_ref() {
-            event_writer.update_segment_metadata(
-                s3_config
-                    .as_metadata()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
-            )
+
+        if !segment_metadata.is_empty() {
+            event_writer.update_segment_metadata(segment_metadata);
         }
 
         #[cfg(feature = "cpu-profiling")]
@@ -1305,25 +1536,10 @@ impl TelemetryCore {
         };
 
         // Auto-construct worker config when we have a trace path and
-        // either cpu-profiling or S3 is configured.
+        // at least one processor. When the user supplies no processors
+        // there is nothing for the worker to do, so skip spawning it.
         let worker_config = trace_path.and_then(|trace_path| {
-            #[allow(unused_mut)]
-            let mut needs_worker = false;
-            #[allow(unused_mut)]
-            let mut symbolize = false;
-
-            #[cfg(feature = "cpu-profiling")]
-            if cpu_profiling.is_some() {
-                needs_worker = true;
-                symbolize = true;
-            }
-
-            #[cfg(feature = "worker-s3")]
-            if s3_config.is_some() {
-                needs_worker = true;
-            }
-
-            if !needs_worker {
+            if processors.is_empty() {
                 return None;
             }
 
@@ -1332,16 +1548,14 @@ impl TelemetryCore {
             let metrics_sink =
                 worker_metrics_sink.unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
 
-            let config = crate::background_task::BackgroundTaskConfig::builder()
-                .trace_path(trace_path)
-                .poll_interval(poll_interval)
-                .symbolize(symbolize)
-                .metrics_sink(metrics_sink);
-
-            #[cfg(feature = "worker-s3")]
-            let config = config.maybe_s3(s3_config).maybe_client(s3_client);
-
-            Some(config.build())
+            Some(
+                crate::background_task::BackgroundTaskConfig::builder()
+                    .trace_path(trace_path)
+                    .poll_interval(poll_interval)
+                    .processors(processors)
+                    .metrics_sink(metrics_sink)
+                    .build(),
+            )
         });
 
         #[allow(unused_mut)]
@@ -1562,20 +1776,19 @@ pub struct TracedRuntime {
 
 impl TracedRuntime {
     /// Create a new [`TracedRuntimeBuilder`].
-    pub fn builder() -> TracedRuntimeBuilder<NoTracePath> {
+    pub fn builder() -> TracedRuntimeBuilder<NoTracePath, PipelineUnset> {
         TracedRuntimeBuilder {
             enabled: true,
             task_tracking_enabled: false,
+            task_dump_config: None,
             trace_path: None,
             runtime_name: None,
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling_config: None,
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: None,
-            #[cfg(feature = "worker-s3")]
-            s3_config: None,
-            #[cfg(feature = "worker-s3")]
-            s3_client: None,
+            pipeline: PipelineConfig::Unset,
+            segment_metadata: Vec::new(),
             worker_poll_interval: None,
             worker_metrics_sink: None,
             _marker: std::marker::PhantomData,
@@ -1915,7 +2128,7 @@ mod tests {
 
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
-        let _shared = SharedState::new(crate::telemetry::events::clock_monotonic_ns());
+        let _shared = SharedState::new(crate::telemetry::events::clock_monotonic_ns(), None);
     }
 
     #[test]
@@ -2913,5 +3126,191 @@ mod tests {
         // The runtime still works end-to-end.
         let value = rt.block_on(async { 21u32 });
         assert_eq!(value, 21);
+    }
+
+    #[cfg(feature = "worker-s3")]
+    #[test]
+    fn with_s3_client_then_with_s3_uploader_preserves_client() {
+        use crate::background_task::s3::S3Config;
+
+        fn dummy_client() -> aws_sdk_s3::Client {
+            let conf = aws_sdk_s3::Config::builder()
+                .behavior_version_latest()
+                .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                    "test", "test", None, None, "test",
+                ))
+                .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                .build();
+            aws_sdk_s3::Client::from_conf(conf)
+        }
+
+        fn cfg(boot_id: &str) -> S3Config {
+            S3Config::builder()
+                .bucket("b")
+                .service_name("s")
+                .boot_id(boot_id)
+                .build()
+        }
+
+        // Order A: client set after the uploader — already worked.
+        let mut builder = TracedRuntime::builder()
+            .with_s3_uploader(cfg("a"))
+            .with_s3_client(dummy_client());
+        match &mut builder.pipeline {
+            PipelineConfig::S3(u) => {
+                assert!(
+                    u.take_client().is_some(),
+                    "client must be present in order A"
+                );
+            }
+            _ => panic!("expected S3 pipeline"),
+        }
+
+        // Order B: client set first, then a follow-up `with_s3_uploader`. The
+        // replacement must carry the previously-bound client across.
+        let mut builder = TracedRuntime::builder()
+            .with_s3_uploader(cfg("a"))
+            .with_s3_client(dummy_client())
+            .with_s3_uploader(cfg("b"));
+        match &mut builder.pipeline {
+            PipelineConfig::S3(u) => {
+                assert!(
+                    u.take_client().is_some(),
+                    "client bound before the second with_s3_uploader must be carried over"
+                );
+            }
+            _ => panic!("expected S3 pipeline"),
+        }
+    }
+
+    /// Pin which builder paths populate `segment_metadata` (the static
+    /// entries the writer embeds as a `SegmentMetadata` event in every
+    /// sealed segment file). Today the S3 preset auto-injects;
+    /// `with_custom_pipeline` does not, so users on that path opt in via
+    /// `with_segment_metadata`.
+    mod segment_metadata_routing {
+        use super::*;
+
+        fn entries<P, M>(builder: &TracedRuntimeBuilder<P, M>) -> &[(String, String)] {
+            &builder.segment_metadata
+        }
+
+        #[cfg(feature = "worker-s3")]
+        fn s3_cfg() -> crate::background_task::s3::S3Config {
+            crate::background_task::s3::S3Config::builder()
+                .bucket("test-bucket")
+                .service_name("checkout-api")
+                .instance_path("us-east-1/i-0abc123")
+                .boot_id("test-boot")
+                .build()
+        }
+
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn s3_preset_populates_from_config() {
+            let builder = TracedRuntime::builder().with_s3_uploader(s3_cfg());
+            let m: std::collections::HashMap<&str, &str> = entries(&builder)
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            assert_eq!(m.get("bucket"), Some(&"test-bucket"));
+            assert_eq!(m.get("service_name"), Some(&"checkout-api"));
+            assert_eq!(m.get("instance_path"), Some(&"us-east-1/i-0abc123"));
+            assert_eq!(m.get("boot_id"), Some(&"test-boot"));
+        }
+
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn s3_preset_replace_overwrites_metadata() {
+            let cfg2 = crate::background_task::s3::S3Config::builder()
+                .bucket("other-bucket")
+                .service_name("other-svc")
+                .boot_id("other-boot")
+                .build();
+            let builder = TracedRuntime::builder()
+                .with_s3_uploader(s3_cfg())
+                .with_s3_uploader(cfg2);
+            let m: std::collections::HashMap<&str, &str> = entries(&builder)
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            // cfg2 wins; nothing leaks from the first call.
+            assert_eq!(m.get("bucket"), Some(&"other-bucket"));
+            assert_eq!(m.get("service_name"), Some(&"other-svc"));
+            assert_eq!(m.get("boot_id"), Some(&"other-boot"));
+        }
+
+        /// Custom pipeline does NOT auto-populate, even when `b.s3(cfg)` is
+        /// composed inside it. Documented behavior — pinned here so a future
+        /// change is intentional.
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn custom_pipeline_with_s3_does_not_auto_populate() {
+            let builder = TracedRuntime::builder().with_custom_pipeline(|b| b.gzip().s3(s3_cfg()));
+            assert!(
+                entries(&builder).is_empty(),
+                "with_custom_pipeline must not auto-inject segment metadata; got {:?}",
+                entries(&builder)
+            );
+        }
+
+        #[test]
+        fn custom_pipeline_without_s3_is_empty() {
+            let builder = TracedRuntime::builder().with_custom_pipeline(|b| b.gzip().write_back());
+            assert!(entries(&builder).is_empty());
+        }
+
+        #[test]
+        fn unset_pipeline_is_empty() {
+            let builder = TracedRuntime::builder();
+            assert!(entries(&builder).is_empty());
+        }
+
+        /// Custom-pipeline users can recover S3-preset parity by calling
+        /// `with_segment_metadata` explicitly.
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn with_segment_metadata_recovers_parity_in_custom_pipeline() {
+            let cfg = s3_cfg();
+            let preset_entries: Vec<(String, String)> = cfg
+                .as_metadata()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let builder = TracedRuntime::builder()
+                .with_custom_pipeline(|b| b.gzip().s3(s3_cfg()))
+                .with_segment_metadata(preset_entries.clone());
+            assert_eq!(entries(&builder), preset_entries.as_slice());
+        }
+
+        /// `with_segment_metadata` after `with_s3_uploader` overrides the
+        /// preset's injection — last call wins.
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn with_segment_metadata_after_s3_overrides_preset() {
+            let custom = vec![("env".to_string(), "prod".to_string())];
+            let builder = TracedRuntime::builder()
+                .with_s3_uploader(s3_cfg())
+                .with_segment_metadata(custom.clone());
+            assert_eq!(entries(&builder), custom.as_slice());
+        }
+
+        /// `with_s3_uploader` after `with_segment_metadata` overwrites the
+        /// custom entries — same "last call wins" rule.
+        #[cfg(feature = "worker-s3")]
+        #[test]
+        fn s3_after_with_segment_metadata_overwrites() {
+            let builder = TracedRuntime::builder()
+                .with_segment_metadata(vec![("env".into(), "prod".into())])
+                .with_s3_uploader(s3_cfg());
+            let m: std::collections::HashMap<&str, &str> = entries(&builder)
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            assert_eq!(m.get("bucket"), Some(&"test-bucket"));
+            assert!(
+                !m.contains_key("env"),
+                "with_s3_uploader should overwrite, not merge"
+            );
+        }
     }
 }

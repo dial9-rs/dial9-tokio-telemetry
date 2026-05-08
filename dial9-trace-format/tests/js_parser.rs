@@ -30,42 +30,15 @@ fn js_decodes_all_field_types() {
         .register_schema(
             "AllTypes",
             vec![
-                FieldDef {
-                    name: "a_u64".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "b_i64".into(),
-                    field_type: FieldType::I64,
-                },
-                FieldDef {
-                    name: "c_f64".into(),
-                    field_type: FieldType::F64,
-                },
-                FieldDef {
-                    name: "d_bool".into(),
-                    field_type: FieldType::Bool,
-                },
-                FieldDef {
-                    name: "e_string".into(),
-                    field_type: FieldType::String,
-                },
-                FieldDef {
-                    name: "f_bytes".into(),
-                    field_type: FieldType::Bytes,
-                },
-                FieldDef {
-                    name: "h_pooled".into(),
-                    field_type: FieldType::PooledString,
-                },
-                FieldDef {
-                    name: "i_stack".into(),
-                    field_type: FieldType::StackFrames,
-                },
-                FieldDef {
-                    name: "j_varint".into(),
-                    field_type: FieldType::Varint,
-                },
+                FieldDef::new("a_u64", FieldType::Varint),
+                FieldDef::new("b_i64", FieldType::I64),
+                FieldDef::new("c_f64", FieldType::F64),
+                FieldDef::new("d_bool", FieldType::Bool),
+                FieldDef::new("e_string", FieldType::String),
+                FieldDef::new("f_bytes", FieldType::Bytes),
+                FieldDef::new("h_pooled", FieldType::PooledString),
+                FieldDef::new("i_stack", FieldType::StackFrames),
+                FieldDef::new("j_varint", FieldType::Varint),
             ],
         )
         .unwrap();
@@ -101,18 +74,9 @@ fn js_decodes_all_field_types() {
             .register_schema(
                 "SymbolTableEntry",
                 vec![
-                    FieldDef {
-                        name: "base_addr".into(),
-                        field_type: FieldType::Varint,
-                    },
-                    FieldDef {
-                        name: "size".into(),
-                        field_type: FieldType::Varint,
-                    },
-                    FieldDef {
-                        name: "symbol_name".into(),
-                        field_type: FieldType::PooledString,
-                    },
+                    FieldDef::new("base_addr", FieldType::Varint),
+                    FieldDef::new("size", FieldType::Varint),
+                    FieldDef::new("symbol_name", FieldType::PooledString),
                 ],
             )
             .unwrap();
@@ -171,13 +135,7 @@ fn js_decodes_empty_stream() {
 fn js_decodes_truncated_trace_gracefully() {
     let mut enc = Encoder::new();
     let tid = enc
-        .register_schema(
-            "Ping",
-            vec![FieldDef {
-                name: "seq".into(),
-                field_type: FieldType::Varint,
-            }],
-        )
+        .register_schema("Ping", vec![FieldDef::new("seq", FieldType::Varint)])
         .unwrap();
     // Write two events so the first one is fully decodable.
     for i in 0..2u64 {
@@ -212,13 +170,7 @@ fn js_decodes_truncated_trace_gracefully() {
 fn js_decodes_multiple_events() {
     let mut enc = Encoder::new();
     let tid = enc
-        .register_schema(
-            "Tick",
-            vec![FieldDef {
-                name: "ts".into(),
-                field_type: FieldType::Varint,
-            }],
-        )
+        .register_schema("Tick", vec![FieldDef::new("ts", FieldType::Varint)])
         .unwrap();
     for i in 0..5u64 {
         enc.write_event(
@@ -247,14 +199,8 @@ fn js_decodes_optional_pooled_string() {
         .register_schema(
             "OptionalStringEvent",
             vec![
-                FieldDef {
-                    name: "required_id".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "opt_name".into(),
-                    field_type: FieldType::OptionalPooledString,
-                },
+                FieldDef::new("required_id", FieldType::Varint),
+                FieldDef::new("opt_name", FieldType::OptionalPooledString),
             ],
         )
         .unwrap();
@@ -304,14 +250,8 @@ fn js_decodes_pooled_stack_frames() {
         .register_schema(
             "CpuSample",
             vec![
-                FieldDef {
-                    name: "worker".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "callchain".into(),
-                    field_type: FieldType::PooledStackFrames,
-                },
+                FieldDef::new("worker", FieldType::Varint),
+                FieldDef::new("callchain", FieldType::PooledStackFrames),
             ],
         )
         .unwrap();
@@ -389,10 +329,10 @@ fn js_decodes_optional_pooled_stack_frames() {
     let tid = enc
         .register_schema(
             "MaybeStack",
-            vec![FieldDef {
-                name: "callchain".into(),
-                field_type: FieldType::OptionalPooledStackFrames,
-            }],
+            vec![FieldDef::new(
+                "callchain",
+                FieldType::OptionalPooledStackFrames,
+            )],
         )
         .unwrap();
 
@@ -423,4 +363,45 @@ fn js_decodes_optional_pooled_stack_frames() {
         serde_json::json!(["43690", "48059"])
     );
     assert!(events[1]["values"]["callchain"].is_null());
+}
+
+#[test]
+fn js_decodes_dynamic_list_and_map() {
+    let mut enc = Encoder::new();
+    let tid = enc
+        .register_schema(
+            "Containers",
+            vec![
+                FieldDef::new("items", FieldType::DynamicList),
+                FieldDef::new("props", FieldType::DynamicMap),
+            ],
+        )
+        .unwrap();
+
+    let list = FieldValue::List(vec![
+        FieldValue::String("hello".into()),
+        FieldValue::Varint(42),
+    ]);
+    let map = FieldValue::Map(vec![(
+        FieldValue::String("key".into()),
+        FieldValue::Varint(99),
+    )]);
+    enc.write_event(&tid, &[FieldValue::Varint(1000), list, map])
+        .unwrap();
+
+    let data = enc.finish();
+    let json = js_decode(&data);
+
+    let frames = json["frames"].as_array().unwrap();
+    // schema + event = 2
+    assert_eq!(frames.len(), 2);
+
+    let vals = &frames[1]["values"];
+    let items = vals["items"].as_array().unwrap();
+    assert_eq!(items[0], "hello");
+    assert_eq!(items[1], "42");
+
+    let props = vals["props"].as_array().unwrap();
+    assert_eq!(props[0][0], "key");
+    assert_eq!(props[0][1], "99");
 }

@@ -38,7 +38,7 @@ Every frame begins with a 1-byte tag:
 | `0x03` | String Pool |
 | `0x04` | Stack Pool |
 | `0x05` | Timestamp Reset |
-| `0x06` | *(reserved)* |
+| `0x06` | Schema Annotations |
 
 Unknown tags **must** cause the decoder to stop (the stream cannot be advanced without knowing the frame size).
 
@@ -150,6 +150,31 @@ Total: **9 bytes**.
 
 After decoding this frame, the decoder sets `timestamp_base_ns = timestamp_ns`. The next event's `timestamp_delta_ns` is relative to this new base.
 
+### Schema Annotations Frame (`0x06`)
+
+Carries per-field metadata for a previously-registered schema. Annotations are key-value string pairs attached to individual fields by index. A schema with no annotations produces no annotation frame.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| tag | u8 | `0x06` |
+| type_id | LEB128 u64 | References a schema's `type_id` (varint-encoded to allow future overflow beyond u16) |
+| count | u16 | Number of annotation entries |
+| entries | [FieldAnnotation; count] | Annotation entries (see below) |
+
+Each **FieldAnnotation**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| field_index | u16 | Index into the schema's field list (0-based) |
+| key_len | u16 | Length of key in bytes |
+| key | [u8; key_len] | UTF-8 annotation key (e.g. `metrique.unit`) |
+| value_len | u32 | Length of value in bytes |
+| value | [u8; value_len] | UTF-8 annotation value (e.g. `microseconds`) |
+
+Multiple annotation frames for the same `type_id` are permitted; the decoder accumulates entries. The encoder typically emits one annotation frame immediately after the schema frame it annotates, but the format does not mandate ordering beyond the requirement that the referenced `type_id` must already be registered.
+
+A decoder that encounters an annotation frame referencing an unknown `type_id` may skip it leniently (the annotations have nowhere to attach).
+
 ## Field Types
 
 | Tag | Name | Wire Encoding | Size |
@@ -167,6 +192,8 @@ After decoding this frame, the decoder sets `timestamp_base_ns = timestamp_ns`. 
 | 11 | U8 | 1-byte unsigned | 1 |
 | 12 | U16 | 2-byte little-endian unsigned | 2 |
 | 13 | U32 | 4-byte little-endian unsigned | 4 |
+| 14 | DynamicList | u32 count + count × (u8 tag + value) | variable |
+| 15 | DynamicMap | u32 count + count × (u8 key_tag + key + u8 value_tag + value) | variable |
 
 ### Optional Field Modifier (`0x80`)
 
@@ -215,6 +242,24 @@ A string map carries an ordered list of key-value pairs (both UTF-8 strings):
 
 1. Write `count` as u32 (number of pairs).
 2. For each pair, write `key_len` as u32, then key bytes, then `val_len` as u32, then value bytes.
+
+### DynamicList Encoding
+
+A self-describing list where each element carries its own type tag:
+
+1. Write `count` as u32 (number of elements).
+2. For each element, write the element's field type tag as u8, then encode the element value according to that tag.
+
+Elements may be heterogeneous (different types in the same list). Nested containers are supported: an element tag of `0x0E` (DynamicList) or `0x0F` (DynamicMap) is followed by the recursive encoding of that container.
+
+### DynamicMap Encoding
+
+A self-describing map where each entry carries type tags for both key and value:
+
+1. Write `count` as u32 (number of entries).
+2. For each entry, write the key's field type tag as u8, encode the key value, then write the value's field type tag as u8, encode the value.
+
+Entries may be heterogeneous. Both keys and values can be any field type including nested containers.
 
 ### LEB128
 

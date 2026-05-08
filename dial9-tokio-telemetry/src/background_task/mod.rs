@@ -1,10 +1,14 @@
 #[cfg(feature = "worker-s3")]
 pub(crate) mod connection;
 pub mod instance_metadata;
+mod payload;
 pub(crate) mod pipeline_metrics;
 #[cfg(feature = "worker-s3")]
 pub mod s3;
 pub(crate) mod sealed;
+
+pub use payload::Payload;
+pub use sealed::SealedSegment;
 
 use crate::metrics::{Operation, SegmentProcessMetrics, SegmentProcessMetricsGuard};
 use crate::rate_limit::rate_limited;
@@ -23,10 +27,8 @@ pub(crate) const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Configuration for the in-process worker pipeline.
 ///
-/// Only `trace_path` and `s3` are required. Optional fields:
-///
-/// - `poll_interval`: how often to check for sealed segments (default: 1 second)
-/// - `client`: pre-built `aws_sdk_s3::Client` for custom credentials or endpoints
+/// The pipeline is composed of a sequence of [`SegmentProcessor`]s supplied
+/// via `processors`. When none are provided the worker runs no processing.
 #[derive(bon::Builder)]
 #[builder(on(String, into))]
 pub struct BackgroundTaskConfig {
@@ -36,19 +38,9 @@ pub struct BackgroundTaskConfig {
     /// How often the worker checks for sealed segments. Defaults to 1 second.
     #[builder(default = DEFAULT_POLL_INTERVAL)]
     poll_interval: Duration,
-    /// S3 upload configuration. When `None`, the worker symbolizes and
-    /// gzip-writes back to disk without uploading.
-    #[cfg(feature = "worker-s3")]
-    s3: Option<s3::S3Config>,
-    /// Pre-built S3 client. When provided, the worker uses this client
-    /// instead of building one from `aws_config::load_defaults`.
-    /// Region auto-detection still applies unless `region` is set on `S3Config`.
-    #[cfg(feature = "worker-s3")]
-    client: Option<aws_sdk_s3::Client>,
-    /// When true, run the symbolize processor on each segment.
+    /// The processor pipeline executed for each sealed segment, in order.
     #[builder(default)]
-    #[allow(dead_code)]
-    symbolize: bool,
+    processors: Vec<Box<dyn SegmentProcessor>>,
     /// Metrics sink. Defaults to [`DevNullSink`](metrique_writer::sink::DevNullSink).
     #[builder(default = metrique_writer::sink::DevNullSink::boxed())]
     metrics_sink: BoxEntrySink,
@@ -94,12 +86,6 @@ impl BackgroundTaskConfig {
             }
         }
     }
-
-    /// S3 upload configuration.
-    #[cfg(feature = "worker-s3")]
-    pub fn s3(&self) -> Option<&s3::S3Config> {
-        self.s3.as_ref()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -108,29 +94,61 @@ impl BackgroundTaskConfig {
 
 /// Data flowing through the processor pipeline.
 ///
-/// The worker reads the sealed segment file into `bytes`, populates initial
+/// The worker reads the sealed segment file into `payload`, populates initial
 /// `metadata`, then passes this through each [`SegmentProcessor`] in order.
 /// Metrics are flushed automatically when the `SegmentData` is dropped.
-pub(crate) struct SegmentData {
-    /// Original sealed segment (path, index).
-    // dead if s3 is not enabled
-    #[allow(unused)]
-    pub(crate) segment: sealed::SealedSegment,
-    /// The payload bytes (raw, symbolized, compressed, etc.).
-    #[allow(unused)]
-    pub(crate) bytes: Vec<u8>,
-    /// Metadata accumulated by processors. Keyed by convention.
-    #[allow(unused)]
+pub struct SegmentData {
+    pub(crate) segment: SealedSegment,
+    pub(crate) payload: Payload,
     pub(crate) metadata: HashMap<String, String>,
-    /// Metrics guard — processors can record metrics; flushed on drop.
     pub(crate) metrics: SegmentProcessMetricsGuard,
+}
+
+impl SegmentData {
+    /// Information about the sealed segment being processed.
+    pub fn segment(&self) -> &SealedSegment {
+        &self.segment
+    }
+
+    /// Current payload (raw, symbolized, compressed, etc.).
+    pub fn payload(&self) -> &Payload {
+        &self.payload
+    }
+
+    /// Take ownership of the payload, leaving an empty [`Payload`] in its place.
+    pub fn take_payload(&mut self) -> Payload {
+        std::mem::take(&mut self.payload)
+    }
+
+    /// Replace the payload.
+    pub fn set_payload(&mut self, payload: impl Into<Payload>) {
+        self.payload = payload.into();
+    }
+
+    /// Metadata accumulated by upstream processors.
+    pub fn metadata(&self) -> &HashMap<String, String> {
+        &self.metadata
+    }
+
+    /// Mutable reference to the metadata map. Processors can insert keys
+    /// (e.g. `"content_encoding"`, `"write_back_extension"`) to signal
+    /// downstream stages.
+    pub fn metadata_mut(&mut self) -> &mut HashMap<String, String> {
+        &mut self.metadata
+    }
+
+    /// Record the segment's post-compression size. Surfaces as the
+    /// `CompressedSize` metric for this segment.
+    pub fn set_compressed_size(&mut self, bytes: u64) {
+        self.metrics.compressed_size = Some(bytes);
+    }
 }
 
 impl std::fmt::Debug for SegmentData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SegmentData")
             .field("segment", &self.segment)
-            .field("bytes", &format_args!("[{} bytes]", self.bytes.len()))
+            .field("payload", &self.payload)
             .field("metadata", &self.metadata)
             .field("metrics", &self.metrics)
             .finish()
@@ -142,16 +160,38 @@ impl std::fmt::Debug for SegmentData {
 /// Carries the [`SegmentData`] back so the caller can still record metrics
 /// and pass the data to subsequent error-handling logic.
 #[derive(Debug)]
-pub(crate) struct ProcessError {
+pub struct ProcessError {
     pub(crate) data: SegmentData,
     pub(crate) kind: ProcessErrorKind,
 }
 
+impl ProcessError {
+    /// Wrap `data` and `kind` into a new [`ProcessError`].
+    pub fn new(data: SegmentData, kind: ProcessErrorKind) -> Self {
+        Self { data, kind }
+    }
+
+    /// Shorthand for [`ProcessError::new`] with an I/O error.
+    pub fn io(data: SegmentData, err: std::io::Error) -> Self {
+        Self::new(data, ProcessErrorKind::Io(err))
+    }
+}
+
+/// Kind of failure reported by a [`SegmentProcessor`].
 #[derive(Debug)]
-pub(crate) enum ProcessErrorKind {
+#[non_exhaustive]
+pub enum ProcessErrorKind {
+    /// The processor hit an `std::io::Error`.
+    #[non_exhaustive]
     Io(std::io::Error),
+
+    /// An error transferring data off the host
+    #[non_exhaustive]
     Transfer {
+        /// Underlying error source.
         source: Box<dyn std::error::Error + Send + Sync>,
+        /// Whether this error is transient and the segment should be kept on
+        /// disk for retry.
         retryable: bool,
     },
 }
@@ -230,7 +270,7 @@ impl From<aws_sdk_s3_transfer_manager::error::Error> for ProcessErrorKind {
 /// subsequent segments, so implementations **must** remain in a valid state
 /// after a panic (i.e., no partially-updated invariants that would cause
 /// incorrect behavior on the next call).
-pub(crate) trait SegmentProcessor: Send {
+pub trait SegmentProcessor: Send {
     /// Human-readable name for this processor (used in metrics).
     fn name(&self) -> &'static str;
 
@@ -243,31 +283,114 @@ pub(crate) trait SegmentProcessor: Send {
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>;
 }
 
-/// Build the processor pipeline based on config flags and available features.
-async fn build_pipeline(_config: &mut BackgroundTaskConfig) -> Vec<Box<dyn SegmentProcessor>> {
-    let mut pipeline: Vec<Box<dyn SegmentProcessor>> = Vec::new();
+/// Closure-scoped builder for assembling a custom processor pipeline.
+///
+/// Obtained via `with_custom_pipeline(|p| ...)` on the runtime builder.
+/// Built-in processors are reachable through dedicated methods
+/// ([`gzip`](Self::gzip), [`write_back`](Self::write_back),
+/// [`s3`](Self::s3), [`symbolize`](Self::symbolize)); custom processors
+/// are added with [`pipe`](Self::pipe).
+///
+/// # Example
+///
+/// ```ignore
+/// struct Logger;
+/// impl SegmentProcessor for Logger {
+///     fn name(&self) -> &'static str { "logger" }
+///     fn process(&mut self, data: SegmentData)
+///         -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+///     {
+///         Box::pin(async move {
+///             println!("segment {} ({} bytes)", data.segment().index(), data.payload().len());
+///             Ok(data)
+///         })
+///     }
+/// }
+///
+/// builder.with_custom_pipeline(|p| p.pipe(Logger).gzip().write_back())
+/// ```
+#[must_use]
+pub struct PipelineBuilder {
+    processors: Vec<Box<dyn SegmentProcessor>>,
+}
 
+impl PipelineBuilder {
+    pub(crate) fn new() -> Self {
+        Self {
+            processors: Vec::new(),
+        }
+    }
+
+    pub(crate) fn into_processors(self) -> Vec<Box<dyn SegmentProcessor>> {
+        self.processors
+    }
+
+    /// Append a user-supplied [`SegmentProcessor`] to the pipeline.
+    pub fn pipe<S>(mut self, processor: S) -> Self
+    where
+        S: SegmentProcessor + 'static,
+    {
+        self.processors.push(Box::new(processor));
+        self
+    }
+
+    /// Gzip the segment payload in-memory.
+    pub fn gzip(mut self) -> Self {
+        self.processors.push(Box::new(GzipCompressor));
+        self
+    }
+
+    /// Write the current payload bytes back to disk. When the payload has
+    /// been gzipped earlier in the pipeline, the file is written with a
+    /// `.gz` suffix and the original sealed segment is removed.
+    pub fn write_back(mut self) -> Self {
+        self.processors.push(Box::new(WriteBackProcessor));
+        self
+    }
+
+    /// Resolve stack-frame addresses in the segment to symbol names.
+    /// Only valid when the runtime is built with the `cpu-profiling` feature.
+    ///
+    /// The built-in S3 / default presets prepend this automatically when
+    /// CPU profiling is on; on the custom path the pipeline is passed
+    /// through verbatim, so chain `.symbolize()` first if you want
+    /// symbolized stack frames in your trace files.
     #[cfg(feature = "cpu-profiling")]
-    if _config.symbolize {
-        pipeline.push(Box::new(SymbolizeProcessor));
+    pub fn symbolize(mut self) -> Self {
+        self.processors.push(Box::new(SymbolizeProcessor));
+        self
     }
 
-    #[allow(unused_mut)]
-    let mut has_s3 = false;
+    /// Upload the current payload to S3 with the given configuration. The
+    /// AWS SDK default credential chain is used; call [`s3_with_client`]
+    /// to supply a pre-built client.
+    ///
+    /// Does not auto-add gzip — chain `.gzip()` first if you want
+    /// compressed uploads.
+    ///
+    /// [`s3_with_client`]: Self::s3_with_client
     #[cfg(feature = "worker-s3")]
-    if let Some(s3_config) = _config.s3.take() {
-        let s3_uploader = S3PipelineUploader::new(s3_config, _config.client.take()).await;
-        pipeline.push(Box::new(GzipCompressor));
-        pipeline.push(Box::new(s3_uploader));
-        has_s3 = true;
+    pub fn s3(mut self, config: s3::S3Config) -> Self {
+        self.processors
+            .push(Box::new(S3PipelineUploader::new(config, None)));
+        self
     }
 
-    if !has_s3 {
-        pipeline.push(Box::new(GzipCompressor));
-        pipeline.push(Box::new(WriteBackProcessor));
+    /// Variant of [`s3`](Self::s3) that uses the supplied pre-built S3 client.
+    #[cfg(feature = "worker-s3")]
+    pub fn s3_with_client(mut self, config: s3::S3Config, client: aws_sdk_s3::Client) -> Self {
+        self.processors
+            .push(Box::new(S3PipelineUploader::new(config, Some(client))));
+        self
     }
+}
 
-    pipeline
+impl std::fmt::Debug for PipelineBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PipelineBuilder")
+            .field("len", &self.processors.len())
+            .finish()
+    }
 }
 
 /// The worker loop function. Runs on a dedicated thread, polls for sealed
@@ -285,7 +408,7 @@ pub(crate) fn run_background_task(
         .build()
         .expect("failed to create worker runtime");
 
-    let processors = rt.block_on(build_pipeline(&mut config));
+    let processors = std::mem::take(&mut config.processors);
     let metrics_sink = config.metrics_sink.clone();
 
     tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), "worker started");
@@ -314,7 +437,12 @@ pub(crate) fn run_background_task(
 // GzipCompressor — compresses segment bytes in-memory
 // ---------------------------------------------------------------------------
 
-struct GzipCompressor;
+/// Gzips the segment payload in-memory. Sets the `content_encoding` and
+/// `write_back_extension` metadata keys so downstream stages know the
+/// payload is gzipped. Already-gzipped segments (detected by magic bytes)
+/// pass through unchanged.
+#[derive(Debug, Default)]
+pub(crate) struct GzipCompressor;
 
 impl SegmentProcessor for GzipCompressor {
     fn name(&self) -> &'static str {
@@ -327,46 +455,42 @@ impl SegmentProcessor for GzipCompressor {
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
             // Skip already-compressed segments to avoid double-gzip.
-            if data.bytes.starts_with(&[0x1f, 0x8b]) {
+            if data.payload.starts_with(&[0x1f, 0x8b]) {
                 data.metadata
                     .insert("content_encoding".into(), "gzip".into());
                 data.metadata
                     .insert("write_back_extension".into(), ".gz".into());
                 return Ok(data);
             }
-            let raw = data.bytes;
+            let raw = std::mem::take(&mut data.payload);
             let compressed = tokio::task::spawn_blocking(move || {
                 use flate2::write::GzEncoder;
                 use std::io::Write;
                 let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
-                encoder.write_all(&raw)?;
+                for chunk in raw.chunks() {
+                    encoder.write_all(chunk)?;
+                }
                 encoder.finish()
             })
             .await;
             match compressed {
                 Ok(Ok(bytes)) => {
                     data.metrics.compressed_size = Some(bytes.len() as u64);
-                    data.bytes = bytes;
+                    data.payload = Payload::from_vec(bytes);
                     data.metadata
                         .insert("content_encoding".into(), "gzip".into());
                     data.metadata
                         .insert("write_back_extension".into(), ".gz".into());
                     Ok(data)
                 }
-                Ok(Err(e)) => {
-                    data.bytes = vec![];
-                    Err(ProcessError {
-                        data,
-                        kind: ProcessErrorKind::Io(e),
-                    })
-                }
-                Err(e) => {
-                    data.bytes = vec![];
-                    Err(ProcessError {
-                        data,
-                        kind: ProcessErrorKind::Io(std::io::Error::other(e)),
-                    })
-                }
+                Ok(Err(e)) => Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(e),
+                }),
+                Err(e) => Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(std::io::Error::other(e)),
+                }),
             }
         })
     }
@@ -376,7 +500,10 @@ impl SegmentProcessor for GzipCompressor {
 // SymbolizeProcessor — resolves stack frame addresses to symbol names
 // ---------------------------------------------------------------------------
 
+/// Resolves stack-frame addresses in the segment to symbol names using
+/// the current process's `/proc/self/maps`.
 #[cfg(feature = "cpu-profiling")]
+#[derive(Debug, Default)]
 pub(crate) struct SymbolizeProcessor;
 
 #[cfg(feature = "cpu-profiling")]
@@ -391,28 +518,34 @@ impl SegmentProcessor for SymbolizeProcessor {
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
             // Skip already-compressed segments (e.g. leftover from a previous run).
-            if data.bytes.starts_with(&[0x1f, 0x8b]) {
+            if data.payload.starts_with(&[0x1f, 0x8b]) {
                 tracing::debug!(target: "dial9_worker", "segment is gzip-compressed, skipping symbolization");
                 return Ok(data);
             }
-            let input = std::mem::take(&mut data.bytes);
+            // The symbolize FFI reads `&[u8]`, so we materialize a single
+            // contiguous `Bytes`. When there's only one chunk this is a
+            // zero-copy `Bytes::clone`-equivalent; the `BytesMut` concat
+            // path runs only on already-segmented input (rare).
+            let input = std::mem::take(&mut data.payload).into_bytes();
             let result = tokio::task::spawn_blocking(move || {
                 let maps = dial9_perf_self_profile::read_proc_maps();
-                // TODO: reduce the amount of reallocation we are doing here, probably by making it possible to extend segment data instead of all the copying
                 let mut output = Vec::new();
                 dial9_perf_self_profile::offline_symbolize::symbolize_trace_with_maps(
                     &input,
                     &maps,
                     &mut output,
                 )?;
-                let mut combined = input;
-                combined.extend_from_slice(&output);
+                // Hand back the original bytes plus the symbol output as two
+                // chunks — no copy of `input`.
+                let mut combined = Payload::new();
+                combined.push(input);
+                combined.push(bytes::Bytes::from(output));
                 Ok::<_, std::io::Error>(combined)
             })
             .await;
             match result {
-                Ok(Ok(bytes)) => {
-                    data.bytes = bytes;
+                Ok(Ok(payload)) => {
+                    data.payload = payload;
                     Ok(data)
                 }
                 Ok(Err(e)) => {
@@ -437,7 +570,11 @@ impl SegmentProcessor for SymbolizeProcessor {
 // WriteBackProcessor — writes processed bytes back to disk
 // ---------------------------------------------------------------------------
 
-struct WriteBackProcessor;
+/// Writes the current payload bytes back to disk. If a
+/// `write_back_extension` metadata key is present, the bytes are written to
+/// `{original}{extension}` and the original segment file is removed.
+#[derive(Debug, Default)]
+pub(crate) struct WriteBackProcessor;
 
 impl SegmentProcessor for WriteBackProcessor {
     fn name(&self) -> &'static str {
@@ -458,10 +595,17 @@ impl SegmentProcessor for WriteBackProcessor {
                 }
                 None => original_path.clone(),
             };
-            let bytes = data.bytes.clone();
+            let payload = data.payload.clone();
             let write_dest = dest_path.clone();
-            let result =
-                tokio::task::spawn_blocking(move || std::fs::write(&write_dest, &bytes)).await;
+            let result = tokio::task::spawn_blocking(move || {
+                use std::io::{BufWriter, Write};
+                let mut f = BufWriter::new(std::fs::File::create(&write_dest)?);
+                for chunk in payload.chunks() {
+                    f.write_all(chunk)?;
+                }
+                f.flush()
+            })
+            .await;
             match result {
                 Ok(Ok(())) => {
                     if dest_path != original_path {
@@ -609,7 +753,7 @@ impl WorkerLoop {
 
             let mut data = SegmentData {
                 segment: segment.clone(),
-                bytes,
+                payload: Payload::from_vec(bytes),
                 metadata: HashMap::from([
                     ("epoch_secs".into(), epoch_secs.to_string()),
                     ("segment_index".into(), segment.index.to_string()),
@@ -722,15 +866,88 @@ impl WorkerLoop {
 // S3PipelineUploader — production S3 upload processor
 // ---------------------------------------------------------------------------
 
+/// S3 uploader processor. Construction is synchronous — the AWS client and
+/// bucket region are resolved lazily on the first `process()` call, inside
+/// the worker's tokio runtime.
 #[cfg(feature = "worker-s3")]
 pub(crate) struct S3PipelineUploader {
-    uploader: s3::S3Uploader,
-    circuit_breaker: connection::CircuitBreaker,
+    state: S3UploaderState,
+}
+
+#[cfg(feature = "worker-s3")]
+enum S3UploaderState {
+    Pending {
+        s3_config: s3::S3Config,
+        client: Option<aws_sdk_s3::Client>,
+    },
+    Ready {
+        uploader: s3::S3Uploader,
+        circuit_breaker: connection::CircuitBreaker,
+    },
+}
+
+#[cfg(feature = "worker-s3")]
+impl std::fmt::Debug for S3PipelineUploader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3PipelineUploader").finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "worker-s3")]
 impl S3PipelineUploader {
-    async fn new(s3_config: s3::S3Config, client: Option<aws_sdk_s3::Client>) -> Self {
+    /// Create a new uploader from an [`S3Config`](s3::S3Config) and an
+    /// optional pre-built S3 client. If `client` is `None`, the default
+    /// AWS configuration chain is used. Region detection and transfer
+    /// manager construction are deferred to the first `process()` call.
+    pub(crate) fn new(s3_config: s3::S3Config, client: Option<aws_sdk_s3::Client>) -> Self {
+        Self {
+            state: S3UploaderState::Pending { s3_config, client },
+        }
+    }
+
+    /// Set (or override) the pre-built S3 client. Must be called before the
+    /// uploader has been initialized (i.e. before the first segment has been
+    /// processed);
+    /// Note: the only caller is the builder, which runs before the
+    /// worker is spawned, so reaching the `Ready` arm is a programmer error.
+    pub(crate) fn set_client(&mut self, client: aws_sdk_s3::Client) {
+        match &mut self.state {
+            S3UploaderState::Pending { client: slot, .. } => *slot = Some(client),
+            S3UploaderState::Ready { .. } => {
+                unreachable!("set_client called after uploader initialization")
+            }
+        }
+    }
+
+    /// Take any previously-stashed client out of a `Pending` uploader so it
+    /// can be carried into a replacement. Returns `None` once the uploader
+    /// has been initialized.
+    pub(crate) fn take_client(&mut self) -> Option<aws_sdk_s3::Client> {
+        match &mut self.state {
+            S3UploaderState::Pending { client, .. } => client.take(),
+            S3UploaderState::Ready { .. } => None,
+        }
+    }
+
+    /// Construct an uploader directly in the `Ready` state. Test-only —
+    /// production code goes through [`new`](Self::new) and lazy init.
+    #[cfg(test)]
+    pub(crate) fn from_ready(
+        uploader: s3::S3Uploader,
+        circuit_breaker: connection::CircuitBreaker,
+    ) -> Self {
+        Self {
+            state: S3UploaderState::Ready {
+                uploader,
+                circuit_breaker,
+            },
+        }
+    }
+
+    async fn initialize(
+        s3_config: s3::S3Config,
+        client: Option<aws_sdk_s3::Client>,
+    ) -> (s3::S3Uploader, connection::CircuitBreaker) {
         let bootstrap_client = match client {
             Some(c) => c,
             None => {
@@ -761,10 +978,10 @@ impl S3PipelineUploader {
                 .build(),
         );
 
-        Self {
-            uploader: s3::S3Uploader::new(tm_client, s3_config),
-            circuit_breaker: connection::CircuitBreaker::new(),
-        }
+        (
+            s3::S3Uploader::new(tm_client, s3_config),
+            connection::CircuitBreaker::new(),
+        )
     }
 }
 
@@ -779,7 +996,37 @@ impl SegmentProcessor for S3PipelineUploader {
         mut data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
-            if !self.circuit_breaker.should_attempt() {
+            // Lazy init: clone the config + client and run `initialize`
+            // without mutating `self.state`. If the init future panics or
+            // is cancelled mid-await, the worker's outer `catch_unwind`
+            // recovers and `self.state` stays `Pending`, so the next
+            // segment will retry. Mutating before the await would leave
+            // the uploader stuck in a transient state forever.
+            if let S3UploaderState::Pending { s3_config, client } = &self.state {
+                let cfg = s3_config.clone();
+                let cli = client.clone();
+                let (uploader, circuit_breaker) = Self::initialize(cfg, cli).await;
+                self.state = S3UploaderState::Ready {
+                    uploader,
+                    circuit_breaker,
+                };
+            }
+            let S3UploaderState::Ready {
+                uploader,
+                circuit_breaker,
+            } = &mut self.state
+            else {
+                // unreachable: we just transitioned above and the state
+                // doesn't otherwise revert. Fall through with an error so
+                // a future refactor doesn't silently break.
+                return Err(ProcessError {
+                    data,
+                    kind: ProcessErrorKind::Io(std::io::Error::other(
+                        "S3 uploader in unexpected state",
+                    )),
+                });
+            };
+            if !circuit_breaker.should_attempt() {
                 tracing::debug!(target: "dial9_worker", path = %data.segment.path.display(), "circuit breaker open, skipping upload");
                 return Err(ProcessError {
                     data,
@@ -789,14 +1036,13 @@ impl SegmentProcessor for S3PipelineUploader {
                     },
                 });
             }
-            let bytes = std::mem::take(&mut data.bytes);
-            match self
-                .uploader
-                .upload_and_delete(&data.segment, bytes, &data.metadata)
+            let payload = std::mem::take(&mut data.payload);
+            match uploader
+                .upload_and_delete(&data.segment, payload, &data.metadata)
                 .await
             {
                 Ok(key) => {
-                    self.circuit_breaker.on_success();
+                    circuit_breaker.on_success();
                     rate_limited!(Duration::from_secs(10), {
                         tracing::info!(target: "dial9_worker", "uploaded {key}");
                     });
@@ -807,7 +1053,7 @@ impl SegmentProcessor for S3PipelineUploader {
                     {
                         tracing::debug!(target: "dial9_worker", path = %data.segment.path.display(), "segment already evicted, skipping");
                     } else {
-                        self.circuit_breaker.on_failure();
+                        circuit_breaker.on_failure();
                         rate_limited!(Duration::from_secs(60), {
                             tracing::warn!(target: "dial9_worker", error = %kind, "upload failed");
                         });
@@ -960,10 +1206,10 @@ mod tests {
         let uploader = s3::S3Uploader::new(tm_client, s3_config);
         let mut processors: Vec<Box<dyn SegmentProcessor>> = vec![
             Box::new(GzipCompressor),
-            Box::new(S3PipelineUploader {
+            Box::new(S3PipelineUploader::from_ready(
                 uploader,
-                circuit_breaker: connection::CircuitBreaker::new(),
-            }),
+                connection::CircuitBreaker::new(),
+            )),
         ];
 
         let segment = sealed::SealedSegment {
@@ -987,7 +1233,7 @@ mod tests {
 
         let mut pipe_data = SegmentData {
             segment,
-            bytes: data,
+            payload: Payload::from_vec(data),
             metadata: HashMap::from([
                 ("epoch_secs".into(), "1741209000".into()),
                 ("segment_index".into(), "0".into()),
@@ -1016,6 +1262,38 @@ mod tests {
             "CompressedSize should be non-zero, got {}",
             compressed
         );
+    }
+
+    /// `set_client` is only valid while the uploader is `Pending`. Calling it
+    /// on a `Ready` uploader indicates an internal misuse and must panic
+    /// rather than silently drop the new client.
+    #[test]
+    #[should_panic(expected = "set_client called after uploader initialization")]
+    fn set_client_after_ready_panics() {
+        let s3_config = s3::S3Config::builder()
+            .bucket("test")
+            .service_name("test")
+            .instance_path("test")
+            .boot_id("test")
+            .region("us-east-1")
+            .build();
+        let sdk_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .build();
+        let sdk_client = aws_sdk_s3::Client::from_conf(sdk_config);
+        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
+            aws_sdk_s3_transfer_manager::Config::builder()
+                .client(sdk_client.clone())
+                .build(),
+        );
+        let uploader = s3::S3Uploader::new(tm_client, s3_config);
+        let mut pipeline_uploader =
+            S3PipelineUploader::from_ready(uploader, connection::CircuitBreaker::new());
+        pipeline_uploader.set_client(sdk_client);
     }
 
     // --- Review finding #10: uncompressed_size should use bytes.len() ---
@@ -1080,12 +1358,6 @@ mod tests {
         stop.cancel();
         let config = BackgroundTaskConfig::builder()
             .trace_path(dir.path().join("trace.bin"))
-            .s3(s3::S3Config::builder()
-                .bucket("b")
-                .service_name("s")
-                .instance_path("i")
-                .boot_id("b")
-                .build())
             .build();
 
         let processors: Vec<Box<dyn SegmentProcessor>> =
@@ -1150,12 +1422,6 @@ mod tests {
         stop.cancel();
         let config = BackgroundTaskConfig::builder()
             .trace_path(dir.path().join("trace.bin"))
-            .s3(s3::S3Config::builder()
-                .bucket("b")
-                .service_name("s")
-                .instance_path("i")
-                .boot_id("b")
-                .build())
             .build();
 
         let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(FailFirstProcessor {
@@ -1187,25 +1453,15 @@ mod tests {
 
 // --- Review finding #9: trace_stem edge cases ---
 
-#[cfg(all(test, feature = "worker-s3"))]
+#[cfg(test)]
 mod trace_stem_tests {
     use super::*;
     use assert2::check;
-
-    fn dummy_s3() -> s3::S3Config {
-        s3::S3Config::builder()
-            .bucket("b")
-            .service_name("s")
-            .instance_path("i")
-            .boot_id("b")
-            .build()
-    }
 
     #[test]
     fn trace_stem_normal_path() {
         let config = BackgroundTaskConfig::builder()
             .trace_path("/tmp/traces/trace.bin")
-            .s3(dummy_s3())
             .build();
         check!(config.trace_stem() == "trace");
     }
@@ -1215,7 +1471,6 @@ mod trace_stem_tests {
         // A path like "/tmp/traces/" — file_stem returns "traces", not an error
         let config = BackgroundTaskConfig::builder()
             .trace_path("/tmp/traces/")
-            .s3(dummy_s3())
             .build();
         // This is the current behavior — it returns "traces" not "trace"
         // which would silently match the wrong files
@@ -1225,10 +1480,7 @@ mod trace_stem_tests {
     #[test]
     fn trace_stem_root_path() {
         // A path like "/" has no file stem
-        let config = BackgroundTaskConfig::builder()
-            .trace_path("/")
-            .s3(dummy_s3())
-            .build();
+        let config = BackgroundTaskConfig::builder().trace_path("/").build();
         // Should fall back to "trace" and log an error
         check!(config.trace_stem() == "trace");
     }
@@ -1237,7 +1489,6 @@ mod trace_stem_tests {
     fn trace_dir_for_directory_path() {
         let config = BackgroundTaskConfig::builder()
             .trace_path("/tmp/traces/")
-            .s3(dummy_s3())
             .build();
         // trace_dir should be the parent of the path
         check!(config.trace_dir() == std::path::Path::new("/tmp"));
@@ -1340,10 +1591,9 @@ mod worker_pipeline_tests {
         std::fs::write(&seg_path, b"bad data").unwrap();
 
         let (uploader, _s3_root) = always_failing_s3_uploader();
-        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(S3PipelineUploader {
-            uploader,
-            circuit_breaker: connection::CircuitBreaker::new(),
-        })];
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(
+            S3PipelineUploader::from_ready(uploader, connection::CircuitBreaker::new()),
+        )];
 
         let stop = tokio_util::sync::CancellationToken::new();
         let mut worker = WorkerLoop::new(
@@ -1371,10 +1621,8 @@ mod worker_pipeline_tests {
         let mut cb = connection::CircuitBreaker::new();
         // Trip the circuit breaker so it refuses attempts.
         cb.on_failure();
-        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(S3PipelineUploader {
-            uploader,
-            circuit_breaker: cb,
-        })];
+        let processors: Vec<Box<dyn SegmentProcessor>> =
+            vec![Box::new(S3PipelineUploader::from_ready(uploader, cb))];
 
         let stop = tokio_util::sync::CancellationToken::new();
         let mut worker = WorkerLoop::new(
@@ -1509,7 +1757,7 @@ mod worker_pipeline_tests {
                 data: SegmentData,
             ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
             {
-                *self.0.lock().unwrap() = data.bytes.clone();
+                *self.0.lock().unwrap() = data.payload.clone().into_vec();
                 Box::pin(async { Ok(data) })
             }
         }
@@ -1564,7 +1812,7 @@ mod worker_pipeline_tests {
 
         let data = SegmentData {
             segment,
-            bytes: b"payload".to_vec(),
+            payload: Payload::from(b"payload"),
             metadata: HashMap::from([("write_back_extension".into(), ".gz".into())]),
             metrics,
         };
@@ -1609,7 +1857,7 @@ mod worker_pipeline_tests {
 
         let data = SegmentData {
             segment,
-            bytes: b"new".to_vec(),
+            payload: Payload::from(b"new"),
             metadata: HashMap::new(),
             metrics,
         };

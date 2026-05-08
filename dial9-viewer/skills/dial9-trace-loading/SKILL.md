@@ -1,3 +1,8 @@
+---
+name: dial9-trace-loading
+description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTrace schema, event types, field definitions, parse options, time filtering, symbol resolution, and timestamp conversion. Use when loading traces or understanding the trace data model.
+---
+
 # Loading and Parsing Traces
 
 ## ParsedTrace structure
@@ -9,6 +14,8 @@
   magic: string,                   // "D9TF" format identifier
   version: number,                 // trace format version
   events: TraceEvent[],          // PollStart, PollEnd, WorkerPark, WorkerUnpark, QueueSample, WakeEvent
+  minTs: number|null,            // earliest event timestamp (ns), null if no events
+  maxTs: number|null,            // latest event timestamp (ns), null if no events
   cpuSamples: CpuSample[],      // Periodic stack traces from perf/eBPF
   customEvents: CustomEvent[],   // SpanEnter/SpanExit events from tracing layer (requires dial9-tokio-telemetry tracing-layer feature)
   spawnLocations: Map<string, string>,    // spawn location ID → source location
@@ -27,6 +34,7 @@
   hasCpuTime: boolean,                   // trace includes CPU time data
   hasSchedWait: boolean,                 // trace includes kernel scheduling wait data
   hasTaskTracking: boolean,              // trace includes task spawn/terminate events
+  taskInstrumented: Map<number, boolean>, // task ID → whether task has tracing instrumentation
 }
 ```
 
@@ -72,13 +80,11 @@ const EVENT_TYPES = {
 ## Parse options
 
 ```javascript
-for await (const trace of parseTrace('/path/to/trace.bin', {
+const trace = await parseTrace('/path/to/trace.bin', {
   maxEvents: 100000,        // Cap event count (metadata/symbols always parsed)
   startTime: 1000000000,    // Filter events to time range (absolute ns)
   endTime:   2000000000,
-})) {
-  // ...
-}
+});
 ```
 
 ## Converting timestamps
@@ -89,19 +95,16 @@ Trace timestamps are monotonic nanoseconds. To convert to wall clock:
 if (trace.clockOffsetNs != null) {
   const wallNs = event.timestamp + trace.clockOffsetNs;
   const wallDate = new Date(wallNs / 1e6);
-  // or: new Date(wallNs / 1e6)  // if already a JS number
 }
 ```
 
 To get relative time from trace start:
+
 ```javascript
-const minTs = trace.events.reduce((m, e) => Math.min(m, e.timestamp), Infinity);
-const relativeMs = (event.timestamp - minTs) / 1e6;
+const relativeMs = (event.timestamp - trace.minTs) / 1e6;
 ```
 
 ## Symbol resolution
-
-CPU sample callchains contain raw addresses. Resolve them:
 
 ```javascript
 const { formatFrame, symbolizeChain, deduplicateSamples } = require('./trace_parser.js');
@@ -110,10 +113,9 @@ const { formatFrame, symbolizeChain, deduplicateSamples } = require('./trace_par
 const frames = symbolizeChain(sample.callchain, trace.callframeSymbols);
 // [{symbol: "hyper::proto::h1::dispatch::Dispatcher<...>::poll_inner", location: "hyper-0.14.28/src/proto/h1/dispatch.rs:174"}, ...]
 
-// Format a single frame for display (shortens generics, extracts filename)
+// Format a single frame for display
 const { text, docsUrl } = formatFrame(frames[0]);
 // text: "Dispatcher::poll_inner dispatch.rs:174"
-// docsUrl: "https://docs.rs/hyper/0.14.28/src/hyper/proto/h1/dispatch.rs.html#174"
 
 // Deduplicate samples by stack trace
 const groups = deduplicateSamples(trace.cpuSamples, trace.callframeSymbols);
@@ -122,16 +124,44 @@ const groups = deduplicateSamples(trace.cpuSamples, trace.callframeSymbols);
 
 ## Handling gzip
 
-`parseTrace` automatically decompresses gzip input. You can pass `.bin.gz` files directly.
+`parseTrace` automatically decompresses gzip input. Pass `.bin.gz` files directly.
+
+## Fetching traces from S3
+
+Start the viewer (`dial9-viewer --bucket BUCKET`, default port 3000), then fetch traces:
+
+```javascript
+// List traces matching a prefix
+const resp = await fetch('http://localhost:3000/api/search?bucket=BUCKET&q=2026-04-09/19');
+const objects = await resp.json(); // [{key, size, last_modified}, ...]
+
+// Single file: fetch and parse one trace
+const traceResp = await fetch(`http://localhost:3000/api/trace?bucket=BUCKET&keys=${encodeURIComponent(objects[0].key)}`);
+const buf = Buffer.from(await traceResp.arrayBuffer());
+const trace = await parseTrace(buf);
+
+// Multiple files: download to a local directory, then analyze
+const fs = require('fs');
+const dir = '/tmp/traces';
+fs.mkdirSync(dir, { recursive: true });
+// Download in parallel (20 at a time)
+const limit = 20;
+for (let i = 0; i < objects.length; i += limit) {
+  await Promise.all(objects.slice(i, i + limit).map(async (obj) => {
+    const r = await fetch(`http://localhost:3000/api/trace?bucket=BUCKET&keys=${encodeURIComponent(obj.key)}`);
+    fs.writeFileSync(`${dir}/${obj.key.split('/').pop()}`, Buffer.from(await r.arrayBuffer()));
+  }));
+}
+for await (const trace of parseTrace(dir)) {
+  // analyze each trace
+}
+```
 
 ## Merging multiple trace files
 
-Trace files can be concatenated back-to-back to form a single combined trace. Decompress any gzipped segments first, then concatenate the raw `.bin` files:
+Trace files can be concatenated back-to-back. The parser handles multiple concatenated segments transparently (headers, string pools, and schemas are re-read at each boundary).
 
 ```bash
-# Decompress and concatenate multiple segments
 gunzip -k segment-001.bin.gz segment-002.bin.gz segment-003.bin.gz
 cat segment-001.bin segment-002.bin segment-003.bin > combined.bin
 ```
-
-Pass the combined file to `parseTrace` as usual. The parser handles multiple concatenated segments transparently — headers, string pools, and schemas are re-read at each segment boundary.

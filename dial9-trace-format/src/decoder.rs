@@ -152,6 +152,10 @@ pub enum DecodedFrame {
     },
     StringPool(Vec<PoolEntry>),
     StackPool(Vec<StackPoolEntry>),
+    SchemaAnnotations {
+        type_id: WireTypeId,
+        annotations: Vec<crate::schema::FieldAnnotation>,
+    },
 }
 
 /// Zero-copy decoded frame that borrows from the input buffer.
@@ -165,6 +169,10 @@ pub enum DecodedFrameRef<'a> {
     },
     StringPool(Vec<PoolEntryRef<'a>>),
     StackPool(Vec<StackPoolEntryRef<'a>>),
+    SchemaAnnotations {
+        type_id: WireTypeId,
+        annotations: Vec<crate::schema::FieldAnnotation>,
+    },
 }
 
 struct SchemaCache {
@@ -343,6 +351,26 @@ impl<'a> Decoder<'a> {
                 self.timestamp_base_ns = ts;
                 self.next_frame() // consume silently, return next real frame
             }
+            Frame::SchemaAnnotations {
+                type_id,
+                annotations,
+            } => {
+                // Merge annotations into the cached schema (lenient: skip if unknown type_id)
+                if let Some(cache) = self
+                    .schema_cache
+                    .get_mut(type_id.0 as usize)
+                    .and_then(|s| s.as_mut())
+                {
+                    cache.entry.annotations.extend_from_slice(&annotations);
+                }
+                if let Some(entry) = self.registry.schemas.get_mut(&type_id) {
+                    entry.annotations.extend_from_slice(&annotations);
+                }
+                Ok(Some(DecodedFrame::SchemaAnnotations {
+                    type_id,
+                    annotations,
+                }))
+            }
         }
     }
 
@@ -415,6 +443,25 @@ impl<'a> Decoder<'a> {
             FrameRef::TimestampReset(ts) => {
                 self.timestamp_base_ns = ts;
                 self.next_frame_ref()
+            }
+            FrameRef::SchemaAnnotations {
+                type_id,
+                annotations,
+            } => {
+                if let Some(cache) = self
+                    .schema_cache
+                    .get_mut(type_id.0 as usize)
+                    .and_then(|s| s.as_mut())
+                {
+                    cache.entry.annotations.extend_from_slice(&annotations);
+                }
+                if let Some(entry) = self.registry.schemas.get_mut(&type_id) {
+                    entry.annotations.extend_from_slice(&annotations);
+                }
+                Ok(Some(DecodedFrameRef::SchemaAnnotations {
+                    type_id,
+                    annotations,
+                }))
             }
         }
     }

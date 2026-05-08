@@ -94,36 +94,15 @@ fn build_callsite_schemas(meta: &'static tracing::Metadata<'static>) -> Callsite
 
     // Base fields present on all span events
     let mut enter_fields = vec![
-        FieldDef {
-            name: "worker_id".into(),
-            field_type: FieldType::Varint,
-        },
-        FieldDef {
-            name: "span_id".into(),
-            field_type: FieldType::Varint,
-        },
-        FieldDef {
-            name: "parent_span_id".into(),
-            field_type: FieldType::OptionalVarint,
-        },
-        FieldDef {
-            name: "span_name".into(),
-            field_type: FieldType::PooledString,
-        },
+        FieldDef::new("worker_id", FieldType::Varint),
+        FieldDef::new("span_id", FieldType::Varint),
+        FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+        FieldDef::new("span_name", FieldType::PooledString),
     ];
     let mut exit_fields = vec![
-        FieldDef {
-            name: "worker_id".into(),
-            field_type: FieldType::Varint,
-        },
-        FieldDef {
-            name: "span_id".into(),
-            field_type: FieldType::Varint,
-        },
-        FieldDef {
-            name: "span_name".into(),
-            field_type: FieldType::PooledString,
-        },
+        FieldDef::new("worker_id", FieldType::Varint),
+        FieldDef::new("span_id", FieldType::Varint),
+        FieldDef::new("span_name", FieldType::PooledString),
     ];
 
     // Add user-defined fields as optional interned strings
@@ -131,10 +110,7 @@ fn build_callsite_schemas(meta: &'static tracing::Metadata<'static>) -> Callsite
     for field in meta.fields() {
         let name = field.name();
         field_names.push(name);
-        let def = FieldDef {
-            name: name.to_string(),
-            field_type: FieldType::OptionalPooledString,
-        };
+        let def = FieldDef::new(name.to_string(), FieldType::OptionalPooledString);
         enter_fields.push(def.clone());
         exit_fields.push(def);
     }

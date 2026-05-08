@@ -94,7 +94,7 @@ async function main() {
           .filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent)
           .map(e => e.workerId)
       )].sort((a, b) => a - b);
-      const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
+      const maxTs = trace.maxTs;
       const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
       attachCpuSamples(trace.cpuSamples, spans.workerSpans);
       const schedDelays = computeSchedulingDelays(spans.workerSpans, workerIds, spans.wakesByTask);

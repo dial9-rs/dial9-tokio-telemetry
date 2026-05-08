@@ -6,28 +6,143 @@
 use crate::codec::WireTypeId;
 use crate::encoder::FxHashMap;
 use crate::types::FieldType;
+use std::borrow::Cow;
+
+/// A per-field annotation carrying arbitrary key-value metadata.
+///
+/// Annotations are emitted in a separate frame (`TAG_SCHEMA_ANNOTATIONS`)
+/// after the schema frame they belong to. They carry metadata such as units,
+/// display hints, or semantic-convention labels.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldAnnotation {
+    field_index: u16,
+    key: Cow<'static, str>,
+    value: Cow<'static, str>,
+}
+
+impl FieldAnnotation {
+    /// Create a new field annotation.
+    pub fn new(field_index: u16, key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            field_index,
+            key: Cow::Owned(key.into()),
+            value: Cow::Owned(value.into()),
+        }
+    }
+
+    /// Index of the field this annotation applies to (0-based, matching the
+    /// field order in [`SchemaEntry::fields`]).
+    pub fn field_index(&self) -> u16 {
+        self.field_index
+    }
+
+    /// Annotation key (e.g. `"metrique.unit"`).
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Annotation value (e.g. `"microseconds"`).
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
 
 /// A single field within a schema: a name and a [`FieldType`].
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldDef {
+    pub(crate) name: String,
+    pub(crate) field_type: FieldType,
+}
+
+impl FieldDef {
+    /// Construct a field definition with the given name and type.
+    ///
+    /// ```
+    /// # use dial9_trace_format::schema::FieldDef;
+    /// # use dial9_trace_format::types::FieldType;
+    /// FieldDef::new("worker_id", FieldType::Varint);
+    /// FieldDef::new("tags", FieldType::DynamicList);
+    /// ```
+    pub fn new(name: impl Into<String>, field_type: FieldType) -> Self {
+        Self {
+            name: name.into(),
+            field_type,
+        }
+    }
+
     /// Field name (e.g. `"worker_id"`).
-    pub name: String,
-    /// Wire type used to encode this field. Optional variants (e.g.
-    /// `FieldType::OptionalPooledString`) indicate the field uses the
-    /// high-bit optional encoding on the wire.
-    pub field_type: FieldType,
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Wire type used to encode this field.
+    pub fn field_type(&self) -> FieldType {
+        self.field_type
+    }
 }
 
 /// Describes the layout of an event type. Does not carry a wire type ID —
 /// the ID is assigned by the encoder and tracked externally by the registry.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaEntry {
+    pub(crate) name: String,
+    pub(crate) has_timestamp: bool,
+    pub(crate) fields: Vec<FieldDef>,
+    pub(crate) annotations: Vec<FieldAnnotation>,
+}
+
+impl SchemaEntry {
+    /// Construct a new schema entry.
+    pub fn new(
+        name: impl Into<String>,
+        has_timestamp: bool,
+        fields: impl IntoIterator<Item = FieldDef>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            has_timestamp,
+            fields: fields.into_iter().collect(),
+            annotations: Vec::new(),
+        }
+    }
+
+    /// Construct a schema entry with annotations.
+    pub fn with_annotations(
+        name: impl Into<String>,
+        has_timestamp: bool,
+        fields: impl IntoIterator<Item = FieldDef>,
+        annotations: impl IntoIterator<Item = FieldAnnotation>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            has_timestamp,
+            fields: fields.into_iter().collect(),
+            annotations: annotations.into_iter().collect(),
+        }
+    }
+
     /// Event type name (e.g. `"PollStart"`).
-    pub name: String,
-    /// Whether events of this type carry a packed u24 nanosecond timestamp in the event header.
-    pub has_timestamp: bool,
-    /// Ordered list of fields (excluding the timestamp, which is in the header).
-    pub fields: Vec<FieldDef>,
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether events of this type carry a packed timestamp in the event header.
+    pub fn has_timestamp(&self) -> bool {
+        self.has_timestamp
+    }
+
+    /// Ordered list of fields (excluding the timestamp).
+    pub fn fields(&self) -> &[FieldDef] {
+        &self.fields
+    }
+
+    /// Per-field annotations.
+    pub fn annotations(&self) -> &[FieldAnnotation] {
+        &self.annotations
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -111,6 +226,7 @@ mod tests {
                     field_type: FieldType::Varint,
                 },
             ],
+            annotations: Vec::new(),
         };
         reg.register(id, entry.clone()).unwrap();
         assert_eq!(reg.get(id), Some(&entry));
@@ -125,6 +241,7 @@ mod tests {
             name: "A".into(),
             has_timestamp: true,
             fields: vec![],
+            annotations: Vec::new(),
         };
         reg.register(id, entry.clone()).unwrap();
         reg.register(id, entry).unwrap();
@@ -140,6 +257,7 @@ mod tests {
                 name: "A".into(),
                 has_timestamp: true,
                 fields: vec![],
+                annotations: Vec::new(),
             },
         )
         .unwrap();
@@ -149,7 +267,8 @@ mod tests {
                 SchemaEntry {
                     name: "B".into(),
                     has_timestamp: true,
-                    fields: vec![]
+                    fields: vec![],
+                    annotations: Vec::new(),
                 }
             )
             .is_err()
@@ -166,6 +285,7 @@ mod tests {
                 name: "A".into(),
                 has_timestamp: true,
                 fields: vec![],
+                annotations: Vec::new(),
             },
         )
         .unwrap();
@@ -176,6 +296,7 @@ mod tests {
                 name: "B".into(),
                 has_timestamp: true,
                 fields: vec![],
+                annotations: Vec::new(),
             },
         )
         .unwrap();

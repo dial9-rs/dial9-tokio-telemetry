@@ -11,14 +11,8 @@ fn full_round_trip() {
         .register_schema(
             "PollStart",
             vec![
-                FieldDef {
-                    name: "worker".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "task_id".into(),
-                    field_type: FieldType::Varint,
-                },
+                FieldDef::new("worker", FieldType::Varint),
+                FieldDef::new("task_id", FieldType::Varint),
             ],
         )
         .unwrap();
@@ -26,14 +20,8 @@ fn full_round_trip() {
         .register_schema(
             "CpuSample",
             vec![
-                FieldDef {
-                    name: "thread_name".into(),
-                    field_type: FieldType::PooledString,
-                },
-                FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::StackFrames,
-                },
+                FieldDef::new("thread_name", FieldType::PooledString),
+                FieldDef::new("frames", FieldType::StackFrames),
             ],
         )
         .unwrap();
@@ -68,18 +56,9 @@ fn full_round_trip() {
         .register_schema(
             "SymbolTableEntry",
             vec![
-                FieldDef {
-                    name: "base_addr".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "size".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "symbol_name".into(),
-                    field_type: FieldType::PooledString,
-                },
+                FieldDef::new("base_addr", FieldType::Varint),
+                FieldDef::new("size", FieldType::Varint),
+                FieldDef::new("symbol_name", FieldType::PooledString),
             ],
         )
         .unwrap();
@@ -105,8 +84,8 @@ fn full_round_trip() {
     // + 1 cpu sample + 1 pool("my_function") + 1 symbol event = 8
     assert_eq!(decoded.len(), 8, "got: {decoded:#?}");
 
-    assert!(matches!(&decoded[0], DecodedFrame::Schema(s) if s.name == "PollStart"));
-    assert!(matches!(&decoded[1], DecodedFrame::Schema(s) if s.name == "CpuSample"));
+    assert!(matches!(&decoded[0], DecodedFrame::Schema(s) if s.name() == "PollStart"));
+    assert!(matches!(&decoded[1], DecodedFrame::Schema(s) if s.name() == "CpuSample"));
 
     assert_eq!(dec.string_pool().get(thread_id), Some("worker-0"));
     assert_eq!(dec.string_pool().get(sym_name_id), Some("my_function"));
@@ -127,7 +106,7 @@ fn full_round_trip() {
     }
 
     // Verify symbol table event
-    assert!(matches!(&decoded[6], DecodedFrame::Schema(s) if s.name == "SymbolTableEntry"));
+    assert!(matches!(&decoded[6], DecodedFrame::Schema(s) if s.name() == "SymbolTableEntry"));
     if let DecodedFrame::Event { values, .. } = &decoded[7] {
         assert_eq!(values[0], FieldValue::Varint(0x5555_5555_0000));
         assert_eq!(values[1], FieldValue::Varint(0x2000));
@@ -144,38 +123,14 @@ fn round_trip_all_field_types() {
         .register_schema(
             "AllTypes",
             vec![
-                FieldDef {
-                    name: "a".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "b".into(),
-                    field_type: FieldType::I64,
-                },
-                FieldDef {
-                    name: "c".into(),
-                    field_type: FieldType::F64,
-                },
-                FieldDef {
-                    name: "d".into(),
-                    field_type: FieldType::Bool,
-                },
-                FieldDef {
-                    name: "e".into(),
-                    field_type: FieldType::String,
-                },
-                FieldDef {
-                    name: "f".into(),
-                    field_type: FieldType::Bytes,
-                },
-                FieldDef {
-                    name: "h".into(),
-                    field_type: FieldType::PooledString,
-                },
-                FieldDef {
-                    name: "i".into(),
-                    field_type: FieldType::StackFrames,
-                },
+                FieldDef::new("a", FieldType::Varint),
+                FieldDef::new("b", FieldType::I64),
+                FieldDef::new("c", FieldType::F64),
+                FieldDef::new("d", FieldType::Bool),
+                FieldDef::new("e", FieldType::String),
+                FieldDef::new("f", FieldType::Bytes),
+                FieldDef::new("h", FieldType::PooledString),
+                FieldDef::new("i", FieldType::StackFrames),
             ],
         )
         .unwrap();
