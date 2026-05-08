@@ -1,21 +1,22 @@
-# Continuous benchmarking with Bencher (https://bencher.dev)
+# Continuous benchmarking with Bencher (https://bencher.dev).
 #
 # PREREQUISITES:
 #   1. Create a project at https://bencher.dev and note its slug.
 #   2. Add the following in GitHub → Settings → Secrets and variables → Actions:
 #      - Secret  BENCHER_API_TOKEN: API token from bencher.dev
 #      - Variable BENCHER_PROJECT:  your project slug
-#   3. GITHUB_TOKEN is provided automatically — no setup needed.
 #
-# overhead_bench uses a custom harness (not Criterion). Its --bmf flag
-# outputs Bencher Metric Format directly.
+# Two jobs share the iai-bench composite action:
+#   - baseline (push to main + workflow_dispatch): posts numbers and
+#     maintains the persistent regression threshold on the target branch.
+#   - pr_gate (pull_request): regression check against main's threshold
+#     via --start-point-reset. Skip via the `skip-bench` PR label.
 
 name: Benchmarks
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
     paths-ignore:
       - '**.md'
@@ -26,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       bencher_branch:
-        description: 'Override Bencher branch name for iai_main (e.g. set to "main" to seed baseline from a feature branch). Leave empty to use the running branch name.'
+        description: 'Override Bencher branch name (e.g. "main" to seed baseline from a feature branch). Leave empty to use the running branch.'
         required: false
         default: ''
 
@@ -34,176 +35,67 @@ permissions:
   checks: write
   pull-requests: write
 
-# Cancel stale runs when a PR gets new pushes
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Disabled until a dedicated runner exists. Wall-clock criterion +
-  # integration benches are too noisy on shared ubuntu-latest. iai jobs
-  # below cover the deterministic micro tier in the meantime.
-  benchmark_main:
-    name: Benchmark — ${{ matrix.bench.name }} (main baseline)
-    if: ${{ false && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }} # skip job
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        bench:
-          - name: overhead_bench
-            adapter: json
-            command: cargo bench --bench overhead_bench -- --bmf 10
-          - name: overhead_bench_ctimer
-            adapter: json
-            command: DIAL9_FORCE_CTIMER=1 cargo bench --bench overhead_bench -- --bmf 10
-          - name: e2e_workload
-            adapter: json
-            command: cargo bench --bench e2e_workload -- --bmf 10
-    env:
-      RUST_BACKTRACE: 1
-      BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Enable perf_event_open and kallsyms
-        run: |
-          sudo sysctl kernel.perf_event_paranoid=1
-          sudo sysctl kernel.kptr_restrict=0
-      - uses: bencherdev/bencher@fa25a72c516046b4c0e31659bef70c5266b0f94d # v0.6.4
-      - name: Run benchmark
-        run: |
-          bencher run \
-            --token '${{ secrets.BENCHER_API_TOKEN }}' \
-            --branch '${{ github.ref_name }}' \
-            --testbed ubuntu-latest \
-            --adapter '${{ matrix.bench.adapter }}' \
-            "${{ matrix.bench.command }}"
-
-  # iai micro tier on push to main: populates the Bencher baseline used
-  # by iai_micro PR gate below. Instruction counts are deterministic so
-  # shared ubuntu-latest is fine.
-  iai_main:
+  baseline:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    name: Microbenchmarks
+    name: baseline
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       RUST_BACKTRACE: 1
-      IAI_CALLGRIND_VERSION: "0.16.1"
       BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
       # Mirror .cargo/config.toml [build] rustflags + add iai_enabled cfg
-      # so the bench files compile their real iai entry point. Without
-      # this cfg they compile to a no-op stub (so plain `cargo test
-      # --all-targets` doesn't try to spawn iai-callgrind-runner).
-      RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes --cfg iai_enabled"
+      # so bench files compile their real iai entry point (not the no-op
+      # stub `cargo test --all-targets` uses).
+      RUSTFLAGS: '--cfg tokio_unstable -C force-frame-pointers=yes --cfg iai_enabled'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install valgrind (cached)
-        uses: awalsh128/cache-apt-pkgs-action@latest
+      - uses: ./.github/actions/iai-bench
         with:
-          packages: valgrind
-          version: 1.0
-      - name: Cache iai-callgrind-runner
-        id: runner_cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/iai-callgrind-runner
-          key: iai-runner-${{ env.IAI_CALLGRIND_VERSION }}
-      - name: Install cargo-binstall
-        if: steps.runner_cache.outputs.cache-hit != 'true'
-        uses: cargo-bins/cargo-binstall@main
-      - name: Install iai-callgrind-runner (prebuilt via binstall)
-        if: steps.runner_cache.outputs.cache-hit != 'true'
-        run: cargo binstall iai-callgrind-runner --version ${{ env.IAI_CALLGRIND_VERSION }} --no-confirm --locked
-      - uses: bencherdev/bencher@fa25a72c516046b4c0e31659bef70c5266b0f94d # v0.6.4
-      - name: Run iai benches → Bencher
-        env:
-          # workflow_dispatch can override target branch (e.g. seed Bencher's
-          # `main` history from a feature branch when bootstrapping).
-          BENCHER_BRANCH: ${{ github.event.inputs.bencher_branch != '' && github.event.inputs.bencher_branch || github.ref_name }}
-        run: |
-          set -euo pipefail
-          for cmd in \
-              "cargo bench -p dial9-tokio-telemetry --bench writer_encode_iai" \
-              "cargo bench -p dial9-tokio-telemetry --bench writer_write_encoded_iai" \
-              "cargo bench -p dial9-tokio-telemetry --bench threadlocal_encode_iai" \
-              "cargo bench -p dial9-tokio-telemetry --bench tracing_layer_iai --features tracing-layer" \
-              "cargo bench -p dial9-trace-format --bench codec_iai"; do
-            bencher run \
-              --token '${{ secrets.BENCHER_API_TOKEN }}' \
-              --branch "$BENCHER_BRANCH" \
-              --testbed ubuntu-latest \
-              --adapter rust_iai_callgrind \
-              "$cmd"
-          done
+          bencher-token: ${{ secrets.BENCHER_API_TOKEN }}
+          bencher-branch: ${{ github.event.inputs.bencher_branch != '' && github.event.inputs.bencher_branch || github.ref_name }}
+          bencher-extra-args: >-
+            --threshold-measure instructions
+            --threshold-measure l1-hits
+            --threshold-measure ram-hits
+            --threshold-measure total-read-write
+            --threshold-measure estimated-cycles
+            --threshold-test percentage
+            --threshold-max-sample-size 1
+            --threshold-upper-boundary 0.01
 
-  # iai micro tier on PRs: regression gate against main baseline on
-  # Bencher (>1% instruction-count delta fails + PR comment + dashboard
-  # alarm). Same-repo PRs only (requires BENCHER_API_TOKEN).
-  # Skipped on PRs labeled `skip-bench`: escape hatch for changes that
-  # knowingly regress (e.g. correctness fixes, intentional cost added).
-  # After such a PR merges, iai_main posts the new main values updating the baseline.
-  iai_micro:
+  pr_gate:
+    # Same-repo PRs only (fork PRs have no access to BENCHER_API_TOKEN).
+    # `skip-bench` label is the escape hatch for changes that knowingly
+    # regress (correctness fixes, intentional cost added). The next
+    # baseline run on main updates the reference.
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && !contains(github.event.pull_request.labels.*.name, 'skip-bench')
-    name: Microbenchmarks
+    name: PR gate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       RUST_BACKTRACE: 1
-      IAI_CALLGRIND_VERSION: "0.16.1"
       BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
-      RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes --cfg iai_enabled"
+      RUSTFLAGS: '--cfg tokio_unstable -C force-frame-pointers=yes --cfg iai_enabled'
     steps:
+      # Pin to PR head SHA — default `refs/pull/N/merge` would build PR
+      # head merged into PR base, so any commits on main since the PR was
+      # opened would slip into the binary and show up as instruction-count
+      # drift the gate would flag.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install valgrind (cached)
-        uses: awalsh128/cache-apt-pkgs-action@latest
+      - uses: ./.github/actions/iai-bench
         with:
-          packages: valgrind
-          version: 1.0
-      - name: Cache iai-callgrind-runner
-        id: runner_cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/iai-callgrind-runner
-          key: iai-runner-${{ env.IAI_CALLGRIND_VERSION }}
-      - name: Install cargo-binstall
-        if: steps.runner_cache.outputs.cache-hit != 'true'
-        uses: cargo-bins/cargo-binstall@main
-      - name: Install iai-callgrind-runner (prebuilt via binstall)
-        if: steps.runner_cache.outputs.cache-hit != 'true'
-        run: cargo binstall iai-callgrind-runner --version ${{ env.IAI_CALLGRIND_VERSION }} --no-confirm --locked
-      - uses: bencherdev/bencher@fa25a72c516046b4c0e31659bef70c5266b0f94d # v0.6.4
-      - name: Run iai benches → Bencher (gated vs main)
-        run: |
-          set -euo pipefail
-          for cmd in \
-              "cargo bench -p dial9-tokio-telemetry --bench writer_encode_iai" \
-              "cargo bench -p dial9-tokio-telemetry --bench writer_write_encoded_iai" \
-              "cargo bench -p dial9-tokio-telemetry --bench threadlocal_encode_iai" \
-              "cargo bench -p dial9-tokio-telemetry --bench tracing_layer_iai --features tracing-layer" \
-              "cargo bench -p dial9-trace-format --bench codec_iai"; do
-            bencher run \
-              --token '${{ secrets.BENCHER_API_TOKEN }}' \
-              --branch '${{ github.head_ref }}' \
-              --start-point main \
-              --start-point-reset \
-              --testbed ubuntu-latest \
-              --adapter rust_iai_callgrind \
-              --threshold-measure instructions \
-              --threshold-test percentage \
-              --threshold-max-sample-size 1 \
-              --threshold-upper-boundary 0.01 \
-              --ci-only-thresholds \
-              --error-on-alert \
-              --github-actions '${{ secrets.GITHUB_TOKEN }}' \
-              "$cmd"
-          done
+          bencher-token: ${{ secrets.BENCHER_API_TOKEN }}
+          bencher-branch: ${{ github.head_ref }}
+          bencher-extra-args: >-
+            --start-point main
+            --start-point-reset
+            --ci-only-thresholds
+            --error-on-alert
+            --github-actions ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,69 @@
+name: 'iai-callgrind bench'
+description: >-
+  Sets up rust toolchain, build cache, valgrind, iai-callgrind-runner, and the
+  Bencher CLI, then runs the iai bench suite via `bencher run`. Caller does
+  `actions/checkout` so the ref can be event-specific.
+
+inputs:
+  iai-callgrind-version:
+    description: Version of iai-callgrind-runner to install
+    required: false
+    default: '0.16.1'
+  bencher-token:
+    description: Bencher API token
+    required: true
+  bencher-branch:
+    description: Bencher branch name to post results under
+    required: true
+  bencher-extra-args:
+    description: Extra flags appended to each `bencher run` invocation
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+
+    - name: Install valgrind (cached)
+      uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+        packages: valgrind
+        version: '1.0'
+
+    - name: Cache iai-callgrind-runner
+      id: runner_cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/iai-callgrind-runner
+        key: iai-runner-${{ inputs.iai-callgrind-version }}
+
+    - name: Install cargo-binstall
+      if: steps.runner_cache.outputs.cache-hit != 'true'
+      uses: cargo-bins/cargo-binstall@main
+
+    - name: Install iai-callgrind-runner (prebuilt via binstall)
+      if: steps.runner_cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo binstall iai-callgrind-runner --version ${{ inputs.iai-callgrind-version }} --no-confirm --locked
+
+    - uses: bencherdev/bencher@fa25a72c516046b4c0e31659bef70c5266b0f94d # v0.6.4
+
+    - name: Run iai benches → Bencher
+      shell: bash
+      run: |
+        set -euo pipefail
+        bencher run \
+          --token '${{ inputs.bencher-token }}' \
+          --branch '${{ inputs.bencher-branch }}' \
+          --testbed ubuntu-latest \
+          --adapter rust_iai_callgrind \
+          ${{ inputs.bencher-extra-args }} \
+          "cargo bench --workspace \
+            --features dial9-tokio-telemetry/tracing-layer \
+            --bench writer_encode_iai \
+            --bench writer_write_encoded_iai \
+            --bench threadlocal_encode_iai \
+            --bench tracing_layer_iai \
+            --bench codec_iai"
