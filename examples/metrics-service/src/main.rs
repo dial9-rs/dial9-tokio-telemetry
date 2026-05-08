@@ -10,7 +10,9 @@ use aws_config::BehaviorVersion;
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryHandle, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{
+    RotatingWriter, TaskDumpConfig, TelemetryHandle, TracedRuntime,
+};
 use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
@@ -167,7 +169,12 @@ fn main() -> std::io::Result<()> {
     builder.worker_threads(args.worker_threads).enable_all();
     let traced_builder = TracedRuntime::builder()
         .with_trace_path(&args.trace_path)
-        .with_task_tracking(true);
+        .with_task_tracking(true)
+        .with_task_dumps(
+            TaskDumpConfig::builder()
+                .idle_threshold(Duration::from_millis(5))
+                .build(),
+        );
     #[cfg(target_os = "linux")]
     let traced_builder = traced_builder
         .with_cpu_profiling(CpuProfilingConfig::default())
