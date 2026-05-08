@@ -501,10 +501,11 @@ The [`examples/metrics-service`](https://github.com/dial9-rs/dial9-tokio-telemet
 
 ## Workspace
 
-This repo is a Cargo workspace with five members:
+This repo is a Cargo workspace:
 
 - [`dial9-tokio-telemetry`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-tokio-telemetry) — the main crate
-- [`dial9-viewer`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-viewer) — CLI and web UI for browsing traces in S3 or on the local filesystem
+- [`dial9`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9) — facade crate published as the `dial9` binary (re-exports `dial9-viewer`, and in the future, libraries)
+- [`dial9-viewer`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-viewer) — CLI and web UI implementation
 - [`dial9-macro`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-macro) — the `#[dial9_tokio_telemetry::main]` attribute macro
 - [`dial9-perf-self-profile`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/perf-self-profile) — minimal Linux `perf_event_open` wrapper for CPU profiling and scheduler events
 - [`examples/metrics-service`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/examples/metrics-service) — end-to-end example service
