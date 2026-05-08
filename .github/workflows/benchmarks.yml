@@ -60,13 +60,29 @@ jobs:
           bencher-branch: ${{ github.event.inputs.bencher_branch != '' && github.event.inputs.bencher_branch || github.ref_name }}
           bencher-extra-args: >-
             --threshold-measure instructions
+            --threshold-test percentage
+            --threshold-max-sample-size 1
+            --threshold-upper-boundary 0.01
             --threshold-measure l1-hits
+            --threshold-test percentage
+            --threshold-max-sample-size 1
+            --threshold-upper-boundary 0.01
             --threshold-measure ram-hits
+            --threshold-test percentage
+            --threshold-max-sample-size 1
+            --threshold-upper-boundary 0.01
             --threshold-measure total-read-write
+            --threshold-test percentage
+            --threshold-max-sample-size 1
+            --threshold-upper-boundary 0.01
             --threshold-measure estimated-cycles
             --threshold-test percentage
             --threshold-max-sample-size 1
             --threshold-upper-boundary 0.01
+            --threshold-measure ll-hits
+            --threshold-test percentage
+            --threshold-max-sample-size 1
+            --threshold-upper-boundary 0.05
 
   pr_gate:
     # Same-repo PRs only (fork PRs have no access to BENCHER_API_TOKEN).
