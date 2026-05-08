@@ -7,7 +7,7 @@ repository.workspace = true
 publish = true
 readme = "README.md"
 description = "Low-overhead runtime telemetry for Tokio with poll timing, wake events, and CPU profiling"
-keywords = ["tokio", "telemetry", "profiling", "async", "tracing"]
+keywords = ["tokio", "telemetry", "profiling", "tracing", "symposium"]
 categories = ["asynchronous", "development-tools::profiling"]
 
 [package.metadata.docs.rs]
