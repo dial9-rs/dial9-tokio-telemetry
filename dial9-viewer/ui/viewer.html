@@ -2634,6 +2634,25 @@
                     return formatHumanDuration(ns);
                 }
 
+                // Diagonal cross-hatch fill inside the rect (x, y, w, h), clipped.
+                // Used to visually flag idle periods that have an associated task dump.
+                function drawCrossHatch(x, y, w, h, { stroke = "rgba(140,120,255,0.35)", step = 8 } = {}) {
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.rect(x, y, w, h);
+                    ctx.clip();
+                    ctx.strokeStyle = stroke;
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([]);
+                    for (let hx = x - h; hx < x + w; hx += step) {
+                        ctx.beginPath();
+                        ctx.moveTo(hx, y + h);
+                        ctx.lineTo(hx + h, y);
+                        ctx.stroke();
+                    }
+                    ctx.restore();
+                }
+
                 const bandTop = 50, bandH = 30;
                 ctx.font = "9px monospace";
                 ctx.textAlign = "center";
@@ -2835,21 +2854,7 @@
 
                     // Cross-hatch pattern for idle periods with task dumps
                     if (hasDump) {
-                        ctx.save();
-                        ctx.beginPath();
-                        ctx.rect(x1, bandTop, w, bandH);
-                        ctx.clip();
-                        ctx.strokeStyle = "rgba(140, 120, 255, 0.35)";
-                        ctx.lineWidth = 1;
-                        ctx.setLineDash([]);
-                        const step = 8;
-                        for (let hx = x1 - bandH; hx < x2; hx += step) {
-                            ctx.beginPath();
-                            ctx.moveTo(hx, bandTop + bandH);
-                            ctx.lineTo(hx + bandH, bandTop);
-                            ctx.stroke();
-                        }
-                        ctx.restore();
+                        drawCrossHatch(x1, bandTop, w, bandH);
                     }
 
                     ctx.strokeStyle = hasDump ? "#7c6cff" : "#444";
@@ -4432,7 +4437,12 @@
                 // Check if clicking an idle region with task dumps
                 for (const r of taskDetailHitRegions) {
                     if (mx >= r.x1 && mx <= r.x2 && my >= r.y1 && my <= r.y2 && r.taskDumps) {
-                        showTaskDumpStack(r.taskDumps);
+                        try {
+                            showTaskDumpStack(r.taskDumps);
+                        } catch (err) {
+                            console.error("showTaskDumpStack error:", err);
+                            showToast("task-dump-err", "Error: " + err.message, "error", 5000);
+                        }
                         return;
                     }
                 }
@@ -4493,21 +4503,24 @@
             const fgContainer = document.getElementById("fg-container");
             const fgInstance = FlamegraphRenderer.createFlamegraph(fgContainer);
 
-            function showTaskDumpStack(dumps) {
-                const samples = dumps.map(d => ({ callchain: d.callchain, workerId: 0 }));
+            // Open the stack sidebar showing a flamegraph built from `samples`.
+            // Used by `showTaskDumpStack`, `showIdleTimeFlamegraph`, and any
+            // other caller that just wants "here's a pile of callchains, render
+            // them as a flamegraph in the sidebar".
+            function renderFlamegraphInSidebar({ title, subtitle, samples }) {
                 fgActive = true;
                 schedActive = false;
                 const sidebar = document.getElementById("stack-sidebar");
-                const title = document.getElementById("stack-sidebar-title");
+                const titleEl = document.getElementById("stack-sidebar-title");
                 const body = document.getElementById("stack-sidebar-body");
                 document.getElementById("sidebar-tabs").style.display = "none";
-                title.textContent = `Waiting on — ${dumps.length} capture${dumps.length > 1 ? "s" : ""}`;
+                titleEl.textContent = title;
                 body.innerHTML = "";
                 body.style.display = "flex";
                 body.style.flexDirection = "column";
                 const actions = document.createElement("div");
                 actions.style.cssText = "display:flex;gap:8px;margin-bottom:6px;flex-shrink:0;align-items:center";
-                actions.innerHTML = `<span style="color:#888;font-size:0.85em">${dumps.length} async stack capture${dumps.length > 1 ? "s" : ""}</span>`;
+                actions.innerHTML = `<span style="color:#888;font-size:0.85em">${subtitle}</span>`;
                 body.appendChild(actions);
                 fgContainer.style.flex = "1";
                 fgContainer.style.minHeight = "0";
@@ -4518,6 +4531,16 @@
                 requestAnimationFrame(() => {
                     fgInstance.setData(samples, trace.callframeSymbols);
                     fgInstance.resize();
+                });
+            }
+
+            function showTaskDumpStack(dumps) {
+                const samples = dumps.map(d => ({ callchain: d.callchain, workerId: 0 }));
+                const s = dumps.length > 1 ? "s" : "";
+                renderFlamegraphInSidebar({
+                    title: `Waiting on — ${dumps.length} capture${s}`,
+                    subtitle: `${dumps.length} async stack capture${s}`,
+                    samples,
                 });
             }
 
@@ -4574,30 +4597,10 @@
                     }
                 }
 
-                // Show in sidebar using the flamegraph renderer
-                fgActive = true;
-                schedActive = false;
-                const sidebar = document.getElementById("stack-sidebar");
-                const title = document.getElementById("stack-sidebar-title");
-                const body = document.getElementById("stack-sidebar-body");
-                document.getElementById("sidebar-tabs").style.display = "none";
-                title.textContent = `Idle time flamegraph — ${dumps.length} samples`;
-                body.innerHTML = "";
-                body.style.display = "flex";
-                body.style.flexDirection = "column";
-                const actions = document.createElement("div");
-                actions.style.cssText = "display:flex;gap:8px;margin-bottom:6px;flex-shrink:0;align-items:center";
-                actions.innerHTML = `<span style="color:#888;font-size:0.85em">${dumps.length} task dumps, time-weighted</span>`;
-                body.appendChild(actions);
-                fgContainer.style.flex = "1";
-                fgContainer.style.minHeight = "0";
-                body.appendChild(fgContainer);
-                const wasHidden = sidebar.style.display !== "flex";
-                sidebar.style.display = "flex";
-                if (wasHidden && trace) requestAnimationFrame(renderAll);
-                requestAnimationFrame(() => {
-                    fgInstance.setData(expandedSamples, trace.callframeSymbols);
-                    fgInstance.resize();
+                renderFlamegraphInSidebar({
+                    title: `Idle time flamegraph — ${dumps.length} samples`,
+                    subtitle: `${dumps.length} task dumps, time-weighted`,
+                    samples: expandedSamples,
                 });
             }
 

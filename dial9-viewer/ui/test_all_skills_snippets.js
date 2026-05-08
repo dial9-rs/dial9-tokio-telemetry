@@ -214,6 +214,14 @@ async function main() {
       .replace(/\[\w+\]:/g, '_dynamic_:')
       .replace(/:\s*Map<[^,]+,\s*([^>]+)>/g, (_, valType) => {
         const v = valType.trim();
+        // Array of objects: Map<K, [{a, b}]> → values are arrays whose elements have those keys.
+        // Emit a marker string that the later [{...}] pass won't double-process;
+        // a separate pass below expands it back to a JS array literal.
+        const arrObjMatch = v.match(/^\[\{([^}]+)\}\]$/);
+        if (arrObjMatch) {
+          const keys = arrObjMatch[1].split(',').map(k => k.trim()).filter(Boolean);
+          return ': {"_map_":"__ARR_OBJ__' + keys.join('|') + '__"}';
+        }
         const objMatch = v.match(/\{([^}]+)\}/);
         if (objMatch) {
           const keys = objMatch[1].split(',').map(k => k.trim()).filter(Boolean);
@@ -230,6 +238,11 @@ async function main() {
       .replace(/:\s*(\w+)\[\]/g, ': "unknown[]"')
       .replace(/\[\{([^}]+)\}\]/g, (_, inner) => {
         const keys = inner.split(',').map(k => k.trim()).filter(Boolean);
+        return '[{' + keys.map(k => `"${k}":"_any_"`).join(',') + '}]';
+      })
+      // Expand Map<K, [{...}]> placeholder from earlier pass into a real array literal.
+      .replace(/"__ARR_OBJ__([^_"]+)__"/g, (_, keysPipe) => {
+        const keys = keysPipe.split('|');
         return '[{' + keys.map(k => `"${k}":"_any_"`).join(',') + '}]';
       });
     let docSkeleton;
