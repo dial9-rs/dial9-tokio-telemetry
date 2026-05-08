@@ -375,7 +375,6 @@
                 flex-shrink: 0;
                 position: relative;
                 overflow: hidden;
-                padding-left: 100px;
             }
             #span-panel .chart-label {
                 position: absolute;
@@ -384,7 +383,45 @@
                 font-size: 0.75em;
                 color: #888;
                 z-index: 2;
-                pointer-events: none;
+                width: 184px;
+                max-height: 112px;
+                overflow-y: auto;
+                overflow-x: hidden;
+            }
+            #span-panel .chart-label .kv-row {
+                display: flex;
+                align-items: baseline;
+                gap: 2px;
+                margin-top: 2px;
+                line-height: 1.3;
+            }
+            #span-panel .chart-label .kv-key {
+                color: #888;
+                font-size: 0.9em;
+                white-space: nowrap;
+            }
+            #span-panel .chart-label .kv-val {
+                color: #ccc;
+                font-size: 0.9em;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                flex: 1;
+                min-width: 0;
+            }
+            #span-panel .chart-label .kv-copy {
+                background: none;
+                border: 1px solid #555;
+                color: #aaa;
+                font-size: 0.8em;
+                padding: 0 3px;
+                cursor: pointer;
+                border-radius: 2px;
+                flex-shrink: 0;
+            }
+            #span-panel .chart-label .kv-copy:hover {
+                background: #333;
+                color: #fff;
             }
             #span-panel canvas {
                 width: 100%;
@@ -650,7 +687,7 @@
                     <span id="span-legend-items"></span>
                 </div>
                 <div id="span-panel">
-                    <span class="chart-label" id="span-panel-label">Spans</span>
+                    <div class="chart-label" id="span-panel-label">Spans</div>
                     <span id="span-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
                     <canvas id="span-panel-canvas"></canvas>
                 </div>
@@ -720,9 +757,10 @@
         <script src="trace_analysis.js"></script>
         <script src="format.js"></script>
         <script src="flamegraph.js"></script>
+        <script src="panel_layout.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, computeSpanLayout } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -832,10 +870,8 @@
             function getSpanDurations() {
                 if (_spanDurCache) return _spanDurCache;
                 _spanDurCache = {};
-                for (const wSpans of Object.values(spansByWorker)) {
-                    for (const s of wSpans) {
-                        (_spanDurCache[s.spanName] ??= []).push(s.end - s.start);
-                    }
+                for (const s of allSpans) {
+                    (_spanDurCache[s.spanName] ??= []).push(s.end - s.start);
                 }
                 for (const durs of Object.values(_spanDurCache)) durs.sort((a, b) => a - b);
                 return _spanDurCache;
@@ -968,17 +1004,50 @@
             // Scheduling delays: wake → next poll for same task
             let schedDelays = []; // [{wakeTime, pollTime, delay, taskId, wakerTaskId, worker}]
             // Span data from custom events (SpanEnterEvent/SpanExitEvent)
-            let spansByWorker = {}; // workerId → [{start, end, spanId, spanName, fields, parentSpanId, depth}]
+            let allSpans = []; // [{start, end, spanId, spanName, fields, parentSpanId, depth, segments: [{start, end, workerId}], activeNs}]
+            let spansById = new Map(); // spanId → entry in allSpans (for O(1) ancestor walks)
             let spanMeta = new Map(); // spanId → {spanName, fields, parentSpanId}
+            let childrenByParent = new Map(); // parentSpanId|null → [childSpanId, ...]
             let spanMaxDepth = 0;
             let spanFilter = ""; // free-text filter for span rendering
             let filteredSpans = []; // all spans matching current filter, sorted by time
             let filteredSpanIndex = -1;
             let selectedSpanNames = new Set(); // clicked span name chips
             let unmatchedSpans = [];
+            let focusedSpanId = null; // when set, show this span + descendants
             // Lane canvases per worker (populated by buildLanes)
             let laneCanvases = {};
 
+            // ─────────────────────────────────────────────────────────────
+            // TIME-PANEL LAYOUT INVARIANT
+            //
+            // All time-based panels in the viewer share the same horizontal
+            // layout so their time axes line up vertically:
+            //
+            //   ┌──────────────┬──────────────────────────────┬────────┐
+            //   │  label area  │       draw area              │ scroll │
+            //   │   LABEL_W    │   drawW = W - LABEL_W - sb   │   sb   │
+            //   └──────────────┴──────────────────────────────┴────────┘
+            //   x=0          x=LABEL_W                     x=W-sb    x=W
+            //
+            // Panels that follow this layout:
+            //   • Timeline header  (renderTimeline)
+            //   • Worker lanes     (renderLane)           — uses DOM flex instead of canvas offset
+            //   • Span panel       (renderSpanPanel)
+            //   • Task detail      (renderTaskDetail)
+            //   • Queue chart      (renderQueueChart)
+            //
+            // Any new time-based panel MUST:
+            //   1. Let its canvas fill the full parent width (no CSS padding)
+            //      so the draw-area offset stays consistent with everything else.
+            //   2. Use `timePanelLayout()` (below) to get `drawW` and the
+            //      nsToPanelX / panelXToNs converters — do NOT reinvent the
+            //      LABEL_W offset math inline.
+            //
+            // This invariant was silently broken once (span panel was padded
+            // by 200px instead of 100px), producing a ~100px horizontal
+            // misalignment.  See `timePanelLayout` for the enforcement point.
+            // ─────────────────────────────────────────────────────────────
             const LABEL_W = 100;
             const LANE_H = 60;
 
@@ -1282,16 +1351,33 @@
                 schedDelays = computeSchedulingDelays(workerSpans, workerIds, wakesByTask);
                 console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);
 
-                // Build span data from custom events
+                // Build span data from custom events.  Reset span state
+                // unconditionally here so a trace with no spans doesn't
+                // inherit stale state from a previously-loaded trace.
+                allSpans = [];
+                spansById = new Map();
+                spanMeta = new Map();
+                childrenByParent = new Map();
+                unmatchedSpans = [];
+                spanMaxDepth = 0;
+                _spanDurCache = null;
+                focusedSpanId = null;
+                selectedSpanId = null;
+                selectedSpanIds = new Set();
+                selectedTaskId = null;
                 if (trace.customEvents && trace.customEvents.length > 0) {
                     const spanResult2 = buildSpanData(trace.customEvents);
-                    spansByWorker = spanResult2.spansByWorker;
-                    _spanDurCache = null;
+                    allSpans = spanResult2.allSpans;
                     spanMeta = spanResult2.spanMeta;
                     spanMaxDepth = spanResult2.maxDepth;
                     unmatchedSpans = spanResult2.unmatchedSpans || [];
-                    const totalSpans = Object.values(spansByWorker).reduce((s, a) => s + a.length, 0);
-                    console.log(`Span events: ${totalSpans} intervals across ${Object.keys(spansByWorker).length} workers, ${spanMeta.size} unique spans, maxDepth=${spanMaxDepth}, ${unmatchedSpans.length} unmatched`);
+                    childrenByParent = spanResult2.childrenByParent || new Map();
+                    // Build spanId → span index for O(1) ancestor walks
+                    // (used by the lane-click handler and anywhere else that
+                    // needs to navigate by parentSpanId).
+                    for (const s of allSpans) spansById.set(s.spanId, s);
+                    const totalSegs = allSpans.reduce((s, sp) => s + sp.segments.length, 0);
+                    console.log(`Span events: ${allSpans.length} spans (${totalSegs} segments), ${spanMeta.size} unique span IDs, maxDepth=${spanMaxDepth}, ${unmatchedSpans.length} unmatched`);
                 }
             }
 
@@ -1336,9 +1422,7 @@
                     const legend = document.getElementById("span-legend");
                     const spanPanel = document.getElementById("span-panel");
                     const allNames = new Set();
-                    for (const spans of Object.values(spansByWorker)) {
-                        for (const s of spans) allNames.add(s.spanName);
-                    }
+                    for (const s of allSpans) allNames.add(s.spanName);
                     if (allNames.size > 0) {
                         function rebuildChips() {
                             const items = [...allNames].sort().map(name => {
@@ -1413,10 +1497,8 @@
                                 document.getElementById("btn-span-next").disabled = true;
                                 return;
                             }
-                            for (const [w, spans] of Object.entries(spansByWorker)) {
-                                for (const s of spans) {
-                                    if (spanMatchesFilter(s)) filteredSpans.push({ ...s, workerId: Number(w) });
-                                }
+                            for (const s of allSpans) {
+                                if (spanMatchesFilter(s)) filteredSpans.push(s);
                             }
                             filteredSpans.sort((a, b) => a.start - b.start);
                             filteredSpanIndex = -1;
@@ -1678,7 +1760,7 @@
 
                 renderTimeline(drawW - scrollbarW);
                 for (const w of workerIds) renderLane(w, drawW);
-                renderSpanPanel(drawW, scrollbarW);
+                renderSpanPanel(scrollbarW);
                 renderTaskDetail(scrollbarW);
                 renderQueueChart(drawW, scrollbarW);
 
@@ -1699,6 +1781,76 @@
                 return ((ns - viewStart) / (viewEnd - viewStart)) * drawW;
             }
 
+            // `makeTimePanelLayout` is defined in panel_layout.js and exposed
+            // globally via `window.PanelLayout`.  It's kept out of this file so
+            // it can be unit-tested from Node without a browser.  See
+            // `test_panel_layout.js`.
+            const { makeTimePanelLayout } = window.PanelLayout;
+
+            /**
+             * Build a layout view for a time-based panel.
+             *
+             * Thin DOM wrapper around `makeTimePanelLayout` (panel_layout.js)
+             * that reads `panel.clientWidth` and the global `viewStart` /
+             * `viewEnd`, and adds canvas-resize convenience.  Encapsulates
+             * the LABEL_W / scrollbar invariant documented at the `LABEL_W`
+             * constant so callers never have to add `LABEL_W` to an
+             * x-coordinate by hand.
+             *
+             * Usage in a render function:
+             *
+             *     const layout = timePanelLayout(panelEl, scrollbarW);
+             *     layout.resizeCanvas(canvas, panelHeight);
+             *     if (layout.drawW <= 0) return;
+             *     // Draw a span from timestamp `start` to `end`:
+             *     ctx.fillRect(
+             *         layout.nsToPanelX(start),
+             *         y,
+             *         layout.nsToPanelX(end) - layout.nsToPanelX(start),
+             *         h,
+             *     );
+             *     // Mouse → ns (pass the event x relative to the canvas):
+             *     const ns = layout.panelXToNs(mouseX);
+             *
+             * @param {HTMLElement} panel The panel element whose clientWidth
+             *   provides the full canvas width.
+             * @param {number=} scrollbarW Width of the vertical scrollbar on
+             *   the main lanes area.  Subtracted from `drawW` so the right
+             *   edge of the time axis matches the worker lanes.
+             */
+            function timePanelLayout(panel, scrollbarW) {
+                const base = makeTimePanelLayout(
+                    panel.clientWidth, LABEL_W, scrollbarW, viewStart, viewEnd,
+                );
+                return {
+                    ...base,
+                    /**
+                     * Size a canvas to fill the full panel width at the given
+                     * height, accounting for devicePixelRatio. Returns the
+                     * canvas's 2D context with the DPR transform applied.
+                     */
+                    resizeCanvas(canvas, height) {
+                        const dpr = devicePixelRatio || 1;
+                        canvas.width = base.pw * dpr;
+                        canvas.height = height * dpr;
+                        canvas.style.width = base.pw + "px";
+                        canvas.style.height = height + "px";
+                        const ctx = canvas.getContext("2d");
+                        ctx.scale(dpr, dpr);
+                        return ctx;
+                    },
+                };
+            }
+
+            /**
+             * Render the top-of-viewer timeline ruler with time-axis tick marks.
+             *
+             * Adheres to the TIME-PANEL LAYOUT INVARIANT: ticks start at
+             * x=LABEL_W so they align with the worker lanes, span panel,
+             * task detail, and queue chart below.  See `timePanelLayout` for
+             * the shared helper (this function predates it and still offsets
+             * LABEL_W inline).
+             */
             function renderTimeline(drawW) {
                 const c = timelineCanvas;
                 const parent = c.parentElement;
@@ -1741,6 +1893,20 @@
                 }
             }
 
+            /**
+             * Render one worker lane (polls, parks, CPU samples, wakes).
+             *
+             * Lanes use a DOM flex layout: a `lane-label` div (width=LABEL_W)
+             * sits to the left of a `lane-content` div that hosts the canvas.
+             * Because the canvas itself is shifted by LABEL_W in the DOM,
+             * rendering inside the canvas starts at x=0 — NO LABEL_W offset
+             * should be added inside this function.  The time axis still lines
+             * up with `timePanelLayout`-based panels because the DOM flex does
+             * the same job that the LABEL_W-offset does for those panels.
+             *
+             * New panels should prefer `timePanelLayout` (single canvas with
+             * internal offset) rather than the flex layout used here.
+             */
             function renderLane(workerId, drawW) {
                 const c = laneCanvases[workerId];
                 if (!c) {
@@ -1963,12 +2129,11 @@
 
                 // Highlight polls containing the selected span
                 if (selectedSpanIds.size > 0) {
-                    const wSpans2 = spansByWorker[workerId];
-                    if (wSpans2) {
-                        for (const s of wSpans2) {
-                            if (!selectedSpanIds.has(s.spanId)) continue;
-                            // Find the poll that contains this span interval
-                            const poll = findSpanAt(spans.polls, s.start);
+                    for (const s of allSpans) {
+                        if (!selectedSpanIds.has(s.spanId)) continue;
+                        for (const seg of s.segments) {
+                            if (seg.workerId !== workerId) continue;
+                            const poll = findSpanAt(spans.polls, seg.start);
                             if (poll) {
                                 const x1 = Math.max(0, nsToX(poll.start, pw));
                                 const x2 = Math.min(pw, nsToX(poll.end, pw));
@@ -2057,137 +2222,236 @@
 
             // Hit regions for task detail tooltip: [{x1, x2, y1, y2, type, detail}]
             let taskDetailHitRegions = [];
+            // Span panel layout: [{spans, representative, x1, x2, y, h}] — set by renderSpanPanel, used by hit testing
+            let spanPanelHits = [];
 
-            function renderSpanPanel(drawW, scrollbarW) {
+            function renderSpanPanel(scrollbarW) {
                 const panel = document.getElementById("span-panel");
                 if (panel.style.display === "none") return;
                 const c = document.getElementById("span-panel-canvas");
-                const dpr = devicePixelRatio || 1;
-                // panel.clientWidth includes the 100px padding-left where the
-                // label sits.  The canvas lives inside that padded area, so its
-                // drawing width must exclude LABEL_W (and the scrollbar
-                // reservation) to match the lane canvases' coordinate system.
-                const pw = panel.clientWidth - LABEL_W - (scrollbarW || 0);
                 const ph = 120;
-                c.width = pw * dpr;
-                c.height = ph * dpr;
-                c.style.width = pw + "px";
-                c.style.height = ph + "px";
-                const ctx = c.getContext("2d");
-                ctx.scale(dpr, dpr);
-                ctx.clearRect(0, 0, pw, ph);
 
-                // Merge all spans across workers, sorted by start
-                const allSpans = [];
-                for (const [w, wSpans] of Object.entries(spansByWorker)) {
-                    for (const s of wSpans) {
-                        if (s.end < viewStart || s.start > viewEnd) continue;
-                        if (!spanMatchesFilter(s)) continue;
-                        allSpans.push({ ...s, workerId: Number(w) });
-                    }
+                // Shared time-panel layout: keeps the draw area aligned with
+                // the worker lanes and task detail.  See TIME-PANEL LAYOUT
+                // INVARIANT near the LABEL_W declaration.
+                //
+                // The K-V focus-label is absolutely positioned over this
+                // panel's left LABEL_W area.  Spans whose x1 falls under the
+                // label are obscured by design (confirmed in design review).
+                const layout = timePanelLayout(panel, scrollbarW);
+                const { pw, drawW, nsToPanelX, nsToPanelXClamped } = layout;
+                const ctx = layout.resizeCanvas(c, ph);
+                ctx.clearRect(0, 0, pw, ph);
+                spanPanelHits = [];
+
+                if (drawW <= 0) return;
+
+                // 1. Filter to visible + matching spans
+                const visibleSpans = [];
+                for (const s of allSpans) {
+                    if (s.end < viewStart || s.start > viewEnd) continue;
+                    if (!spanMatchesFilter(s)) continue;
+                    visibleSpans.push(s);
                 }
 
-                if (allSpans.length === 0) {
+                if (visibleSpans.length === 0) {
                     ctx.fillStyle = "#555";
                     ctx.font = "12px sans-serif";
-                    ctx.fillText("No spans in view" + (spanFilter ? ` (filter: "${spanFilter}")` : ""), 10, 60);
+                    ctx.fillText("No spans in view" + (spanFilter ? ` (filter: "${spanFilter}")` : ""), LABEL_W + 10, 60);
                     return;
                 }
 
-                // Group by span name, assign a row per name (max 5 rows visible)
-                const nameSet = [...new Set(allSpans.map(s => s.spanName))].sort();
-                const maxRows = 5;
-                const visibleNames = nameSet.slice(0, maxRows);
-                const rowH = Math.min(20, Math.floor((ph - 10) / Math.max(visibleNames.length, 1)));
-                const nameToRow = {};
-                visibleNames.forEach((n, i) => { nameToRow[n] = i; });
+                // 2. Select render set (roots only, or focused + descendants)
+                const renderSet = selectSpanRenderSet({
+                    allSpans: visibleSpans,
+                    focusedSpanId,
+                    childrenByParent,
+                });
 
-                const barW = pw;
-                if (barW <= 0) return;
+                if (renderSet.length === 0) {
+                    ctx.fillStyle = "#555";
+                    ctx.font = "12px sans-serif";
+                    ctx.fillText("No root spans in view", LABEL_W + 10, 60);
+                    return;
+                }
 
-                // Draw span bars
-                const maxVisible = 5000;
-                const step = allSpans.length > maxVisible ? Math.ceil(allSpans.length / maxVisible) : 1;
-                for (let i = 0; i < allSpans.length; i += step) {
-                    const s = allSpans[i];
-                    const row = nameToRow[s.spanName];
-                    if (row == null) continue;
-                    const y = 4 + row * rowH;
-                    const x1 = Math.max(0, ((s.start - viewStart) / (viewEnd - viewStart)) * barW);
-                    const x2 = Math.min(barW, ((s.end - viewStart) / (viewEnd - viewStart)) * barW);
-                    const isSelected = selectedSpanIds.has(s.spanId);
-                    ctx.fillStyle = spanColor(s.spanName);
-                    ctx.globalAlpha = isSelected ? 1.0 : (selectedSpanIds.size > 0 ? 0.3 : 0.5);
-                    ctx.fillRect(x1, y + 2, Math.max(x2 - x1, 1), rowH - 4);
-                    if (isSelected) {
-                        ctx.strokeStyle = "#fff";
-                        ctx.lineWidth = 1;
-                        ctx.strokeRect(x1, y + 2, Math.max(x2 - x1, 2), rowH - 4);
+                // 3. Compute layout with duration-based y and clustering
+                const CLUSTER_X = 6;
+                const BAR_H = 4;
+                const spanLayout = computeSpanLayout({
+                    spans: renderSet,
+                    viewStart,
+                    viewEnd,
+                    drawW,
+                    panelH: ph,
+                    clusterXPx: CLUSTER_X,
+                    barH: BAR_H,
+                });
+
+                // When focused: pin parent at top, children packed right below
+                if (focusedSpanId != null) {
+                    const focusBucket = spanLayout.buckets.find(b => b.representative.spanId === focusedSpanId);
+                    if (focusBucket) {
+                        const PARENT_Y = 4;
+                        const CHILD_Y = 34;
+                        focusBucket.y = PARENT_Y;
+                        for (const b of spanLayout.buckets) {
+                            if (b !== focusBucket) b.y = CHILD_Y;
+                        }
                     }
+                }
+
+                // 4. Draw buckets using shared panel-layout coordinates so the
+                //    time axis lines up with the worker lanes and task detail.
+                for (const bucket of spanLayout.buckets) {
+                    const rep = bucket.representative;
+                    const x1 = nsToPanelXClamped(rep.start);
+                    const x2 = nsToPanelXClamped(rep.end);
+                    const y = bucket.y;
+                    const isSelected = selectedSpanIds.has(rep.spanId);
+                    const isFocused = rep.spanId === focusedSpanId;
+                    const color = spanColor(rep.spanName);
+                    const clusterSize = bucket.spans.length;
+
+                    // Scale height by cluster size (capped), and make focused span much taller
+                    let h = bucket.h;
+                    if (isFocused) {
+                        h = Math.min(h * 6, ph / 3);
+                    } else if (focusedSpanId != null) {
+                        // Child spans in focused view: make them taller so they're visible
+                        h = Math.max(h * 3, 12);
+                        if (clusterSize > 1) h = Math.min(h + Math.log2(clusterSize) * 3, ph / 4);
+                    } else if (clusterSize > 1) {
+                        h = Math.min(h + Math.log2(clusterSize) * 3, ph / 4);
+                    }
+
+                    // Draw representative bar
+                    ctx.fillStyle = color;
+                    ctx.globalAlpha = isSelected ? 0.4 : (selectedSpanIds.size > 0 ? 0.08 : 0.15);
+                    ctx.fillRect(x1, y, Math.max(x2 - x1, 1), h);
+
+                    // Active segments of representative
+                    ctx.globalAlpha = isSelected ? 1.0 : (selectedSpanIds.size > 0 ? 0.3 : 0.8);
+                    for (const seg of rep.segments) {
+                        if (seg.end < viewStart || seg.start > viewEnd) continue;
+                        const sx1 = nsToPanelXClamped(seg.start);
+                        const sx2 = nsToPanelXClamped(seg.end);
+                        ctx.fillRect(sx1, y, Math.max(sx2 - sx1, 1), h);
+                    }
+
+                    spanPanelHits.push({ spans: bucket.spans, representative: rep, x1, x2: Math.max(x2, x1 + 4), y, h });
                 }
                 ctx.globalAlpha = 1.0;
 
-                // Info text
-                const info = document.getElementById("span-panel-info");
-                info.textContent = `${allSpans.length} spans · ${nameSet.length} types`;
-            }
-
-            // Find the nearest span to a given timestamp within a pixel threshold
-            function findNearestSpan(ns, barW) {
-                let hit = null;
-                let bestDist = Infinity;
-                for (const [w, wSpans] of Object.entries(spansByWorker)) {
-                    if (!wSpans || wSpans.length === 0) continue;
-                    let lo = 0, hi = wSpans.length - 1;
-                    while (lo <= hi) {
-                        const mid = (lo + hi) >> 1;
-                        if (wSpans[mid].end < ns) lo = mid + 1;
-                        else if (wSpans[mid].start > ns) hi = mid - 1;
-                        else {
-                            if (spanMatchesFilter(wSpans[mid])) {
-                                hit = { ...wSpans[mid], workerId: Number(w) };
-                                bestDist = 0;
-                            }
-                            break;
-                        }
+                // Y-axis duration ticks (log scale)
+                if (spanLayout.minDur > 0 && spanLayout.maxDur > 0) {
+                    const PAD_TOP = 2, BAR_H_TICK = 4;
+                    const usableH = ph - PAD_TOP - 2 - BAR_H_TICK;
+                    const minL = Math.log(spanLayout.minDur), maxL = Math.log(spanLayout.maxDur);
+                    const range = maxL - minL || 1;
+                    ctx.fillStyle = "#666";
+                    ctx.font = "9px sans-serif";
+                    ctx.textAlign = "left";
+                    // Pick ~3-4 nice tick values between minDur and maxDur
+                    const ticks = [];
+                    const decades = [1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9];
+                    for (const d of decades) {
+                        if (d >= spanLayout.minDur && d <= spanLayout.maxDur) ticks.push(d);
                     }
-                    if (bestDist === 0) break;
-                    for (const idx of [lo - 1, lo, lo + 1]) {
-                        if (idx < 0 || idx >= wSpans.length) continue;
-                        const s = wSpans[idx];
-                        if (!spanMatchesFilter(s)) continue;
-                        const dist = Math.min(Math.abs(s.start - ns), Math.abs(s.end - ns));
-                        const pxThreshold = (viewEnd - viewStart) / barW * 3;
-                        if (dist < bestDist && dist < pxThreshold) {
-                            bestDist = dist;
-                            hit = { ...s, workerId: Number(w) };
-                        }
+                    if (ticks.length < 2) { ticks.push(spanLayout.minDur); ticks.push(spanLayout.maxDur); }
+                    for (const dur of ticks) {
+                        const norm = (Math.log(dur) - minL) / range;
+                        let y = PAD_TOP + (1 - norm) * usableH;
+                        if (y < 2 || y > ph - 8) continue;
+                        ctx.globalAlpha = 0.4;
+                        ctx.fillRect(LABEL_W, y, drawW, 0.5); // faint horizontal line
+                        ctx.globalAlpha = 0.7;
+                        ctx.fillText(formatHumanDuration(dur), LABEL_W + 2, y - 2);
                     }
                 }
-                return hit;
+
+                const info = document.getElementById("span-panel-info");
+                const focusNote = focusedSpanId != null ? " (focused)" : "";
+                info.textContent = `${renderSet.length} spans · ${spanLayout.buckets.length} clusters${focusNote}`;
+
+                // Update left label: show focused span's fields or default "Spans"
+                const label = document.getElementById("span-panel-label");
+                if (focusedSpanId != null) {
+                    const meta = spanMeta.get(focusedSpanId);
+                    const focusedSpan = allSpans.find(s => s.spanId === focusedSpanId);
+                    const fields = focusedSpan?.fields || meta?.fields || {};
+                    const name = meta?.spanName || focusedSpan?.spanName || "Span";
+                    let html = `<div style="color:#ccc;margin-bottom:3px">${esc(name)}</div>`;
+                    for (const [k, v] of Object.entries(fields)) {
+                        const val = String(v);
+                        html += `<div class="kv-row"><span class="kv-key">${esc(k)}:</span><span class="kv-val" title="${esc(val)}">${esc(val)}</span><button class="kv-copy" data-val="${esc(val)}">⎘</button></div>`;
+                    }
+                    label.innerHTML = html;
+                } else {
+                    label.textContent = "Spans";
+                }
             }
 
-            // Span panel hover: show tooltip with span details
+            // Find the bucket at a given (x, y) position in the span panel canvas
+            function findBucketAtXY(mx, my) {
+                for (let i = spanPanelHits.length - 1; i >= 0; i--) {
+                    const h = spanPanelHits[i];
+                    if (mx >= h.x1 && mx <= h.x2 && my >= h.y && my <= h.y + h.h) {
+                        return h;
+                    }
+                }
+                return null;
+            }
+
+            // Span panel hover: show tooltip with cluster/span details
             document.getElementById("span-panel-canvas").addEventListener("mousemove", (e) => {
                 const c = document.getElementById("span-panel-canvas");
                 const rect = c.getBoundingClientRect();
                 const mx = e.clientX - rect.left;
-                const barW = rect.width;
-                if (barW <= 0) { tooltip.style.display = "none"; return; }
+                const my = e.clientY - rect.top;
 
-                const ns = viewStart + (mx / barW) * (viewEnd - viewStart);
-                const hit = findNearestSpan(ns, barW);
-                if (hit) {
-                    const dur = hit.end - hit.start;
-                    const pct = spanPercentileRank(hit);
-                    const pctStr = pct != null ? ` (P${pct})` : "";
-                    let html = `<span class="label">Span:</span> <span class="value">${esc(hit.spanName)}</span> <span style="color:#888">${formatHumanDuration(dur)}${pctStr}</span>`;
-                    html += `<br><span class="label">Worker:</span> <span class="value">${hit.workerId}</span>`;
-                    if (hit.fields && typeof hit.fields === "object") {
-                        const entries = Object.entries(hit.fields);
-                        if (entries.length > 0) {
-                            html += `<br><span class="label">Fields:</span> <span class="value">${entries.map(([k, v]) => esc(k) + "=" + esc(String(v))).join(", ")}</span>`;
+                const bucket = findBucketAtXY(mx, my);
+                if (bucket) {
+                    const spans = bucket.spans;
+                    const rep = bucket.representative;
+                    let html = "";
+                    if (spans.length === 1) {
+                        // Single span tooltip (same as before)
+                        const dur = rep.end - rep.start;
+                        const idle = dur - rep.activeNs;
+                        const pct = spanPercentileRank(rep);
+                        const pctStr = pct != null ? ` (P${pct})` : "";
+                        const nSegs = rep.segments.length;
+                        html = `<span class="label">Span:</span> <span class="value">${esc(rep.spanName)}</span> <span style="color:#888">${formatHumanDuration(dur)}${pctStr}</span>`;
+                        html += `<br><span class="label">Active:</span> <span class="value">${formatHumanDuration(rep.activeNs)}</span>`;
+                        if (idle > 0) html += ` · <span class="label">Idle:</span> <span class="value">${formatHumanDuration(idle)}</span>`;
+                        if (nSegs > 1) html += ` · <span class="label">Polls:</span> <span class="value">${nSegs}</span>`;
+                        const workers = [...new Set(rep.segments.map(s => s.workerId))].sort();
+                        html += `<br><span class="label">Worker${workers.length > 1 ? "s" : ""}:</span> <span class="value">${workers.join(", ")}</span>`;
+                        if (rep.fields && typeof rep.fields === "object") {
+                            const entries = Object.entries(rep.fields);
+                            if (entries.length > 0) {
+                                html += `<br><span class="label">Fields:</span> <span class="value">${entries.map(([k, v]) => esc(k) + "=" + esc(String(v))).join(", ")}</span>`;
+                            }
                         }
+                    } else {
+                        // Cluster tooltip
+                        const nameCounts = {};
+                        let minDur = Infinity, maxDur = 0;
+                        for (const s of spans) {
+                            nameCounts[s.spanName] = (nameCounts[s.spanName] || 0) + 1;
+                            const d = s.end - s.start;
+                            if (d < minDur) minDur = d;
+                            if (d > maxDur) maxDur = d;
+                        }
+                        const nameList = Object.entries(nameCounts)
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 5)
+                            .map(([n, c]) => `${esc(n)}${c > 1 ? " ×" + c : ""}`)
+                            .join(", ");
+                        html = `<span class="label">Cluster:</span> <span class="value">${spans.length} spans</span>`;
+                        html += `<br><span class="label">Names:</span> <span class="value">${nameList}</span>`;
+                        html += `<br><span class="label">Duration:</span> <span class="value">${formatHumanDuration(minDur)} – ${formatHumanDuration(maxDur)}</span>`;
                     }
                     tooltip.innerHTML = html;
                     tooltip.style.display = "block";
@@ -2201,60 +2465,86 @@
                 tooltip.style.display = "none";
             });
 
-            // Span panel click: select a span, highlight polls and task
+            // Copy button handler for span field values
+            document.getElementById("span-panel-label").addEventListener("click", (e) => {
+                const btn = e.target.closest(".kv-copy");
+                if (btn) {
+                    navigator.clipboard.writeText(btn.dataset.val);
+                    btn.textContent = "✓";
+                    setTimeout(() => { btn.textContent = "⎘"; }, 800);
+                }
+            });
+
+            // Span panel click: pick representative from cluster, focus to reveal children
             document.getElementById("span-panel-canvas").addEventListener("click", (e) => {
                 const c = document.getElementById("span-panel-canvas");
                 const rect = c.getBoundingClientRect();
                 const mx = e.clientX - rect.left;
-                const barW = rect.width;
-                if (barW <= 0) return;
+                const my = e.clientY - rect.top;
 
-                const ns = viewStart + (mx / barW) * (viewEnd - viewStart);
+                const bucket = findBucketAtXY(mx, my);
 
-                // Find the clicked span using nearest-span search
-                const hit = findNearestSpan(ns, barW);
-
-                if (hit) {
-                    selectedSpanId = (hit.spanId !== selectedSpanId) ? hit.spanId : null;
-                    selectedSpanIds = new Set();
-                    if (selectedSpanId != null) {
-                        // Build parent chain
-                        selectedSpanIds.add(selectedSpanId);
+                if (bucket) {
+                    const hit = bucket.representative;
+                    // Toggle focus: clicking same span clears focus
+                    if (hit.spanId === focusedSpanId) {
+                        focusedSpanId = null;
+                        selectedSpanId = null;
+                        selectedSpanIds = new Set();
+                        selectedTaskId = null;
+                    } else {
+                        focusedSpanId = hit.spanId;
+                        selectedSpanId = hit.spanId;
+                        selectedSpanIds = new Set();
+                        selectedSpanIds.add(hit.spanId);
                         let parentId = hit.parentSpanId;
                         while (parentId != null && !selectedSpanIds.has(parentId)) {
                             selectedSpanIds.add(parentId);
                             const parent = spanMeta.get(parentId);
                             parentId = parent?.parentSpanId ?? null;
                         }
-                    }
-                    // Find the task that was polling when this span ran
-                    if (selectedSpanId != null) {
-                        const polls = workerSpans[hit.workerId]?.polls;
-                        if (polls) {
-                            const poll = polls.find(p => p.start <= hit.start && p.end >= hit.end);
-                            if (poll && poll.taskId) selectedTaskId = poll.taskId;
+                        // Find the task that was polling when this span's first segment ran
+                        const firstSeg = hit.segments[0];
+                        if (firstSeg) {
+                            const polls = workerSpans[firstSeg.workerId]?.polls;
+                            if (polls) {
+                                const poll = polls.find(p => p.start <= firstSeg.start && p.end >= firstSeg.start);
+                                if (poll && poll.taskId) selectedTaskId = poll.taskId;
+                            }
                         }
                         // Show percentile info
-                        const allOfName = Object.values(spansByWorker).flat()
+                        const durations = allSpans
                             .filter(s => s.spanName === hit.spanName)
                             .map(s => s.end - s.start)
                             .sort((a, b) => a - b);
                         const dur = hit.end - hit.start;
-                        const rank = allOfName.filter(d => d <= dur).length;
-                        const pct = (rank / allOfName.length * 100).toFixed(0);
-                        const p50 = allOfName[Math.floor(allOfName.length * 0.5)];
-                        const p99 = allOfName[Math.floor(allOfName.length * 0.99)];
+                        const rank = durations.filter(d => d <= dur).length;
+                        const pct = (rank / durations.length * 100).toFixed(0);
+                        const p50 = durations[Math.floor(durations.length * 0.5)];
+                        const p99 = durations[Math.floor(durations.length * 0.99)];
                         document.getElementById("span-panel-info").textContent =
-                            `${hit.spanName}: ${(dur / 1e3).toFixed(1)}µs (P${pct} of ${allOfName.length}) · P50=${(p50 / 1e3).toFixed(1)}µs P99=${(p99 / 1e3).toFixed(1)}µs`;
-                    } else {
-                        selectedTaskId = null;
+                            `${hit.spanName}: ${formatHumanDuration(dur)} (P${pct} of ${durations.length}) · P50=${formatHumanDuration(p50)} P99=${formatHumanDuration(p99)}`;
                     }
                 } else {
+                    // Click empty area: clear focus and selection
+                    focusedSpanId = null;
                     selectedSpanId = null;
+                    selectedSpanIds = new Set();
+                    selectedTaskId = null;
                 }
                 renderAll();
             });
 
+            /**
+             * Render the per-task detail panel (polls, wake→poll delays,
+             * lifespan) for the currently selected task.
+             *
+             * Adheres to the TIME-PANEL LAYOUT INVARIANT: the canvas fills
+             * the panel, drawing is shifted by LABEL_W.  This function still
+             * uses the inline LABEL_W-offset pattern rather than
+             * `timePanelLayout`; both produce identical output as long as the
+             * invariant is preserved.
+             */
             function renderTaskDetail(scrollbarW) {
                 const panel = document.getElementById("task-detail");
                 const c = document.getElementById("task-detail-canvas");
@@ -2535,6 +2825,13 @@
                 ctx.fillText("▲ = wake", 12, bandTop + bandH + 18);
             }
 
+            /**
+             * Render the global + per-worker queue depth chart at the bottom.
+             *
+             * Adheres to the TIME-PANEL LAYOUT INVARIANT: LABEL_W reserved on
+             * the left for the axis labels, `scrollbarW` on the right so the
+             * chart's right edge matches the worker lanes.
+             */
             function renderQueueChart(drawW, scrollbarW) {
                 const c = queueCanvas;
                 const parent = c.parentElement;
@@ -3133,32 +3430,73 @@
                     hideStackPopup();
                 }
 
-                // Check if a span bar was clicked
-                const wSpans = spansByWorker[w];
-                let clickedSpanId = null;
-                if (wSpans && wSpans.length > 0) {
-                    let lo = 0, hi = wSpans.length - 1, hit = null;
-                    while (lo <= hi) {
-                        const mid = (lo + hi) >> 1;
-                        if (wSpans[mid].end < ns) lo = mid + 1;
-                        else if (wSpans[mid].start > ns) hi = mid - 1;
-                        else { hit = wSpans[mid]; break; }
+                // A click in a worker lane selects the task (task detail
+                // pane pops up) and, as a bonus, focuses the span panel on
+                // the outermost span containing the clicked instant — so the
+                // user sees the span hierarchy for that poll without having
+                // to click into the span panel separately.
+                //
+                // Regression note: an earlier version of this handler
+                // treated ANY overlapping span as a "span bar click" and
+                // silently cleared `selectedTaskId`, which broke the
+                // task-selection flow once every poll had overlapping spans.
+                // Always select the task here; the span-focus logic is
+                // purely additive.
+
+                // Find a span on this worker whose time range contains `ns`,
+                // then walk up the parent chain to the outermost ancestor
+                // that still contains `ns` — that's the span we focus on.
+                let containingSpan = null;
+                for (const s of allSpans) {
+                    if (s.end < ns || s.start > ns) continue;
+                    for (const seg of s.segments) {
+                        if (seg.workerId === w && seg.start <= ns && seg.end >= ns) {
+                            containingSpan = s;
+                            break;
+                        }
                     }
-                    if (hit) clickedSpanId = hit.spanId;
+                    if (containingSpan) break;
                 }
 
-                if (clickedSpanId != null) {
-                    selectedSpanId = (clickedSpanId !== selectedSpanId) ? clickedSpanId : null;
-                    selectedSpanIds = new Set();
-                    if (selectedSpanId != null) selectedSpanIds.add(selectedSpanId);
+                let newFocusedSpanId = null;
+                const newSelectedSpanIds = new Set();
+                if (containingSpan) {
+                    // Walk up to the outermost ancestor whose [start,end]
+                    // still contains the click.  Build the highlight set
+                    // along the way.
+                    let cur = containingSpan;
+                    let outermost = containingSpan;
+                    newSelectedSpanIds.add(cur.spanId);
+                    while (cur.parentSpanId != null) {
+                        const parentSpan = spansById.get(cur.parentSpanId);
+                        if (!parentSpan) break;
+                        if (parentSpan.start <= ns && parentSpan.end >= ns) {
+                            outermost = parentSpan;
+                            newSelectedSpanIds.add(parentSpan.spanId);
+                            cur = parentSpan;
+                        } else {
+                            break;
+                        }
+                        // Defense against cycles in malformed data:
+                        if (newSelectedSpanIds.size > 1024) break;
+                    }
+                    newFocusedSpanId = outermost.spanId;
+                }
+
+                // Toggle task selection: clicking the same task again clears
+                // both the task and the span focus (a single un-click).
+                const togglingOff = found && found === selectedTaskId;
+                if (togglingOff) {
                     selectedTaskId = null;
-                    renderAll();
-                    return;
+                    selectedSpanId = null;
+                    selectedSpanIds = new Set();
+                    focusedSpanId = null;
+                } else {
+                    selectedTaskId = found || null;
+                    selectedSpanId = newFocusedSpanId;
+                    selectedSpanIds = newSelectedSpanIds;
+                    focusedSpanId = newFocusedSpanId;
                 }
-
-                selectedSpanId = null;
-                selectedSpanIds = new Set();
-                selectedTaskId = (found && found !== selectedTaskId) ? found : null;
                 renderAll();
             });
 
@@ -3759,6 +4097,33 @@
             });
 
             // ── Tooltip ──
+            /**
+             * Convert a clientX from a mousemove event into the timestamp at
+             * that horizontal position on the shared time axis.  Uses the
+             * lanes container's geometry since every time-based panel has the
+             * same horizontal layout (see TIME-PANEL LAYOUT INVARIANT).
+             *
+             * Returns null if the x falls outside the draw area.
+             */
+            function eventToTimelineNs(clientX) {
+                const rect = lanesContainer.getBoundingClientRect();
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const mouseX = clientX - rect.left - LABEL_W;
+                const drawW = rect.width - LABEL_W - scrollbarW;
+                if (mouseX < 0 || mouseX > drawW) return null;
+                return viewStart + (mouseX / drawW) * (viewEnd - viewStart);
+            }
+
+            /** Schedule a crosshair redraw on the next animation frame. */
+            function scheduleCrosshairRedraw() {
+                if (!queueChartRafId) {
+                    queueChartRafId = requestAnimationFrame(() => {
+                        renderCrosshair();
+                        queueChartRafId = null;
+                    });
+                }
+            }
+
             document
                 .getElementById("main-area")
                 .addEventListener("mousemove", (e) => {
@@ -3767,10 +4132,13 @@
                         mouseNs = null;
                         return;
                     }
-                    // Don't override span panel tooltip
+                    // Over the span panel: it owns its own tooltip, but we
+                    // still want the crosshair to follow the mouse so users
+                    // can correlate spans with the task detail / lanes below.
                     if (e.target.closest && e.target.closest("#span-panel")) {
-                        mouseNs = null;
+                        mouseNs = eventToTimelineNs(e.clientX);
                         lanesContainer.style.cursor = "";
+                        scheduleCrosshairRedraw();
                         return;
                     }
                     const rect = lanesContainer.getBoundingClientRect();
@@ -3789,12 +4157,7 @@
                     mouseNs = ns;
 
                     // Throttle crosshair redraw with RAF
-                    if (!queueChartRafId) {
-                        queueChartRafId = requestAnimationFrame(() => {
-                            renderCrosshair();
-                            queueChartRafId = null;
-                        });
-                    }
+                    scheduleCrosshairRedraw();
 
                     const laneIdx = Math.floor(
                         (mouseY + lanesContainer.scrollTop) / LANE_H,
@@ -3857,24 +4220,18 @@
                                 pollInfo += `<span class="label">Sched events:</span> <span class="value">⚠️ ${s.schedSamples.length} blocking</span> <span style="color:#666">(click to view)</span><br>`;
                                 hasClickableStack = true;
                             }
-                            // Count span events within this poll
-                            const wSpans = spansByWorker[w];
-                            if (wSpans && wSpans.length > 0) {
+                            // Count span segments within this poll on this worker
+                            {
                                 let spanCount = 0;
                                 const spanNames = {};
-                                // Binary search for first span that could overlap this poll
-                                let sLo = 0, sHi = wSpans.length - 1;
-                                while (sLo <= sHi) {
-                                    const mid = (sLo + sHi) >> 1;
-                                    if (wSpans[mid].end < s.start) sLo = mid + 1;
-                                    else sHi = mid - 1;
-                                }
-                                for (let si = sLo; si < wSpans.length; si++) {
-                                    const sp = wSpans[si];
+                                for (const sp of allSpans) {
                                     if (sp.start > s.end) break;
-                                    if (sp.start >= s.start && sp.end <= s.end) {
-                                        spanCount++;
-                                        spanNames[sp.spanName] = (spanNames[sp.spanName] || 0) + 1;
+                                    if (sp.end < s.start) continue;
+                                    for (const seg of sp.segments) {
+                                        if (seg.workerId === w && seg.start >= s.start && seg.end <= s.end) {
+                                            spanCount++;
+                                            spanNames[sp.spanName] = (spanNames[sp.spanName] || 0) + 1;
+                                        }
                                     }
                                 }
                                 if (spanCount > 0) {
@@ -3910,32 +4267,29 @@
                     // Span detail: if mouse is near the span sub-band, find the hovered span
                     let spanInfo = "";
                     {
-                        const wSpans = spansByWorker[w];
-                        if (wSpans && wSpans.length > 0) {
-                            // Find span at current timestamp using binary search
-                            let lo = 0, hi = wSpans.length - 1, hit = null;
-                            while (lo <= hi) {
-                                const mid = (lo + hi) >> 1;
-                                if (wSpans[mid].end < ns) lo = mid + 1;
-                                else if (wSpans[mid].start > ns) hi = mid - 1;
-                                else { hit = wSpans[mid]; break; }
+                        // Find a span that has a segment on this worker at this timestamp
+                        let hit = null;
+                        for (const s of allSpans) {
+                            if (s.end < ns || s.start > ns) continue;
+                            for (const seg of s.segments) {
+                                if (seg.workerId === w && seg.start <= ns && seg.end >= ns) { hit = s; break; }
                             }
-                            if (hit) {
-                                const durNs = hit.end - hit.start;
-                                spanInfo = `<br><span class="label">Span:</span> <span class="value">${esc(hit.spanName)}</span> <span style="color:#888">${formatHumanDuration(durNs)}</span>`;
-                                const fields = hit.fields;
-                                if (fields && typeof fields === "object") {
-                                    const entries = Object.entries(fields);
-                                    if (entries.length > 0) {
-                                        spanInfo += `<br><span class="label">Fields:</span> <span class="value">${entries.map(([k, v]) => esc(k) + "=" + esc(v)).join(", ")}</span>`;
-                                    }
+                            if (hit) break;
+                        }
+                        if (hit) {
+                            const durNs = hit.end - hit.start;
+                            spanInfo = `<br><span class="label">Span:</span> <span class="value">${esc(hit.spanName)}</span> <span style="color:#888">${formatHumanDuration(durNs)}</span>`;
+                            const fields = hit.fields;
+                            if (fields && typeof fields === "object") {
+                                const entries = Object.entries(fields);
+                                if (entries.length > 0) {
+                                    spanInfo += `<br><span class="label">Fields:</span> <span class="value">${entries.map(([k, v]) => esc(k) + "=" + esc(v)).join(", ")}</span>`;
                                 }
-                                if (hit.parentSpanId != null) {
-                                    // Find the parent span interval by ID and time overlap
-                                    const parentSpan = wSpans.find(s => s.spanId === hit.parentSpanId && s.start <= hit.start && s.end >= hit.end);
-                                    if (parentSpan) {
-                                        spanInfo += `<br><span class="label">Parent:</span> <span class="value">${esc(parentSpan.spanName)}</span>`;
-                                    }
+                            }
+                            if (hit.parentSpanId != null) {
+                                const parentSpan = allSpans.find(s => s.spanId === hit.parentSpanId && s.start <= hit.start && s.end >= hit.end);
+                                if (parentSpan) {
+                                    spanInfo += `<br><span class="label">Parent:</span> <span class="value">${esc(parentSpan.spanName)}</span>`;
                                 }
                             }
                         }

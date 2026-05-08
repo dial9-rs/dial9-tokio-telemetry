@@ -188,6 +188,10 @@ harness = false
 name = "threadlocal_encode"
 harness = false
 
+[[example]]
+name = "tracing_sleep"
+required-features = ["tracing-layer"]
+
 [[bench]]
 name = "tracing_layer_bench"
 harness = false
