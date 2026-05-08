@@ -380,20 +380,3 @@ for await (const trace of parseTrace('/path/to/traces/')) {
 }
 ```
 
-## Which tasks have the most task dumps?
-
-Tasks with many dumps are spending a lot of time idle (waiting on I/O, timers, channels, etc.).
-
-```javascript
-const { parseTrace } = require('./trace_parser.js');
-
-for await (const trace of parseTrace('/path/to/traces/')) {
-  const sorted = [...trace.taskDumps.entries()]
-    .sort((a, b) => b[1].length - a[1].length)
-    .slice(0, 10);
-  for (const [taskId, dumps] of sorted) {
-    const loc = trace.taskSpawnLocs?.get(taskId) || '(unknown)';
-    console.log(`Task ${taskId} (${loc}): ${dumps.length} dumps`);
-  }
-}
-```
