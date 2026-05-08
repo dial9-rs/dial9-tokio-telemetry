@@ -93,7 +93,7 @@
     let selfCount = 0;
     let frameCount = 0;
     function walk(node) {
-      if (node.name.toLowerCase().includes(queryLower)) {
+      if (node.name.toLowerCase().includes(queryLower) || (node.fullName && node.fullName.toLowerCase().includes(queryLower))) {
         selfCount += node.self;
         frameCount++;
       }
@@ -244,7 +244,7 @@
         if (w < 0.5) continue;
 
         const isAncestor = !!node.isAncestor;
-        const searchMatch = !searching || node.name.toLowerCase().includes(qLower);
+        const searchMatch = !searching || node.name.toLowerCase().includes(qLower) || (node.treeNode && node.treeNode.fullName && node.treeNode.fullName.toLowerCase().includes(qLower));
         const highlighted = highlightName != null && node.name === highlightName;
         const dimmed = (searching && !searchMatch) || (highlightName != null && !highlighted);
         let alpha = 1.0;
@@ -498,12 +498,10 @@
       tooltip.innerHTML = buildTooltipHtml(hit, pinned);
       tooltip.style.pointerEvents = pinned ? "auto" : "none";
       tooltip.style.display = "block";
-      // Clamp to viewport
+      // Position at top of the flamegraph container so it never covers hovered frames
+      const containerRect = container.getBoundingClientRect();
       const tipX = Math.min(x + 12, window.innerWidth - tooltip.offsetWidth - 8);
-      let tipY = Math.max(8, y - 50);
-      if (tipY + tooltip.offsetHeight > window.innerHeight - 8) {
-        tipY = window.innerHeight - tooltip.offsetHeight - 8;
-      }
+      const tipY = Math.max(8, containerRect.top);
       tooltip.style.left = tipX + "px";
       tooltip.style.top = tipY + "px";
       if (pinned) {

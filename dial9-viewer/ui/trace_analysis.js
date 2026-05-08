@@ -431,22 +431,26 @@
       node.count++;
       for (const addr of chain) {
         const entry = callframeSymbols.get(addr);
-        const resolved = Array.isArray(entry) ? entry[0] : entry;
-        const key = resolved ? resolved.symbol : addr || "??";
-        const formatted = formatFrame(addr, callframeSymbols);
-        if (!node.children.has(key)) {
-          node.children.set(key, {
-            name: formatted.text,
-            fullName: key,
-            location: resolved ? resolved.location : null,
-            docsUrl: formatted.docsUrl,
-            children: new Map(),
-            count: 0,
-            self: 0,
-          });
+        // Expand inlined frames: an array entry means multiple frames at one address
+        const frames = Array.isArray(entry) ? entry : [entry];
+        for (let fi = frames.length - 1; fi >= 0; fi--) {
+          const resolved = frames[fi];
+          const key = resolved ? resolved.symbol : addr || "??";
+          const formatted = resolved ? formatFrame(resolved) : formatFrame(addr, callframeSymbols);
+          if (!node.children.has(key)) {
+            node.children.set(key, {
+              name: formatted.text,
+              fullName: key,
+              location: resolved ? resolved.location : null,
+              docsUrl: formatted.docsUrl,
+              children: new Map(),
+              count: 0,
+              self: 0,
+            });
+          }
+          node = node.children.get(key);
+          node.count++;
         }
-        node = node.children.get(key);
-        node.count++;
       }
       node.self++;
     }
