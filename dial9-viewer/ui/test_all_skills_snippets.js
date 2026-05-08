@@ -252,8 +252,10 @@ async function main() {
     function toSkeleton(val) {
       if (val === null || val === undefined) return '_null_';
       if (val instanceof Map) {
-        const first = val.values().next().value;
-        return { '_map_': first !== undefined ? toSkeleton(first) : '_empty_' };
+        let rep;
+        for (const v of val.values()) { if (!Array.isArray(v)) { rep = v; break; } }
+        if (rep === undefined) rep = val.values().next().value;
+        return { '_map_': rep !== undefined ? toSkeleton(rep) : '_empty_' };
       }
       if (typeof val === 'object' && typeof val.percentile === 'function') return 'Histogram';
       if (Array.isArray(val)) {
