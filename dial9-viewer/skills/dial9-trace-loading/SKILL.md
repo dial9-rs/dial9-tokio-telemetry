@@ -35,6 +35,7 @@ description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTr
   hasSchedWait: boolean,                 // trace includes kernel scheduling wait data
   hasTaskTracking: boolean,              // trace includes task spawn/terminate events
   taskInstrumented: Map<number, boolean>, // task ID → whether task has tracing instrumentation
+  taskDumps: Map<number, [{timestamp, callchain}]>, // task ID → async stack captures (sorted by timestamp); see dial9-tokio-telemetry `taskdump` feature
 }
 ```
 

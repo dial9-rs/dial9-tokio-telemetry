@@ -431,10 +431,17 @@
       node.count++;
       for (const addr of chain) {
         const entry = callframeSymbols.get(addr);
-        // Expand inlined frames: an array entry means multiple frames at one address
+        // Expand inlined frames. Per blazesym, an array entry is ordered
+        // [outermost, ..., innermost]: entry[0] is the real function at this
+        // address, and entry[i>0] are inlined callees (entry[0] calls entry[1]
+        // calls entry[2], etc.). To walk the call graph caller→callee while
+        // descending the flamegraph tree, iterate 0 → N. Skip nullish slots
+        // that can appear in sparse arrays (rare, but can happen if inline
+        // SymbolTableEntry events arrive before their depth=0 sibling).
         const frames = Array.isArray(entry) ? entry : [entry];
-        for (let fi = frames.length - 1; fi >= 0; fi--) {
+        for (let fi = 0; fi < frames.length; fi++) {
           const resolved = frames[fi];
+          if (fi > 0 && !resolved) continue;
           const key = resolved ? resolved.symbol : addr || "??";
           const formatted = resolved ? formatFrame(resolved) : formatFrame(addr, callframeSymbols);
           if (!node.children.has(key)) {
