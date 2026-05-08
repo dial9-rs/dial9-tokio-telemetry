@@ -192,25 +192,26 @@ const fgData = buildFgData(workerSamples, trace.callframeSymbols);
 
 ## buildSpanData(customEvents)
 
-Pairs `SpanEnter`/`SpanExit` custom events into span intervals per worker. Requires the `tracing-layer` feature on `dial9-tokio-telemetry` and `Dial9TokioLayer` in the subscriber.
+Pairs `SpanEnter`/`SpanExit` custom events into complete span objects. Requires the `tracing-layer` feature on `dial9-tokio-telemetry` and `Dial9TokioLayer` in the subscriber.
 
 ```javascript
-const { spansByWorker, spanMeta, maxDepth } = buildSpanData(trace.customEvents);
+const { allSpans, spanMeta, maxDepth, childrenByParent } = buildSpanData(trace.customEvents);
 ```
 
 Returns:
 ```
 {
-  spansByWorker: {
-    [workerId]: [{start, end, spanId, spanName, fields, parentSpanId, depth}]
-  },
+  allSpans: [{start, end, spanId, spanName, fields, parentSpanId, segments: [{start, end, workerId}], activeNs, depth}],
   spanMeta: Map<spanId, {spanName, fields, parentSpanId}>,
   maxDepth: number,
+  unmatchedSpans: number,
+  childrenByParent: Map<spanId, [spanId]>,
 }
 ```
 
 Key concepts:
-- **Span interval**: One enter/exit pair. A span re-entered across multiple polls produces multiple intervals with the same `spanId`.
+- **allSpans**: Flat array of all completed spans, sorted by start time.
+- **segments**: Each span may run across multiple polls (and workers). `segments` records each enter/exit pair with its `workerId`. Filter by `s.segments.some(seg => seg.workerId === w)` to find spans on a specific worker.
 - **fields**: User-defined span fields (e.g., `{request_id: "abc", metric_name: "cpu"}`). Base fields (`worker_id`, `span_id`, `span_name`) are excluded.
 - **parentSpanId**: Only set for explicit parents (`span!(parent: &x, ..)`). Most `#[instrument]` spans have `null`. Use timestamp containment to infer nesting.
 - **depth**: Computed from the parent chain. 0 for root spans, incremented for each ancestor.

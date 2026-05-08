@@ -41,4 +41,7 @@ node dial9-viewer/ui/test_trace_integrity.js
 echo "--- Checking trace analysis ---"
 node dial9-viewer/ui/test_trace_analysis.js
 
+echo "--- Checking skills snippets ---"
+node dial9-viewer/ui/test_all_skills_snippets.js
+
 echo "All E2E trace checks passed."

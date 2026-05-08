@@ -293,6 +293,7 @@ async function main() {
           if (doc.length > 0 && actual.length > 0) diff(doc[0], actual[0], p + '[0]');
           return;
         }
+        if (Array.isArray(doc) && actual === '[]') return; // empty actual array is compatible
         if (typeof doc === 'object' && doc !== null && typeof actual === 'object' && actual !== null) {
           const dk = new Set(Object.keys(doc)), ak = new Set(Object.keys(actual));
           for (const k of dk) { if (!ak.has(k)) deepErrors.push(`${p}.${k}: documented but missing from result`); }
