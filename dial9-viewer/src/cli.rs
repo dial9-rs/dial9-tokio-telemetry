@@ -16,27 +16,7 @@ mod skills {
 )]
 pub struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>,
-
-    /// Port to listen on (when running without a subcommand)
-    #[arg(long, default_value = "3000", global = true)]
-    port: u16,
-
-    /// S3 bucket name (when running without a subcommand)
-    #[arg(long, global = true)]
-    bucket: Option<String>,
-
-    /// S3 key prefix (when running without a subcommand)
-    #[arg(long, global = true)]
-    prefix: Option<String>,
-
-    /// Serve traces from a local directory instead of S3
-    #[arg(long, global = true, conflicts_with = "bucket")]
-    local_dir: Option<PathBuf>,
-
-    /// Dev mode: serve UI files from disk for faster iteration
-    #[arg(long, global = true)]
-    dev: bool,
+    command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
@@ -47,7 +27,27 @@ enum Commands {
         action: Option<AgentsAction>,
     },
     /// Start the web server
-    Serve {},
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "3000")]
+        port: u16,
+
+        /// S3 bucket name
+        #[arg(long)]
+        bucket: Option<String>,
+
+        /// S3 key prefix
+        #[arg(long)]
+        prefix: Option<String>,
+
+        /// Serve traces from a local directory instead of S3
+        #[arg(long, conflicts_with = "bucket")]
+        local_dir: Option<PathBuf>,
+
+        /// Dev mode: serve UI files from disk for faster iteration
+        #[arg(long)]
+        dev: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -74,7 +74,7 @@ pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Agents { action }) => match action {
+        Commands::Agents { action } => match action {
             None => print!("{}", skills::HEADER),
             Some(AgentsAction::Toolkit { path }) => {
                 std::fs::create_dir_all(&path)?;
@@ -115,8 +115,14 @@ pub async fn run() -> anyhow::Result<()> {
                 eprintln!("Add to .kiro/skills/ or point your agent at this directory.");
             }
         },
-        Some(Commands::Serve {}) | None => {
-            return crate::serve(cli.port, cli.bucket, cli.prefix, cli.local_dir, cli.dev).await;
+        Commands::Serve {
+            port,
+            bucket,
+            prefix,
+            local_dir,
+            dev,
+        } => {
+            return crate::serve(port, bucket, prefix, local_dir, dev).await;
         }
     }
     Ok(())

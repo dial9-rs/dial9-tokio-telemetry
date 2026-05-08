@@ -12,9 +12,11 @@ It can be hard to understand application performance and behavior in async code.
 
 Compared to [tokio-console](https://github.com/tokio-rs/console), which is designed for live debugging, dial9-tokio-telemetry is designed for post-hoc analysis. Because traces are written to files with bounded disk usage, you can leave it running in production and come back later to deeply analyze what went wrong or why a specific request was slow. On Linux, traces include CPU profile samples and kernel scheduling events, so you can see not just _that_ a task was delayed but _what code_ was running on the worker instead.
 
+Compared to [tokio-metrics](https://github.com/tokio-rs/tokio-metrics), which exports aggregate counters (mean poll time, queue depth, etc.) for dashboarding and alerting, dial9 records every individual event. tokio-metrics is great for "something is wrong" alarms; dial9 is for "here's exactly what happened and why." They're complementary: use tokio-metrics for operational dashboards, dial9 for deep dives when those dashboards fire.
+
 ## Is there a demo?
 
-Yes, check out this [quick walkthrough (YouTube)](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)!
+Yes, check out this [quick walkthrough (YouTube)](https://www.youtube.com/watch?v=kr0RYMu57kU)!
 
 The [viewer](https://dial9-tokio-telemetry.netlify.app/) (autodeployed from code in `main`) is hosted on Netlify for convenience. You can [load the demo trace](https://dial9-tokio-telemetry.netlify.app/?trace=demo-trace.bin) directly, or use [serve.py](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/serve.py) to run it locally (pure HTML and JS, client side only).
 
@@ -73,6 +75,7 @@ The macro spawns your function body as a task, so top-level code is visible in t
 ### Feature flags
 
 - **`cpu-profiling`** — Linux only. Enables `perf_event_open`-based CPU sampling and scheduler event capture via `dial9-perf-self-profile`. See [CPU profiling](#cpu-profiling-linux-only).
+- **`taskdump`** — Linux only. Captures async backtraces at yield points via Tokio's `taskdump` support. See [Task dumps](#task-dumps-linux-only).
 - **`worker-s3`** — Enables S3 upload support. Adds `aws-sdk-s3`, `aws-sdk-s3-transfer-manager`, `aws-config`, and `flate2`. See [S3 upload](#s3-upload).
 
 ### CPU profiling (Linux only)
@@ -145,6 +148,49 @@ sudo sysctl kernel.kptr_restrict=0
 
 Because CPU samples are tagged with the worker thread they were collected on, and the trace records which task is being polled on each worker at each instant, the viewer can correlate samples with individual polls. When a poll takes an unusually long time (a "long poll"), the CPU samples collected during that poll show you exactly what code was running — expensive serialization, accidental blocking I/O, lock contention, etc. In the trace viewer, click on a long poll to see its flamegraph, or shift+drag to aggregate CPU samples across a time range.
 
+### Task dumps (Linux only)
+
+With the `taskdump` feature, dial9 captures async backtraces at yield points, showing what futures a task is `await`ing while idle. When you click on an idle period in the viewer, you see the full async call stack: which `select!` branch is pending, what HTTP request is in flight, etc.
+
+```toml
+[dependencies]
+dial9-tokio-telemetry = { version = "0.3", features = ["taskdump"] }
+```
+
+> **Note:** The `taskdump` feature requires Tokio's upstream `taskdump` support, which only compiles on Linux (aarch64, x86, x86_64). Enabling it on other targets is a hard compile error from Tokio.
+
+```rust,no_run
+# #[cfg(feature = "taskdump")]
+# mod inner {
+use dial9_tokio_telemetry::Dial9Config;
+use dial9_tokio_telemetry::telemetry::TaskDumpConfig;
+
+fn my_config() -> Dial9Config {
+    Dial9Config::builder()
+        .base_path("/tmp/my_traces/trace.bin")
+        .max_file_size(100 * 1024 * 1024)
+        .max_total_size(500 * 1024 * 1024)
+        .with_runtime(|r| {
+            r.with_task_tracking(true)
+             .with_task_dumps(TaskDumpConfig::default())
+        })
+        .build_or_disabled()
+}
+
+#[dial9_tokio_telemetry::main(config = my_config)]
+async fn main() { /* ... */ }
+# }
+# fn main() {}
+```
+
+Captures are Poisson-sampled based on idle duration. See `TaskDumpConfig` for tuning options.
+
+> **Performance note:** Task dumps currently produce one extra wake per capture and are more likely than other features to degrade performance. Measure overhead in your environment before enabling in latency-sensitive paths.
+
+#### Requirements
+
+**Frame pointers**: Like CPU profiling, task dump stack traces rely on frame-pointer-based unwinding. Compile with `-C force-frame-pointers=yes` (see [CPU profiling](#cpu-profiling-linux-only) above).
+
 ### S3 upload
 
 With the `worker-s3` feature, sealed trace segments are automatically gzip-compressed and uploaded to S3 by a background worker thread. Application threads are unaffected: uploads happen on a background thread after segments are sealed.
@@ -189,6 +235,8 @@ By default (customizable via `S3Config::builder().key_fn(...)`), objects land at
 The worker requires `s3:PutObject` and `s3:HeadBucket` permissions.
 
 The worker uses a circuit breaker with exponential backoff if S3 is unreachable. It never crashes or blocks the application. Segments remain on disk when uploads fail and are retried on the next poll cycle. For explicit shutdown control, use `guard.graceful_shutdown(timeout)` instead of dropping the guard (which seals the final segment but does not wait for the worker to drain).
+
+For custom upload destinations or post-processing (e.g. shipping to a different object store, running analysis on each segment), you can replace the built-in pipeline entirely with `with_custom_pipeline`. See [`examples/custom_pipeline.rs`](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/examples/custom_pipeline.rs) for a complete example.
 
 ### Without the macro
 
@@ -387,22 +435,44 @@ Overhead:   3.2%
 
 ## Analyzing traces
 
-[`dial9-viewer`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-viewer) is an interactive trace viewer and S3 browser. Point it at a local directory or an S3 bucket to browse and visualize traces in the browser. [Here's a demo.](https://www.youtube.com/watch?v=zJOzU_6Mf7Q)
+[`dial9`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-viewer) is a CLI for browsing and analyzing traces. Use `dial9 serve` to start a local web UI that visualizes traces from a directory or S3 bucket. [Here's a demo.](https://www.youtube.com/watch?v=kr0RYMu57kU)
 
 ```bash
 # Install
-cargo install --locked dial9-viewer
+cargo install --locked dial9
 # or, for pre-built binaries:
-cargo binstall dial9-viewer
+cargo binstall dial9
 
 # Serve traces from a local directory
-dial9-viewer serve --local-dir /tmp/my_traces
+dial9 serve --local-dir /tmp/my_traces
 
 # Serve traces from S3
-dial9-viewer serve --bucket my-trace-bucket
+dial9 serve --bucket my-trace-bucket
 ```
 
-`dial9-viewer` also ships an agent toolkit (`dial9-viewer agents`) with skill documentation and JS analysis modules that AI agents can use to diagnose traces programmatically.
+### Agent toolkit
+
+`dial9` also ships skill documentation and JS analysis modules for scripted trace analysis.
+
+```bash
+# Print the agent skill overview
+dial9 agents
+
+# Unpack all skills to a directory
+dial9 agents skills /path/to/skills
+
+# Extract the JS analysis toolkit
+dial9 agents toolkit /path/to/toolkit
+node /path/to/toolkit/analyze.js /tmp/my_traces/
+```
+
+If you use [Symposium](https://symposium.dev), skills auto-install when your project depends on `dial9-tokio-telemetry`:
+
+```bash
+cargo agents sync
+```
+
+### CLI analysis
 
 For CLI analysis without the viewer, there are example scripts:
 
@@ -431,10 +501,11 @@ The [`examples/metrics-service`](https://github.com/dial9-rs/dial9-tokio-telemet
 
 ## Workspace
 
-This repo is a Cargo workspace with five members:
+This repo is a Cargo workspace:
 
 - [`dial9-tokio-telemetry`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-tokio-telemetry) — the main crate
-- [`dial9-viewer`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-viewer) — CLI and web UI for browsing traces in S3 or on the local filesystem
+- [`dial9`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9) — facade crate published as the `dial9` binary (re-exports `dial9-viewer`, and in the future, libraries)
+- [`dial9-viewer`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-viewer) — CLI and web UI implementation
 - [`dial9-macro`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-macro) — the `#[dial9_tokio_telemetry::main]` attribute macro
 - [`dial9-perf-self-profile`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/perf-self-profile) — minimal Linux `perf_event_open` wrapper for CPU profiling and scheduler events
 - [`examples/metrics-service`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/examples/metrics-service) — end-to-end example service
@@ -442,7 +513,6 @@ This repo is a Cargo workspace with five members:
 ## Future work
 
 - **Parquet output** — write traces as Parquet for efficient querying with Athena, DuckDB, etc.
-- **Tokio task dumps** — capture async stack traces of all in-flight tasks
 - **Retroactive sampling** — trace data lives in a ring buffer; when your application detects anomalous behavior, it triggers persistence of the last N seconds of data rather than recording everything continuously
 - **Out-of-process symbolication** — resolve CPU profile stack traces in a background process to avoid adding latency or memory overhead to the application
 
