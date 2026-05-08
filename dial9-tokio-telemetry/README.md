@@ -185,6 +185,8 @@ async fn main() { /* ... */ }
 
 Captures are Poisson-sampled based on idle duration. See `TaskDumpConfig` for tuning options.
 
+> **Performance note:** Task dumps currently produce one extra wake per capture and are more likely than other features to degrade performance. Measure overhead in your environment before enabling in latency-sensitive paths.
+
 #### Requirements
 
 **Frame pointers**: Like CPU profiling, task dump stack traces rely on frame-pointer-based unwinding. Compile with `-C force-frame-pointers=yes` (see [CPU profiling](#cpu-profiling-linux-only) above).
@@ -433,7 +435,7 @@ Overhead:   3.2%
 
 ## Analyzing traces
 
-[`dial9`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-viewer) is an interactive trace viewer and S3 browser. Point it at a local directory or an S3 bucket to browse and visualize traces in the browser. [Here's a demo.](https://www.youtube.com/watch?v=kr0RYMu57kU)
+[`dial9`](https://github.com/dial9-rs/dial9-tokio-telemetry/tree/main/dial9-viewer) is a CLI for browsing and analyzing traces. Use `dial9 serve` to start a local web UI that visualizes traces from a directory or S3 bucket. [Here's a demo.](https://www.youtube.com/watch?v=kr0RYMu57kU)
 
 ```bash
 # Install
