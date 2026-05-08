@@ -125,7 +125,7 @@ aws-sdk-s3 = { version = "1", default-features = false, features = [
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 async-trait = "0.1.89"
 uuid = { version = "1", features = ["v4"] }
-iai-callgrind = "0.16"
+iai-callgrind = "=0.16.1"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 dial9-tokio-telemetry = { path = ".", features = [

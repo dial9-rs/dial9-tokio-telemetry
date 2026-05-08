@@ -41,7 +41,7 @@ runs:
 
     - name: Install cargo-binstall
       if: steps.runner_cache.outputs.cache-hit != 'true'
-      uses: cargo-bins/cargo-binstall@main
+      uses: cargo-bins/cargo-binstall@v1.19.1
 
     - name: Install iai-callgrind-runner (prebuilt via binstall)
       if: steps.runner_cache.outputs.cache-hit != 'true'
