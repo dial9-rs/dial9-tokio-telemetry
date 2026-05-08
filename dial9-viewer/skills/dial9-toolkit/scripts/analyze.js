@@ -677,6 +677,7 @@ async function parseWorkerMain(traceFile, cachePath) {
     callframeSymbols: mapToEntries(trace.callframeSymbols),
     threadNames: mapToEntries(trace.threadNames),
     runtimeWorkers: mapToEntries(trace.runtimeWorkers),
+    taskDumps: mapToEntries(trace.taskDumps),
     clockSyncAnchors: trace.clockSyncAnchors, clockOffsetNs: trace.clockOffsetNs,
   }});
   for (const e of trace.events) writeLine({ t: 'e', d: e });
@@ -703,7 +704,7 @@ function loadCacheFile(cachePath) {
     const rec = JSON.parse(line);
     switch (rec.t) {
       case 'm': raw = rec.d;
-        for (const k of ['spawnLocations','taskSpawnLocs','taskSpawnTimes','taskTerminateTimes','callframeSymbols','threadNames','runtimeWorkers'])
+        for (const k of ['spawnLocations','taskSpawnLocs','taskSpawnTimes','taskTerminateTimes','callframeSymbols','threadNames','runtimeWorkers','taskDumps'])
           if (raw[k]) raw[k] = new Map(raw[k]);
         break;
       case 'e': events.push(rec.d); break;

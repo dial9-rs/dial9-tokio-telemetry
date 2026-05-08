@@ -367,6 +367,115 @@ async function main() {
     pass("buildFgData returns null for empty samples");
   }
 
+  // Inlined frames: when callframeSymbols.get(addr) returns an array, per
+  // blazesym the array is ordered [outermost, ..., innermost]. entry[0] is the
+  // real function at the address; entry[i>0] are inlined callees so the call
+  // chain goes entry[0] -> entry[1] -> entry[2]. The flamegraph tree must
+  // descend in that same order (outermost as parent, innermost as leaf).
+  function testFlamegraphInlineOrder() {
+    const callframeSymbols = new Map([
+      ["0x1000", [
+        { symbol: "outer_fn", location: "outer.rs:10" },
+        { symbol: "mid_fn", location: "mid.rs:20" },
+        { symbol: "leaf_fn", location: "leaf.rs:30" },
+      ]],
+    ]);
+    const samples = [{ callchain: ["0x1000"], workerId: 0 }];
+    const tree = buildFlamegraphTree(samples, callframeSymbols);
+    if (tree.children.size !== 1) fail(`root has ${tree.children.size} children, expected 1`);
+    const outer = [...tree.children.values()][0];
+    if (!outer.fullName.includes("outer_fn")) fail(`child of root is "${outer.fullName}", expected "outer_fn"`);
+    if (outer.children.size !== 1) fail(`outer has ${outer.children.size} children, expected 1`);
+    const mid = [...outer.children.values()][0];
+    if (!mid.fullName.includes("mid_fn")) fail(`child of outer is "${mid.fullName}", expected "mid_fn"`);
+    const leaf = [...mid.children.values()][0];
+    if (!leaf.fullName.includes("leaf_fn")) fail(`child of mid is "${leaf.fullName}", expected "leaf_fn"`);
+    if (leaf.self !== 1) fail(`leaf.self = ${leaf.self}, expected 1 (innermost frame is where the sample lands)`);
+    pass("Inlined frames expand outermost→innermost as parent→child in the flamegraph");
+  }
+
+  // The inline-expansion code must not crash when an address maps to an array
+  // with nullish elements (can happen with sparse SymbolTableEntry events or
+  // when a child inline is resolved before its parent frame).
+  function testFlamegraphInlineTolerantOfNullSlots() {
+    // arr[0] present, arr[1] undefined, arr[2] present. The iteration should
+    // skip the undefined slot rather than creating a "(unknown)" level.
+    const sparse = new Array(3);
+    sparse[0] = { symbol: "outer_fn", location: null };
+    sparse[2] = { symbol: "leaf_fn", location: null };
+    const callframeSymbols = new Map([["0x2000", sparse]]);
+    const samples = [{ callchain: ["0x2000"], workerId: 0 }];
+    const tree = buildFlamegraphTree(samples, callframeSymbols);
+    // Expected: (all) -> outer_fn -> leaf_fn (sparse slot skipped)
+    const outer = [...tree.children.values()][0];
+    if (!outer || !outer.fullName.includes("outer_fn")) fail(`expected outer_fn child, got ${outer && outer.fullName}`);
+    if (outer.children.size !== 1) fail(`outer has ${outer.children.size} children, expected 1 (sparse slot should be skipped)`);
+    const leaf = [...outer.children.values()][0];
+    if (!leaf.fullName.includes("leaf_fn")) fail(`expected leaf_fn after outer_fn, got ${leaf.fullName}`);
+    pass("Sparse inline arrays do not produce phantom tree levels");
+  }
+
+  // An address that is not present in callframeSymbols should still produce
+  // a single-level child using the raw address as the key (so unresolved
+  // traces remain visible rather than collapsing).
+  function testFlamegraphUnknownAddress() {
+    const callframeSymbols = new Map(); // empty — address resolves to undefined
+    const samples = [{ callchain: ["0x3000"], workerId: 0 }];
+    const tree = buildFlamegraphTree(samples, callframeSymbols);
+    if (tree.children.size !== 1) fail(`root has ${tree.children.size} children for single unresolved address`);
+    const node = [...tree.children.values()][0];
+    if (node.self !== 1) fail(`unresolved node.self = ${node.self}, expected 1`);
+    pass("Unresolved addresses still produce a single tree level");
+  }
+
+  // ── TaskDumpEvent parsing (verified against the demo trace) ──
+
+  function testTaskDumpsParsed() {
+    if (!trace.taskDumps) fail("trace.taskDumps should be a Map");
+    if (!(trace.taskDumps instanceof Map)) fail("trace.taskDumps should be an instance of Map");
+    pass(`trace.taskDumps is a Map with ${trace.taskDumps.size} task IDs`);
+  }
+
+  function testTaskDumpsSortedByTimestamp() {
+    // Every value in taskDumps is an array sorted by timestamp — the renderer
+    // relies on this for its O(n) sweep across idle gaps.
+    for (const [tid, dumps] of trace.taskDumps) {
+      for (let i = 1; i < dumps.length; i++) {
+        if (dumps[i].timestamp < dumps[i - 1].timestamp) {
+          fail(`taskDumps for task ${tid} not sorted (index ${i})`);
+        }
+      }
+    }
+    pass("All taskDumps arrays are sorted by timestamp");
+  }
+
+  function testTaskDumpsShape() {
+    // Each dump is {timestamp, callchain} where callchain is an array of hex address strings.
+    for (const [tid, dumps] of trace.taskDumps) {
+      for (const d of dumps) {
+        if (typeof d.timestamp !== "number") fail(`dump.timestamp for task ${tid} is ${typeof d.timestamp}`);
+        if (!Array.isArray(d.callchain)) fail(`dump.callchain for task ${tid} is not an array`);
+        for (const addr of d.callchain) {
+          if (typeof addr !== "string" || !addr.startsWith("0x")) {
+            fail(`dump.callchain entry ${addr} not a hex string`);
+          }
+        }
+        break; // sample one per task is enough
+      }
+    }
+    pass("TaskDumps have expected {timestamp, callchain} shape with hex-string addresses");
+  }
+
+  function testTaskDumpsTaskIdsKnown() {
+    // Every task ID that has a dump should be a known spawned task (no orphans).
+    for (const tid of trace.taskDumps.keys()) {
+      if (!trace.taskSpawnTimes.has(tid)) {
+        fail(`task ${tid} has taskDumps but is not in taskSpawnTimes`);
+      }
+    }
+    pass("All taskDump task IDs refer to tasks that appear in taskSpawnTimes");
+  }
+
   // ── buildSpanData ──
 
   function testBuildSpanDataPairing() {
@@ -822,6 +931,15 @@ async function main() {
   testFlattenFlamegraph();
   testBuildFgData();
   testBuildFgDataEmpty();
+  testFlamegraphInlineOrder();
+  testFlamegraphInlineTolerantOfNullSlots();
+  testFlamegraphUnknownAddress();
+
+  console.log("\ntaskDumps:");
+  testTaskDumpsParsed();
+  testTaskDumpsSortedByTimestamp();
+  testTaskDumpsShape();
+  testTaskDumpsTaskIdsKnown();
 
   console.log("\nbuildSpanData:");
   testBuildSpanDataPairing();
