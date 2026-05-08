@@ -126,6 +126,37 @@ const groups = deduplicateSamples(trace.cpuSamples, trace.callframeSymbols);
 
 `parseTrace` automatically decompresses gzip input. Pass `.bin.gz` files directly.
 
+## Fetching traces from S3
+
+Start the viewer (`dial9-viewer --bucket BUCKET`, default port 3000), then fetch traces:
+
+```javascript
+// List traces matching a prefix
+const resp = await fetch('http://localhost:3000/api/search?bucket=BUCKET&q=2026-04-09/19');
+const objects = await resp.json(); // [{key, size, last_modified}, ...]
+
+// Single file: fetch and parse one trace
+const traceResp = await fetch(`http://localhost:3000/api/trace?bucket=BUCKET&keys=${encodeURIComponent(objects[0].key)}`);
+const buf = Buffer.from(await traceResp.arrayBuffer());
+const trace = await parseTrace(buf);
+
+// Multiple files: download to a local directory, then analyze
+const fs = require('fs');
+const dir = '/tmp/traces';
+fs.mkdirSync(dir, { recursive: true });
+// Download in parallel (20 at a time)
+const limit = 20;
+for (let i = 0; i < objects.length; i += limit) {
+  await Promise.all(objects.slice(i, i + limit).map(async (obj) => {
+    const r = await fetch(`http://localhost:3000/api/trace?bucket=BUCKET&keys=${encodeURIComponent(obj.key)}`);
+    fs.writeFileSync(`${dir}/${obj.key.split('/').pop()}`, Buffer.from(await r.arrayBuffer()));
+  }));
+}
+for await (const trace of parseTrace(dir)) {
+  // analyze each trace
+}
+```
+
 ## Merging multiple trace files
 
 Trace files can be concatenated back-to-back. The parser handles multiple concatenated segments transparently (headers, string pools, and schemas are re-read at each boundary).

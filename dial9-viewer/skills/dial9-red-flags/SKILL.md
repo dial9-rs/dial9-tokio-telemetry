@@ -25,7 +25,7 @@ Active task count grows without bound. Tasks are spawned but never complete. Che
 Time between `Waker::wake()` and the task being polled exceeds 5ms. All workers are busy. Fix: shorter polls, more workers, or yield points.
 
 ### blocking-calls
-Scheduling samples (source=1) reveal blocking system calls on the async runtime. These should use `spawn_blocking` or a dedicated thread.
+Scheduling samples (source=1) reveal blocking system calls (file I/O, DNS resolution, mutex contention) on the async runtime. These should use `spawn_blocking` or a dedicated thread.
 
 ### queue-depth
 Global injection queue exceeds 100 (warning) or 1000 (critical). The runtime cannot keep up with incoming work.
@@ -46,4 +46,4 @@ A single poll contains more than 20 span enter/exit pairs. Usually a tight loop 
 A span whose duration exceeds 10x the P50 for its name. Flags individual slow operations.
 
 ### unmatched-spans
-Spans with enter but no exit. Small counts are normal at segment boundaries. Large counts may indicate task cancellation.
+Spans with enter but no exit. Small counts are normal at segment boundaries. Large counts may indicate task cancellation or a bug in span instrumentation.

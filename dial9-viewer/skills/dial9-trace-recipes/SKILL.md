@@ -23,7 +23,7 @@ const result = await analyzeTraces('/path/to/traces/');
 
 ```javascript
 const { parseTrace, EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples } = require('./trace_parser.js');
-const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
+const { buildWorkerSpans, attachCpuSamples,
         computeSchedulingDelays } = require('./trace_analysis.js');
 
 for await (const trace of parseTrace('/path/to/traces/')) {
@@ -287,6 +287,66 @@ for (const w of workerIds) {
     }
   }
 }
+```
+
+## What else was happening during a slow span?
+
+Find a slow span and see what other spans and polls overlap on the same and other workers.
+
+```javascript
+const { buildSpanData } = require('./trace_analysis.js');
+const { spansByWorker } = buildSpanData(trace.customEvents);
+
+// Find the slowest query_metric span
+const allSpans = Object.values(spansByWorker).flat();
+const slowest = allSpans
+  .filter(s => s.spanName === 'query_metric')
+  .sort((a, b) => (b.end - b.start) - (a.end - a.start))[0];
+
+if (slowest) {
+  console.log(`Slowest query_metric: ${((slowest.end - slowest.start) / 1e6).toFixed(2)}ms`);
+  console.log(`Fields: ${JSON.stringify(slowest.fields)}`);
+
+  // What other spans overlapped on all workers?
+  for (const [w, wSpans] of Object.entries(spansByWorker)) {
+    const overlapping = wSpans.filter(s => s.start < slowest.end && s.end > slowest.start && s !== slowest);
+    if (overlapping.length > 0) {
+      const byName = {};
+      for (const s of overlapping) byName[s.spanName] = (byName[s.spanName] || 0) + 1;
+      console.log(`  Worker ${w}: ${Object.entries(byName).map(([n, c]) => `${n}×${c}`).join(', ')}`);
+    }
+  }
+}
+```
+
+## Where does a specific span rank among its peers?
+
+Given a span, show its percentile rank compared to all spans of the same name.
+
+```javascript
+const { buildSpanData } = require('./trace_analysis.js');
+const { spansByWorker } = buildSpanData(trace.customEvents);
+
+function spanPercentile(span) {
+  const allSpans = Object.values(spansByWorker).flat();
+  const peers = allSpans.filter(s => s.spanName === span.spanName).map(s => s.end - s.start);
+  peers.sort((a, b) => a - b);
+  const dur = span.end - span.start;
+  const rank = peers.filter(d => d <= dur).length;
+  const pct = (rank / peers.length * 100).toFixed(1);
+  const p50 = peers[Math.floor(peers.length * 0.5)];
+  const p90 = peers[Math.floor(peers.length * 0.9)];
+  const p99 = peers[Math.floor(peers.length * 0.99)];
+  console.log(`${span.spanName} duration: ${(dur / 1e3).toFixed(1)}µs (P${pct} of ${peers.length})`);
+  console.log(`  p0=${(peers[0] / 1e3).toFixed(1)}µs p50=${(p50 / 1e3).toFixed(1)}µs p90=${(p90 / 1e3).toFixed(1)}µs p99=${(p99 / 1e3).toFixed(1)}µs p100=${(peers[peers.length - 1] / 1e3).toFixed(1)}µs`);
+}
+
+// Example: rank the slowest query_metric
+const allSpans = Object.values(spansByWorker).flat();
+const slowest = allSpans
+  .filter(s => s.spanName === 'query_metric')
+  .sort((a, b) => (b.end - b.start) - (a.end - a.start))[0];
+if (slowest) spanPercentile(slowest);
 ```
 
 ## Trace a request across workers

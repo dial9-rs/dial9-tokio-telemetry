@@ -7,6 +7,20 @@ description: JavaScript analysis toolkit for parsing and analyzing dial9 Tokio r
 
 This skill provides the JavaScript modules for working with dial9 traces programmatically.
 
+## What traces capture
+
+dial9 traces capture the internal behavior of a Tokio async runtime:
+
+- **Poll events**: Every time a worker thread polls a task future (start/end timestamps, task ID, spawn location)
+- **Worker lifecycle**: Park/unpark events with CPU time and kernel scheduling wait
+- **Queue depth**: Periodic samples of the global injection queue
+- **Task lifecycle**: Spawn and terminate events with spawn location
+- **Wake events**: Which task woke which other task, and on which worker
+- **CPU samples**: Periodic stack traces from perf/eBPF, attached to the poll they occurred in
+- **Scheduling samples**: Stack traces captured when the kernel deschedules a worker thread (shows blocking calls)
+- **Clock sync**: Monotonic-to-wall-clock anchors for correlating with external logs
+- **Span events**: Enter/exit events from `tracing` spans (`#[instrument]`), showing what happened inside each poll with field values and nesting
+
 ## Quick start
 
 ```bash
