@@ -48,7 +48,7 @@ Open `http://localhost:3000` to browse traces. Enter a search prefix (e.g. `2026
 
 ### `agents`
 
-Provides skill documentation and an analysis toolkit for AI agents working with dial9 traces.
+Prints skill documentation and extracts the JS analysis toolkit for AI agents.
 
 ```bash
 # Print the agent skill header
@@ -62,4 +62,10 @@ dial9 agents skills /tmp/dial9-skills
 
 # Extract the JS analysis toolkit to a directory
 dial9 agents toolkit /tmp/dial9-toolkit
+```
+
+If you use [Symposium](https://symposium.dev), skills auto-install when your project depends on `dial9-tokio-telemetry`:
+
+```bash
+cargo agents sync
 ```
