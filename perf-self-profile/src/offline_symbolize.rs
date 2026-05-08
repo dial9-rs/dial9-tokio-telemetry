@@ -159,13 +159,7 @@ mod tests {
     fn symbolize_no_stack_frames_writes_nothing() {
         let mut enc = Encoder::new();
         let schema = enc
-            .register_schema(
-                "Ev",
-                vec![FieldDef {
-                    name: "count".into(),
-                    field_type: FieldType::Varint,
-                }],
-            )
+            .register_schema("Ev", vec![FieldDef::new("count", FieldType::Varint)])
             .unwrap();
         enc.write_event(&schema, &[FieldValue::Varint(0), FieldValue::Varint(42)])
             .unwrap();
@@ -186,13 +180,7 @@ mod tests {
     fn symbolize_empty_maps_writes_nothing() {
         let mut enc = Encoder::new();
         let schema = enc
-            .register_schema(
-                "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::StackFrames,
-                }],
-            )
+            .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
             .unwrap();
         enc.write_event(
             &schema,

@@ -188,10 +188,7 @@ fuzz_target!(|data: &[u8]| {
                 } else {
                     base
                 };
-                FieldDef {
-                    name: format!("f{j}"),
-                    field_type,
-                }
+                FieldDef::new(format!("f{j}"), field_type)
             })
             .collect();
         schemas.push(enc.register_schema(names[i], fields).unwrap());

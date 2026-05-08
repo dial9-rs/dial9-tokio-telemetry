@@ -18,14 +18,8 @@ fuzz_target!(|data: &[u8]| {
         .register_schema(
             "FuzzEvent",
             vec![
-                FieldDef {
-                    name: "a".into(),
-                    field_type: FieldType::Varint,
-                },
-                FieldDef {
-                    name: "b".into(),
-                    field_type: FieldType::Varint,
-                },
+                FieldDef::new("a", FieldType::Varint),
+                FieldDef::new("b", FieldType::Varint),
             ],
         )
         .unwrap();

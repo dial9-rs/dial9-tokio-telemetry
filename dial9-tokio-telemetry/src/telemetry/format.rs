@@ -322,7 +322,7 @@ pub(crate) fn decode_ref<'a>(
     schema: &SchemaEntry,
 ) -> Option<TelemetryEventRef<'a>> {
     use dial9_trace_format::TraceEvent as _;
-    let field_defs = &schema.fields;
+    let field_defs = schema.fields();
     Some(match name {
         "PollStartEvent" => {
             TelemetryEventRef::PollStart(PollStartEvent::decode(timestamp_ns, fields, field_defs)?)

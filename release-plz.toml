@@ -33,3 +33,7 @@ changelog_update = false
 [[package]]
 name = "dial9-viewer"
 changelog_update = false
+
+[[package]]
+name = "dial9"
+changelog_update = false

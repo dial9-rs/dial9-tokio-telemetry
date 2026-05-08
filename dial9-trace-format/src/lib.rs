@@ -24,6 +24,8 @@ pub mod schema;
 pub mod types;
 
 pub use dial9_trace_format_derive::TraceEvent;
+pub use types::DynamicListRef;
+pub use types::DynamicMapRef;
 pub use types::EventEncoder;
 pub use types::FieldValue;
 pub use types::InternedStackFrames;

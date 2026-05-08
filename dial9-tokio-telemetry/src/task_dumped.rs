@@ -22,10 +22,9 @@
 //! If the current poll returns `Pending`, a fresh capture is taken via
 //! [`tokio::runtime::dump::trace_with`] so that the next poll's sampling
 //! decision has fresh data. The capture runs a second `poll` of the inner
-//! future under a no-op waker inside `trace_with`. Tokio yield points use the
-//! *inner* context's waker (noop) rather than the real executor waker, so this
-//! does not produce a duplicate `WakeEvent`, and the `PollStart`/`PollEnd`
-//! hooks run only on the outer scheduler call, not on the trace_with sub-poll.
+//! future under the real waker inside `trace_with`. This may produce a
+//! spurious wake (the inner future re-registers the waker, which fires
+//! immediately), but avoids lost wakes that would cause task hangs.
 //!
 //! # Allocation
 //!
@@ -44,7 +43,7 @@ use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 /// Initial heap reservation for the instruction-pointer buffer on first capture.
 const FRAME_BUF_INITIAL_CAPACITY: usize = 256;
@@ -173,7 +172,7 @@ impl<F: Future> Future for TaskDumped<F> {
                 *this.pending_capture_ts = None;
             }
             Poll::Pending => {
-                this.frames.capture(this.inner.as_mut());
+                this.frames.capture(this.inner.as_mut(), cx);
                 let poll_end = crate::telemetry::recorder::poll_start_ts_or_now();
                 *this.pending_capture_ts = NonZeroU64::new(poll_end);
             }
@@ -223,18 +222,14 @@ impl FrameBuf {
         self.clear();
     }
 
-    /// Capture backtraces at yield points by re-polling `inner` under a no-op
-    /// waker inside `trace_with`.
-    fn capture<F: Future>(&mut self, inner: Pin<&mut F>) {
+    /// Capture backtraces at yield points by re-polling `inner` under the
+    /// real waker inside `trace_with`.
+    fn capture<F: Future>(&mut self, inner: Pin<&mut F>, cx: &mut Context<'_>) {
         if self.ips.capacity() == 0 {
             self.ips.reserve(FRAME_BUF_INITIAL_CAPACITY);
         }
         self.clear();
 
-        // Noop waker so any waker registration performed during this
-        // diagnostic re-poll is discarded, avoiding duplicate wake events.
-        let noop = Waker::noop();
-        let mut noop_cx = Context::from_waker(noop);
         let ips = &mut self.ips;
         let offsets = &mut self.offsets;
 
@@ -242,7 +237,7 @@ impl FrameBuf {
         // pinned reference in without requiring a `Copy` bound or unsafe.
         tokio::runtime::dump::trace_with(
             || {
-                let _ = inner.poll(&mut noop_cx);
+                let _ = inner.poll(cx);
             },
             |meta| {
                 offsets.push(ips.len());

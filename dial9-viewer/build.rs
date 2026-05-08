@@ -2,28 +2,142 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-/// Generates two files in OUT_DIR:
+/// Generates files in OUT_DIR for the new Agent Skills directory structure:
 ///
-/// `toolkit_files.rs` — `TOOLKIT_FILES: &[(&str, &str)]` mapping filename → content
-/// for every file in `toolkit/`. Symlinks are resolved so `include_str!` reads the
-/// real file.
-///
-/// `skill_files.rs` — `HEADER: &str` for `header.md`, plus
-/// `SKILL_FILES: &[(&str, &str, &str)]` mapping (segment name, title, content)
-/// for every other `.md` file in `skills/`. The title is extracted from the first
-/// `# Heading` line. Non-`.md` files (like `analyze.js`) are skipped.
+/// `skills.rs` — Constants for all skills:
+///   - `SKILL_DIRS: &[SkillDir]` with name, description, skill_md content, and file lists
+///   - `HEADER: &str` auto-generated overview from skill frontmatter
+///   - `TOOLKIT_FILES: &[(&str, &str)]` for the `agents toolkit` command
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let out_dir = env::var("OUT_DIR").unwrap();
 
-    println!("cargo::rerun-if-changed=toolkit");
     println!("cargo::rerun-if-changed=skills");
     println!("cargo::rerun-if-changed=ui");
     println!("cargo::rerun-if-changed=README_TELEMETRY.md");
 
-    generate_toolkit(&manifest_dir, &out_dir);
-    generate_setup_from_readme(&manifest_dir, &out_dir);
-    generate_skills(&manifest_dir, &out_dir);
+    let skills_dir = Path::new(&manifest_dir).join("skills");
+    let mut skills: Vec<SkillInfo> = Vec::new();
+
+    // Walk each subdirectory in skills/
+    if skills_dir.is_dir() {
+        let mut entries: Vec<_> = fs::read_dir(&skills_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+
+        for entry in entries {
+            let dir_path = entry.path();
+            let skill_md_path = dir_path.join("SKILL.md");
+            if !skill_md_path.exists() {
+                continue;
+            }
+            let skill_md = fs::read_to_string(&skill_md_path).unwrap();
+            let (name, description) = parse_frontmatter(&skill_md);
+            if name.is_empty() || description.is_empty() {
+                panic!(
+                    "SKILL.md in {:?} has invalid frontmatter: name and description are required",
+                    dir_path
+                );
+            }
+            let body = strip_frontmatter(&skill_md);
+
+            // Collect all files in the skill directory (recursively)
+            let mut files: Vec<(String, String)> = Vec::new(); // (relative_path, absolute_path)
+            collect_files(&dir_path, &dir_path, &mut files);
+
+            skills.push(SkillInfo {
+                name,
+                description,
+                body,
+                files,
+            });
+        }
+    }
+
+    // Generate the setup skill from README
+    let setup_body = generate_setup_from_readme(&manifest_dir, &out_dir);
+    skills.push(SkillInfo {
+        name: "dial9-setup".to_string(),
+        description: "How to instrument your app with dial9-tokio-telemetry. Covers prerequisites, macro and manual setup, the tracing layer, and wake event tracking.".to_string(),
+        body: setup_body,
+        files: vec![("SKILL.md".to_string(), resolve_path(&Path::new(&out_dir).join("dial9-setup-SKILL.md")))],
+    });
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Generate the header from skill descriptions
+    let header = generate_header(&skills);
+    let header_path = Path::new(&out_dir).join("header.md");
+    fs::write(&header_path, &header).unwrap();
+
+    // Generate skills.rs
+    let dest = Path::new(&out_dir).join("skills.rs");
+    let mut code = String::new();
+
+    // HEADER constant
+    code.push_str(&format!(
+        "pub const HEADER: &str = include_str!({:?});\n\n",
+        resolve_path(&header_path)
+    ));
+
+    // Write stripped body files to OUT_DIR for the `skill` command
+    for skill in &skills {
+        let body_path = Path::new(&out_dir).join(format!("{}-body.md", skill.name));
+        fs::write(&body_path, &skill.body).unwrap();
+    }
+
+    // SKILL_DIRS array
+    code.push_str("pub struct SkillDir {\n");
+    code.push_str("    pub name: &'static str,\n");
+    code.push_str("    pub description: &'static str,\n");
+    code.push_str("    pub body: &'static str,\n");
+    code.push_str("    pub files: &'static [(&'static str, &'static str)],\n");
+    code.push_str("}\n\n");
+    code.push_str("pub const SKILL_DIRS: &[SkillDir] = &[\n");
+    for skill in &skills {
+        let body_path = Path::new(&out_dir).join(format!("{}-body.md", skill.name));
+        code.push_str("    SkillDir {\n");
+        code.push_str(&format!("        name: {:?},\n", skill.name));
+        code.push_str(&format!("        description: {:?},\n", skill.description));
+        code.push_str(&format!(
+            "        body: include_str!({:?}),\n",
+            resolve_path(&body_path)
+        ));
+        code.push_str("        files: &[\n");
+        for (rel, abs) in &skill.files {
+            code.push_str(&format!(
+                "            ({:?}, include_str!({:?})),\n",
+                rel, abs
+            ));
+        }
+        code.push_str("        ],\n");
+        code.push_str("    },\n");
+    }
+    code.push_str("];\n\n");
+
+    // TOOLKIT_FILES: collect scripts from dial9-toolkit skill
+    let toolkit_skill = skills.iter().find(|s| s.name == "dial9-toolkit");
+    code.push_str("pub const TOOLKIT_FILES: &[(&str, &str)] = &[\n");
+    if let Some(tk) = toolkit_skill {
+        for (rel, abs) in &tk.files {
+            if rel.starts_with("scripts/") {
+                let filename = rel.strip_prefix("scripts/").unwrap();
+                code.push_str(&format!("    ({:?}, include_str!({:?})),\n", filename, abs));
+            }
+        }
+    }
+    code.push_str("];\n");
+
+    fs::write(dest, code).unwrap();
+}
+
+struct SkillInfo {
+    name: String,
+    description: String,
+    body: String,
+    files: Vec<(String, String)>, // (relative_path, resolved_absolute_path)
 }
 
 fn resolve_path(path: &Path) -> String {
@@ -33,98 +147,119 @@ fn resolve_path(path: &Path) -> String {
         .to_string()
 }
 
-fn generate_toolkit(manifest_dir: &str, out_dir: &str) {
-    let toolkit_dir = Path::new(manifest_dir).join("toolkit");
-    let dest = Path::new(out_dir).join("toolkit_files.rs");
+/// Recursively collect all files in a directory, resolving symlinks.
+fn collect_files(base: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+    let mut entries: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
 
-    let mut entries: Vec<(String, String)> = Vec::new();
-    if toolkit_dir.is_dir() {
-        for entry in fs::read_dir(&toolkit_dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if path.is_file() || path.is_symlink() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                entries.push((name, resolve_path(&path)));
+    for entry in entries {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(base)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        if path.is_dir() && !path.is_symlink() {
+            collect_files(base, &path, out);
+        } else if path.is_file() || path.is_symlink() {
+            out.push((rel, resolve_path(&path)));
+        }
+    }
+}
+
+/// Parse YAML frontmatter to extract name and description.
+fn parse_frontmatter(content: &str) -> (String, String) {
+    let mut name = String::new();
+    let mut description = String::new();
+
+    let skip = if content.starts_with("---\r\n") {
+        5
+    } else if content.starts_with("---\n") {
+        4
+    } else {
+        return (name, description);
+    };
+
+    let rest = &content[skip..];
+    if let Some(end) = rest.find("\n---") {
+        let frontmatter = &rest[..end];
+        for line in frontmatter.lines() {
+            if let Some(val) = line.strip_prefix("name:") {
+                name = val.trim().to_string();
+            } else if let Some(val) = line.strip_prefix("description:") {
+                description = val.trim().to_string();
             }
         }
     }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut code = String::from("pub const TOOLKIT_FILES: &[(&str, &str)] = &[\n");
-    for (name, path) in &entries {
-        code.push_str(&format!("    ({:?}, include_str!({:?})),\n", name, path));
-    }
-    code.push_str("];\n");
-    fs::write(dest, code).unwrap();
+    (name, description)
 }
 
-fn generate_skills(manifest_dir: &str, out_dir: &str) {
-    let skills_dir = Path::new(manifest_dir).join("skills");
-    let dest = Path::new(out_dir).join("skill_files.rs");
+/// Strip YAML frontmatter, returning just the markdown body.
+fn strip_frontmatter(content: &str) -> String {
+    let skip = if content.starts_with("---\r\n") {
+        5
+    } else if content.starts_with("---\n") {
+        4
+    } else {
+        return content.to_string();
+    };
 
-    let mut code = String::new();
-    let mut segments: Vec<(String, String, String)> = Vec::new(); // (name, title, path)
-
-    if skills_dir.is_dir() {
-        for entry in fs::read_dir(&skills_dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.ends_with(".md") {
-                continue;
-            }
-            let canonical = resolve_path(&path);
-            if name == "header.md" {
-                code.push_str(&format!(
-                    "pub const HEADER: &str = include_str!({:?});\n",
-                    canonical
-                ));
-                continue;
-            }
-            let stem = name.trim_end_matches(".md").to_string();
-            let title = extract_title(&path).unwrap_or_else(|| stem.clone());
-            segments.push((stem, title, canonical));
-        }
+    let rest = &content[skip..];
+    if let Some(end) = rest.find("\n---") {
+        let after = &rest[end + 4..]; // skip "\n---"
+        // Skip the newline after closing ---
+        after
+            .strip_prefix("\r\n")
+            .or_else(|| after.strip_prefix('\n'))
+            .unwrap_or(after)
+            .to_string()
+    } else {
+        content.to_string()
     }
-    // Fallback if header.md wasn't found
-    if !code.contains("HEADER") {
-        code.push_str("pub const HEADER: &str = \"\";\n");
-    }
-    segments.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // The setup skill is generated from the README by generate_setup_from_readme().
-    // Include it here so it appears alongside the hand-written skills.
-    let setup_path = Path::new(out_dir).join("setup_skill.md");
-    segments.push((
-        "setup".to_string(),
-        "Instrumenting your app with dial9".to_string(),
-        resolve_path(&setup_path),
-    ));
-    segments.sort_by(|a, b| a.0.cmp(&b.0));
-
-    code.push_str("pub const SKILL_FILES: &[(&str, &str, &str)] = &[\n");
-    for (name, title, path) in &segments {
-        code.push_str(&format!(
-            "    ({:?}, {:?}, include_str!({:?})),\n",
-            name, title, path
-        ));
-    }
-    code.push_str("];\n");
-    fs::write(dest, code).unwrap();
 }
 
-/// Extract the first `# Heading` from a markdown file.
-fn extract_title(path: &Path) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    content
-        .lines()
-        .find(|l| l.starts_with("# "))
-        .map(|l| l.trim_start_matches("# ").to_string())
+/// Generate the overview header from skill metadata.
+fn generate_header(skills: &[SkillInfo]) -> String {
+    let mut out = String::from("# dial9 Trace Analysis Skills\n\n");
+    out.push_str("dial9 traces capture the internal behavior of a Tokio async runtime: task polling, worker thread activity, queue depths, CPU profiling samples, scheduling delays, and task lifecycle events.\n\n");
+    out.push_str("## Quick start\n\n");
+    out.push_str("```bash\n");
+    out.push_str("# Extract the JS analysis toolkit\n");
+    out.push_str("dial9-viewer agents toolkit /tmp/d9-toolkit\n");
+    out.push_str("node /tmp/d9-toolkit/analyze.js <trace.bin or directory>\n\n");
+    out.push_str("# Unpack all skills as an Agent Skills directory\n");
+    out.push_str("dial9-viewer agents skills /tmp/d9-skills\n");
+    out.push_str("```\n\n");
+    out.push_str("## Available skills\n\n");
+    out.push_str("| Skill | Description |\n");
+    out.push_str("|-------|-------------|\n");
+    for skill in skills {
+        let desc = if skill.description.len() > 120 {
+            let boundary = skill
+                .description
+                .char_indices()
+                .take_while(|(i, _)| *i < 117)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(117);
+            format!("{}...", &skill.description[..boundary])
+        } else {
+            skill.description.clone()
+        };
+        out.push_str(&format!("| `{}` | {} |\n", skill.name, desc));
+    }
+    out.push_str("\n## CLI commands\n\n");
+    out.push_str("| Command | Description |\n");
+    out.push_str("|---------|-------------|\n");
+    out.push_str("| `agents` | Print this overview |\n");
+    out.push_str("| `agents skill <name>` | Print a specific skill's instructions |\n");
+    out.push_str("| `agents toolkit <dir>` | Extract JS analysis scripts to a directory |\n");
+    out.push_str("| `agents skills <dir>` | Unpack all skills (Agent Skills spec layout) |\n");
+    out
 }
 
 /// Sections from the dial9-tokio-telemetry README to include in the setup skill.
-/// These are extracted by exact `## Heading` match and concatenated in order.
-/// If a heading is renamed in the README, the build fails loudly.
 const SETUP_SECTIONS: &[&str] = &[
     "Prerequisites",
     "Setup",
@@ -133,30 +268,34 @@ const SETUP_SECTIONS: &[&str] = &[
     "Wake event tracking",
 ];
 
-/// Extract sections from the crate README and write them as `setup.md` in the
-/// skills directory. This keeps the README as the single source of truth for
-/// instrumentation docs.
-fn generate_setup_from_readme(manifest_dir: &str, out_dir: &str) {
+/// Generate the setup skill from the crate README.
+fn generate_setup_from_readme(manifest_dir: &str, out_dir: &str) -> String {
     let readme_path = Path::new(manifest_dir).join("README_TELEMETRY.md");
     let readme = fs::read_to_string(&readme_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", readme_path.display()));
 
-    let mut output = String::from("# Instrumenting your app with dial9\n\n");
-    output.push_str("*This content is extracted from the [dial9-tokio-telemetry README](https://github.com/dial9-rs/dial9-tokio-telemetry).*\n\n");
+    let mut body = String::from("# Instrumenting your app with dial9\n\n");
 
     for &heading in SETUP_SECTIONS {
         let section = extract_section(&readme, heading)
             .unwrap_or_else(|| panic!("README section '{heading}' not found; was it renamed?"));
-        output.push_str(&section);
-        output.push('\n');
+        body.push_str(&section);
+        body.push('\n');
     }
 
-    let dest = Path::new(out_dir).join("setup_skill.md");
-    fs::write(&dest, &output).unwrap();
+    // Write the full SKILL.md (with frontmatter) for the unpack command
+    let mut full = String::from(
+        "---\nname: dial9-setup\ndescription: How to instrument your app with dial9-tokio-telemetry. Covers prerequisites, macro and manual setup, the tracing layer, and wake event tracking.\n---\n\n",
+    );
+    full.push_str(&body);
+
+    let dest = Path::new(out_dir).join("dial9-setup-SKILL.md");
+    fs::write(&dest, &full).unwrap();
+
+    body
 }
 
-/// Extract a markdown section by heading text, at any heading level.
-/// Captures everything up to the next heading of the same or higher level.
+/// Extract a markdown section by heading text.
 fn extract_section(markdown: &str, heading: &str) -> Option<String> {
     let lines: Vec<&str> = markdown.lines().collect();
     let start = lines.iter().position(|l| {

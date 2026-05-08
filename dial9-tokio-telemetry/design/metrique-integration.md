@@ -17,7 +17,7 @@ This design depends on the entry descriptor system in metrique (see `docs/entry-
 - **`dial9::Context`**: a `#[doc(hidden)]` dial9-internal field tag carried by `Dial9Context`'s own fields. Users do not interact with it directly; they flatten `Dial9Context` into their entry, and the sink walks the descriptor on first-use to find fields tagged `Context`. The name is not a stable guarantee; a future typed source-extraction mechanism would replace this tag-based discovery.
 - **`Dial9EntryWriter`**: the dial9 adapter that walks `Entry::write` on the flush thread. Uses the cached context- and payload-field index sets to route each callback to either the event header (context) or the payload encoder (Emit), or to skip.
 - **First-use per-descriptor**: the moment a `Dial9Stream` first sees an entry with a given `DescriptorId`. Dial9 walks the descriptor once, caches the index sets and any diagnostics, and uses the cache for every subsequent entry of that type.
-- **Trace format**: dial9's wire format, defined in `dial9-trace-format/SPEC.md`. Carries schema frames (one per entry type), event frames (one per emission), pool frames (deduplicated strings and stack frames), and schema-annotation frames (per-field metadata). This design relies on two format features that ship independently of the integration: `TAG_SCHEMA_ANNOTATIONS` and the `List` / `Map` field types.
+- **Trace format**: dial9's wire format, defined in `dial9-trace-format/SPEC.md`. Carries schema frames (one per entry type), event frames (one per emission), pool frames (deduplicated strings and stack frames), and schema-annotation frames (per-field metadata). This design relies on two format features that ship independently of the integration: `TAG_SCHEMA_ANNOTATIONS` and the `DynamicList` / `DynamicMap` field types.
 
 ## User-facing API
 
@@ -156,8 +156,8 @@ The builder and manual composition paths are unchanged from the original design.
 │       encode according to FieldShape:                          │
 │            Known   : encode scalar                             │
 │            Optional: encode presence byte + inner              │
-│            List    : encode <count> <repeated element>         │
-│            Flex    : encode map<key, value>                    │
+│            List    : encode <count> <tag + value per element>   │
+│            Flex    : encode <count> <key_tag+key+val_tag+val>  │
 │            Opaque  : report + skip (sink-side validation)      │
 │                                                                │
 │     if field is tagged Interned and carries string data:       │
@@ -229,7 +229,7 @@ Per entry:
 3. First-use per `DescriptorId`: walk the descriptor to compute the context-field indices (fields tagged `dial9::Context`) and payload-field indices (tagged `dial9::Emit`). Build the wire schema with annotations for units.
 4. Walk `entry.write(..)` with a `Dial9EntryWriter` that uses the cached index sets to route each callback to either the event header (context) or the payload encoder (Emit), or to skip. `Interned` fields have their string data routed through the dial9 string pool. Relies on the metrique contract that `Entry::write` emits `value` callbacks in descriptor order.
 
-`Dial9EntryWriter` overrides `ValueWriter::values()` (the default implementation comma-joins elements into a string) to preserve the typed list wire encoding for `Vec<T>` fields.
+`Dial9EntryWriter` overrides `ValueWriter::values()` (the default implementation comma-joins elements into a string) to preserve the self-describing list wire encoding for `Vec<T>` fields.
 
 A `catch_unwind(AssertUnwindSafe(..))` guard around the `Entry::write` walk drops offending events (rate-limited log) without poisoning the flush thread's state.
 

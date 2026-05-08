@@ -1,1 +1,0 @@
-../skills/analyze.js

@@ -192,6 +192,8 @@ A decoder that encounters an annotation frame referencing an unknown `type_id` m
 | 11 | U8 | 1-byte unsigned | 1 |
 | 12 | U16 | 2-byte little-endian unsigned | 2 |
 | 13 | U32 | 4-byte little-endian unsigned | 4 |
+| 14 | DynamicList | u32 count + count × (u8 tag + value) | variable |
+| 15 | DynamicMap | u32 count + count × (u8 key_tag + key + u8 value_tag + value) | variable |
 
 ### Optional Field Modifier (`0x80`)
 
@@ -240,6 +242,24 @@ A string map carries an ordered list of key-value pairs (both UTF-8 strings):
 
 1. Write `count` as u32 (number of pairs).
 2. For each pair, write `key_len` as u32, then key bytes, then `val_len` as u32, then value bytes.
+
+### DynamicList Encoding
+
+A self-describing list where each element carries its own type tag:
+
+1. Write `count` as u32 (number of elements).
+2. For each element, write the element's field type tag as u8, then encode the element value according to that tag.
+
+Elements may be heterogeneous (different types in the same list). Nested containers are supported: an element tag of `0x0E` (DynamicList) or `0x0F` (DynamicMap) is followed by the recursive encoding of that container.
+
+### DynamicMap Encoding
+
+A self-describing map where each entry carries type tags for both key and value:
+
+1. Write `count` as u32 (number of entries).
+2. For each entry, write the key's field type tag as u8, encode the key value, then write the value's field type tag as u8, encode the value.
+
+Entries may be heterogeneous. Both keys and values can be any field type including nested containers.
 
 ### LEB128
 
