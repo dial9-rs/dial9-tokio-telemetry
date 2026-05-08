@@ -196,29 +196,45 @@ impl<F: Future> Future for TaskDumped<F> {
     }
 }
 
+/// Metadata for one captured callchain stored in [`FrameBuf`].
+struct ChainMeta {
+    /// Index into `FrameBuf::ips` where this chain's frames start.
+    ip_start: usize,
+    /// Address of the root function (upper trim boundary). `None` means trim
+    /// to the end of the buffer.
+    root_addr: Option<*const core::ffi::c_void>,
+    /// Address of the leaf function (lower trim boundary). `None` means no
+    /// leaf boundary was available; the chain will be skipped at emit time.
+    leaf_addr: Option<*const core::ffi::c_void>,
+}
+
+// SAFETY: raw pointers are only used for address comparison, never dereferenced
+// across threads.
+unsafe impl Send for ChainMeta {}
+
 /// Reusable storage for one or more callchains captured during a single
 /// `trace_with` sub-poll. Frames are appended flat to `ips`; each new chain's
-/// start index is pushed onto `offsets`.
+/// metadata is pushed onto `chains`.
 struct FrameBuf {
     ips: Vec<u64>,
-    offsets: SmallVec<[usize; 8]>,
+    chains: SmallVec<[ChainMeta; 4]>,
 }
 
 impl FrameBuf {
     fn new() -> Self {
         Self {
             ips: Vec::new(),
-            offsets: SmallVec::new(),
+            chains: SmallVec::new(),
         }
     }
 
     fn clear(&mut self) {
         self.ips.clear();
-        self.offsets.clear();
+        self.chains.clear();
     }
 
     fn has_data(&self) -> bool {
-        !self.offsets.is_empty()
+        !self.chains.is_empty()
     }
 
     /// Emit one `TaskDumpEvent` per recorded callchain, then clear.
@@ -226,31 +242,17 @@ impl FrameBuf {
     /// rather than during capture, keeping the hot path lock-free.
     fn emit(&mut self, shared: &SharedState, task_id: TaskId, capture_ts: u64) {
         shared.if_enabled(|buf| {
-            // Each chain is stored as 3 entries in offsets:
-            //   [ip_start_index, root_addr_as_usize, leaf_addr_as_usize]
-            for chunk in self.offsets.chunks_exact(3) {
-                let ip_start = chunk[0];
-                let root_addr = chunk[1];
-                let leaf_addr = chunk[2];
-
-                // Determine the end of this chain's IPs: either the start of
-                // the next chain or the end of the ips buffer.
+            for (i, meta) in self.chains.iter().enumerate() {
                 let ip_end = self
-                    .offsets
-                    .chunks_exact(3)
-                    .map(|c| c[0])
-                    .find(|&s| s > ip_start)
+                    .chains
+                    .get(i + 1)
+                    .map(|next| next.ip_start)
                     .unwrap_or(self.ips.len());
-
-                let raw = &self.ips[ip_start..ip_end];
-                let root = if root_addr == 0 {
-                    None
-                } else {
-                    Some(root_addr as *const core::ffi::c_void)
+                let raw = &self.ips[meta.ip_start..ip_end];
+                let chain = match meta.leaf_addr {
+                    Some(leaf) => crate::unwind::trim_frames(raw, meta.root_addr, leaf),
+                    None => &[],
                 };
-                let leaf = leaf_addr as *const core::ffi::c_void;
-                let chain = crate::unwind::trim_frames(raw, root, leaf);
-
                 if !chain.is_empty() {
                     buf.record_encodable_event(&TaskDumpData {
                         timestamp_ns: capture_ts,
@@ -272,7 +274,7 @@ impl FrameBuf {
         self.clear();
 
         let ips = &mut self.ips;
-        let offsets = &mut self.offsets;
+        let chains = &mut self.chains;
 
         // `trace_with`'s outer closure is `FnOnce`; `Option::take` moves the
         // pinned reference in without requiring a `Copy` bound or unsafe.
@@ -281,14 +283,17 @@ impl FrameBuf {
                 let _ = inner.poll(cx);
             },
             |meta| {
-                offsets.push(ips.len());
+                let ip_start = ips.len();
                 // Hot path: collect raw IPs only — no _Unwind_FindEnclosingFunction,
                 // no dl_iterate_phdr, no global locks. Trimming to root/leaf
                 // boundaries happens later in emit().
                 crate::unwind::collect_frames_raw(ips);
                 // Stash the root/leaf addresses so we can trim at emit time.
-                offsets.push(meta.root_addr.map_or(0, |p| p as usize));
-                offsets.push(meta.trace_leaf_addr as usize);
+                chains.push(ChainMeta {
+                    ip_start,
+                    root_addr: meta.root_addr,
+                    leaf_addr: Some(meta.trace_leaf_addr),
+                });
             },
         );
     }
