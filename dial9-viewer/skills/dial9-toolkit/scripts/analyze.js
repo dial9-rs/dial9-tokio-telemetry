@@ -201,14 +201,12 @@ function accumulateTrace(acc, trace) {
 
   // Span durations (native HDR histogram for bounded memory, exact percentiles)
   if (trace.customEvents && trace.customEvents.length > 0) {
-    const { spansByWorker } = buildSpanData(trace.customEvents);
-    for (const spans of Object.values(spansByWorker)) {
-      for (const s of spans) {
-        const dur = Math.max(1, Math.round(s.end - s.start));
-        let h = acc.spanStats.get(s.spanName);
-        if (!h) { h = createHistogram(); acc.spanStats.set(s.spanName, h); }
-        h.record(dur);
-      }
+    const { allSpans } = buildSpanData(trace.customEvents);
+    for (const s of allSpans) {
+      const dur = Math.max(1, Math.round(s.end - s.start));
+      let h = acc.spanStats.get(s.spanName);
+      if (!h) { h = createHistogram(); acc.spanStats.set(s.spanName, h); }
+      h.record(dur);
     }
   }
 }
@@ -770,8 +768,8 @@ function analyzeWorkerMain(cachePath) {
   partial.schedDelayWorst.sort((a, b) => b.delay - a.delay);
   partial.schedDelayWorst.length = Math.min(partial.schedDelayWorst.length, 100);
   if (trace.customEvents && trace.customEvents.length > 0) {
-    const { spansByWorker } = buildSpanData(trace.customEvents);
-    for (const ss of Object.values(spansByWorker)) for (const s of ss)
+    const { allSpans } = buildSpanData(trace.customEvents);
+    for (const s of allSpans)
       (partial.spanDurations[s.spanName] || (partial.spanDurations[s.spanName] = [])).push(Math.max(1, Math.round(s.end - s.start)));
   }
   process.stdout.write(JSON.stringify(partial) + '\n');
