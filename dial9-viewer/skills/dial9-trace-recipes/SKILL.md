@@ -1,6 +1,6 @@
 ---
 name: dial9-trace-recipes
-description: Diagnostic recipes for common questions about dial9 Tokio runtime traces. Covers finding long polls, task leaks, worker utilization, blocking calls, wake chains, span analysis, and time-window debugging. Use when answering specific diagnostic questions about trace data.
+description: Diagnostic recipes for common questions about dial9 Tokio runtime traces. Covers finding long polls, task leaks, worker utilization, blocking calls, wake chains, span analysis, task dumps, and time-window debugging. Use when answering specific diagnostic questions about trace data.
 ---
 
 # Diagnostic Recipes
@@ -367,5 +367,43 @@ for (const [w, wSpans] of Object.entries(spansByWorker)) {
 timeline.sort((a, b) => a.start - b.start);
 for (const s of timeline) {
   console.log(`  +${((s.start - minTs) / 1e6).toFixed(3)}ms worker=${s.worker} ${s.spanName} ${((s.end - s.start) / 1e3).toFixed(1)}µs`);
+}
+```
+
+## What is a task waiting on? (task dumps)
+
+Task dumps capture async backtraces at yield points. Use them to see what futures a task is `await`ing during idle periods.
+
+```javascript
+const { parseTrace, symbolizeChain, formatFrame } = require('./trace_parser.js');
+
+for await (const trace of parseTrace('/path/to/traces/')) {
+  for (const [taskId, dumps] of trace.taskDumps) {
+    const loc = trace.taskSpawnLocs?.get(taskId) || '(unknown)';
+    console.log(`Task ${taskId} (${loc}): ${dumps.length} task dumps`);
+    for (const dump of dumps) {
+      const frames = symbolizeChain(dump.callchain, trace.callframeSymbols);
+      const readable = frames.map(f => formatFrame(f).text).join('\n    ');
+      console.log(`  at +${((dump.timestamp - trace.minTs) / 1e6).toFixed(1)}ms:\n    ${readable}`);
+    }
+  }
+}
+```
+
+## Which tasks have the most task dumps?
+
+Tasks with many dumps are spending a lot of time idle (waiting on I/O, timers, channels, etc.).
+
+```javascript
+const { parseTrace } = require('./trace_parser.js');
+
+for await (const trace of parseTrace('/path/to/traces/')) {
+  const sorted = [...trace.taskDumps.entries()]
+    .sort((a, b) => b[1].length - a[1].length)
+    .slice(0, 10);
+  for (const [taskId, dumps] of sorted) {
+    const loc = trace.taskSpawnLocs?.get(taskId) || '(unknown)';
+    console.log(`Task ${taskId} (${loc}): ${dumps.length} dumps`);
+  }
 }
 ```
