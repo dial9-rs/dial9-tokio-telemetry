@@ -2594,7 +2594,24 @@
                 if (!isInstrumented) {
                     labelHtml += ` · <a class="uninstrumented-badge" href="https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/telemetry/struct.TelemetryHandle.html#method.spawn" target="_blank" title="Task spawned via raw tokio::spawn() — click for docs on TelemetryHandle::spawn">no wake data ⓘ</a>`;
                 }
+                const taskHasDumps = trace.taskDumps && trace.taskDumps.has(selectedTaskId) && trace.taskDumps.get(selectedTaskId).length > 0;
+                if (taskHasDumps) {
+                    const dumpCount = trace.taskDumps.get(selectedTaskId).length;
+                    labelHtml += ` · <span id="btn-idle-flamegraph" style="cursor:pointer;color:#b388ff;text-decoration:underline;position:relative;z-index:10" title="Show time-weighted flamegraph of idle periods">🔥 idle flamegraph (${dumpCount})</span>`;
+                }
                 document.getElementById("task-detail-label").innerHTML = labelHtml;
+                if (taskHasDumps) {
+                    document.getElementById("btn-idle-flamegraph").onclick = (e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        try {
+                            showIdleTimeFlamegraph();
+                        } catch (err) {
+                            console.error("showIdleTimeFlamegraph error:", err);
+                            showToast("idle-fg-err", "Error: " + err.message, "error", 5000);
+                        }
+                    };
+                }
 
                 const parent = c.parentElement;
                 const dpr = devicePixelRatio || 1;
@@ -2783,6 +2800,9 @@
                 }
 
                 // Draw idle gaps between consecutive polls (where no wake→poll delay is shown)
+                // Look up task dumps for this task (sorted by timestamp)
+                const dumps = trace.taskDumps ? (trace.taskDumps.get(selectedTaskId) || []) : [];
+                let dumpIdx = 0; // cursor into dumps array for efficient lookup
                 for (let i = 0; i < polls.length - 1; i++) {
                     const gapStart = polls[i].end;
                     const gapEnd = polls[i + 1].start;
@@ -2796,9 +2816,43 @@
                     const x2 = Math.min(wakeX, LABEL_W + Math.min(drawW, nsToX(gapEnd, drawW)));
                     const w = Math.max(x2 - x1, 0);
                     if (w < 1) continue;
-                    ctx.fillStyle = "#2a2a4a";
+
+                    // Find task dump(s) for this idle period.
+                    // A dump captured during poll[i-1] has ts in [poll[i-1].start, poll[i-1].end].
+                    // The capture triggers a spurious re-wake, so poll[i] is the spurious poll.
+                    // The dump represents what the task is waiting on during THIS gap (after
+                    // the spurious poll[i]). So we collect dumps with ts within poll[i-1].
+                    const gapDumps = [];
+                    const prevPollStart = i > 0 ? polls[i - 1].start : polls[i].start;
+                    while (dumpIdx < dumps.length && dumps[dumpIdx].timestamp < prevPollStart) dumpIdx++;
+                    for (let di = dumpIdx; di < dumps.length && dumps[di].timestamp <= polls[i].start; di++) {
+                        gapDumps.push(dumps[di]);
+                    }
+                    const hasDump = gapDumps.length > 0;
+
+                    ctx.fillStyle = hasDump ? "#2a2a5a" : "#2a2a4a";
                     ctx.fillRect(x1, bandTop, w, bandH);
-                    ctx.strokeStyle = "#444";
+
+                    // Cross-hatch pattern for idle periods with task dumps
+                    if (hasDump) {
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.rect(x1, bandTop, w, bandH);
+                        ctx.clip();
+                        ctx.strokeStyle = "rgba(140, 120, 255, 0.35)";
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([]);
+                        const step = 8;
+                        for (let hx = x1 - bandH; hx < x2; hx += step) {
+                            ctx.beginPath();
+                            ctx.moveTo(hx, bandTop + bandH);
+                            ctx.lineTo(hx + bandH, bandTop);
+                            ctx.stroke();
+                        }
+                        ctx.restore();
+                    }
+
+                    ctx.strokeStyle = hasDump ? "#7c6cff" : "#444";
                     ctx.lineWidth = 1;
                     ctx.setLineDash([3, 3]);
                     ctx.strokeRect(x1, bandTop, w, bandH);
@@ -2812,7 +2866,10 @@
                     taskDetailHitRegions.push({
                         x1, x2, y1: bandTop, y2: bandTop + bandH,
                         type: "idle",
-                        detail: `Idle — waiting ${fmtDur(dur)} for waker (no wake received yet)`,
+                        detail: hasDump
+                            ? `Idle — waiting ${fmtDur(dur)} (click for async stack trace)`
+                            : `Idle — waiting ${fmtDur(dur)} for waker (no wake received yet)`,
+                        taskDumps: hasDump ? gapDumps : null,
                     });
                 }
 
@@ -4346,6 +4403,9 @@
                         break;
                     }
                 }
+                if (!found) {
+                    document.getElementById("task-detail").style.cursor = (hit && hit.taskDumps) ? "pointer" : "";
+                }
                 const icon = hit ? (hit.type === "polling" ? "⚡" : hit.type === "scheduled" ? "⏳" : "💤") : "";
                 statusEl.textContent = hit ? `${icon} ${hit.detail}` : "";
             });
@@ -4354,6 +4414,27 @@
                 if (hoveredWakerTaskId) {
                     hoveredWakerTaskId = null;
                     renderAll();
+                }
+            });
+            document.getElementById("task-detail").addEventListener("click", (e) => {
+                const c = document.getElementById("task-detail-canvas");
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+                // Check if clicking a waker region (existing behavior: select waker task)
+                for (const r of taskDetailWakeRegions) {
+                    if (mx >= r.x1 && mx <= r.x2 && my >= r.y1 && my <= r.y2) {
+                        selectedTaskId = r.wakerTaskId;
+                        renderAll();
+                        return;
+                    }
+                }
+                // Check if clicking an idle region with task dumps
+                for (const r of taskDetailHitRegions) {
+                    if (mx >= r.x1 && mx <= r.x2 && my >= r.y1 && my <= r.y2 && r.taskDumps) {
+                        showTaskDumpStack(r.taskDumps);
+                        return;
+                    }
                 }
             });
 
@@ -4411,6 +4492,114 @@
             let fgActive = false;
             const fgContainer = document.getElementById("fg-container");
             const fgInstance = FlamegraphRenderer.createFlamegraph(fgContainer);
+
+            function showTaskDumpStack(dumps) {
+                const samples = dumps.map(d => ({ callchain: d.callchain, workerId: 0 }));
+                fgActive = true;
+                schedActive = false;
+                const sidebar = document.getElementById("stack-sidebar");
+                const title = document.getElementById("stack-sidebar-title");
+                const body = document.getElementById("stack-sidebar-body");
+                document.getElementById("sidebar-tabs").style.display = "none";
+                title.textContent = `Waiting on — ${dumps.length} capture${dumps.length > 1 ? "s" : ""}`;
+                body.innerHTML = "";
+                body.style.display = "flex";
+                body.style.flexDirection = "column";
+                const actions = document.createElement("div");
+                actions.style.cssText = "display:flex;gap:8px;margin-bottom:6px;flex-shrink:0;align-items:center";
+                actions.innerHTML = `<span style="color:#888;font-size:0.85em">${dumps.length} async stack capture${dumps.length > 1 ? "s" : ""}</span>`;
+                body.appendChild(actions);
+                fgContainer.style.flex = "1";
+                fgContainer.style.minHeight = "0";
+                body.appendChild(fgContainer);
+                const wasHidden = sidebar.style.display !== "flex";
+                sidebar.style.display = "flex";
+                if (wasHidden && trace) requestAnimationFrame(renderAll);
+                requestAnimationFrame(() => {
+                    fgInstance.setData(samples, trace.callframeSymbols);
+                    fgInstance.resize();
+                });
+            }
+
+            function showIdleTimeFlamegraph() {
+                if (!selectedTaskId || !trace.taskDumps) return;
+                const dumps = trace.taskDumps.get(selectedTaskId);
+                if (!dumps || dumps.length === 0) return;
+
+                // Collect polls for this task to compute idle durations
+                const polls = [];
+                for (const w of workerIds) {
+                    for (const s of workerSpans[w].polls) {
+                        if (s.taskId === selectedTaskId) polls.push(s);
+                    }
+                }
+                polls.sort((a, b) => a.start - b.start);
+
+                // For each dump, find the idle period it belongs to and compute weight (duration in µs)
+                const weightedSamples = [];
+                let di = 0;
+                for (let i = 0; i < polls.length - 1 && di < dumps.length; i++) {
+                    const gapStart = polls[i].end;
+                    const gapEnd = polls[i + 1].start;
+                    const dur = gapEnd - gapStart;
+                    while (di < dumps.length && dumps[di].timestamp <= gapStart) di++;
+                    for (let j = di; j < dumps.length && dumps[j].timestamp <= gapEnd; j++) {
+                        // Weight = idle duration in µs (minimum 1)
+                        const weight = Math.max(1, Math.round(dur / 1000));
+                        weightedSamples.push({ callchain: dumps[j].callchain, weight });
+                    }
+                }
+                // Also include dumps after the last poll (task still idle at trace end)
+                if (polls.length > 0) {
+                    const lastEnd = polls[polls.length - 1].end;
+                    const traceEnd = trace.maxTs || lastEnd;
+                    while (di < dumps.length) {
+                        const dur = traceEnd - lastEnd;
+                        const weight = Math.max(1, Math.round(dur / 1000));
+                        weightedSamples.push({ callchain: dumps[di].callchain, weight });
+                        di++;
+                    }
+                }
+
+                if (weightedSamples.length === 0) return;
+
+                // Expand weighted samples: repeat each sample proportional to weight
+                const totalWeight = weightedSamples.reduce((s, x) => s + x.weight, 0);
+                const scale = totalWeight > 10000 ? 10000 / totalWeight : 1;
+                const expandedSamples = [];
+                for (const ws of weightedSamples) {
+                    const count = Math.max(1, Math.round(ws.weight * scale));
+                    for (let k = 0; k < count; k++) {
+                        expandedSamples.push({ callchain: ws.callchain, workerId: 0 });
+                    }
+                }
+
+                // Show in sidebar using the flamegraph renderer
+                fgActive = true;
+                schedActive = false;
+                const sidebar = document.getElementById("stack-sidebar");
+                const title = document.getElementById("stack-sidebar-title");
+                const body = document.getElementById("stack-sidebar-body");
+                document.getElementById("sidebar-tabs").style.display = "none";
+                title.textContent = `Idle time flamegraph — ${dumps.length} samples`;
+                body.innerHTML = "";
+                body.style.display = "flex";
+                body.style.flexDirection = "column";
+                const actions = document.createElement("div");
+                actions.style.cssText = "display:flex;gap:8px;margin-bottom:6px;flex-shrink:0;align-items:center";
+                actions.innerHTML = `<span style="color:#888;font-size:0.85em">${dumps.length} task dumps, time-weighted</span>`;
+                body.appendChild(actions);
+                fgContainer.style.flex = "1";
+                fgContainer.style.minHeight = "0";
+                body.appendChild(fgContainer);
+                const wasHidden = sidebar.style.display !== "flex";
+                sidebar.style.display = "flex";
+                if (wasHidden && trace) requestAnimationFrame(renderAll);
+                requestAnimationFrame(() => {
+                    fgInstance.setData(expandedSamples, trace.callframeSymbols);
+                    fgInstance.resize();
+                });
+            }
 
             function showFlamegraph(selStart, selEnd) {
                 const samples = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, selStart, selEnd);

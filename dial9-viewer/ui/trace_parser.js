@@ -198,6 +198,7 @@
     const cpuSamples = [];
     const threadNames = new Map();
     const runtimeWorkers = new Map(); // runtime name → [workerId, ...]
+    const taskDumps = new Map(); // taskId → [{timestamp, callchain}] sorted by timestamp
     const customEvents = []; // unrecognized event types: {name, timestamp, fields}
     // { monotonicNs, realtimeNs } anchors used to recover wall clock.
     const clockSyncAnchors = [];
@@ -214,6 +215,7 @@
       "TaskSpawnEvent",
       "TaskTerminateEvent",
       "CpuSampleEvent",
+      "TaskDumpEvent",
       "SymbolTableEntry",
       "SegmentMetadataEvent",
       "ClockSyncEvent",
@@ -380,6 +382,15 @@
           }
           break;
         }
+        case "TaskDumpEvent": {
+          const taskId = num(v.task_id);
+          const chain = (v.callchain || []).map(
+            (addr) => "0x" + BigInt(addr).toString(16)
+          );
+          if (!taskDumps.has(taskId)) taskDumps.set(taskId, []);
+          taskDumps.get(taskId).push({ timestamp: ts, callchain: chain });
+          break;
+        }
         case "ClockSyncEvent": {
           const real = num(v.realtime_ns);
           if (real > 0) {
@@ -468,6 +479,11 @@
       return 0;
     });
 
+    // Sort task dumps by timestamp for efficient lookup during rendering
+    for (const arr of taskDumps.values()) {
+      arr.sort((a, b) => a.timestamp - b.timestamp);
+    }
+
     let clockOffsetNs = null;
     if (clockSyncAnchors.length > 0) {
       const a0 = clockSyncAnchors[0];
@@ -506,6 +522,7 @@
       taskTerminateTimes,
       runtimeWorkers,
       customEvents,
+      taskDumps,
       clockSyncAnchors,
       clockOffsetNs,
     };
@@ -553,6 +570,7 @@
           if (raw.callframeSymbols) raw.callframeSymbols = entriesToMap(raw.callframeSymbols);
           if (raw.threadNames) raw.threadNames = entriesToMap(raw.threadNames);
           if (raw.runtimeWorkers) raw.runtimeWorkers = entriesToMap(raw.runtimeWorkers);
+          if (raw.taskDumps) raw.taskDumps = entriesToMap(raw.taskDumps);
           break;
         case 'e': events.push(rec.d); break;
         case 'c': cpuSamples.push(rec.d); break;
