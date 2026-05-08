@@ -160,6 +160,8 @@ jobs:
       RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes --cfg iai_enabled"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install valgrind (cached)
