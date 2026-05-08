@@ -20,7 +20,7 @@ aws-config = "1"
 aws-sdk-dynamodb = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-dial9-tokio-telemetry = { path = "../../dial9-tokio-telemetry", features = ["worker-s3", "tracing-layer", "taskdump"] }
+dial9-tokio-telemetry = { path = "../../dial9-tokio-telemetry", features = ["worker-s3", "tracing-layer"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
