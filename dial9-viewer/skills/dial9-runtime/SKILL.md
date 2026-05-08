@@ -1,6 +1,11 @@
+---
+name: dial9-runtime
+description: Tokio async runtime internals reference. Covers the execution model, waking and scheduling, cooperative scheduling, poll duration effects on tail latency, worker parking, and how to connect trace data to application behavior. Use when reasoning about runtime performance from first principles.
+---
+
 # Understanding the Tokio Runtime
 
-This document explains how the Tokio async runtime works internally. Use this knowledge to reason about trace data, diagnose performance problems from first principles, and recommend code changes.
+This skill explains how the Tokio async runtime works internally. Use this knowledge to reason about trace data, diagnose performance problems from first principles, and recommend code changes.
 
 ## The execution model
 

@@ -188,7 +188,7 @@ mod tests {
                 type_id, values, ..
             } = frame
                 && let Some(entry) = dec.registry().get(*type_id)
-                && entry.name == SymbolTableEntry::event_name()
+                && entry.name() == SymbolTableEntry::event_name()
                 && let Some(FieldValue::Varint(addr)) = values.first()
             {
                 out.push(*addr);
@@ -208,10 +208,7 @@ mod tests {
         let schema1 = enc1
             .register_schema(
                 "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::PooledStackFrames,
-                }],
+                vec![FieldDef::new("frames", FieldType::PooledStackFrames)],
             )
             .unwrap();
         let id_a = enc1.intern_stack_frames(&[addr_a]).unwrap();
@@ -227,10 +224,7 @@ mod tests {
         let schema2 = enc2
             .register_schema(
                 "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::PooledStackFrames,
-                }],
+                vec![FieldDef::new("frames", FieldType::PooledStackFrames)],
             )
             .unwrap();
         let id_b = enc2.intern_stack_frames(&[addr_b]).unwrap();
@@ -270,13 +264,7 @@ mod tests {
 
         let mut enc = Encoder::new();
         let schema = enc
-            .register_schema(
-                "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::StackFrames,
-                }],
-            )
+            .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
             .unwrap();
         enc.write_event(
             &schema,
@@ -301,7 +289,7 @@ mod tests {
             .iter()
             .any(|f| matches!(f, DecodedFrame::StringPool(_)));
         let has_symbol_schema = frames.iter().any(
-            |f| matches!(f, DecodedFrame::Schema(s) if s.name == SymbolTableEntry::event_name()),
+            |f| matches!(f, DecodedFrame::Schema(s) if s.name() == SymbolTableEntry::event_name()),
         );
         assert!(has_string_pool, "expected StringPool frame in output");
         assert!(
@@ -326,13 +314,7 @@ mod tests {
         // Build a minimal trace containing a single StackFrames event with our address.
         let mut enc = Encoder::new();
         let schema = enc
-            .register_schema(
-                "Ev",
-                vec![FieldDef {
-                    name: "frames".into(),
-                    field_type: FieldType::StackFrames,
-                }],
-            )
+            .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
             .unwrap();
         enc.write_event(
             &schema,
@@ -356,7 +338,7 @@ mod tests {
         let frames = dec.decode_all();
 
         let has_symbol_schema = frames.iter().any(
-            |f| matches!(f, DecodedFrame::Schema(s) if s.name == SymbolTableEntry::event_name()),
+            |f| matches!(f, DecodedFrame::Schema(s) if s.name() == SymbolTableEntry::event_name()),
         );
         assert!(
             has_symbol_schema,

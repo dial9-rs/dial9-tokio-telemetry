@@ -165,17 +165,15 @@ fn main() -> std::io::Result<()> {
 
     let mut builder = Builder::new_multi_thread();
     builder.worker_threads(args.worker_threads).enable_all();
-    #[allow(unused_mut)]
-    let mut traced_builder = TracedRuntime::builder()
+    let traced_builder = TracedRuntime::builder()
         .with_trace_path(&args.trace_path)
         .with_task_tracking(true);
     #[cfg(target_os = "linux")]
-    {
-        traced_builder = traced_builder
-            .with_cpu_profiling(CpuProfilingConfig::default())
-            .with_sched_events(SchedEventConfig::default().include_kernel(true));
-    }
-    if let Some(bucket) = &args.s3_bucket {
+    let traced_builder = traced_builder
+        .with_cpu_profiling(CpuProfilingConfig::default())
+        .with_sched_events(SchedEventConfig::default().include_kernel(true));
+
+    let (runtime, guard) = if let Some(bucket) = &args.s3_bucket {
         use dial9_tokio_telemetry::background_task::s3::S3Config;
 
         let s3_config = S3Config::builder()
@@ -192,9 +190,12 @@ fn main() -> std::io::Result<()> {
             .maybe_region(args.s3_region.as_ref())
             .build();
 
-        traced_builder = traced_builder.with_s3_uploader(s3_config);
-    }
-    let (runtime, guard) = traced_builder.build(builder, writer)?;
+        traced_builder
+            .with_s3_uploader(s3_config)
+            .build(builder, writer)?
+    } else {
+        traced_builder.build(builder, writer)?
+    };
     guard.enable();
     let handle = guard.handle();
 

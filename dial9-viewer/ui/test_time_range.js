@@ -33,8 +33,8 @@ async function main() {
   pass("Full parse: no truncation, no time filter");
 
   // ── Time range filtering ──
-  const minTs = full.events.reduce((m, e) => Math.min(m, e.timestamp), Infinity);
-  const maxTs = full.events.reduce((m, e) => Math.max(m, e.timestamp), 0);
+  const minTs = full.minTs;
+  const maxTs = full.maxTs;
   const midTs = Math.floor((minTs + maxTs) / 2);
 
   // Filter first half

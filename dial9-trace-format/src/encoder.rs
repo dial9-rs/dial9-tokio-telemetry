@@ -117,7 +117,17 @@ impl Schema {
                 name: name.to_string(),
                 has_timestamp: true,
                 fields,
+                annotations: Vec::new(),
             }),
+            name_key,
+        }
+    }
+
+    /// Create a schema handle from a complete [`SchemaEntry`].
+    pub fn from_entry(entry: SchemaEntry) -> Self {
+        let name_key: Arc<str> = Arc::from(entry.name.as_str());
+        Self {
+            entry: Arc::new(entry),
             name_key,
         }
     }
@@ -305,6 +315,13 @@ impl<W: Write> Encoder<W> {
         }
         let id = self.registry.next_type_id();
         codec::encode_schema(id, &schema.entry, &mut self.state.writer)?;
+        if !schema.entry.annotations.is_empty() {
+            codec::encode_schema_annotations(
+                id,
+                &schema.entry.annotations,
+                &mut self.state.writer,
+            )?;
+        }
         self.registry
             .register(id, (*schema.entry).clone())
             .expect("schema registration failed");
@@ -329,6 +346,14 @@ impl<W: Write> Encoder<W> {
         let schema = Schema::new(name, fields);
         self.ensure_registered(&schema)?;
         Ok(schema)
+    }
+
+    /// Register a pre-built [`Schema`] handle with this encoder.
+    ///
+    /// Eagerly writes the schema frame (and annotation frame if annotations
+    /// are present). Idempotent if the definition matches.
+    pub fn register_existing(&mut self, schema: &Schema) -> io::Result<WireTypeId> {
+        self.ensure_registered(schema)
     }
 
     /// Write an event for a schema.

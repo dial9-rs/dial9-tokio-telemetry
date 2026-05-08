@@ -29,8 +29,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::telemetry::recorder::{HasTracePath, TracedRuntime, TracedRuntimeBuilder};
+use crate::telemetry::recorder::{
+    HasTracePath, PipelineUnset, TelemetryGuard, TracedRuntime, TracedRuntimeBuilder,
+};
 use crate::telemetry::writer::RotatingWriter;
+
+/// Type-erased terminal step for a [`TracedRuntimeBuilder`]: hides the
+/// pipeline-mode marker `M` so [`Inner::Enabled`] can stay non-generic.
+pub(crate) trait BuildTracedRuntime: Send {
+    fn build_and_start(
+        self: Box<Self>,
+        tokio_builder: tokio::runtime::Builder,
+        writer: RotatingWriter,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>;
+}
+
+impl<M: Send + 'static> BuildTracedRuntime for TracedRuntimeBuilder<HasTracePath, M> {
+    fn build_and_start(
+        self: Box<Self>,
+        tokio_builder: tokio::runtime::Builder,
+        writer: RotatingWriter,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        TracedRuntimeBuilder::<HasTracePath, M>::build_and_start(*self, tokio_builder, writer)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Dial9ConfigBuilderError — unified error for builder validation and writer I/O
@@ -121,7 +143,7 @@ pub(crate) enum Inner {
     Enabled {
         writer: RotatingWriter,
         tokio_configurators: Vec<TokioConfigurator>,
-        runtime_builder: TracedRuntimeBuilder<HasTracePath>,
+        runtime_builder: Box<dyn BuildTracedRuntime>,
     },
     Disabled {
         tokio_configurators: Vec<TokioConfigurator>,
@@ -134,12 +156,11 @@ impl fmt::Debug for Inner {
             Inner::Enabled {
                 writer,
                 tokio_configurators,
-                runtime_builder,
+                runtime_builder: _,
             } => f
                 .debug_struct("Enabled")
                 .field("writer", writer)
                 .field("tokio_configurators", &tokio_configurators.len())
-                .field("runtime_builder", runtime_builder)
                 .finish(),
             Inner::Disabled {
                 tokio_configurators,
@@ -165,8 +186,9 @@ pub(crate) fn materialize_tokio_builder(
 // Dial9ConfigBuilder — single bon-generated fluent entry point
 // ---------------------------------------------------------------------------
 
-type RuntimeConfigurator =
-    Box<dyn FnOnce(TracedRuntimeBuilder<HasTracePath>) -> TracedRuntimeBuilder<HasTracePath>>;
+type RuntimeConfigurator = Box<
+    dyn FnOnce(TracedRuntimeBuilder<HasTracePath, PipelineUnset>) -> Box<dyn BuildTracedRuntime>,
+>;
 
 fn default_tokio_builder() -> tokio::runtime::Builder {
     let mut b = tokio::runtime::Builder::new_multi_thread();
@@ -192,7 +214,7 @@ impl Dial9Config {
     pub fn builder(
         #[builder(field)] tokio_configurators: Vec<TokioConfigurator>,
 
-        #[builder(field)] runtime_configurators: Vec<RuntimeConfigurator>,
+        #[builder(field)] runtime_finalizer: Option<RuntimeConfigurator>,
 
         /// Defaults to `true`. When `false`, required writer fields are
         /// ignored and the runtime is built without telemetry.
@@ -210,7 +232,7 @@ impl Dial9Config {
     ) -> Result<Dial9Config, Dial9ConfigBuilderError> {
         assemble(AssembleArgs {
             tokio_configurators,
-            runtime_configurators,
+            runtime_finalizer,
             enabled,
             base_path,
             max_file_size,
@@ -223,7 +245,7 @@ impl Dial9Config {
 
 struct AssembleArgs {
     tokio_configurators: Vec<TokioConfigurator>,
-    runtime_configurators: Vec<RuntimeConfigurator>,
+    runtime_finalizer: Option<RuntimeConfigurator>,
     enabled: bool,
     base_path: Option<PathBuf>,
     max_file_size: Option<u64>,
@@ -238,7 +260,7 @@ struct AssembleArgs {
 fn assemble(args: AssembleArgs) -> Result<Inner, Dial9ConfigBuilderError> {
     let AssembleArgs {
         tokio_configurators,
-        runtime_configurators,
+        runtime_finalizer,
         enabled,
         base_path,
         max_file_size,
@@ -278,10 +300,12 @@ fn assemble(args: AssembleArgs) -> Result<Inner, Dial9ConfigBuilderError> {
         .build()
         .map_err(Dial9ConfigBuilderError::Io)?;
 
-    let mut runtime_builder = TracedRuntime::builder().with_trace_path(base_path);
-    for configure in runtime_configurators {
-        runtime_builder = configure(runtime_builder);
-    }
+    let runtime_builder: TracedRuntimeBuilder<HasTracePath, PipelineUnset> =
+        TracedRuntime::builder().with_trace_path(base_path);
+    let runtime_builder: Box<dyn BuildTracedRuntime> = match runtime_finalizer {
+        Some(configure) => configure(runtime_builder),
+        None => Box::new(runtime_builder),
+    };
 
     Ok(Inner::Enabled {
         writer,
@@ -313,22 +337,30 @@ impl<S: dial9_config_builder::State> Dial9ConfigBuilder<S> {
         self
     }
 
-    /// Queue a configurator for the dial9 [`TracedRuntimeBuilder`].
+    /// Set the configurator for the dial9 [`TracedRuntimeBuilder`].
     ///
     /// The closure receives the staged builder by value and must return it.
     /// Use this to access runtime configuration methods like
-    /// `with_runtime_name` and `with_task_tracking`; see
-    /// [`TracedRuntimeBuilder`] for the full list.
+    /// `with_runtime_name`, `with_task_tracking`, `with_s3_uploader`, or
+    /// `with_custom_pipeline`; see [`TracedRuntimeBuilder`] for the full list.
     ///
-    /// Queued configurators are applied in call order during `build()`
-    /// once `base_path` is known. When `.enabled(false)` is set, queued
-    /// configurators are ignored.
-    pub fn with_runtime<F>(mut self, f: F) -> Self
+    /// The closure may transition the builder's pipeline-mode marker
+    /// (e.g. by calling `.with_s3_uploader(...)` or
+    /// `.with_custom_pipeline(...)`); the resulting mode is preserved
+    /// through to runtime construction.
+    ///
+    /// The configurator is applied during `build()` once `base_path` is
+    /// known. When `.enabled(false)` is set the configurator is ignored.
+    /// Calling this method more than once replaces the prior closure.
+    pub fn with_runtime<F, N>(mut self, f: F) -> Self
     where
-        F: FnOnce(TracedRuntimeBuilder<HasTracePath>) -> TracedRuntimeBuilder<HasTracePath>
+        F: FnOnce(
+                TracedRuntimeBuilder<HasTracePath, PipelineUnset>,
+            ) -> TracedRuntimeBuilder<HasTracePath, N>
             + 'static,
+        N: Send + 'static,
     {
-        self.runtime_configurators.push(Box::new(f));
+        self.runtime_finalizer = Some(Box::new(move |b| Box::new(f(b))));
         self
     }
 }

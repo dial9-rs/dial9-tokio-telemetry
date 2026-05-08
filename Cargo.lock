@@ -1457,6 +1457,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dial9"
+version = "0.3.7"
+dependencies = [
+ "anyhow",
+ "dial9-viewer",
+ "tokio",
+]
+
+[[package]]
 name = "dial9-macro"
 version = "0.3.6"
 dependencies = [
@@ -1472,6 +1481,7 @@ name = "dial9-perf-self-profile"
 version = "0.4.0"
 dependencies = [
  "blazesym",
+ "criterion",
  "crossbeam-utils",
  "dial9-trace-format",
  "libc",
@@ -1490,8 +1500,8 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-sdk-s3-transfer-manager",
- "backtrace",
  "bon",
+ "bytes",
  "clap",
  "criterion",
  "crossbeam-queue",

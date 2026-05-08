@@ -6,6 +6,7 @@ members = [
     "dial9-trace-format-derive",
     "dial9-macro",
     "dial9-viewer",
+    "dial9",
     "perf-self-profile",
     "examples/metrics-service",
     "examples/simple-local",

@@ -24,9 +24,9 @@ pub use format::{
     WorkerUnparkEvent,
 };
 pub use recorder::{
-    HasTracePath, NoTracePath, RuntimeTelemetryHandle, TelemetryCore, TelemetryCoreBuilder,
-    TelemetryGuard, TelemetryHandle, TelemetryRuntimeError, TraceRuntimeCoreBuilder, TracedRuntime,
-    TracedRuntimeBuilder, current_worker_id, spawn,
+    HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset, RuntimeTelemetryHandle,
+    TelemetryCore, TelemetryCoreBuilder, TelemetryGuard, TelemetryHandle, TelemetryRuntimeError,
+    TraceRuntimeCoreBuilder, TracedRuntime, TracedRuntimeBuilder, current_worker_id, spawn,
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};

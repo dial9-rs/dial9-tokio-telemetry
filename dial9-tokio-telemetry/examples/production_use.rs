@@ -167,7 +167,9 @@ use std::time::Duration;
 
 use clap::Parser;
 use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::telemetry::{
+    HasTracePath, PipelineUnset, TelemetryHandle, TracedRuntimeBuilder,
+};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
@@ -226,6 +228,45 @@ impl Dial9Opts {
     }
 }
 
+/// Emit dial9 operational metrics (Flush, TlDrain, ProcessSegment) to stderr.
+/// In production, you would typically pass the `ServiceMetrics` sink that
+/// your application already uses.
+fn stderr_metrics_sink() -> metrique_writer::BoxEntrySink {
+    FlushImmediatelyBuilder::new().build_boxed(
+        LocalFormat::new(OutputStyle::Pretty).output_to_makewriter(|| std::io::stderr().lock()),
+    )
+}
+
+#[cfg(feature = "cpu-profiling")]
+fn configure_runtime_common(
+    mut r: TracedRuntimeBuilder<HasTracePath, PipelineUnset>,
+    metrics_sink: metrique_writer::BoxEntrySink,
+    cpu_profile_enabled: bool,
+    schedule_profile_enabled: bool,
+    cpu_sample_hz: u64,
+) -> TracedRuntimeBuilder<HasTracePath, PipelineUnset> {
+    r = r
+        .with_task_tracking(true)
+        .with_worker_metrics_sink(metrics_sink);
+    use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
+    if cpu_profile_enabled {
+        r = r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(cpu_sample_hz));
+    }
+    if schedule_profile_enabled {
+        r = r.with_sched_events(SchedEventConfig::default());
+    }
+    r
+}
+
+#[cfg(not(feature = "cpu-profiling"))]
+fn configure_runtime_common(
+    r: TracedRuntimeBuilder<HasTracePath, PipelineUnset>,
+    metrics_sink: metrique_writer::BoxEntrySink,
+) -> TracedRuntimeBuilder<HasTracePath, PipelineUnset> {
+    r.with_task_tracking(true)
+        .with_worker_metrics_sink(metrics_sink)
+}
+
 /// Translate parsed options into a [`Dial9Config`] the `#[main]` macro can consume.
 ///
 /// `build_or_disabled()` is the important piece here: any writer I/O or
@@ -259,49 +300,48 @@ fn configure_dial9(opts: &Dial9Opts) -> Dial9Config {
     #[cfg(feature = "worker-s3")]
     let (s3_bucket, s3_service) = (opts.s3_bucket.clone(), opts.service_name.clone());
 
-    // Emit dial9 operational metrics (Flush, TlDrain, ProcessSegment) to stderr.
-    // In production, you would typically pass the `ServiceMetrics` sink that
-    // your application already uses.
-    let metrics_sink = FlushImmediatelyBuilder::new().build_boxed(
-        LocalFormat::new(OutputStyle::Pretty).output_to_makewriter(|| std::io::stderr().lock()),
-    );
-
-    Dial9Config::builder()
+    let cfg = Dial9Config::builder()
         .enabled(opts.enabled)
         .base_path(base_path)
         .max_file_size(max_file_size)
         .max_total_size(max_disk)
-        .rotation_period(opts.rotation())
-        .with_runtime(move |mut r| {
-            r = r
-                .with_task_tracking(true)
-                .with_worker_metrics_sink(metrics_sink);
-            #[cfg(feature = "cpu-profiling")]
-            {
-                use dial9_tokio_telemetry::telemetry::cpu_profile::{
-                    CpuProfilingConfig, SchedEventConfig,
-                };
-                if cpu_enabled {
-                    r = r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(cpu_hz));
+        .rotation_period(opts.rotation());
+
+    #[cfg(feature = "worker-s3")]
+    if let (Some(bucket), Some(service_name)) = (s3_bucket, s3_service) {
+        use dial9_tokio_telemetry::background_task::s3::S3Config;
+        let s3 = S3Config::builder()
+            .bucket(bucket)
+            .service_name(service_name)
+            .build();
+        return cfg
+            .with_runtime(move |r| {
+                let sink = stderr_metrics_sink();
+                #[cfg(feature = "cpu-profiling")]
+                {
+                    configure_runtime_common(r, sink, cpu_enabled, sched_enabled, cpu_hz)
+                        .with_s3_uploader(s3)
                 }
-                if sched_enabled {
-                    r = r.with_sched_events(SchedEventConfig::default());
+                #[cfg(not(feature = "cpu-profiling"))]
+                {
+                    configure_runtime_common(r, sink).with_s3_uploader(s3)
                 }
-            }
-            #[cfg(feature = "worker-s3")]
-            {
-                use dial9_tokio_telemetry::background_task::s3::S3Config;
-                if let (Some(bucket), Some(service_name)) = (&s3_bucket, &s3_service) {
-                    let s3 = S3Config::builder()
-                        .bucket(bucket.clone())
-                        .service_name(service_name.clone())
-                        .build();
-                    r = r.with_s3_uploader(s3);
-                }
-            }
-            r
-        })
-        .build_or_disabled()
+            })
+            .build_or_disabled();
+    }
+
+    cfg.with_runtime(move |r| {
+        let sink = stderr_metrics_sink();
+        #[cfg(feature = "cpu-profiling")]
+        {
+            configure_runtime_common(r, sink, cpu_enabled, sched_enabled, cpu_hz)
+        }
+        #[cfg(not(feature = "cpu-profiling"))]
+        {
+            configure_runtime_common(r, sink)
+        }
+    })
+    .build_or_disabled()
 }
 
 /// Complain at startup when the operator asked for something a feature flag

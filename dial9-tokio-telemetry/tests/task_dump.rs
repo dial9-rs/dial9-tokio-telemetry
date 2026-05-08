@@ -15,7 +15,7 @@ fn task_dump_emitted_for_long_sleep() {
     builder.enable_all();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .with_task_dumps(TaskDumpConfig::default())
+        .with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build())
         .build_and_start(builder, writer)
         .unwrap();
 
@@ -64,6 +64,7 @@ fn no_task_dump_for_short_sleep() {
         .with_task_dumps(
             TaskDumpConfig::builder()
                 .idle_threshold(Duration::from_secs(1))
+                .rng_seed(42)
                 .build(),
         )
         .build_and_start(builder, writer)
@@ -102,7 +103,7 @@ fn task_dump_does_not_produce_extra_events() {
         builder.enable_all();
         let mut tb = TracedRuntime::builder().with_task_tracking(true);
         if enable {
-            tb = tb.with_task_dumps(TaskDumpConfig::default());
+            tb = tb.with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build());
         }
         let (runtime, guard) = tb.build_and_start(builder, writer).unwrap();
 

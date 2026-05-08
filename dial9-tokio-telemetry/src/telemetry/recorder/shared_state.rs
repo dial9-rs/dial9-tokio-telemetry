@@ -32,6 +32,9 @@ pub(crate) struct SharedState {
     /// each `TaskDumped` instance at construction time so the hot poll path
     /// does not need an atomic load.
     pub(crate) task_dump_idle_threshold_ns: AtomicU64,
+    /// Fixed RNG seed for deterministic task dump sampling. Set once at
+    /// construction before the `Arc` is shared; read-only thereafter.
+    pub(crate) task_dump_rng_seed: Option<u64>,
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
     pub(crate) start_time_ns: u64,
@@ -58,11 +61,12 @@ pub(crate) struct SharedState {
 }
 
 impl SharedState {
-    pub(super) fn new(start_time_ns: u64) -> Self {
+    pub(super) fn new(start_time_ns: u64, task_dump_rng_seed: Option<u64>) -> Self {
         Self {
             enabled: AtomicBool::new(false),
             task_dumps_enabled: AtomicBool::new(false),
             task_dump_idle_threshold_ns: AtomicU64::new(0),
+            task_dump_rng_seed,
             collector: Arc::new(CentralCollector::new()),
             start_time_ns,
             next_worker_id: AtomicU64::new(0),
@@ -249,7 +253,7 @@ mod tests {
 
     /// Helper: create a SharedState with recording enabled.
     fn enabled_shared_state() -> SharedState {
-        let ss = SharedState::new(0);
+        let ss = SharedState::new(0, None);
         ss.enabled.store(true, Ordering::Relaxed);
         ss
     }
@@ -551,7 +555,7 @@ mod shuttle_tests {
         dec.for_each_event(|ev| {
             if ev.name == "ValidationEvent"
                 && let Some(decoded) =
-                    ValidationEvent::decode(ev.timestamp_ns, ev.fields, &ev.schema.fields)
+                    ValidationEvent::decode(ev.timestamp_ns, ev.fields, &ev.schema.fields())
             {
                 out.push(ValidationEvent {
                     timestamp_ns: decoded.timestamp_ns,

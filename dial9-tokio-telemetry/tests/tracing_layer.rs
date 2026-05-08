@@ -55,56 +55,56 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
             if ev.name.starts_with("SpanEnter:") {
                 result.enter_count += 1;
                 result.enter_schema_names.insert(ev.name.to_owned());
-                for (field_def, field_val) in ev.schema.fields.iter().zip(ev.fields.iter()) {
-                    if field_def.name == "span_name"
+                for (field_def, field_val) in ev.schema.fields().iter().zip(ev.fields.iter()) {
+                    if field_def.name() == "span_name"
                         && let FieldValueRef::PooledString(id) = field_val
                         && let Some(name) = ev.string_pool.get(*id)
                     {
                         result.enter_names.push(name.to_owned());
                     }
-                    if field_def.name == "span_id"
+                    if field_def.name() == "span_id"
                         && let FieldValueRef::Varint(v) = field_val
                     {
                         result.entered_span_ids.insert(*v);
                     }
-                    if field_def.name == "parent_span_id"
+                    if field_def.name() == "parent_span_id"
                         && let FieldValueRef::Varint(v) = field_val
                         && *v > 0
                     {
                         result.saw_parent_span_id = true;
                     }
-                    if field_def.name == "worker_id"
+                    if field_def.name() == "worker_id"
                         && let FieldValueRef::Varint(v) = field_val
                     {
                         result.worker_ids.insert(*v);
                     }
                     // User-defined fields are optional pooled strings
                     if !["worker_id", "span_id", "parent_span_id", "span_name"]
-                        .contains(&field_def.name.as_str())
+                        .contains(&field_def.name())
                         && let FieldValueRef::PooledString(id) = field_val
                         && let Some(v) = ev.string_pool.get(*id)
                     {
                         result
                             .enter_fields
-                            .push((field_def.name.clone(), v.to_owned()));
+                            .push((field_def.name().to_owned(), v.to_owned()));
                     }
                 }
             } else if ev.name.starts_with("SpanExit:") {
                 result.exit_count += 1;
-                for (field_def, field_val) in ev.schema.fields.iter().zip(ev.fields.iter()) {
-                    if !["worker_id", "span_id", "span_name"].contains(&field_def.name.as_str())
+                for (field_def, field_val) in ev.schema.fields().iter().zip(ev.fields.iter()) {
+                    if !["worker_id", "span_id", "span_name"].contains(&field_def.name())
                         && let FieldValueRef::PooledString(id) = field_val
                         && let Some(v) = ev.string_pool.get(*id)
                     {
                         result
                             .exit_fields
-                            .push((field_def.name.clone(), v.to_owned()));
+                            .push((field_def.name().to_owned(), v.to_owned()));
                     }
                 }
             } else if ev.name == "SpanCloseEvent" {
                 result.close_count += 1;
-                for (field_def, field_val) in ev.schema.fields.iter().zip(ev.fields.iter()) {
-                    if field_def.name == "span_id"
+                for (field_def, field_val) in ev.schema.fields().iter().zip(ev.fields.iter()) {
+                    if field_def.name() == "span_id"
                         && let FieldValueRef::Varint(v) = field_val
                     {
                         result.closed_span_ids.insert(*v);

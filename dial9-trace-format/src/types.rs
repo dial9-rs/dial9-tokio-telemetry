@@ -15,6 +15,7 @@ use std::io::{self, Write};
 /// absent (decoded as [`FieldValueRef::None`]), `0x01` means present (followed
 /// by the inner type's normal encoding). The inner type tag is `tag & 0x7F`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 #[repr(u8)]
 pub enum FieldType {
     I64 = 1,
@@ -30,6 +31,8 @@ pub enum FieldType {
     U8 = 11,
     U16 = 12,
     U32 = 13,
+    DynamicList = 14,
+    DynamicMap = 15,
     // Optional variants (inner tag | 0x80).
     OptionalI64 = 0x81,
     OptionalF64 = 0x82,
@@ -44,6 +47,8 @@ pub enum FieldType {
     OptionalU8 = 0x8B,
     OptionalU16 = 0x8C,
     OptionalU32 = 0x8D,
+    OptionalDynamicList = 0x8E,
+    OptionalDynamicMap = 0x8F,
 }
 
 /// Newtype for stack frame addresses (leaf-first).
@@ -149,6 +154,10 @@ pub enum FieldValue {
     PooledStackFrames(InternedStackFrames),
     Varint(u64),
     StringMap(Vec<(Vec<u8>, Vec<u8>)>),
+    /// Self-describing list: each element carries its own type tag.
+    List(Vec<FieldValue>),
+    /// Self-describing map: each entry carries type tags for key and value.
+    Map(Vec<(FieldValue, FieldValue)>),
     /// Absent optional field.
     None,
 }
@@ -177,6 +186,8 @@ impl serde::Serialize for FieldValue {
                 }
                 map.end()
             }
+            FieldValue::List(items) => items.serialize(serializer),
+            FieldValue::Map(pairs) => pairs.serialize(serializer),
             FieldValue::None => serializer.serialize_none(),
         }
     }
@@ -185,6 +196,26 @@ impl serde::Serialize for FieldValue {
 impl FieldValue {
     pub fn string(s: &str) -> Self {
         FieldValue::String(s.to_string())
+    }
+
+    /// Returns the `FieldType` wire tag corresponding to this value's type.
+    /// Used for self-describing encoding in DynamicList/DynamicMap.
+    pub fn field_type_tag(&self) -> u8 {
+        match self {
+            FieldValue::I64(_) => FieldType::I64 as u8,
+            FieldValue::F64(_) => FieldType::F64 as u8,
+            FieldValue::Bool(_) => FieldType::Bool as u8,
+            FieldValue::String(_) => FieldType::String as u8,
+            FieldValue::Bytes(_) => FieldType::Bytes as u8,
+            FieldValue::PooledString(_) => FieldType::PooledString as u8,
+            FieldValue::StackFrames(_) => FieldType::StackFrames as u8,
+            FieldValue::PooledStackFrames(_) => FieldType::PooledStackFrames as u8,
+            FieldValue::Varint(_) => FieldType::Varint as u8,
+            FieldValue::StringMap(_) => FieldType::StringMap as u8,
+            FieldValue::List(_) => FieldType::DynamicList as u8,
+            FieldValue::Map(_) => FieldType::DynamicMap as u8,
+            FieldValue::None => 0x00,
+        }
     }
 }
 
@@ -207,6 +238,8 @@ impl FieldType {
             11 => Some(FieldType::U8),
             12 => Some(FieldType::U16),
             13 => Some(FieldType::U32),
+            14 => Some(FieldType::DynamicList),
+            15 => Some(FieldType::DynamicMap),
             0x81 => Some(FieldType::OptionalI64),
             0x82 => Some(FieldType::OptionalF64),
             0x83 => Some(FieldType::OptionalBool),
@@ -220,6 +253,8 @@ impl FieldType {
             0x8B => Some(FieldType::OptionalU8),
             0x8C => Some(FieldType::OptionalU16),
             0x8D => Some(FieldType::OptionalU32),
+            0x8E => Some(FieldType::OptionalDynamicList),
+            0x8F => Some(FieldType::OptionalDynamicMap),
             _ => None,
         }
     }
@@ -268,6 +303,24 @@ impl FieldValue {
                     w.write_all(k)?;
                     w.write_all(&(v.len() as u32).to_le_bytes())?;
                     w.write_all(v)?;
+                }
+                Ok(())
+            }
+            FieldValue::List(items) => {
+                w.write_all(&(items.len() as u32).to_le_bytes())?;
+                for item in items {
+                    w.write_all(&[item.field_type_tag()])?;
+                    item.encode(w)?;
+                }
+                Ok(())
+            }
+            FieldValue::Map(pairs) => {
+                w.write_all(&(pairs.len() as u32).to_le_bytes())?;
+                for (k, v) in pairs {
+                    w.write_all(&[k.field_type_tag()])?;
+                    k.encode(w)?;
+                    w.write_all(&[v.field_type_tag()])?;
+                    v.encode(w)?;
                 }
                 Ok(())
             }
@@ -361,6 +414,41 @@ impl FieldValue {
                 }
                 Some((FieldValue::StringMap(pairs), &data[pos..]))
             }
+            FieldType::DynamicList | FieldType::OptionalDynamicList => {
+                let count = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
+                let mut pos = 4;
+                let mut items = Vec::with_capacity(count.min(data.len() / 2));
+                for _ in 0..count {
+                    let tag = *data.get(pos)?;
+                    pos += 1;
+                    let ft = FieldType::from_tag(tag)?;
+                    let (val, rest) = Self::decode(ft, &data[pos..])?;
+                    pos += data.len() - pos - rest.len();
+                    items.push(val);
+                }
+                Some((FieldValue::List(items), &data[pos..]))
+            }
+            FieldType::DynamicMap | FieldType::OptionalDynamicMap => {
+                let count = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
+                let mut pos = 4;
+                let mut pairs = Vec::with_capacity(count.min(data.len() / 4));
+                for _ in 0..count {
+                    let key_tag = *data.get(pos)?;
+                    pos += 1;
+                    let key_ft = FieldType::from_tag(key_tag)?;
+                    let (key, rest) = Self::decode(key_ft, &data[pos..])?;
+                    pos += data.len() - pos - rest.len();
+
+                    let val_tag = *data.get(pos)?;
+                    pos += 1;
+                    let val_ft = FieldType::from_tag(val_tag)?;
+                    let (val, rest) = Self::decode(val_ft, &data[pos..])?;
+                    pos += data.len() - pos - rest.len();
+
+                    pairs.push((key, val));
+                }
+                Some((FieldValue::Map(pairs), &data[pos..]))
+            }
             // Optional variants: decode using the inner type.
             _ => Self::decode(field_type.inner(), data),
         }
@@ -383,6 +471,10 @@ pub enum FieldValueRef<'a> {
     PooledStackFrames(InternedStackFrames),
     Varint(u64),
     StringMap(StringMapRef<'a>),
+    /// Self-describing list. Use [`DynamicListRef::iter`] to access elements.
+    List(DynamicListRef<'a>),
+    /// Self-describing map. Use [`DynamicMapRef::iter`] to access entries.
+    Map(DynamicMapRef<'a>),
     /// Absent optional field.
     None,
 }
@@ -442,6 +534,48 @@ impl<'a> StringMapRef<'a> {
     /// Raw packed bytes (length-prefixed key-value pairs). Used for zero-copy re-encoding.
     pub fn raw_data(&self) -> &'a [u8] {
         self.data
+    }
+}
+
+/// Opaque wrapper for a decoded dynamic list. Access elements via [`Self::iter`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DynamicListRef<'a>(Vec<FieldValueRef<'a>>);
+
+impl<'a> DynamicListRef<'a> {
+    /// Iterate the list elements.
+    pub fn iter(&self) -> impl Iterator<Item = &FieldValueRef<'a>> {
+        self.0.iter()
+    }
+
+    /// Number of elements.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Opaque wrapper for a decoded dynamic map. Access entries via [`Self::iter`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DynamicMapRef<'a>(Vec<(FieldValueRef<'a>, FieldValueRef<'a>)>);
+
+impl<'a> DynamicMapRef<'a> {
+    /// Iterate the map entries as `(key, value)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&FieldValueRef<'a>, &FieldValueRef<'a>)> {
+        self.0.iter().map(|(k, v)| (k, v))
+    }
+
+    /// Number of entries.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -523,6 +657,41 @@ impl<'a> FieldValueRef<'a> {
                     pos,
                 ))
             }
+            FieldType::DynamicList | FieldType::OptionalDynamicList => {
+                let count = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
+                let mut pos = 4;
+                let mut items = Vec::with_capacity(count.min(d.len() / 2));
+                for _ in 0..count {
+                    let tag = *d.get(pos)?;
+                    pos += 1;
+                    let ft = FieldType::from_tag(tag)?;
+                    let (val, consumed) = Self::decode(ft, data, offset + pos)?;
+                    pos += consumed;
+                    items.push(val);
+                }
+                Some((FieldValueRef::List(DynamicListRef(items)), pos))
+            }
+            FieldType::DynamicMap | FieldType::OptionalDynamicMap => {
+                let count = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
+                let mut pos = 4;
+                let mut pairs = Vec::with_capacity(count.min(d.len() / 4));
+                for _ in 0..count {
+                    let key_tag = *d.get(pos)?;
+                    pos += 1;
+                    let key_ft = FieldType::from_tag(key_tag)?;
+                    let (key, key_consumed) = Self::decode(key_ft, data, offset + pos)?;
+                    pos += key_consumed;
+
+                    let val_tag = *d.get(pos)?;
+                    pos += 1;
+                    let val_ft = FieldType::from_tag(val_tag)?;
+                    let (val, val_consumed) = Self::decode(val_ft, data, offset + pos)?;
+                    pos += val_consumed;
+
+                    pairs.push((key, val));
+                }
+                Some((FieldValueRef::Map(DynamicMapRef(pairs)), pos))
+            }
             // Optional variants: decode using the inner type.
             _ => Self::decode(field_type.inner(), data, offset),
         }
@@ -543,6 +712,12 @@ impl<'a> FieldValueRef<'a> {
             FieldValueRef::StringMap(sm) => FieldValue::StringMap(
                 sm.iter()
                     .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
+                    .collect(),
+            ),
+            FieldValueRef::List(lr) => FieldValue::List(lr.iter().map(|v| v.to_owned()).collect()),
+            FieldValueRef::Map(mr) => FieldValue::Map(
+                mr.iter()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
                     .collect(),
             ),
             FieldValueRef::None => FieldValue::None,
@@ -1135,7 +1310,7 @@ mod tests {
             assert_eq!(ft as u8, tag);
         }
         assert!(FieldType::from_tag(0).is_none());
-        assert!(FieldType::from_tag(14).is_none());
+        assert!(FieldType::from_tag(14).is_some());
     }
 
     #[test]

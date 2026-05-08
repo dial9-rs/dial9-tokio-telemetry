@@ -21,6 +21,8 @@ pub(crate) mod task_dumped;
 /// Core telemetry types, recording, and trace I/O.
 pub mod telemetry;
 pub(crate) mod traced;
+#[cfg(feature = "taskdump")]
+pub(crate) mod unwind;
 
 #[cfg(feature = "tracing-layer")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing-layer")))]

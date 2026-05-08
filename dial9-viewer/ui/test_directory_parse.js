@@ -256,7 +256,7 @@ async function main() {
             .map(e => e.workerId)
         )].sort((a, b) => a - b);
         assert(workerIds.length > 0, "pipeline: has workers");
-        const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
+        const maxTs = trace.maxTs;
         const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
         assert(spans.workerSpans[workerIds[0]].polls.length > 0, "pipeline: has polls");
         const { pollsWithCpuSamples } = attachCpuSamples(trace.cpuSamples, spans.workerSpans);
@@ -272,7 +272,7 @@ async function main() {
   // ── analyzeTraces respects sample option ──
   console.log("\nanalyzeTraces sample:");
   {
-    const { analyzeTraces } = require(path.resolve(__dirname, '..', 'skills', 'analyze.js'));
+    const { analyzeTraces } = require(path.resolve(__dirname, '..', 'skills', 'dial9-toolkit', 'scripts', 'analyze.js'));
     const dir = setupDir(6);
     try {
       // Full run to populate cache for all 6 files
@@ -295,7 +295,7 @@ async function main() {
   // ── analyzeTraces respects force option ──
   console.log("\nanalyzeTraces force:");
   {
-    const { analyzeTraces } = require(path.resolve(__dirname, '..', 'skills', 'analyze.js'));
+    const { analyzeTraces } = require(path.resolve(__dirname, '..', 'skills', 'dial9-toolkit', 'scripts', 'analyze.js'));
     const dir = setupDir(2);
     try {
       // First run populates cache

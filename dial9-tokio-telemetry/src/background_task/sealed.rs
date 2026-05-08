@@ -7,9 +7,21 @@ use std::path::{Path, PathBuf};
 
 /// A sealed trace segment ready for processing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SealedSegment {
+pub struct SealedSegment {
     pub(crate) path: PathBuf,
     pub(crate) index: u32,
+}
+
+impl SealedSegment {
+    /// Path to the sealed segment file on disk.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Segment index (e.g. `3` for `trace.3.bin`).
+    pub fn index(&self) -> u32 {
+        self.index
+    }
 }
 
 /// Segment creation time as epoch seconds, parsed from the first clock
@@ -74,7 +86,7 @@ fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
                 let name = dec
                     .registry()
                     .get(type_id)
-                    .map(|s| s.name.as_str())
+                    .map(|s| s.name())
                     .ok_or(ParseTimestampError::UnknownTypeId(type_id.0))?;
                 if name == "ClockSyncEvent" {
                     return match values.first() {

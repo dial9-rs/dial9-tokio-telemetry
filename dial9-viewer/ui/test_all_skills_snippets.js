@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 "use strict";
-// Extracts code blocks from skills files and runs each one against the demo trace.
-// Catches regressions where a recipe references a stale API.
+// Validates skills: extracts code blocks from SKILL.md files and runs them against
+// the demo trace. Also validates scripts/ files load correctly and schema docs match
+// the actual runtime objects.
 
 const fs = require("fs");
 const path = require("path");
@@ -53,16 +54,30 @@ function fixPlaceholders(code, tracePath) {
     .replace(/['"]trace\.bin['"]/g, JSON.stringify(tracePath));
 }
 
+// Walk skills/ subdirectories and collect all SKILL.md files
+function collectSkillMds() {
+  const results = [];
+  for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const skillMd = path.join(skillsDir, entry.name, "SKILL.md");
+    if (fs.existsSync(skillMd)) {
+      results.push({ name: entry.name, path: skillMd });
+    }
+  }
+  return results.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 async function main() {
-  // Collect recipes from all skills markdown files
-  const mdFiles = fs.readdirSync(skillsDir).filter(f => f.endsWith(".md"));
+  const skillMds = collectSkillMds();
+
+  // Collect recipes from all SKILL.md files
   let allRecipes = [];
-  for (const f of mdFiles) {
-    const md = fs.readFileSync(path.join(skillsDir, f), "utf8");
-    allRecipes.push(...extractRecipes(md, f));
+  for (const { name, path: mdPath } of skillMds) {
+    const md = fs.readFileSync(mdPath, "utf8");
+    allRecipes.push(...extractRecipes(md, name));
   }
 
-  console.log(`Found ${allRecipes.length} code blocks across ${mdFiles.length} skills files\n`);
+  console.log(`Found ${allRecipes.length} code blocks across ${skillMds.length} skill SKILL.md files\n`);
 
   const { parseTrace, EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples } = require("./trace_parser.js");
   const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
@@ -84,6 +99,9 @@ async function main() {
   let failed = 0;
   let skipped = 0;
 
+  // Resolve analyze.js from the toolkit skill scripts
+  const analyzeJsPath = path.join(skillsDir, "dial9-toolkit", "scripts", "analyze.js");
+
   for (const input of inputs) {
     console.log(`── ${input.label}: ${input.path} ──\n`);
 
@@ -95,8 +113,8 @@ async function main() {
         trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent)
           .map(e => e.workerId)
       )].sort((a, b) => a - b);
-      maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
-      minTs = trace.events.reduce((m, e) => Math.min(m, e.timestamp), Infinity);
+      maxTs = trace.maxTs;
+      minTs = trace.minTs;
       spans = buildWorkerSpans(trace.events, workerIds, maxTs);
       attachCpuSamples(trace.cpuSamples, spans.workerSpans);
       taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
@@ -105,7 +123,7 @@ async function main() {
     }
 
     // Context: all variables available to code blocks
-    const { analyzeTraces } = require(path.resolve(__dirname, '..', 'skills', 'analyze.js'));
+    const { analyzeTraces } = require(analyzeJsPath);
     const ctx = {
       trace, workerIds, minTs, maxTs, spans, schedDelays, taskTimeline,
       EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples,
@@ -160,14 +178,30 @@ async function main() {
 
   fs.rmSync(testDir, { recursive: true, force: true });
 
+  // ── Script validation ──
+  // Verify that scripts/ files in each skill load without errors
+  console.log(`\n── Script validation ──\n`);
+  for (const { name } of skillMds) {
+    const scriptsDir = path.join(skillsDir, name, "scripts");
+    if (!fs.existsSync(scriptsDir)) continue;
+    for (const f of fs.readdirSync(scriptsDir).filter(f => f.endsWith(".js"))) {
+      const scriptPath = path.join(scriptsDir, f);
+      try {
+        require(scriptPath);
+        console.log(`✓ ${name}/scripts/${f} loads`);
+        passed++;
+      } catch (err) {
+        console.log(`✗ ${name}/scripts/${f}: ${err.message}`);
+        failed++;
+      }
+    }
+  }
+
   // ── Schema validation helpers ──
-  // Parses a pseudo-code schema block into a typed JS skeleton, then diffs against an actual object.
-  // Returns {topLevelErrors: string[], deepErrors: string[], docKeyCount: number}.
   function validateSchema(schemaBlock, actualObj) {
     const topLevelErrors = [];
     const deepErrors = [];
 
-    // Top-level key check
     const actualKeys = new Set(Object.keys(actualObj));
     const topKeyMatches = schemaBlock.match(/^ {2}(\w+):/gm);
     if (!topKeyMatches) { topLevelErrors.push('no top-level keys found in schema'); return { topLevelErrors, deepErrors, docKeyCount: 0 }; }
@@ -175,7 +209,6 @@ async function main() {
     for (const k of actualKeys) { if (!docKeys.has(k)) topLevelErrors.push(`'${k}' in result but not documented`); }
     for (const k of docKeys) { if (!actualKeys.has(k)) topLevelErrors.push(`'${k}' documented but missing from result`); }
 
-    // Parse schema into typed skeleton
     let schemaJs = schemaBlock
       .replace(/\/\/.*$/gm, '')
       .replace(/\[\w+\]:/g, '_dynamic_:')
@@ -194,7 +227,7 @@ async function main() {
       .replace(/:\s*(number)(\|null)?/g, (_, __, n) => ': "number' + (n ? '|null' : '') + '"')
       .replace(/:\s*(string)(\|null)?/g, (_, __, n) => ': "string' + (n ? '|null' : '') + '"')
       .replace(/:\s*(boolean)/g, ': "boolean"')
-      .replace(/:\s*(\w+)\[\]/g, ': "unknown[]"')          // TraceEvent[], CpuSample[], etc.
+      .replace(/:\s*(\w+)\[\]/g, ': "unknown[]"')
       .replace(/\[\{([^}]+)\}\]/g, (_, inner) => {
         const keys = inner.split(',').map(k => k.trim()).filter(Boolean);
         return '[{' + keys.map(k => `"${k}":"_any_"`).join(',') + '}]';
@@ -235,14 +268,13 @@ async function main() {
         }
         if (typeof doc === 'string' && typeof actual === 'string') {
           if (doc === '_any_' || actual === doc) return;
-          if (actual === '_empty_') return; // empty Map/collection, can't validate value type
+          if (actual === '_empty_') return;
           if (doc.endsWith('|null') && (actual === doc.replace('|null', '') || actual === '_null_')) return;
           if (doc === 'number[]' && actual === '[]') return;
           deepErrors.push(`${p}: type mismatch (documented: ${doc}, actual: ${actual})`);
           return;
         }
         if (doc === '_any_') return;
-        // Opaque array types (TraceEvent[], CpuSample[], etc.) match any array
         if (doc === 'unknown[]') return;
         if (Array.isArray(doc) && Array.isArray(actual)) {
           if (doc.length > 0 && actual.length > 0) diff(doc[0], actual[0], p + '[0]');
@@ -262,16 +294,17 @@ async function main() {
     return { topLevelErrors, deepErrors, docKeyCount: docKeys.size };
   }
 
-  function runSchemaCheck(label, mdFile, headingRegex, actualObj) {
-    const md = fs.readFileSync(path.join(skillsDir, mdFile), "utf8");
+  function runSchemaCheck(label, skillName, headingRegex, actualObj) {
+    const mdPath = path.join(skillsDir, skillName, "SKILL.md");
+    const md = fs.readFileSync(mdPath, "utf8");
     const match = md.match(headingRegex);
-    if (!match) { console.log(`✗ ${label}: could not find schema block in ${mdFile}`); failed++; return; }
+    if (!match) { console.log(`✗ ${label}: could not find schema block in ${skillName}/SKILL.md`); failed++; return; }
     const { topLevelErrors, deepErrors, docKeyCount } = validateSchema(match[1], actualObj);
     if (topLevelErrors.length > 0) {
       for (const e of topLevelErrors) console.log(`✗ ${label} sync: ${e}`);
       failed++;
     } else {
-      console.log(`✓ ${label} sync: ${mdFile} matches (${docKeyCount} keys)`);
+      console.log(`✓ ${label} sync: ${skillName}/SKILL.md matches (${docKeyCount} keys)`);
       passed++;
     }
     if (deepErrors.length > 0) {
@@ -283,15 +316,15 @@ async function main() {
     }
   }
 
-  // ── analyzeTraces schema (analysis.md) ──
-  const { analyzeTraces: at } = require(path.resolve(__dirname, '..', 'skills', 'analyze.js'));
+  // ── analyzeTraces schema (dial9-trace-analysis) ──
+  const { analyzeTraces: at } = require(analyzeJsPath);
   const analyzeResult = await at(demoPath);
-  runSchemaCheck('analyzeTraces', 'analysis.md', /## analyzeTraces return schema[\s\S]*?```\n\{([\s\S]*?)\n\}[\s\S]*?```/, analyzeResult);
+  runSchemaCheck('analyzeTraces', 'dial9-trace-analysis', /## analyzeTraces return schema[\s\S]*?```\n\{([\s\S]*?)\n\}[\s\S]*?```/, analyzeResult);
 
-  // ── ParsedTrace schema (loading.md) ──
+  // ── ParsedTrace schema (dial9-trace-loading) ──
   let parsedTrace;
   for await (const t of require("./trace_parser.js").parseTrace(demoPath)) { parsedTrace = t; break; }
-  runSchemaCheck('ParsedTrace', 'loading.md', /## ParsedTrace structure[\s\S]*?```\n\{([\s\S]*?)\n\}[\s\S]*?```/, parsedTrace);
+  runSchemaCheck('ParsedTrace', 'dial9-trace-loading', /## ParsedTrace structure[\s\S]*?```\n\{([\s\S]*?)\n\}[\s\S]*?```/, parsedTrace);
 
   const unique = allRecipes.filter(r => !shouldSkip(r)).length;
   console.log(`\n${failed === 0 ? "✓" : "✗"} ${unique} snippets × ${inputs.length} modes: ${passed} passed, ${failed} failed, ${skipped} skipped`);

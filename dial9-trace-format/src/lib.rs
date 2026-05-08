@@ -24,6 +24,8 @@ pub mod schema;
 pub mod types;
 
 pub use dial9_trace_format_derive::TraceEvent;
+pub use types::DynamicListRef;
+pub use types::DynamicMapRef;
 pub use types::EventEncoder;
 pub use types::FieldValue;
 pub use types::InternedStackFrames;
@@ -70,6 +72,7 @@ pub trait TraceEvent {
             name: Self::event_name().to_string(),
             has_timestamp: Self::has_timestamp(),
             fields: Self::field_defs(),
+            annotations: Vec::new(),
         }
     }
 }

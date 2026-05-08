@@ -13,6 +13,9 @@ const { createHistogram } = require('perf_hooks');
 function resolve(name) {
   const sibling = path.resolve(__dirname, name);
   if (fs.existsSync(sibling)) return sibling;
+  // Source tree: skills/dial9-toolkit/scripts/ -> ui/
+  const fromSkills = path.resolve(__dirname, '..', '..', '..', 'ui', name);
+  if (fs.existsSync(fromSkills)) return fromSkills;
   return path.resolve(__dirname, '..', 'ui', name);
 }
 
@@ -108,8 +111,8 @@ function accumulateTrace(acc, trace) {
       .map(e => e.workerId)
   )].sort((a, b) => a - b);
 
-  const minTs = minBy(trace.events, e => e.timestamp);
-  const maxTs = maxBy(trace.events, e => e.timestamp);
+  const minTs = trace.minTs;
+  const maxTs = trace.maxTs;
 
   const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
   attachCpuSamples(trace.cpuSamples, spans.workerSpans);

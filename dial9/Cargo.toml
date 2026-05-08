@@ -1,0 +1,21 @@
+[package]
+name = "dial9"
+version = "0.3.7"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI for dial9-tokio-telemetry: trace viewer, analysis toolkit, and agent skills"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/dial9-viewer-v{ version }/dial9-viewer-{ target }-v{ version }{ archive-suffix }"
+pkg-fmt = "tgz"
+bin-dir = "dial9{ binary-ext }"
+
+[[bin]]
+name = "dial9"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+dial9-viewer = { version = "0.3.7", path = "../dial9-viewer" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
