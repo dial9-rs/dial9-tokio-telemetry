@@ -48,7 +48,7 @@ struct Args {
 
     #[arg(
         long,
-        default_value = "100000000",
+        default_value = "100000000", // 100 MB
         help = "Max trace file size in bytes"
     )]
     trace_max_file_size: u64,
@@ -77,6 +77,9 @@ struct Args {
 
     #[arg(long, help = "AWS region for S3 uploads (defaults to SDK default)")]
     s3_region: Option<String>,
+
+    #[arg(long, help = "Disable task dump capture")]
+    no_task_dumps: bool,
 }
 
 #[derive(Clone)]
@@ -147,8 +150,8 @@ fn main() -> std::io::Result<()> {
     if args.demo {
         args.run_duration = 4;
         args.worker_threads = 2;
-        args.trace_max_file_size = 20_000_000;
-        args.trace_max_total_size = 20_000_000;
+        args.trace_max_file_size = 100_000_000;
+        args.trace_max_total_size = 100_000_000;
     }
 
     let writer = RotatingWriter::builder()
@@ -169,12 +172,16 @@ fn main() -> std::io::Result<()> {
     builder.worker_threads(args.worker_threads).enable_all();
     let traced_builder = TracedRuntime::builder()
         .with_trace_path(&args.trace_path)
-        .with_task_tracking(true)
-        .with_task_dumps(
+        .with_task_tracking(true);
+    let traced_builder = if args.no_task_dumps {
+        traced_builder
+    } else {
+        traced_builder.with_task_dumps(
             TaskDumpConfig::builder()
                 .idle_threshold(Duration::from_millis(5))
                 .build(),
-        );
+        )
+    };
     #[cfg(target_os = "linux")]
     let traced_builder = traced_builder
         .with_cpu_profiling(CpuProfilingConfig::default())
