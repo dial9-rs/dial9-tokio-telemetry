@@ -6,24 +6,15 @@
 #      - Secret  BENCHER_API_TOKEN: API token from bencher.dev
 #      - Variable BENCHER_PROJECT:  your project slug
 #
-# Two jobs share the iai-bench composite action:
-#   - baseline (push to main + workflow_dispatch): posts numbers and
-#     maintains the persistent regression threshold on the target branch.
-#   - pr_gate (pull_request): regression check against main's threshold
-#     via --start-point-reset. Skip via the `skip-bench` PR label.
+# This workflow posts numbers and maintains the persistent regression
+# threshold on the target branch. The PR gate (benchmarks-pr.yml) reads
+# main's threshold via --start-point-reset.
 
 name: Benchmarks
 
 on:
   push:
     branches: [main]
-  pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'examples/**'
-      - 'dial9-viewer/**'
-      - '.github/ISSUE_TEMPLATE/**'
   workflow_dispatch:
     inputs:
       bencher_branch:
@@ -36,12 +27,11 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   baseline:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     name: baseline
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -83,35 +73,3 @@ jobs:
             --threshold-test percentage
             --threshold-max-sample-size 1
             --threshold-upper-boundary 0.05
-
-  pr_gate:
-    # Same-repo PRs only (fork PRs have no access to BENCHER_API_TOKEN).
-    # `skip-bench` label is the escape hatch for changes that knowingly
-    # regress (correctness fixes, intentional cost added). The next
-    # baseline run on main updates the reference.
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && !contains(github.event.pull_request.labels.*.name, 'skip-bench')
-    name: PR gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      RUST_BACKTRACE: 1
-      BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
-      RUSTFLAGS: '--cfg tokio_unstable -C force-frame-pointers=yes --cfg iai_enabled'
-    steps:
-      # Pin to PR head SHA — default `refs/pull/N/merge` would build PR
-      # head merged into PR base, so any commits on main since the PR was
-      # opened would slip into the binary and show up as instruction-count
-      # drift the gate would flag.
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-      - uses: ./.github/actions/iai-bench
-        with:
-          bencher-token: ${{ secrets.BENCHER_API_TOKEN }}
-          bencher-branch: ${{ github.head_ref }}
-          bencher-extra-args: >-
-            --start-point main
-            --start-point-reset
-            --ci-only-thresholds
-            --error-on-alert
-            --github-actions ${{ secrets.GITHUB_TOKEN }}

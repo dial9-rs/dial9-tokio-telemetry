@@ -1,0 +1,49 @@
+# iai-callgrind PR regression gate. See benchmarks.yml for prereqs.
+#
+# Compares against the persistent thresholds maintained on the main
+# branch (set by benchmarks.yml). Skipped on PRs labeled `skip-bench`.
+# Same-repo PRs only (fork PRs have no access to BENCHER_API_TOKEN).
+
+name: Benchmarks (PR)
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'examples/**'
+      - 'dial9-viewer/**'
+      - '.github/ISSUE_TEMPLATE/**'
+
+permissions:
+  checks: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr_gate:
+    if: github.event.pull_request.head.repo.full_name == github.repository && !contains(github.event.pull_request.labels.*.name, 'skip-bench')
+    name: PR gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUST_BACKTRACE: 1
+      BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+      RUSTFLAGS: '--cfg tokio_unstable -C force-frame-pointers=yes --cfg iai_enabled'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: ./.github/actions/iai-bench
+        with:
+          bencher-token: ${{ secrets.BENCHER_API_TOKEN }}
+          bencher-branch: ${{ github.head_ref }}
+          bencher-extra-args: >-
+            --start-point main
+            --start-point-reset
+            --ci-only-thresholds
+            --error-on-alert
+            --github-actions ${{ secrets.GITHUB_TOKEN }}
