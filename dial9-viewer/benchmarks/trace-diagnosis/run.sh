@@ -6,14 +6,16 @@ TARGET="/tmp/dial9-bench-target"
 CLEAN=""
 MODEL=""
 AGENT=""
+EFFORT=""
 
 usage() {
-    echo "Usage: ./run.sh [target-dir] [--clean] [--model <model>] [--agent <agent>]"
+    echo "Usage: ./run.sh [target-dir] [--clean] [--model <model>] [--agent <agent>] [--effort <level>]"
     echo ""
     echo "  target-dir    Path to the test project (default: /tmp/dial9-bench-target)"
     echo "  --clean       Regenerate the target project from scratch"
     echo "  --model       Model to use (e.g. claude-sonnet-4-20250514)"
     echo "  --agent       Agent to use (e.g. kiro, claude, codex)"
+    echo "  --effort      Effort level (low, medium, high, xhigh, max). Claude only."
     exit 1
 }
 
@@ -22,6 +24,7 @@ while [[ $# -gt 0 ]]; do
         --clean) CLEAN="yes"; shift ;;
         --model) MODEL="$2"; shift 2 ;;
         --agent) AGENT="$2"; shift 2 ;;
+        --effort) EFFORT="$2"; shift 2 ;;
         --help|-h) usage ;;
         -*) usage ;;
         *) TARGET="$1"; shift ;;
@@ -52,14 +55,29 @@ if [[ -n "$MODEL" ]]; then
     MODEL_FLAG="--model $MODEL"
 fi
 
+EFFORT_FLAG=""
+if [[ -n "$EFFORT" ]]; then
+    EFFORT_FLAG="--effort $EFFORT"
+fi
+
 cd "$TARGET"
 case "${AGENT:-claude}" in
     claude)
         echo "$PROMPT" | claude -p --verbose --output-format stream-json \
             $MODEL_FLAG \
+            $EFFORT_FLAG \
             --allowed-tools "Read,Glob,Grep,Skill,Bash(node *)" \
             | tee "$LOG.raw" \
-            | jq -r --unbuffered 'select(.type == "assistant") | .message.content[]? | select(.type == "text" or .type == "thinking") | if .type == "thinking" then "<thinking>\n\(.thinking)\n</thinking>" else .text // empty end' \
+            | jq -r --unbuffered '
+                select(.type == "assistant")
+                | .message.content[]?
+                | if .type == "text" then
+                    .text // empty
+                  elif .type == "thinking" then
+                    if (.thinking // "") | length > 0 then "<thinking>\n\(.thinking)\n</thinking>" else empty end
+                  elif .type == "tool_use" then
+                    "→ \(.name) \(.input | tostring | .[0:120])"
+                  else empty end' \
             | tee "$LOG.md"
         ;;
     kiro)
