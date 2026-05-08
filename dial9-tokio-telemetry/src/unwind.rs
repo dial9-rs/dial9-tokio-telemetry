@@ -83,6 +83,6 @@ pub(crate) fn trim_frames(
     match (leaf_start, root_end) {
         (Some(start), Some(end)) if start + 1 < end => &frame_ips[start + 1..end],
         (Some(start), None) if start + 1 < frame_ips.len() => &frame_ips[start + 1..],
-        _ => &[],
+        _ => frame_ips,
     }
 }
