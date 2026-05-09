@@ -28,6 +28,14 @@ Avoid dropping an error without logging it. Use `tracing` for logging.
 let _ = ...
 ```
 
+**ALWAYS rate-limit logging that can fire from a loop or repeated error path.** Any `warn!`/`error!` reachable from a background task loop, retry loop, or per-request hot path MUST be wrapped in `rate_limited!`:
+```rust
+rate_limited!(Duration::from_secs(60), {
+    tracing::warn!("...: {e}");
+});
+```
+Unguarded logging in loops causes log spam that degrades observability and can itself become a performance problem. One-time paths (startup, shutdown, per-thread init) are exempt.
+
 ## Running tests
 
 - Always run `cargo nextest run` to run tests
