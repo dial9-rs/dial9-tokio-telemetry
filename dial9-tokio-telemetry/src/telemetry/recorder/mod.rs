@@ -1704,7 +1704,9 @@ fn run_flush_loop(
             && !exit
             && let Err(e) = event_writer.drained()
         {
-            tracing::warn!("failed to complete post-drain action: {e}");
+            rate_limited!(Duration::from_secs(60), {
+                tracing::warn!("failed to complete post-drain action: {e}");
+            });
         }
 
         // Create the metrics guard up front; mutate on the exit path,
