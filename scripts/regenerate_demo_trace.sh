@@ -36,14 +36,18 @@ echo "Recording demo trace..."
 cargo run --release -p metrics-service --bin metrics-service -- \
     --trace-path "$TRACE_PATH" --demo
 
-# Find the generated trace file (rotating writer appends an index).
-TRACE_FILE=$(ls -1S $TRACE_GZ_GLOB 2>/dev/null | head -1)
-if [ -z "$TRACE_FILE" ]; then
+# Concatenate all segments (sorted by index) into a single trace file.
+# When rotation occurs mid-run, early events (like TaskSpawn) end up in
+# earlier segments; concatenation preserves the complete timeline.
+# We decompress each segment and re-gzip as a single stream to avoid
+# multi-member gzip compatibility issues with older Node.js zlib.
+SEGMENTS=$(ls -1v $TRACE_GZ_GLOB 2>/dev/null)
+if [ -z "$SEGMENTS" ]; then
     echo "ERROR: No trace file generated" >&2
     exit 1
 fi
 
-cp "$TRACE_FILE" "$DEMO_DEST"
+zcat $SEGMENTS | gzip > "$DEMO_DEST"
 rm -f $TRACE_GZ_GLOB
 
 echo "Demo trace size:"
