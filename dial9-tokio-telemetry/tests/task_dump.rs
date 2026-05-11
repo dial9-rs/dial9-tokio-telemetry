@@ -4,6 +4,7 @@ mod common;
 
 use dial9_tokio_telemetry::telemetry::{TaskDumpConfig, TelemetryEvent, TracedRuntime};
 use std::time::Duration;
+use tokio::task::JoinSet;
 
 /// A task that stays idle longer than the threshold between polls should
 /// produce at least one `TaskDump` event.
@@ -141,5 +142,51 @@ fn task_dump_does_not_produce_extra_events() {
     assert_eq!(
         baseline, with_dumps,
         "enabling task dumps changed PollStart/PollEnd/WakeEvent counts: {baseline:?} vs {with_dumps:?}"
+    );
+}
+
+/// Custom spawn APIs should get the same task-dump instrumentation as
+/// [`TelemetryHandle::spawn`](dial9_tokio_telemetry::telemetry::TelemetryHandle::spawn).
+#[test]
+fn spawn_with_joinset_emits_task_dump() {
+    let (writer, events) = common::CapturingWriter::new();
+
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build())
+        .build_and_start(builder, writer)
+        .unwrap();
+
+    let handle = guard.handle();
+    runtime.block_on(async {
+        let mut set: JoinSet<()> = JoinSet::new();
+        handle.spawn_with(
+            async {
+                // Well above the 10ms default threshold.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            },
+            |f| set.spawn(f),
+        );
+        while set.join_next().await.is_some() {}
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    let events = events.lock().unwrap();
+    let dumps: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, TelemetryEvent::TaskDump { .. }))
+        .collect();
+
+    assert!(
+        !dumps.is_empty(),
+        "expected TaskDump events from spawn_with JoinSet task; got: {:?}",
+        events
+            .iter()
+            .map(std::mem::discriminant)
+            .collect::<Vec<_>>()
     );
 }
