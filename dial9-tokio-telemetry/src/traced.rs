@@ -34,13 +34,6 @@ type InstrumentedFuture<F> = WakeTracked<MaybeTaskDumped<F>>;
 pin_project! {
     /// Future wrapper produced by `spawn_with` for custom spawn APIs.
     ///
-    /// Values of this type are produced by
-    /// [`TelemetryHandle::spawn_with`](crate::telemetry::TelemetryHandle::spawn_with)
-    /// and
-    /// [`RuntimeTelemetryHandle::spawn_with`](crate::telemetry::RuntimeTelemetryHandle::spawn_with).
-    /// The constructor and fields are private so callers cannot construct a
-    /// `TracedFuture<F>` directly.
-    ///
     /// On first poll, `TracedFuture<F>` resolves the surrounding Tokio task ID
     /// and uses it for task instrumentation. If the future is polled outside a
     /// Tokio task context, it runs as a transparent passthrough without wake
