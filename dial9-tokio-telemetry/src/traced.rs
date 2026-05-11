@@ -1,4 +1,4 @@
-//! `Traced<F>` future wrapper for wake event capture and task dump collection.
+//! Future wrappers for task instrumentation.
 
 use crate::rate_limit::rate_limited;
 use crate::telemetry::recorder::SharedState;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-/// Handle used by `Traced<F>` to emit events into the telemetry system.
+/// Handle used by instrumented futures to emit events into the telemetry system.
 #[derive(Clone)]
 pub(crate) struct TracedHandle {
     pub(crate) shared: Arc<SharedState>,
@@ -23,35 +23,85 @@ impl std::fmt::Debug for TracedHandle {
     }
 }
 
+#[cfg(feature = "taskdump")]
+type MaybeTaskDumped<F> = crate::task_dumped::TaskDumped<F>;
+
+#[cfg(not(feature = "taskdump"))]
+type MaybeTaskDumped<F> = F;
+
+type InstrumentedFuture<F> = WakeTracked<MaybeTaskDumped<F>>;
+
 pin_project! {
-    /// Future wrapper that captures wake events (and later, task dumps).
+    /// Future wrapper produced by `spawn_with` for custom spawn APIs.
     ///
     /// Values of this type are produced by
     /// [`TelemetryHandle::spawn_with`](crate::telemetry::TelemetryHandle::spawn_with)
     /// and
     /// [`RuntimeTelemetryHandle::spawn_with`](crate::telemetry::RuntimeTelemetryHandle::spawn_with).
     /// The constructor and fields are private so callers cannot construct a
-    /// `Traced<F>` directly.
+    /// `TracedFuture<F>` directly.
     ///
-    /// On first poll, `Traced<F>` resolves the surrounding Tokio task ID and
-    /// uses it for wake-event tracking. If the future is polled outside a
+    /// On first poll, `TracedFuture<F>` resolves the surrounding Tokio task ID
+    /// and uses it for task instrumentation. If the future is polled outside a
     /// Tokio task context, it runs as a transparent passthrough without wake
-    /// tracking.
-    pub struct Traced<F> {
+    /// tracking or task dumps.
+    pub struct TracedFuture<F> {
         #[pin]
-        inner: F,
-        handle: Option<TracedHandle>,
-        waker_data: Option<Arc<TracedWakerData>>, // reused across polls to avoid a per-poll Arc allocation
+        state: TracedFutureState<F>,
     }
 }
 
-impl<F> Traced<F> {
+impl<F> std::fmt::Debug for TracedFuture<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TracedFuture").finish_non_exhaustive()
+    }
+}
+
+impl<F> TracedFuture<F> {
     pub(crate) fn new(inner: F, handle: Option<TracedHandle>) -> Self {
         Self {
-            inner,
-            handle,
-            waker_data: None,
+            state: TracedFutureState::Init { inner, handle },
         }
+    }
+}
+
+pin_project! {
+    #[project = TracedFutureStateProj]
+    #[project_replace = TracedFutureStateProjReplace]
+    enum TracedFutureState<F> {
+        Init {
+            inner: F,
+            handle: Option<TracedHandle>,
+        },
+        Passthrough {
+            #[pin]
+            inner: F,
+        },
+        Instrumented {
+            #[pin]
+            inner: InstrumentedFuture<F>,
+        },
+        Empty,
+    }
+}
+
+pin_project! {
+    /// Future wrapper that captures wake events for a known Tokio task.
+    pub(crate) struct WakeTracked<F> {
+        #[pin]
+        inner: F,
+        waker_data: Arc<TracedWakerData>, // reused across polls to avoid a per-poll Arc allocation
+    }
+}
+
+impl<F> WakeTracked<F> {
+    pub(crate) fn new(inner: F, handle: TracedHandle, task_id: TaskId) -> Self {
+        let waker_data = Arc::new(TracedWakerData {
+            inner: AtomicWaker::new(),
+            woken_task_id: task_id,
+            shared: handle.shared.clone(),
+        });
+        Self { inner, waker_data }
     }
 }
 
@@ -98,34 +148,68 @@ fn make_traced_waker(data: Arc<TracedWakerData>) -> Waker {
     arc_waker(data)
 }
 
-impl<F: Future> Future for Traced<F> {
+fn make_instrumented<F>(inner: F, handle: TracedHandle, task_id: TaskId) -> InstrumentedFuture<F>
+where
+    F: Future,
+{
+    let shared = handle.shared.clone();
+    #[cfg(feature = "taskdump")]
+    let inner = crate::task_dumped::TaskDumped::new(inner, shared, task_id);
+    #[cfg(not(feature = "taskdump"))]
+    let _ = shared;
+
+    WakeTracked::new(inner, handle, task_id)
+}
+
+impl<F: Future> Future for TracedFuture<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.project().state;
+
+        loop {
+            match state.as_mut().project() {
+                TracedFutureStateProj::Init { .. } => {}
+                TracedFutureStateProj::Passthrough { inner } => return inner.poll(cx),
+                TracedFutureStateProj::Instrumented { inner } => return inner.poll(cx),
+                TracedFutureStateProj::Empty => {
+                    unreachable!("TracedFutureState::Empty is only used during state transitions")
+                }
+            }
+
+            let TracedFutureStateProjReplace::Init { inner, handle } =
+                state.as_mut().project_replace(TracedFutureState::Empty)
+            else {
+                unreachable!("Init was matched immediately before project_replace")
+            };
+
+            let Some(handle) = handle else {
+                state.set(TracedFutureState::Passthrough { inner });
+                continue;
+            };
+
+            let Some(task_id) = tokio::task::try_id().map(TaskId::from) else {
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(
+                        "Traced future polled outside a Tokio task context; running future without instrumentation"
+                    );
+                });
+                state.set(TracedFutureState::Passthrough { inner });
+                continue;
+            };
+
+            let inner = make_instrumented(inner, handle, task_id);
+            state.set(TracedFutureState::Instrumented { inner });
+        }
+    }
+}
+
+impl<F: Future> Future for WakeTracked<F> {
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-
-        if this.waker_data.is_none()
-            && let Some(handle) = this.handle.take()
-        {
-            let Some(task_id) = tokio::task::try_id().map(TaskId::from) else {
-                rate_limited!(Duration::from_secs(60), {
-                    tracing::warn!(
-                        "Traced future polled outside a Tokio task context; running future without wake tracking"
-                    );
-                });
-                return this.inner.poll(cx);
-            };
-
-            *this.waker_data = Some(Arc::new(TracedWakerData {
-                inner: AtomicWaker::new(),
-                woken_task_id: task_id,
-                shared: handle.shared.clone(),
-            }));
-        }
-
-        let Some(waker_data) = this.waker_data.as_ref().cloned() else {
-            return this.inner.poll(cx);
-        };
+        let waker_data = this.waker_data.clone();
 
         if !waker_data.shared.is_enabled() {
             return this.inner.poll(cx);
@@ -158,31 +242,34 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn traced_consumes_handle_after_missing_task_context() {
+    fn traced_future_falls_back_after_missing_task_context() {
         let guard = TelemetryCore::builder().writer(NullWriter).build().unwrap();
         let handle = guard
             .handle()
             .traced_handle()
             .expect("enabled handle yields TracedHandle");
 
-        let mut future = Traced::new(std::future::pending::<()>(), Some(handle));
+        let mut future = TracedFuture::new(std::future::pending::<()>(), Some(handle));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
-        assert!(future.handle.is_none());
-        assert!(future.waker_data.is_none());
+        assert!(matches!(
+            future.state,
+            TracedFutureState::Passthrough { .. }
+        ));
 
         // This is important to ensure the missing-task fallback is one-way:
-        // after the first failed task-id lookup, `handle` has been consumed
-        // and later polls go straight through without retrying `try_id()` or
-        // warning again.
+        // after the first failed task-id lookup, later polls go straight
+        // through without retrying `try_id()` or warning again.
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
-        assert!(future.handle.is_none());
-        assert!(future.waker_data.is_none());
+        assert!(matches!(
+            future.state,
+            TracedFutureState::Passthrough { .. }
+        ));
     }
 
-    /// Verify that `Traced<F>` records a `WakeEvent` whose `woken_task_id`
+    /// Verify that the wake-tracking wrapper records a `WakeEvent` whose `woken_task_id`
     /// matches the spawned task when a `Notify` wakes it.
     ///
     /// This is an integration test: events are written to a real file via
@@ -212,7 +299,7 @@ mod tests {
         let spawned_id_write = spawned_id.clone();
 
         runtime.block_on(async {
-            // Spawn a task wrapped in Traced that blocks on a Notify.
+            // Spawn a traced task that blocks on a Notify.
             let join = handle.spawn(async move {
                 *spawned_id_write.lock().unwrap() = tokio::task::try_id()
                     .map(TaskId::from)

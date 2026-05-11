@@ -1,11 +1,10 @@
 //! `TaskDumped<F>` wraps a future and captures async backtraces at yield
 //! points using Poisson sampling keyed on idle duration.
 //!
-//! This wrapper is intentionally separate from [`crate::traced::Traced`]: the
-//! wake-event capture in `Traced` runs on every instrumented spawn regardless
-//! of the `taskdump` feature, while task-dump capture is gated behind the
-//! `taskdump` feature and its own runtime toggle.  Typical stacking is
-//! `Traced<TaskDumped<F>>`.
+//! This wrapper is intentionally separate from the wake-event wrapper: wake
+//! capture runs on every instrumented spawn regardless of the `taskdump`
+//! feature, while task-dump capture is gated behind the `taskdump` feature and
+//! its own runtime toggle. Typical stacking is `WakeTracked<TaskDumped<F>>`.
 //!
 //! # Sampling model
 //!

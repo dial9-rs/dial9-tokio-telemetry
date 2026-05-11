@@ -44,7 +44,7 @@ fn spawn_with_joinset_emits_wake_events() {
     runtime.block_on(async move {
         let mut set: JoinSet<()> = JoinSet::new();
         // `yield_now().await` self-wakes through the active waker, which
-        // here is our `Traced` waker — so a `WakeEvent` fires without
+        // here is our wake-tracking waker — so a `WakeEvent` fires without
         // depending on cross-task scheduling order.
         handle.spawn_with(
             async move {

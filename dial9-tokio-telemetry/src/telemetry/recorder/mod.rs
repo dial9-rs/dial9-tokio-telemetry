@@ -507,11 +507,10 @@ impl TelemetryHandle {
         match self.traced_handle() {
             Some(traced_handle) => {
                 let _guard = InstrumentedSpawnGuard::enter();
-                tokio::spawn(async move {
-                    let task_id = TaskId::from(tokio::task::id());
-                    let inner = wrap_task_dumped(future, traced_handle.shared.clone(), task_id);
-                    crate::telemetry::Traced::new(inner, Some(traced_handle)).await
-                })
+                tokio::spawn(crate::telemetry::TracedFuture::new(
+                    future,
+                    Some(traced_handle),
+                ))
             }
             None => tokio::spawn(future),
         }
@@ -519,7 +518,7 @@ impl TelemetryHandle {
 
     /// Spawn a wake-tracked future through a user-supplied spawn function.
     ///
-    /// `spawn_fn` is invoked synchronously with a [`Traced<F>`] that
+    /// `spawn_fn` is invoked synchronously with a [`TracedFuture<F>`] that
     /// the caller is expected to spawn immediately. The closure's return
     /// value is forwarded back to the caller, so you can keep the
     /// [`tokio::task::JoinHandle`], [`tokio::task::AbortHandle`], or
@@ -554,45 +553,26 @@ impl TelemetryHandle {
     /// # }
     /// ```
     ///
-    /// [`Traced<F>`]: crate::telemetry::Traced
+    /// [`TracedFuture<F>`]: crate::telemetry::TracedFuture
     pub fn spawn_with<F, S>(
         &self,
         future: F,
-        spawn_fn: impl FnOnce(crate::telemetry::Traced<F>) -> S,
+        spawn_fn: impl FnOnce(crate::telemetry::TracedFuture<F>) -> S,
     ) -> S
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let _guard = InstrumentedSpawnGuard::enter();
-        spawn_fn(crate::telemetry::Traced::new(future, self.traced_handle()))
+        let traced_handle = self.traced_handle();
+        let future = crate::telemetry::TracedFuture::new(future, traced_handle.clone());
+        match traced_handle {
+            Some(_) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                spawn_fn(future)
+            }
+            None => spawn_fn(future),
+        }
     }
-}
-
-/// If the `taskdump` feature is on, wrap `future` in `TaskDumped<F>`; otherwise
-/// pass through unchanged. Factored so `TelemetryHandle::spawn` stays readable.
-#[cfg(feature = "taskdump")]
-fn wrap_task_dumped<F>(
-    future: F,
-    shared: Arc<crate::telemetry::recorder::SharedState>,
-    task_id: TaskId,
-) -> crate::task_dumped::TaskDumped<F>
-where
-    F: std::future::Future,
-{
-    crate::task_dumped::TaskDumped::new(future, shared, task_id)
-}
-
-#[cfg(not(feature = "taskdump"))]
-fn wrap_task_dumped<F>(
-    future: F,
-    _shared: Arc<crate::telemetry::recorder::SharedState>,
-    _task_id: TaskId,
-) -> F
-where
-    F: std::future::Future,
-{
-    future
 }
 
 /// Spawn a traced task on the current tokio runtime.
@@ -657,9 +637,16 @@ impl RuntimeTelemetryHandle {
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let _guard = InstrumentedSpawnGuard::enter();
-        self.runtime
-            .spawn(crate::telemetry::Traced::new(future, self.traced.clone()))
+        match self.traced.clone() {
+            Some(traced_handle) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                self.runtime.spawn(crate::telemetry::TracedFuture::new(
+                    future,
+                    Some(traced_handle),
+                ))
+            }
+            None => self.runtime.spawn(future),
+        }
     }
 
     /// Spawn a wake-tracked future through a user-supplied spawn function.
@@ -685,18 +672,24 @@ impl RuntimeTelemetryHandle {
     /// # }
     /// ```
     ///
-    /// [`Traced<F>`]: crate::telemetry::Traced
+    /// [`TracedFuture<F>`]: crate::telemetry::TracedFuture
     pub fn spawn_with<F, S>(
         &self,
         future: F,
-        spawn_fn: impl FnOnce(crate::telemetry::Traced<F>) -> S,
+        spawn_fn: impl FnOnce(crate::telemetry::TracedFuture<F>) -> S,
     ) -> S
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let _guard = InstrumentedSpawnGuard::enter();
-        spawn_fn(crate::telemetry::Traced::new(future, self.traced.clone()))
+        let future = crate::telemetry::TracedFuture::new(future, self.traced.clone());
+        match self.traced {
+            Some(_) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                spawn_fn(future)
+            }
+            None => spawn_fn(future),
+        }
     }
 }
 
@@ -2586,7 +2579,7 @@ mod tests {
             .build_and_attach_to_telemetry(builder_b, &guard)
             .unwrap();
 
-        // Use handle.spawn on runtime B to get Traced waker wrapping → wake events.
+        // Use handle.spawn on runtime B to get wake-tracked wrapping → wake events.
         let handle = guard.handle();
         runtime_b.block_on(async {
             let mut handles = Vec::new();
@@ -3004,7 +2997,7 @@ mod tests {
         drop(runtime);
         drop(guard);
 
-        // Verify wake events were recorded (handle.spawn wraps with Traced)
+        // Verify wake events were recorded (handle.spawn wraps with wake tracking)
         let raw = data.lock().unwrap();
         let events = crate::telemetry::format::decode_events(&raw).unwrap();
         let wake_count = events
