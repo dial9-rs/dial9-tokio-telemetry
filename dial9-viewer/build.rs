@@ -261,11 +261,9 @@ fn generate_header(skills: &[SkillInfo]) -> String {
 
 /// Sections from the dial9-tokio-telemetry README to include in the setup skill.
 const SETUP_SECTIONS: &[&str] = &[
-    "Prerequisites",
-    "Setup",
-    "Root future limitation",
+    "Quick Start",
+    "Tokio events",
     "Tracing span events (opt-in)",
-    "Wake event tracking",
 ];
 
 /// Generate the setup skill from the crate README.
@@ -285,7 +283,7 @@ fn generate_setup_from_readme(manifest_dir: &str, out_dir: &str) -> String {
 
     // Write the full SKILL.md (with frontmatter) for the unpack command
     let mut full = String::from(
-        "---\nname: dial9-setup\ndescription: How to instrument your app with dial9-tokio-telemetry. Covers prerequisites, macro and manual setup, the tracing layer, and wake event tracking.\n---\n\n",
+        "---\nname: dial9-setup\ndescription: How to instrument your app with dial9-tokio-telemetry. Covers quick start, Tokio events, and the tracing layer.\n---\n\n",
     );
     full.push_str(&body);
 
