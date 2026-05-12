@@ -29,7 +29,7 @@ type MaybeTaskDumped<F> = crate::task_dumped::TaskDumped<F>;
 #[cfg(not(feature = "taskdump"))]
 type MaybeTaskDumped<F> = F;
 
-type InstrumentedFuture<F> = WakeTracked<MaybeTaskDumped<F>>;
+type InstrumentedFuture<F> = WakeTraced<MaybeTaskDumped<F>>;
 
 pin_project! {
     /// Future wrapper produced by `spawn_with` for custom spawn APIs.
@@ -80,14 +80,14 @@ pin_project! {
 
 pin_project! {
     /// Future wrapper that captures wake events for a known Tokio task.
-    pub(crate) struct WakeTracked<F> {
+    pub(crate) struct WakeTraced<F> {
         #[pin]
         inner: F,
         waker_data: Arc<TracedWakerData>, // reused across polls to avoid a per-poll Arc allocation
     }
 }
 
-impl<F> WakeTracked<F> {
+impl<F> WakeTraced<F> {
     pub(crate) fn new(inner: F, handle: TracedHandle, task_id: TaskId) -> Self {
         let waker_data = Arc::new(TracedWakerData {
             inner: AtomicWaker::new(),
@@ -151,7 +151,7 @@ where
     #[cfg(not(feature = "taskdump"))]
     let _ = shared;
 
-    WakeTracked::new(inner, handle, task_id)
+    WakeTraced::new(inner, handle, task_id)
 }
 
 impl<F: Future> Future for TracedFuture<F> {
@@ -197,7 +197,7 @@ impl<F: Future> Future for TracedFuture<F> {
     }
 }
 
-impl<F: Future> Future for WakeTracked<F> {
+impl<F: Future> Future for WakeTraced<F> {
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

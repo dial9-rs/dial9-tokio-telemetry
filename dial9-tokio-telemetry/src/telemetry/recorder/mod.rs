@@ -518,11 +518,13 @@ impl TelemetryHandle {
 
     /// Spawn an instrumented future through a user-supplied spawn function.
     ///
-    /// `spawn_fn` is invoked synchronously with a [`TracedFuture<F>`] that
-    /// the caller is expected to spawn immediately. The closure's return
-    /// value is forwarded back to the caller, so you can keep the
-    /// [`tokio::task::JoinHandle`], [`tokio::task::AbortHandle`], or
-    /// whatever the spawn function returns.
+    /// `spawn_fn` must synchronously perform a real Tokio spawn (or an
+    /// equivalent operation) before returning; do not defer the future or run
+    /// it with `block_on`. To record the resulting task as instrumented, spawn
+    /// on a dial9-traced runtime with task tracking enabled. The closure's
+    /// return value is forwarded back to the caller, so you can keep the
+    /// [`tokio::task::JoinHandle`], [`tokio::task::AbortHandle`], or whatever
+    /// the spawn function returns.
     ///
     /// # Examples
     ///
@@ -651,12 +653,13 @@ impl RuntimeTelemetryHandle {
 
     /// Spawn an instrumented future through a user-supplied spawn function.
     ///
-    /// Mirrors [`TelemetryHandle::spawn_with`] but does not require an
-    /// ambient tokio runtime context — `spawn_fn` is invoked on the
-    /// calling thread, so it is the closure's responsibility to target
-    /// this handle's runtime (typically via
-    /// [`tokio::task::JoinSet::spawn_on`] passing the appropriate
-    /// [`tokio::runtime::Handle`]).
+    /// Mirrors [`TelemetryHandle::spawn_with`] for callers that already hold a
+    /// [`RuntimeTelemetryHandle`]. `spawn_fn` must synchronously perform a real
+    /// Tokio spawn (or an equivalent operation) before returning; do not defer
+    /// the future or run it with `block_on`. To record the resulting task as
+    /// instrumented, target a dial9-traced runtime with task tracking enabled,
+    /// typically via [`tokio::task::JoinSet::spawn_on`] with the appropriate
+    /// [`tokio::runtime::Handle`].
     ///
     /// # Examples
     ///
