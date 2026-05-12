@@ -35,14 +35,12 @@ fn capture_and_symbolize() {
         .iter()
         .filter_map(|&addr| resolve_symbol_with_maps(addr, &symbolizer, &maps).name)
         .collect();
-
-    let joined = names.join("\n");
-    assert!(
-        names.iter().any(|n| n.contains("inner")),
-        "expected `inner` in stack:\n{joined}"
-    );
-    assert!(
-        names.iter().any(|n| n.contains("outer")),
-        "expected `outer` in stack:\n{joined}"
+    assert_eq!(
+        names[0..3],
+        vec![
+            "symbolize_stack::inner",
+            "symbolize_stack::outer",
+            "symbolize_stack::capture_and_symbolize"
+        ]
     );
 }
