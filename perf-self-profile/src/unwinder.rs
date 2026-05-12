@@ -303,216 +303,196 @@ mod tests {
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
-    #[test]
-    fn verify_handler_true_after_install() {
-        let u = Unwinder::install().unwrap();
-        assert!(u.verify_handler(), "handler should be active after install");
-    }
+    mod linux {
+        use super::*;
 
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    #[test]
-    fn capture_produces_frames() {
-        let unwinder = Unwinder::install().unwrap();
-        #[inline(never)]
-        fn helper(u: &Unwinder) -> (CaptureResult, [u64; 64]) {
-            let mut out = [0u64; 64];
-            // SAFETY: handler installed via Unwinder::install above; test thread
-            // is not inside a signal handler.
-            let result = unsafe { u.capture(&mut out) };
-            std::hint::black_box(&out);
-            (result, out)
-        }
-        let (result, out) = helper(&unwinder);
-        assert!(
-            result.frames_written >= 2,
-            "expected at least 2 frames, got {}",
-            result.frames_written
-        );
-        for (i, &addr) in out.iter().enumerate().take(result.frames_written) {
-            assert_ne!(addr, 0, "frame {i} must be non-zero");
-        }
-    }
-
-    /// Tighter version of the frame-0 contract test: verify that frame 0
-    /// lands inside `helper` (the caller of `capture`) rather than inside
-    /// `Unwinder::capture` itself. This catches the bug where the old
-    /// double-`#[inline(never)]` layering made frame 0 point at an
-    /// instruction inside `Unwinder::capture`'s body.
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    #[test]
-    fn frame_zero_points_into_caller_of_capture() {
-        let unwinder = Unwinder::install().unwrap();
-
-        #[inline(never)]
-        fn helper(u: &Unwinder) -> u64 {
-            let mut out = [0u64; 64];
-            // SAFETY: same as capture_produces_frames.
-            let result = unsafe { u.capture(&mut out) };
-            std::hint::black_box(&out);
-            assert!(result.frames_written >= 1);
-            out[0]
+        #[test]
+        fn verify_handler_true_after_install() {
+            let u = Unwinder::install().unwrap();
+            assert!(u.verify_handler(), "handler should be active after install");
         }
 
-        let frame0 = helper(&unwinder);
-        let helper_start = helper as *const () as u64;
-        let capture_fn = Unwinder::capture as *const () as u64;
-
-        // Frame 0 must NOT be inside Unwinder::capture's body. Allow a
-        // generous 4 KiB window around its entry in case of debug bloat.
-        let capture_window = 4096u64;
-        assert!(
-            !(frame0 >= capture_fn && frame0 < capture_fn + capture_window),
-            "frame 0 {:#x} must not be inside Unwinder::capture [{:#x}..{:#x})",
-            frame0,
-            capture_fn,
-            capture_fn + capture_window,
-        );
-
-        // Stronger: frame 0 should land inside `helper`'s body. Debug
-        // builds can be large, so use a 64 KiB window as an upper bound.
-        let helper_window = 64 * 1024u64;
-        assert!(
-            frame0 >= helper_start && frame0 < helper_start + helper_window,
-            "frame 0 {:#x} should be inside helper [{:#x}..{:#x})",
-            frame0,
-            helper_start,
-            helper_start + helper_window,
-        );
-    }
-
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    #[test]
-    fn capture_respects_output_buffer_limit() {
-        let unwinder = Unwinder::install().unwrap();
-        let mut out = [0u64; 1];
-        // SAFETY: handler installed; test context is not a signal handler.
-        let result = unsafe { unwinder.capture(&mut out) };
-        assert!(
-            result.frames_written <= 1,
-            "expected at most 1 frame, got {}",
-            result.frames_written
-        );
-        if result.frames_written == 1 {
-            assert_ne!(out[0], 0, "frame 0 must be non-zero when written");
-        }
-    }
-
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    #[test]
-    fn capture_reports_truncation_with_tiny_buffer() {
-        let unwinder = Unwinder::install().unwrap();
-        // Build a small but real call chain so a 1-slot buffer is bound
-        // to truncate.
-        #[inline(never)]
-        fn depth_2(u: &Unwinder) -> CaptureResult {
-            let mut out = [0u64; 1];
-            // SAFETY: handler installed above.
-            let r = unsafe { u.capture(&mut out) };
-            std::hint::black_box(&out);
-            r
-        }
-        #[inline(never)]
-        fn depth_1(u: &Unwinder) -> CaptureResult {
-            std::hint::black_box(depth_2(u))
-        }
-        let result = depth_1(&unwinder);
-        assert_eq!(result.frames_written, 1);
-        assert!(
-            result.truncated,
-            "a 1-slot buffer with a multi-frame stack must report truncated"
-        );
-    }
-
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    #[test]
-    fn capture_with_empty_buffer_reports_truncation() {
-        let unwinder = Unwinder::install().unwrap();
-        // SAFETY: handler installed above.
-        let result = unsafe { unwinder.capture(&mut []) };
-        assert_eq!(result.frames_written, 0);
-        assert!(result.truncated);
-    }
-
-    /// In debug builds, `capture` panics via `debug_assert!` when its SIGSEGV
-    /// handler has been replaced out from under it. This protects against
-    /// third-party signal handlers silently breaking stack-walk fault
-    /// recovery.
-    ///
-    /// Nextest runs each test in its own process, so replacing the SIGSEGV
-    /// handler here cannot affect sibling tests.
-    #[cfg(all(
-        debug_assertions,
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    #[test]
-    fn capture_debug_asserts_when_handler_replaced() {
-        use std::panic::{AssertUnwindSafe, catch_unwind};
-
-        let unwinder = Unwinder::install().unwrap();
-        assert!(unwinder.verify_handler());
-
-        // Replace SIGSEGV with SIG_IGN so verify_handler() returns false.
-        // SAFETY: we restore our handler below on all exit paths via the
-        // guard; nextest's process isolation limits blast radius even if
-        // restoration is skipped.
-        let mut new_action: libc::sigaction = unsafe { std::mem::zeroed() };
-        new_action.sa_sigaction = libc::SIG_IGN;
-        unsafe { libc::sigemptyset(&mut new_action.sa_mask) };
-        let rc = unsafe { libc::sigaction(libc::SIGSEGV, &new_action, std::ptr::null_mut()) };
-        assert_eq!(rc, 0, "failed to replace SIGSEGV handler");
-
-        struct RestoreGuard;
-        impl Drop for RestoreGuard {
-            fn drop(&mut self) {
-                // Best-effort restore of our handler. `Unwinder::install`
-                // is a no-op after the first successful call (idempotent
-                // flag), so use `sigaction` directly. Nextest's
-                // per-test process isolation means even if this fails,
-                // other tests are unaffected.
-                // SAFETY: process-global signal state; we rewrite
-                // SIGSEGV back to SIG_DFL so any subsequent fault during
-                // teardown terminates cleanly rather than being ignored.
-                let mut dfl: libc::sigaction = unsafe { std::mem::zeroed() };
-                dfl.sa_sigaction = libc::SIG_DFL;
-                unsafe { libc::sigemptyset(&mut dfl.sa_mask) };
-                let _ = unsafe { libc::sigaction(libc::SIGSEGV, &dfl, std::ptr::null_mut()) };
+        #[test]
+        fn capture_produces_frames() {
+            let unwinder = Unwinder::install().unwrap();
+            #[inline(never)]
+            fn helper(u: &Unwinder) -> (CaptureResult, [u64; 64]) {
+                let mut out = [0u64; 64];
+                // SAFETY: handler installed via Unwinder::install above; test thread
+                // is not inside a signal handler.
+                let result = unsafe { u.capture(&mut out) };
+                std::hint::black_box(&out);
+                (result, out)
+            }
+            let (result, out) = helper(&unwinder);
+            assert!(
+                result.frames_written >= 2,
+                "expected at least 2 frames, got {}",
+                result.frames_written
+            );
+            for (i, &addr) in out.iter().enumerate().take(result.frames_written) {
+                assert_ne!(addr, 0, "frame {i} must be non-zero");
             }
         }
-        let _guard = RestoreGuard;
 
-        assert!(
-            !unwinder.verify_handler(),
-            "precondition: handler should appear replaced"
-        );
+        /// Tighter version of the frame-0 contract test: verify that frame 0
+        /// lands inside `helper` (the caller of `capture`) rather than inside
+        /// `Unwinder::capture` itself. This catches the bug where the old
+        /// double-`#[inline(never)]` layering made frame 0 point at an
+        /// instruction inside `Unwinder::capture`'s body.
+        #[test]
+        fn frame_zero_points_into_caller_of_capture() {
+            let unwinder = Unwinder::install().unwrap();
 
-        // capture() must panic via debug_assert before doing any stack
-        // walking.
-        let mut out = [0u64; 16];
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            // SAFETY: we intentionally violate the "handler installed"
-            // precondition to verify the debug_assert fires. The panic
-            // from debug_assert aborts before the frame walk runs.
-            let _ = unsafe { unwinder.capture(&mut out) };
-        }));
-        assert!(
-            result.is_err(),
-            "capture should panic via debug_assert when handler is replaced"
-        );
+            #[inline(never)]
+            fn helper(u: &Unwinder) -> u64 {
+                let mut out = [0u64; 64];
+                // SAFETY: same as capture_produces_frames.
+                let result = unsafe { u.capture(&mut out) };
+                std::hint::black_box(&out);
+                assert!(result.frames_written >= 1);
+                out[0]
+            }
+
+            let frame0 = helper(&unwinder);
+            let helper_start = helper as *const () as u64;
+            let capture_fn = Unwinder::capture as *const () as u64;
+
+            // Frame 0 must NOT be inside Unwinder::capture's body. Allow a
+            // generous 4 KiB window around its entry in case of debug bloat.
+            let capture_window = 4096u64;
+            assert!(
+                !(frame0 >= capture_fn && frame0 < capture_fn + capture_window),
+                "frame 0 {:#x} must not be inside Unwinder::capture [{:#x}..{:#x})",
+                frame0,
+                capture_fn,
+                capture_fn + capture_window,
+            );
+
+            // Stronger: frame 0 should land inside `helper`'s body. Debug
+            // builds can be large, so use a 64 KiB window as an upper bound.
+            let helper_window = 64 * 1024u64;
+            assert!(
+                frame0 >= helper_start && frame0 < helper_start + helper_window,
+                "frame 0 {:#x} should be inside helper [{:#x}..{:#x})",
+                frame0,
+                helper_start,
+                helper_start + helper_window,
+            );
+        }
+
+        #[test]
+        fn capture_respects_output_buffer_limit() {
+            let unwinder = Unwinder::install().unwrap();
+            let mut out = [0u64; 1];
+            // SAFETY: handler installed; test context is not a signal handler.
+            let result = unsafe { unwinder.capture(&mut out) };
+            assert!(
+                result.frames_written <= 1,
+                "expected at most 1 frame, got {}",
+                result.frames_written
+            );
+            if result.frames_written == 1 {
+                assert_ne!(out[0], 0, "frame 0 must be non-zero when written");
+            }
+        }
+
+        #[test]
+        fn capture_reports_truncation_with_tiny_buffer() {
+            let unwinder = Unwinder::install().unwrap();
+            // Build a small but real call chain so a 1-slot buffer is bound
+            // to truncate.
+            #[inline(never)]
+            fn depth_2(u: &Unwinder) -> CaptureResult {
+                let mut out = [0u64; 1];
+                // SAFETY: handler installed above.
+                let r = unsafe { u.capture(&mut out) };
+                std::hint::black_box(&out);
+                r
+            }
+            #[inline(never)]
+            fn depth_1(u: &Unwinder) -> CaptureResult {
+                std::hint::black_box(depth_2(u))
+            }
+            let result = depth_1(&unwinder);
+            assert_eq!(result.frames_written, 1);
+            assert!(
+                result.truncated,
+                "a 1-slot buffer with a multi-frame stack must report truncated"
+            );
+        }
+
+        #[test]
+        fn capture_with_empty_buffer_reports_truncation() {
+            let unwinder = Unwinder::install().unwrap();
+            // SAFETY: handler installed above.
+            let result = unsafe { unwinder.capture(&mut []) };
+            assert_eq!(result.frames_written, 0);
+            assert!(result.truncated);
+        }
+
+        /// In debug builds, `capture` panics via `debug_assert!` when its SIGSEGV
+        /// handler has been replaced out from under it. This protects against
+        /// third-party signal handlers silently breaking stack-walk fault
+        /// recovery.
+        ///
+        /// Nextest runs each test in its own process, so replacing the SIGSEGV
+        /// handler here cannot affect sibling tests.
+        #[cfg(debug_assertions)]
+        #[test]
+        fn capture_debug_asserts_when_handler_replaced() {
+            use std::panic::{AssertUnwindSafe, catch_unwind};
+
+            let unwinder = Unwinder::install().unwrap();
+            assert!(unwinder.verify_handler());
+
+            // Replace SIGSEGV with SIG_IGN so verify_handler() returns false.
+            // SAFETY: we restore our handler below on all exit paths via the
+            // guard; nextest's process isolation limits blast radius even if
+            // restoration is skipped.
+            let mut new_action: libc::sigaction = unsafe { std::mem::zeroed() };
+            new_action.sa_sigaction = libc::SIG_IGN;
+            unsafe { libc::sigemptyset(&mut new_action.sa_mask) };
+            let rc = unsafe { libc::sigaction(libc::SIGSEGV, &new_action, std::ptr::null_mut()) };
+            assert_eq!(rc, 0, "failed to replace SIGSEGV handler");
+
+            struct RestoreGuard;
+            impl Drop for RestoreGuard {
+                fn drop(&mut self) {
+                    // Best-effort restore of our handler. `Unwinder::install`
+                    // is a no-op after the first successful call (idempotent
+                    // flag), so use `sigaction` directly. Nextest's
+                    // per-test process isolation means even if this fails,
+                    // other tests are unaffected.
+                    // SAFETY: process-global signal state; we rewrite
+                    // SIGSEGV back to SIG_DFL so any subsequent fault during
+                    // teardown terminates cleanly rather than being ignored.
+                    let mut dfl: libc::sigaction = unsafe { std::mem::zeroed() };
+                    dfl.sa_sigaction = libc::SIG_DFL;
+                    unsafe { libc::sigemptyset(&mut dfl.sa_mask) };
+                    let _ = unsafe { libc::sigaction(libc::SIGSEGV, &dfl, std::ptr::null_mut()) };
+                }
+            }
+            let _guard = RestoreGuard;
+
+            assert!(
+                !unwinder.verify_handler(),
+                "precondition: handler should appear replaced"
+            );
+
+            // capture() must panic via debug_assert before doing any stack
+            // walking.
+            let mut out = [0u64; 16];
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                // SAFETY: we intentionally violate the "handler installed"
+                // precondition to verify the debug_assert fires. The panic
+                // from debug_assert aborts before the frame walk runs.
+                let _ = unsafe { unwinder.capture(&mut out) };
+            }));
+            assert!(
+                result.is_err(),
+                "capture should panic via debug_assert when handler is replaced"
+            );
+        }
     }
 }
