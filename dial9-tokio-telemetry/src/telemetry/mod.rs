@@ -17,6 +17,7 @@ pub mod task_dump_config;
 pub(crate) mod task_metadata;
 pub(crate) mod writer;
 
+pub use crate::traced::TracedFuture;
 pub use buffer::{Encodable, ThreadLocalEncoder};
 pub use events::{CpuSampleSource, TelemetryEvent, clock_monotonic_ns};
 pub use format::{

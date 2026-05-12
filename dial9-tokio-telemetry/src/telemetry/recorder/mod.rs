@@ -33,9 +33,9 @@ crate::primitives::thread_local! {
     /// cleared in `on_thread_stop`. Enables [`TelemetryHandle::current`].
     static CURRENT_HANDLE: RefCell<Option<TelemetryHandle>> = const { RefCell::new(None) };
 
-    /// Set by `TelemetryHandle::spawn()` before calling `tokio::spawn()`,
-    /// so the `on_task_spawn` hook can distinguish instrumented from raw spawns.
-    static INSTRUMENTED_SPAWN: Cell<bool> = const { Cell::new(false) };
+    /// Nest count for [`InstrumentedSpawnGuard`]. `on_task_spawn` treats
+    /// any value `> 0` as an instrumented spawn.
+    static INSTRUMENTED_SPAWN: Cell<u32> = const { Cell::new(0) };
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +204,7 @@ fn register_hooks(
             s5.if_enabled(|buf| {
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
-                let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get());
+                let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get()) > 0;
                 let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
                 buf.record_encodable_event(&runtime_context::TaskSpawn {
                     timestamp_ns,
@@ -506,42 +506,75 @@ impl TelemetryHandle {
     {
         match self.traced_handle() {
             Some(traced_handle) => {
-                let _guard = InstrumentedSpawnGuard::set();
-                tokio::spawn(async move {
-                    let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-                    let inner = wrap_task_dumped(future, traced_handle.shared.clone(), task_id);
-                    crate::traced::Traced::new(inner, traced_handle, task_id).await
-                })
+                let _guard = InstrumentedSpawnGuard::enter();
+                tokio::spawn(crate::telemetry::TracedFuture::new(
+                    future,
+                    Some(traced_handle),
+                ))
             }
             None => tokio::spawn(future),
         }
     }
-}
 
-/// If the `taskdump` feature is on, wrap `future` in `TaskDumped<F>`; otherwise
-/// pass through unchanged. Factored so `TelemetryHandle::spawn` stays readable.
-#[cfg(feature = "taskdump")]
-fn wrap_task_dumped<F>(
-    future: F,
-    shared: Arc<crate::telemetry::recorder::SharedState>,
-    task_id: TaskId,
-) -> crate::task_dumped::TaskDumped<F>
-where
-    F: std::future::Future,
-{
-    crate::task_dumped::TaskDumped::new(future, shared, task_id)
-}
-
-#[cfg(not(feature = "taskdump"))]
-fn wrap_task_dumped<F>(
-    future: F,
-    _shared: Arc<crate::telemetry::recorder::SharedState>,
-    _task_id: TaskId,
-) -> F
-where
-    F: std::future::Future,
-{
-    future
+    /// Spawn an instrumented future through a user-supplied spawn function.
+    ///
+    /// `spawn_fn` must synchronously perform a real Tokio spawn (or an
+    /// equivalent operation) before returning; do not defer the future or run
+    /// it with `block_on`. To record the resulting task as instrumented, spawn
+    /// on a dial9-traced runtime with task tracking enabled. The closure's
+    /// return value is forwarded back to the caller, so you can keep the
+    /// [`tokio::task::JoinHandle`], [`tokio::task::AbortHandle`], or whatever
+    /// the spawn function returns.
+    ///
+    /// # Examples
+    ///
+    /// Spawn into a [`tokio::task::JoinSet`]:
+    ///
+    /// ```rust,no_run
+    /// # use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+    /// # use tokio::task::JoinSet;
+    /// # async fn work() {}
+    /// # async fn demo() {
+    /// let handle = TelemetryHandle::current();
+    /// let mut set: JoinSet<()> = JoinSet::new();
+    /// handle.spawn_with(work(), |f| set.spawn(f));
+    /// # }
+    /// ```
+    ///
+    /// Spawn into a [`tokio::task::JoinSet`] on a specific runtime:
+    ///
+    /// ```rust,no_run
+    /// # use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+    /// # use tokio::runtime::Runtime;
+    /// # use tokio::task::JoinSet;
+    /// # async fn work() {}
+    /// # fn demo(runtime: &Runtime) {
+    /// let handle = TelemetryHandle::current();
+    /// let mut set: JoinSet<()> = JoinSet::new();
+    /// handle.spawn_with(work(), |f| set.spawn_on(f, runtime.handle()));
+    /// # }
+    /// ```
+    ///
+    /// [`TracedFuture<F>`]: crate::telemetry::TracedFuture
+    pub fn spawn_with<F, S>(
+        &self,
+        future: F,
+        spawn_fn: impl FnOnce(crate::telemetry::TracedFuture<F>) -> S,
+    ) -> S
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let traced_handle = self.traced_handle();
+        let future = crate::telemetry::TracedFuture::new(future, traced_handle.clone());
+        match traced_handle {
+            Some(_) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                spawn_fn(future)
+            }
+            None => spawn_fn(future),
+        }
+    }
 }
 
 /// Spawn a traced task on the current tokio runtime.
@@ -565,24 +598,24 @@ where
     TelemetryHandle::current().spawn(future)
 }
 
-/// RAII guard that sets `INSTRUMENTED_SPAWN` to `true` on creation and
-/// resets it to `false` on drop, even if `tokio::spawn` panics.
+/// RAII guard that increments `INSTRUMENTED_SPAWN` on creation and
+/// decrements it on drop, even if the protected closure panics.
 struct InstrumentedSpawnGuard;
 
 impl InstrumentedSpawnGuard {
-    fn set() -> Self {
-        INSTRUMENTED_SPAWN.with(|c| c.set(true));
+    fn enter() -> Self {
+        INSTRUMENTED_SPAWN.with(|c| c.set(c.get().saturating_add(1)));
         Self
     }
 }
 
 impl Drop for InstrumentedSpawnGuard {
     fn drop(&mut self) {
-        INSTRUMENTED_SPAWN.with(|c| c.set(false));
+        INSTRUMENTED_SPAWN.with(|c| c.set(c.get().saturating_sub(1)));
     }
 }
 
-/// Handle for spawning wake-tracked futures on a specific runtime.
+/// Handle for spawning instrumented futures on a specific runtime.
 ///
 /// Returned by [`TraceRuntimeCoreBuilder::build`]. Unlike [`TelemetryHandle::spawn`]
 /// which uses `tokio::spawn()` (requiring an ambient runtime context), this type
@@ -606,16 +639,59 @@ impl RuntimeTelemetryHandle {
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        match &self.traced {
-            Some(traced) => {
-                let traced = traced.clone();
-                let _guard = InstrumentedSpawnGuard::set();
-                self.runtime.spawn(async move {
-                    let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-                    crate::traced::Traced::new(future, traced, task_id).await
-                })
+        match self.traced.clone() {
+            Some(traced_handle) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                self.runtime.spawn(crate::telemetry::TracedFuture::new(
+                    future,
+                    Some(traced_handle),
+                ))
             }
             None => self.runtime.spawn(future),
+        }
+    }
+
+    /// Spawn an instrumented future through a user-supplied spawn function.
+    ///
+    /// Mirrors [`TelemetryHandle::spawn_with`] for callers that already hold a
+    /// [`RuntimeTelemetryHandle`]. `spawn_fn` must synchronously perform a real
+    /// Tokio spawn (or an equivalent operation) before returning; do not defer
+    /// the future or run it with `block_on`. To record the resulting task as
+    /// instrumented, target a dial9-traced runtime with task tracking enabled,
+    /// typically via [`tokio::task::JoinSet::spawn_on`] with the appropriate
+    /// [`tokio::runtime::Handle`].
+    ///
+    /// # Examples
+    ///
+    /// Spawn into a [`tokio::task::JoinSet`] on a specific runtime:
+    ///
+    /// ```rust,no_run
+    /// # use dial9_tokio_telemetry::telemetry::RuntimeTelemetryHandle;
+    /// # use tokio::runtime::Runtime;
+    /// # use tokio::task::JoinSet;
+    /// # async fn work() {}
+    /// # fn demo(runtime: &Runtime, handle: RuntimeTelemetryHandle, set: &mut JoinSet<()>) {
+    /// handle.spawn_with(work(), |f| set.spawn_on(f, runtime.handle()));
+    /// # }
+    /// ```
+    ///
+    /// [`TracedFuture<F>`]: crate::telemetry::TracedFuture
+    pub fn spawn_with<F, S>(
+        &self,
+        future: F,
+        spawn_fn: impl FnOnce(crate::telemetry::TracedFuture<F>) -> S,
+    ) -> S
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let future = crate::telemetry::TracedFuture::new(future, self.traced.clone());
+        match self.traced {
+            Some(_) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                spawn_fn(future)
+            }
+            None => spawn_fn(future),
         }
     }
 }
@@ -1378,7 +1454,7 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
     /// Install telemetry hooks, build the runtime, and reserve worker IDs.
     ///
     /// Returns the runtime and a [`RuntimeTelemetryHandle`] for spawning
-    /// wake-tracked futures via [`RuntimeTelemetryHandle::spawn`].
+    /// instrumented futures via [`RuntimeTelemetryHandle::spawn`].
     pub fn build(
         self,
         mut builder: tokio::runtime::Builder,
@@ -2081,6 +2157,23 @@ mod tests {
             Ok(())
         }
     }
+
+    /// Nested `InstrumentedSpawnGuard`s must compose: inner drop must not
+    /// clear the outer scope. Counter, not flag.
+    #[test]
+    fn instrumented_spawn_guard_nests() {
+        assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 0);
+        let outer = InstrumentedSpawnGuard::enter();
+        assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 1);
+        {
+            let _inner = InstrumentedSpawnGuard::enter();
+            assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 2);
+        }
+        assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 1);
+        drop(outer);
+        assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 0);
+    }
+
     #[test]
     fn current_thread_runtime_resolves_worker_ids() {
         let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
@@ -2491,7 +2584,7 @@ mod tests {
             .build_and_attach_to_telemetry(builder_b, &guard)
             .unwrap();
 
-        // Use handle.spawn on runtime B to get Traced waker wrapping → wake events.
+        // Use handle.spawn on runtime B to get wake-tracked wrapping → wake events.
         let handle = guard.handle();
         runtime_b.block_on(async {
             let mut handles = Vec::new();
@@ -2909,7 +3002,7 @@ mod tests {
         drop(runtime);
         drop(guard);
 
-        // Verify wake events were recorded (handle.spawn wraps with Traced)
+        // Verify wake events were recorded (handle.spawn wraps with wake tracking)
         let raw = data.lock().unwrap();
         let events = crate::telemetry::format::decode_events(&raw).unwrap();
         let wake_count = events
