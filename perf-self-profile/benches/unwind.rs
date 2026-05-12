@@ -93,7 +93,8 @@ fn read_registers() -> (usize, usize, usize) {
 fn do_unwind() -> usize {
     let (pc, fp, sp) = read_registers();
     let mut out = [0u64; 128];
-    unsafe { unwind(pc, fp, sp, &mut out) }
+    let (n, _truncated) = unsafe { unwind(pc, fp, sp, &mut out) };
+    n
 }
 
 /// Build a chain of exactly N inline(never) frames via recursion.
