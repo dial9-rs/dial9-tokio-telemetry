@@ -1,6 +1,6 @@
 //! Framepointer-based stack unwinding
 //!
-//! This implementation uses a SIGSEV fault handler to allow safe walking of stacks. Without
+//! This implementation uses a SIGSEGV fault handler to allow safe walking of stacks. Without
 //! this, there is no way to perform framepointer unwinding without risking segfaults when walking
 //! stacks where framepointers are not enabled.
 //!
@@ -246,8 +246,7 @@ mod platform {
         let ret_addr = unsafe { *(fp as *const usize).add(1) };
         // Strip pointer authentication bits (ARMv8.3-A PAC). The saved LR may
         // be signed when compiled with `-Z branch-protection=pac-ret`.
-        // See: https://www.kernel.org/doc/html/latest/arch/arm64/pointer-authentication.html
-        let ret_addr = ret_addr & 0x0000_FFFF_FFFF_FFFF;
+        let ret_addr = crate::sys::fp_profiler::unwind::strip_pac(ret_addr);
         let caller_fp = unsafe { *(fp as *const usize) };
         (ret_addr, caller_fp, sp)
     }
@@ -520,6 +519,20 @@ mod tests {
                 result.is_err(),
                 "capture should panic via debug_assert when handler is replaced"
             );
+        }
+    }
+
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    mod unsupported {
+        use super::super::*;
+
+        #[test]
+        fn install_returns_unsupported() {
+            let err = Unwinder::install().unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
         }
     }
 }

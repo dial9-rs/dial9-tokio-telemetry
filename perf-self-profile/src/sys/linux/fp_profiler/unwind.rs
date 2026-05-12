@@ -36,13 +36,13 @@ const MAX_FRAME_SIZE: usize = 0x40000;
 /// Safe to apply unconditionally, on non-PAC systems the upper bits are zero.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-fn strip_pac(addr: usize) -> usize {
+pub(crate) fn strip_pac(addr: usize) -> usize {
     addr & 0x0000_FFFF_FFFF_FFFF
 }
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn strip_pac(addr: usize) -> usize {
+pub(crate) fn strip_pac(addr: usize) -> usize {
     addr
 }
 
