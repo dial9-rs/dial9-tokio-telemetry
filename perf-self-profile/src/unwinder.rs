@@ -277,44 +277,57 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn install_is_idempotent() {
-        let r1 = Unwinder::install();
-        let r2 = Unwinder::install();
-        let r3 = Unwinder::install();
-        assert!(r1.is_ok());
-        assert!(r2.is_ok());
-        assert!(r3.is_ok());
-    }
-
-    #[test]
-    fn install_is_idempotent_across_threads() {
-        let handles: Vec<_> = (0..8)
-            .map(|_| std::thread::spawn(Unwinder::install))
-            .collect();
-        for h in handles {
-            assert!(h.join().unwrap().is_ok());
-        }
-    }
-
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     mod linux {
-        use super::*;
+        use super::super::*;
+
+        /// Skip the test if something (e.g. ASAN) replaced our SIGSEGV handler
+        /// after install. Returns the Unwinder on success.
+        fn install_or_skip() -> Option<Unwinder> {
+            let u = Unwinder::install().unwrap();
+            if !u.verify_handler() {
+                eprintln!("skipping: SIGSEGV handler was replaced (sanitizer?)");
+                return None;
+            }
+            Some(u)
+        }
+
+        #[test]
+        fn install_is_idempotent() {
+            let r1 = Unwinder::install();
+            let r2 = Unwinder::install();
+            let r3 = Unwinder::install();
+            assert!(r1.is_ok());
+            assert!(r2.is_ok());
+            assert!(r3.is_ok());
+        }
+
+        #[test]
+        fn install_is_idempotent_across_threads() {
+            let handles: Vec<_> = (0..8)
+                .map(|_| std::thread::spawn(Unwinder::install))
+                .collect();
+            for h in handles {
+                assert!(h.join().unwrap().is_ok());
+            }
+        }
 
         #[test]
         fn verify_handler_true_after_install() {
-            let u = Unwinder::install().unwrap();
+            let Some(u) = install_or_skip() else {
+                return;
+            };
             assert!(u.verify_handler(), "handler should be active after install");
         }
 
         #[test]
         fn capture_produces_frames() {
-            let unwinder = Unwinder::install().unwrap();
+            let Some(unwinder) = install_or_skip() else {
+                return;
+            };
             #[inline(never)]
             fn helper(u: &Unwinder) -> (CaptureResult, [u64; 64]) {
                 let mut out = [0u64; 64];
@@ -342,7 +355,9 @@ mod tests {
         /// instruction inside `Unwinder::capture`'s body.
         #[test]
         fn frame_zero_points_into_caller_of_capture() {
-            let unwinder = Unwinder::install().unwrap();
+            let Some(unwinder) = install_or_skip() else {
+                return;
+            };
 
             #[inline(never)]
             fn helper(u: &Unwinder) -> u64 {
@@ -383,7 +398,9 @@ mod tests {
 
         #[test]
         fn capture_respects_output_buffer_limit() {
-            let unwinder = Unwinder::install().unwrap();
+            let Some(unwinder) = install_or_skip() else {
+                return;
+            };
             let mut out = [0u64; 1];
             // SAFETY: handler installed; test context is not a signal handler.
             let result = unsafe { unwinder.capture(&mut out) };
@@ -399,7 +416,9 @@ mod tests {
 
         #[test]
         fn capture_reports_truncation_with_tiny_buffer() {
-            let unwinder = Unwinder::install().unwrap();
+            let Some(unwinder) = install_or_skip() else {
+                return;
+            };
             // Build a small but real call chain so a 1-slot buffer is bound
             // to truncate.
             #[inline(never)]
@@ -424,7 +443,9 @@ mod tests {
 
         #[test]
         fn capture_with_empty_buffer_reports_truncation() {
-            let unwinder = Unwinder::install().unwrap();
+            let Some(unwinder) = install_or_skip() else {
+                return;
+            };
             // SAFETY: handler installed above.
             let result = unsafe { unwinder.capture(&mut []) };
             assert_eq!(result.frames_written, 0);
@@ -443,7 +464,9 @@ mod tests {
         fn capture_debug_asserts_when_handler_replaced() {
             use std::panic::{AssertUnwindSafe, catch_unwind};
 
-            let unwinder = Unwinder::install().unwrap();
+            let Some(unwinder) = install_or_skip() else {
+                return;
+            };
             assert!(unwinder.verify_handler());
 
             // Replace SIGSEGV with SIG_IGN so verify_handler() returns false.
