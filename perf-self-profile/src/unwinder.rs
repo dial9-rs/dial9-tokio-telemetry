@@ -244,6 +244,10 @@ mod platform {
         //   [saved_fp (x29) : u64, saved_lr : u64, ...]
         // so `*fp` and `*(fp + 8)` are valid reads of live stack memory.
         let ret_addr = unsafe { *(fp as *const usize).add(1) };
+        // Strip pointer authentication bits (ARMv8.3-A PAC). The saved LR may
+        // be signed when compiled with `-Z branch-protection=pac-ret`.
+        // See: https://www.kernel.org/doc/html/latest/arch/arm64/pointer-authentication.html
+        let ret_addr = ret_addr & 0x0000_FFFF_FFFF_FFFF;
         let caller_fp = unsafe { *(fp as *const usize) };
         (ret_addr, caller_fp, sp)
     }
