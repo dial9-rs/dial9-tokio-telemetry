@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/dial9-tokio-telemetry/badge.svg)](https://docs.rs/dial9-tokio-telemetry)
 ![License](https://img.shields.io/crates/l/dial9-tokio-telemetry.svg)
 
-dial9 is a microscope for Tokio (and Rust applications in general). It allows you to record a large number of events very cheaply and analyze them later. By incorporating data from Tokio, the operating system, and your application, hard-to-debug problems can become obvious. "What is Tokio actually doing?" becomes readily apparent.
+dial9 is a microscope for Tokio (and Rust applications in general). It allows you to record a large number of events cheaply and analyze them later. By incorporating data from Tokio, the operating system, and your application, hard-to-debug problems can become obvious. "What is Tokio actually doing?" becomes readily apparent.
 
 [Demo (Youtube)](https://www.youtube.com/watch?v=kr0RYMu57kU) | [Demo Application](https://dial9-tokio-telemetry.netlify.app/?trace=demo-trace.bin) 
 
@@ -12,7 +12,7 @@ dial9 is a microscope for Tokio (and Rust applications in general). It allows yo
 
 ## Quick Start
 
-dial9 is fundamentally an efficient way to collect data from [different sources](#data-sources) then [export them out of the application](#getting-data-out-of-dial9). You can enable as many different data sources as you need to debug (or as few as you can tolerate the overhead of in production.)
+dial9 allows you to efficiently collect data from [different sources](#data-sources) then [export them out of the application](#getting-data-out-of-dial9). You can enable as many different data sources as you need to debug (or as few as you can tolerate the overhead of in production.) Most applications will want Tokio events, CPU profiling information, and a handful of application events.
 
 Once you have data, you will want to analyze it. There are two complementary paths:
 1. The `dial9` crate which provides an HTML static site which can view the trace files. The viewer is also hosted [here](https://dial9-tokio-telemetry.netlify.app/).
@@ -62,9 +62,9 @@ async fn main() {
 
 ## Why dial9-tokio-telemetry?
 
-It can be hard to understand application performance and behavior in async code. dial9 tracks Tokio, operating system and application events to create a detailed, nanosecond-by-nanosecond trace of your application behavior that you can analyze. On Linux, traces include CPU profile samples and kernel scheduling events, so you can see not just _that_ a task was delayed but _what code_ was running on the worker instead.
+It can be hard to understand application performance and behavior in async code. dial9 tracks Tokio, operating system and application events to create a detailed, nanosecond-by-nanosecond trace of your application behavior that you can analyze. On Linux, you can capture CPU profiles and kernel scheduling events, so you can see not just _that_ a task was delayed but _what code_ was running on the worker instead.
 
-Compared to [tokio-console](https://github.com/tokio-rs/console), which is designed for live debugging, dial9-tokio-telemetry is designed for post-hoc analysis and to be a tool you can run in production. dial9 pushes out trace files to disk, S3 and anywhere else you configure. After a problem happens, you can come back to the trace to figure out the problem.
+Compared to [tokio-console](https://github.com/tokio-rs/console), which is designed for live debugging, dial9 is designed for post-hoc analysis and to be a tool you can run in production. dial9 pushes out trace files to disk, S3 and anywhere else you configure. After a problem happens, you can come back to the trace to figure out the problem.
 
 Compared to [tokio-metrics](https://github.com/tokio-rs/tokio-metrics), which exports aggregate counters (mean poll time, queue depth, etc.) for dashboarding and alerting, dial9 records every individual event. tokio-metrics can tell you something is wrong. dial9 can tell you _what_ is wrong. Use tokio-metrics for operational dashboards, and dial9 for debugging the root cause.
 
@@ -265,7 +265,7 @@ record_event(
 dial9 is recording data to in memory buffers and eventually to disk. For most applications, they would like the data to go somewhere else. `dial9` has a built in exporter for S3 and it is also possible to write your own exporter.
 
 ### Exporting data to S3
-dial9 has a built-in S3 exporter. When segments are sealed, symbolized, and compressed they will be uploaded to S3 by a background thread.
+dial9 has a built-in S3 exporter. When segments are sealed, symbolized, and compressed they will be uploaded to S3 by a background thread. The `dial9` viewer includes a browser to browse the traces stored on S3.
 
 **Enable the `worker-s3` feature:**
 ```toml
@@ -306,9 +306,7 @@ async fn main() {
 # fn main() {}
 ```
 
-By default objects will be uploaded to `s3://{bucket}/{prefix}/{YYYY-MM-DD}/{HHMM}/{service_name}/{instance_path}/{boot_id}/{epoch_secs}-{index}.bin.gz`. You can customize the location with `S3Config::builder().key_fn(...)`.
-
-The worker uses a circuit breaker with exponential backoff if S3 is unreachable. It never crashes or blocks the application. Segments remain on disk when uploads fail and are retried on the next cycle. To ensure the last segment is uploaded, use `guard.graceful_shutdown(timeout)` instead of dropping the guard (which seals the final segment but does not wait for the worker to drain).
+To ensure the last segment is uploaded, use `guard.graceful_shutdown(timeout)`.
 
 ### Exporting data to other destinations
 
