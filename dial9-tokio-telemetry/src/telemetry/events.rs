@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn test_schedstat_fd_closed_on_thread_exit() {
         // fcntl(fd, F_GETFD) returns -1 with errno=EBADF for closed fds.
         // SAFETY: F_GETFD with a raw fd is side-effect free.
