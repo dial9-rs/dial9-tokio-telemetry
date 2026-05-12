@@ -327,12 +327,12 @@ pub(crate) struct CpuSampleData {
 }
 
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn current_tid() -> u32 {
     unsafe { libc::syscall(libc::SYS_gettid) as u32 }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub(crate) fn current_tid() -> u32 {
     // No gettid on non-Linux; use a thread-local counter as a unique ID.
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -425,11 +425,11 @@ pub(crate) fn clock_pair() -> (u64, u64) {
 pub(crate) struct SchedStat {
     pub wait_time_ns: u64,
     /// Raw fd backing this read, exposed for FD-lifecycle tests. Not used in production.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
     fd: std::os::fd::RawFd,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 impl SchedStat {
     /// Read schedstat for the current thread using a cached per-thread file descriptor.
     /// Opening `/proc/self/task/<tid>/schedstat` is done once per thread; subsequent reads
@@ -496,7 +496,7 @@ impl SchedStat {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 impl SchedStat {
     pub(crate) fn read_current() -> std::io::Result<Self> {
         Err(std::io::Error::new(
@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     fn test_schedstat_fd_closed_on_thread_exit() {
         // fcntl(fd, F_GETFD) returns -1 with errno=EBADF for closed fds.
         // SAFETY: F_GETFD with a raw fd is side-effect free.
