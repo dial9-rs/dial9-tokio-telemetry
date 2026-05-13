@@ -190,10 +190,201 @@ type RuntimeConfigurator = Box<
     dyn FnOnce(TracedRuntimeBuilder<HasTracePath, PipelineUnset>) -> Box<dyn BuildTracedRuntime>,
 >;
 
+const ENV_DIAL9_ENABLED: &str = "DIAL9_ENABLED";
+const ENV_DIAL9_TRACE_DIR: &str = "DIAL9_TRACE_DIR";
+const ENV_DIAL9_ROTATION_SECS: &str = "DIAL9_ROTATION_SECS";
+const ENV_DIAL9_MAX_DISK_USAGE_MB: &str = "DIAL9_MAX_DISK_USAGE_MB";
+
+const DEFAULT_ENABLED: bool = false;
+const DEFAULT_TRACE_DIR: &str = "/tmp/dial9-traces";
+const DEFAULT_ROTATION_SECS: u64 = 60;
+const DEFAULT_MAX_DISK_USAGE_MB: u64 = 1024;
+
+const BYTES_PER_MIB: u64 = 1024 * 1024;
+const MIN_MAX_FILE_SIZE: u64 = 16 * BYTES_PER_MIB;
+
+trait EnvSource {
+    fn get(&self, name: &str) -> Option<String>;
+}
+
+struct ProcessEnv;
+
+impl EnvSource for ProcessEnv {
+    fn get(&self, name: &str) -> Option<String> {
+        std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+    }
+}
+
+#[derive(Debug)]
+struct ParsedEnvConfig {
+    enabled: bool,
+    trace_dir: PathBuf,
+    rotation_period: Duration,
+    max_total_size: u64,
+    max_file_size: u64,
+    warnings: Vec<String>,
+}
+
+fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
+    let mut warnings = Vec::new();
+
+    let enabled = parse_env_bool(env, ENV_DIAL9_ENABLED, DEFAULT_ENABLED, &mut warnings);
+    let trace_dir = PathBuf::from(parse_env_string(
+        env,
+        ENV_DIAL9_TRACE_DIR,
+        DEFAULT_TRACE_DIR,
+        &mut warnings,
+    ));
+    let rotation_secs = parse_env_positive_u64(
+        env,
+        ENV_DIAL9_ROTATION_SECS,
+        DEFAULT_ROTATION_SECS,
+        &mut warnings,
+    );
+    let max_disk_usage_mb = parse_env_positive_u64(
+        env,
+        ENV_DIAL9_MAX_DISK_USAGE_MB,
+        DEFAULT_MAX_DISK_USAGE_MB,
+        &mut warnings,
+    );
+
+    let max_total_size = max_disk_usage_mb.saturating_mul(BYTES_PER_MIB);
+    let max_file_size = (max_total_size / 4).max(MIN_MAX_FILE_SIZE);
+
+    ParsedEnvConfig {
+        enabled,
+        trace_dir,
+        rotation_period: Duration::from_secs(rotation_secs),
+        max_total_size,
+        max_file_size,
+        warnings,
+    }
+}
+
+fn parse_env_bool(
+    env: &impl EnvSource,
+    name: &'static str,
+    default: bool,
+    warnings: &mut Vec<String>,
+) -> bool {
+    let Some(value) = env.get(name) else {
+        return default;
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        warnings.push(format!(
+            "dial9: {name} is blank; expected an explicit boolean value; using default {default}"
+        ));
+        return default;
+    }
+
+    match value.to_ascii_lowercase().as_str() {
+        "t" | "true" | "1" | "y" | "yes" | "on" => true,
+        "f" | "false" | "0" | "n" | "no" | "off" => false,
+        _ => {
+            warnings.push(format!(
+                "dial9: {name}={value:?} is invalid; valid values are t,true,1,y,yes,on,f,false,0,n,no,off; using default {default}"
+            ));
+            default
+        }
+    }
+}
+
+fn parse_env_positive_u64(
+    env: &impl EnvSource,
+    name: &'static str,
+    default: u64,
+    warnings: &mut Vec<String>,
+) -> u64 {
+    let Some(value) = env.get(name) else {
+        return default;
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        warnings.push(format!(
+            "dial9: {name} is blank; expected a positive integer; using default {default}"
+        ));
+        return default;
+    }
+
+    match value.parse::<u64>() {
+        Ok(n) if n > 0 => n,
+        _ => {
+            warnings.push(format!(
+                "dial9: {name}={value:?} is invalid; expected a positive integer; using default {default}"
+            ));
+            default
+        }
+    }
+}
+
+fn parse_env_string(
+    env: &impl EnvSource,
+    name: &'static str,
+    default: &'static str,
+    warnings: &mut Vec<String>,
+) -> String {
+    let Some(value) = env.get(name) else {
+        return default.to_string();
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        warnings.push(format!(
+            "dial9: {name} is blank; expected a non-empty value; using default {default:?}"
+        ));
+        return default.to_string();
+    }
+    value.to_string()
+}
+
+fn emit_env_warnings(warnings: &[String]) {
+    for warning in warnings {
+        if tracing::dispatcher::has_been_set() {
+            tracing::warn!(target: "dial9_telemetry", "{warning}");
+        } else {
+            eprintln!("{warning}");
+        }
+    }
+}
+
 fn default_tokio_builder() -> tokio::runtime::Builder {
     let mut b = tokio::runtime::Builder::new_multi_thread();
     b.enable_all();
     b
+}
+
+impl Dial9Config {
+    /// Build a production-oriented config from standard `DIAL9_*` environment variables.
+    ///
+    /// Supported variables in this first iteration:
+    ///
+    /// | Variable | Default | Meaning |
+    /// | --- | --- | --- |
+    /// | `DIAL9_ENABLED` | `false` | Master switch for installing telemetry. |
+    /// | `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. |
+    /// | `DIAL9_ROTATION_SECS` | `60` | Wall-clock rotation period in seconds. |
+    /// | `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
+    ///
+    /// Missing variables use defaults. Blank or invalid values emit a warning
+    /// and fall back to defaults. The returned config is built with
+    /// [`Dial9ConfigBuilder::build_or_disabled`], so writer setup failures are
+    /// logged and downgraded to a plain Tokio runtime.
+    pub fn from_env() -> Self {
+        Self::from_env_source(&ProcessEnv)
+    }
+
+    fn from_env_source(env: &impl EnvSource) -> Self {
+        let parsed = parse_env_config(env);
+        emit_env_warnings(&parsed.warnings);
+
+        Self::builder()
+            .enabled(parsed.enabled)
+            .base_path(parsed.trace_dir.join("trace.bin"))
+            .max_file_size(parsed.max_file_size)
+            .max_total_size(parsed.max_total_size)
+            .rotation_period(parsed.rotation_period)
+            .build_or_disabled()
+    }
 }
 
 #[bon::bon]
@@ -411,6 +602,7 @@ impl<S: dial9_config_builder::IsComplete> Dial9ConfigBuilder<S> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -430,6 +622,116 @@ mod tests {
     /// will fail to create the trace file there.
     fn unwritable_base_path() -> PathBuf {
         PathBuf::from("/this/dir/does/not/exist/dial9_test_trace.bin")
+    }
+
+    #[derive(Default)]
+    struct FakeEnv {
+        vars: BTreeMap<String, String>,
+    }
+
+    impl FakeEnv {
+        fn with(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+            self.vars.insert(name.into(), value.into());
+            self
+        }
+    }
+
+    impl EnvSource for FakeEnv {
+        fn get(&self, name: &str) -> Option<String> {
+            self.vars.get(name).cloned()
+        }
+    }
+
+    #[test]
+    fn env_defaults_to_disabled_local_traces() {
+        let parsed = parse_env_config(&FakeEnv::default());
+
+        assert!(!parsed.enabled);
+        assert_eq!(parsed.trace_dir, PathBuf::from("/tmp/dial9-traces"));
+        assert_eq!(parsed.rotation_period, Duration::from_secs(60));
+        assert_eq!(parsed.max_total_size, 1024 * 1024 * 1024);
+        assert_eq!(parsed.max_file_size, 256 * 1024 * 1024);
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn env_parses_trimmed_values() {
+        let parsed = parse_env_config(
+            &FakeEnv::default()
+                .with("DIAL9_ENABLED", " YES ")
+                .with("DIAL9_TRACE_DIR", " /var/tmp/dial9 ")
+                .with("DIAL9_ROTATION_SECS", "15")
+                .with("DIAL9_MAX_DISK_USAGE_MB", "2048"),
+        );
+
+        assert!(parsed.enabled);
+        assert_eq!(parsed.trace_dir, PathBuf::from("/var/tmp/dial9"));
+        assert_eq!(parsed.rotation_period, Duration::from_secs(15));
+        assert_eq!(parsed.max_total_size, 2048 * 1024 * 1024);
+        assert_eq!(parsed.max_file_size, 512 * 1024 * 1024);
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn env_warns_and_uses_defaults_for_blank_or_invalid_values() {
+        let parsed = parse_env_config(
+            &FakeEnv::default()
+                .with("DIAL9_ENABLED", "maybe")
+                .with("DIAL9_TRACE_DIR", "   ")
+                .with("DIAL9_ROTATION_SECS", "0")
+                .with("DIAL9_MAX_DISK_USAGE_MB", "wat"),
+        );
+
+        assert!(!parsed.enabled);
+        assert_eq!(parsed.trace_dir, PathBuf::from("/tmp/dial9-traces"));
+        assert_eq!(parsed.rotation_period, Duration::from_secs(60));
+        assert_eq!(parsed.max_total_size, 1024 * 1024 * 1024);
+        assert_eq!(parsed.max_file_size, 256 * 1024 * 1024);
+        assert_eq!(parsed.warnings.len(), 4);
+        assert!(parsed.warnings.iter().any(|w| w.contains("DIAL9_ENABLED")));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("DIAL9_TRACE_DIR"))
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("DIAL9_ROTATION_SECS"))
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("DIAL9_MAX_DISK_USAGE_MB"))
+        );
+    }
+
+    #[test]
+    fn env_config_builds_disabled_by_default() {
+        let cfg = Dial9Config::from_env_source(&FakeEnv::default());
+
+        assert!(matches!(cfg.0, Inner::Disabled { .. }));
+    }
+
+    #[test]
+    fn env_config_builds_enabled_with_local_trace_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trace_dir = dir.path().to_str().expect("utf8 tempdir");
+        let env = FakeEnv::default()
+            .with("DIAL9_ENABLED", "true")
+            .with("DIAL9_TRACE_DIR", trace_dir);
+
+        let cfg = Dial9Config::from_env_source(&env);
+
+        match cfg.0 {
+            Inner::Enabled { writer, .. } => {
+                assert_eq!(writer.base_path(), dir.path().join("trace.bin"));
+            }
+            Inner::Disabled { .. } => panic!("expected enabled config"),
+        }
     }
 
     #[test]
