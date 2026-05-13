@@ -60,6 +60,33 @@ async fn main() {
 }
 ```
 
+For zero-code configuration in production, use `Dial9Config::from_env()`:
+
+```rust,no_run
+use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
+
+fn my_config() -> Dial9Config {
+    Dial9Config::from_env()
+}
+
+#[dial9_tokio_telemetry::main(config = my_config)]
+async fn main() {
+    let handle = TelemetryHandle::current();
+    handle.spawn(async { /* wake events tracked when enabled */ }).await.unwrap();
+}
+```
+
+`from_env()` currently supports the local trace writer knobs:
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_ENABLED` | `false` | Master switch for installing telemetry. |
+| `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. |
+| `DIAL9_ROTATION_SECS` | `60` | Wall-clock rotation period in seconds. |
+| `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
+
+Missing variables use defaults. Blank or invalid values emit a warning and fall back to defaults.
+
 ## Why dial9-tokio-telemetry?
 
 It can be hard to understand application performance and behavior in async code. dial9 tracks Tokio, operating system and application events to create a detailed, nanosecond-by-nanosecond trace of your application behavior that you can analyze. On Linux, you can capture CPU profiles and kernel scheduling events, so you can see not just _that_ a task was delayed but _what code_ was running on the worker instead.
