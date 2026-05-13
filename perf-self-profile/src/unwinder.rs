@@ -474,32 +474,24 @@ mod tests {
 
             // Replace SIGSEGV with SIG_IGN so verify_handler() returns false.
             // SAFETY: we restore our handler below on all exit paths via the
-            // guard; nextest's process isolation limits blast radius even if
-            // restoration is skipped.
+            // guard, making this safe even under `cargo test`'s threaded harness.
             let mut new_action: libc::sigaction = unsafe { std::mem::zeroed() };
             new_action.sa_sigaction = libc::SIG_IGN;
             unsafe { libc::sigemptyset(&mut new_action.sa_mask) };
-            let rc = unsafe { libc::sigaction(libc::SIGSEGV, &new_action, std::ptr::null_mut()) };
+            let mut old_action: libc::sigaction = unsafe { std::mem::zeroed() };
+            let rc = unsafe { libc::sigaction(libc::SIGSEGV, &new_action, &mut old_action) };
             assert_eq!(rc, 0, "failed to replace SIGSEGV handler");
 
-            struct RestoreGuard;
+            struct RestoreGuard(libc::sigaction);
             impl Drop for RestoreGuard {
                 fn drop(&mut self) {
-                    // Best-effort restore of our handler. `Unwinder::install`
-                    // is a no-op after the first successful call (idempotent
-                    // flag), so use `sigaction` directly. Nextest's
-                    // per-test process isolation means even if this fails,
-                    // other tests are unaffected.
-                    // SAFETY: process-global signal state; we rewrite
-                    // SIGSEGV back to SIG_DFL so any subsequent fault during
-                    // teardown terminates cleanly rather than being ignored.
-                    let mut dfl: libc::sigaction = unsafe { std::mem::zeroed() };
-                    dfl.sa_sigaction = libc::SIG_DFL;
-                    unsafe { libc::sigemptyset(&mut dfl.sa_mask) };
-                    let _ = unsafe { libc::sigaction(libc::SIGSEGV, &dfl, std::ptr::null_mut()) };
+                    // Restore the original handler so concurrent tests under
+                    // `cargo test` (threaded harness) still have fault recovery.
+                    let _ =
+                        unsafe { libc::sigaction(libc::SIGSEGV, &self.0, std::ptr::null_mut()) };
                 }
             }
-            let _guard = RestoreGuard;
+            let _guard = RestoreGuard(old_action);
 
             assert!(
                 !unwinder.verify_handler(),
