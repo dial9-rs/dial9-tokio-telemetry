@@ -6,23 +6,29 @@
 
 Let dial9 run with no filesystem dependency. Users with plenty of RAM, or running in environments where disk is unavailable or unwelcome, get a memory-only path: encoded bytes flow from the writer through an in-process queue to the worker, then through the existing `SegmentProcessor` pipeline to whichever destination they configured.
 
-The existing lifecycle is disk-mediated end to end. Flush thread writes encoded batches into `trace.N.bin.active`, writer renames to `trace.N.bin` on rotation, worker polls the directory every second, reads the file back into memory, and runs the processor pipeline. Removing the disk hop replaces the rename-then-rescan handoff with a bounded in-process queue and a wakeup primitive, while keeping the recorder hot path, the encoder, and the processor chain untouched.
+The existing lifecycle is disk-mediated end to end. Flush thread writes encoded batches into `trace.N.bin.active`, writer renames to `trace.N.bin` on rotation, worker polls the directory every second, reads the file back into memory, and runs the processor pipeline.
 
-**Core principle:** the disk path stays the default and unchanged. Memory mode is one writer swap on the existing runtime builder.
+Two abstractions cover the writer/worker split:
+
+**`Fs` trait.** Active-segment file management (create, write, seal). `DiskFs` over `std::fs`. `MemFs` over a per-path `Vec<u8>` map.
+
+**`SegmentSource`.** Carries sealed segments from writer to worker. `Dir` variant scans the filesystem (existing disk behavior). `Channel` variant pops from a `BoundedQueue` fed by `MemFs::seal`.
+
+Why split: no shared mutex between writer and worker on the sealed-bytes path, and `RotatingWriter` tests can swap `MemFs` in for in-process verification (see section 6).
+
+**Core principle:** the disk path stays the default and unchanged. Memory mode is one constructor swap on the existing writer builder.
 
 ## Goals
 
-- A memory-only path that never touches the filesystem for the segment data itself. Encoded bytes flow writer, in-process queue, worker, destination.
+- A memory-only path that never touches the real filesystem for the segment data itself. Encoded bytes flow writer, in-process queue, worker, destination.
 - Reuse the existing `SegmentProcessor` pipeline. No new API for users who already wire `.s3(...)` or custom processors.
-- Bounded memory with the same "drop oldest, never block the recorder" policy the disk path already uses for eviction.
+- Bounded memory with the same "drop oldest, never block the recorder" policy the disk path already uses for eviction. Memory mode evicts at ring overflow (drop-at-seal via `force_push`). Disk mode evicts after seal (`evict_oldest` in the writer).
 
 ## Non-goals
 
-- Recovering in-flight segments after a process crash. Anything in memory at crash time is gone. The disk path already drops segments under eviction pressure, 
-so "data loss is sometimes okay" is an existing invariant.
-- Spill-to-disk fallback when the memory budget is exhausted. A follow-up could make this configurable, but avoiding disk altogether keeps the feature usable in environments
-where disk access is unavailable.
-- Single-file mode analogue (`RotatingWriter::single_file`). Memory writer always rotates.
+- Recovering in-flight segments after a process crash. Anything in memory at crash time is gone (the disk path already drops segments under eviction pressure).
+- Spill-to-disk fallback when the memory budget is exhausted. A follow-up could make this configurable, but avoiding disk altogether keeps the feature usable in environments where disk access is unavailable.
+- Single-file mode analogue (`RotatingWriter::single_file`) under `MemFs`. Memory mode always rotates.
 
 ---
 
@@ -39,190 +45,109 @@ record_event() ──┐
         CentralCollector (existing)
                  │ drain
                  ▼
-          MemoryWriter ─── queue+Notify ─▶ WorkerLoop
-          (encode + seal)                  │
-          drop-oldest if over              ▼
-          max_buffered_bytes        Pipeline (SegmentProcessor chain):
-                                      SymbolizeProcessor
-                                      GzipCompressor
-                                      S3PipelineUploader / user processor
+          RotatingWriter
+            │
+            ├── Fs ─── active segment management
+            │   (DiskFs: real files | MemFs: per-path Vec<u8>)
+            │
+            └── on seal:
+                ├── disk: file is now on the filesystem ──▶ Dir SegmentSource
+                │       (worker scans directory)
+                │
+                └── memory: push (SegmentRef, Bytes) to ──▶ Channel SegmentSource
+                        BoundedQueue + Notify                 (worker pops, awaits Notify)
+                                                                   │
+                                                                   ▼
+                                                              Pipeline (SegmentProcessor chain):
+                                                                SymbolizeProcessor
+                                                                GzipCompressor
+                                                                S3PipelineUploader / user processor
 ```
 
-The hot path (recording, thread-local flush, central collector) does not change. The work is on the writer (new `MemoryWriter`), the worker (new `SegmentSource` arm plus per-processor failure wrapping that benefits the disk path too), and the in-pipeline carrier (`SegmentRef` enum so processors operate in both modes).
+The hot path (recording, thread-local flush, central collector) does not change. The work is on three pieces:
 
-### `MemoryWriter`
+- A new `Fs` trait with `DiskFs` and `MemFs` impls, covering active-segment file management.
+- A new `SegmentSource` enum (`Dir` and `Channel`) covering writer-to-worker handoff.
+- The in-pipeline carrier (`SegmentRef` enum so processors operate in both modes).
 
-A new `TraceWriter` impl that lives next to `RotatingWriter`.
+### The `Fs` trait
+
+Write-side only, object-safe so `Arc<dyn Fs>` works.
 
 ```rust
-pub struct MemoryWriter {
-    base: PathBuf,                          // virtual; used for stem / metadata
-    rotation_period: Duration,
-    next_rotation_time: SystemTime,
-    drain_interval: Duration,
-    next_drain_time: SystemTime,
-    max_segment_size: u64,
-    max_buffered_bytes: u64,
+trait Fs: Send + Sync + 'static {
+    /// Open a fresh active segment for writing. The writer wraps the
+    /// returned handle in a `BufWriter`. Subsequent rotations seal it
+    /// via [`Fs::seal`].
+    fn create(&self, path: &Path) -> io::Result<Box<dyn Write + Send>>;
 
-    state: WriterState,                     // Active { encoder, ... } | Finished
-    next_index: u32,
-    did_rotate: bool,
-    segment_metadata: SegmentMetadata,
-    has_real_events: bool,
+    /// Seal the active segment.
+    ///
+    /// Disk: rename to the path produced by stripping the `.active`
+    /// suffix from `active`. Memory: drain the active buffer and push
+    /// to the channel. `active` is the writer's identifier; both impls
+    /// use it (disk as filename, memory as map key).
+    fn seal(&self, active: &Path, index: u32) -> io::Result<SegmentRef>;
 
-    // Shared with the worker. See surrounding prose for semantics.
-    queue: Arc<BoundedQueue<EncodedSegment>>,
-    notify: Arc<Notify>,
-    buffered_bytes: Arc<AtomicU64>,   // gauge only; not eviction trigger
-    dropped_segments: Arc<AtomicU64>,
-    writer_done: Arc<AtomicBool>,
-}
+    /// Eviction-side removal. Disk: unlinks the sealed file plus any
+    /// extension-renamed siblings (e.g. `.gz` from `WriteBackProcessor`).
+    /// Memory: no-op (sealed bytes are already gone from `MemFs`; they
+    /// are either in the channel or in-flight in the pipeline).
+    fn remove_sealed(&self, seg: &SegmentRef) -> io::Result<()>;
 
-/// Writer-to-worker queue carrier (`pub(crate)`). Mirrors `Batch`
-/// shape. Worker wraps into `SegmentData` on pop.
-pub(crate) struct EncodedSegment {
-    pub payload: Payload,
-    pub metadata: HashMap<String, String>,
-    pub index: u32,
-}
-
-/// Consumer-side handle. Clones via Arc bumps. The writer hands one of
-/// these to the runtime builder, which gives it to the worker. Bundles
-/// the four shared primitives so we don't thread them through
-/// `BackgroundTaskConfig` individually.
-pub struct MemoryConsumer {
-    queue: Arc<BoundedQueue<EncodedSegment>>,
-    notify: Arc<Notify>,
-    buffered_bytes: Arc<AtomicU64>,
-    writer_done: Arc<AtomicBool>,
-}
-
-impl MemoryWriter {
-    pub fn consumer(&self) -> MemoryConsumer { /* clone the four Arcs */ }
+    /// Remove an active (still-being-written) segment by path. Called
+    /// by `RotatingWriter::finalize` when the trailing segment had no
+    /// real events.
+    fn remove_active(&self, path: &Path) -> io::Result<()>;
 }
 ```
 
-- The active segment is a `Vec<u8>` plus a `RawEncoder<Vec<u8>>` writing into it. The same `prepare_segment` / `write_metadata_if_needed` code as
-`RotatingWriter` applies, parameterized over the underlying writer type.
-- Rotation (time- or size-triggered, identical policy to the disk path) seals the active vec into a `Segment` and pushes it onto `queue`. A new
-active vec is allocated for the next segment.
-- Reuses the `should_drain` / `drained` / `take_rotated` semantics from the `TraceWriter` trait. In memory mode, rotation seals the active vec and pushes it onto the queue. Disk path unchanged.
-- `finalize` pushes the active segment onto the queue, sets a "writer done" flag the worker observes, and notifies. The worker drains the
-queue and exits.
+- **`DiskFs`** is stateless, wraps `std::fs`.
+- **`MemFs`** holds active-only state (per-path `Vec<u8>` map). Sealed bytes do not live in `MemFs`. `seal` takes the `Vec<u8>`, wraps it as `Bytes` (zero-copy), and pushes via `ChannelSender`, which triggers byte-aware eviction (see section 3). `remove_sealed` is a no-op: bytes already left `MemFs`.
 
-The seal path:
+Disk-vs-memory backend selection lives in `RotatingWriter` itself: a `tracks_closed_files: bool` field controls whether the writer runs `evict_oldest` after rotation, and an `Option<ShutdownHandle>` lets memory-mode writers signal `writer_done` from `finalize`. Neither lives on the `Fs` trait.
+
+### Writer-to-worker handoff: `SegmentSource`
+
+Worker-side abstraction. The writer feeds it (via `Fs::seal` for memory, via a real-file rename for disk). The worker reads from it.
 
 ```rust
-fn seal_and_push(&mut self) -> std::io::Result<()> {
-    let prev = std::mem::replace(&mut self.state, MemoryWriterState::Finished);
-    let MemoryWriterState::ActivePlain { writer, .. } = prev else { return Ok(()) };
-
-    let bytes = writer.into_inner();
-    let len = bytes.len() as u64;
-    let segment = EncodedSegment {
-        payload: Payload::from_vec(bytes),
-        metadata: self.segment_metadata().iter().cloned().collect(),
-        index: self.next_index - 1,
-    };
-
-    self.buffered_bytes.fetch_add(len, AcqRel);
-    if let Some(evicted) = self.queue.force_push(segment) {
-        self.buffered_bytes.fetch_sub(evicted.payload.len() as u64, AcqRel);
-        self.dropped_segments.fetch_add(1, Relaxed);
-        // `evicted` drops at end of scope, freeing its `Bytes` Arcs.
-    }
-    self.notify.notify_one();
-
-    let new_buf = Vec::with_capacity(self.max_segment_size as usize);
-    self.state = MemoryWriterState::ActivePlain {
-        writer: Encoder::new_to(new_buf)?.into_raw_encoder(),
-        need_metadata: true,
-    };
-    Ok(())
+pub enum SegmentSource {
+    /// Filesystem scan. Disk path. Worker calls `find_sealed_segments(dir, stem)` 
+    /// and reads each via `std::fs`.
+    Dir { fs: Arc<dyn Fs>, dir: PathBuf, stem: String, poll_interval: Duration },
+    /// In-process ring + Notify wakeup. Memory path. Writer pushes via
+    /// `MemFs::seal`, worker pops via `ChannelReceiver`.
+    Channel { receiver: ChannelReceiver },
 }
 ```
 
-There's no separate `evict_oldest` path. Eviction is whatever `force_push` returned.
+The source exposes three operations: `drain_ready()` returns the currently-available `(SegmentRef, Payload)` pairs (Dir reads bytes from disk, Channel pops from the ring), `wait(stop)` blocks for the next signal (Dir sleeps `poll_interval`, Channel awaits `Notify`), and `writer_done()` returns true once `RotatingWriter::finalize` ran (Dir always false, the worker shuts down via stop-token).
 
-Two cooperating primitives carry segments from writer to worker:
+`ChannelReceiver` bundles `Arc<BoundedQueue<MemSealedSegment>>`, `Arc<Notify>`, `Arc<AtomicBool>` (writer_done), and the shared `queued_bytes` / `in_flight_bytes` / `dropped_segments` counters used for accounting (see section 3).
 
-- **Storage:** `BoundedQueue<EncodedSegment>` from `crate::primitives` (lock-free `crossbeam_queue::ArrayQueue` in production, `Mutex<VecDeque>` under `--cfg shuttle`). Same primitive `CentralCollector` already uses for batches with the same drop-oldest discipline. Capacity is derived from the byte budget at builder time: `capacity = ceil(max_buffered_bytes / max_segment_size) + headroom`. The byte budget is the user-facing knob; capacity is internal.
-- **Wakeup:** `tokio::sync::Notify`. Writer calls `notify_one()` after each push (sync, non-blocking). Worker awaits via `notify.notified().await` between drains. See the rejected-alternatives subsection below for the choice rationale and the new `primitives::sync::Notify` shuttle shim.
+The worker holds a `SegmentSource` and runs one loop. Each iteration: drain ready segments and run each through the pipeline. If `stop` or `source.writer_done()`, drain once more (catches segments produced between the last drain and the signal observation) and exit. Otherwise `select!` between `stop.cancelled()` and `source.wait(&stop)`. Per-processor failure wrapping (retry budget, panic isolation) lives in a single helper that both source variants use.
 
-Queue traffic stays well below the recording hot path: pushes and pops happen at segment-seal rate (a few per second at most under bursty load, slower under steady load). Wakeups are at the same rate.
+### `RotatingWriter`
 
-**Invariant: exactly one consumer.** `Notify` wakes one waiter per `notify_one`; a second worker would race on `notified()` and silently steal half the wakeups. If parallel processing is ever wanted (e.g. multiple S3 uploads in flight), it lives **inside** the sink (one worker, one sink, sink fans out internally), not as multiple workers reading the same queue.
+Holds `Arc<dyn Fs>`. Disk constructors (`new`, `single_file`, `builder`) wire `DiskFs`. The memory constructor `in_memory(max_segment_size, max_total_size) -> io::Result<Self>` allocates a sender/receiver pair, wires the sender into a `MemFs`, and stashes the receiver in `pending_receiver: Option<ChannelReceiver>` on the writer. The runtime builder pulls it out via a `TraceWriter` trait method (`take_pending_receiver`, default `None`) during build, so users never thread the receiver themselves. `fs_handle() -> Arc<dyn Fs>` is exposed so the runtime builder can hand the disk path's `Fs` to the worker for `remove_sealed` cleanup.
 
-### Channel-driven worker
+Eviction lives where it is natural:
 
-The worker's existing poll-the-directory loop becomes one variant of a
-`SegmentSource`:
-
-```rust
-pub(crate) enum SegmentSource {
-    Disk {
-        dir: PathBuf,
-        stem: String,
-        poll_interval: Duration,
-    },
-    Channel {
-        queue: Arc<BoundedQueue<EncodedSegment>>,
-        notify: Arc<Notify>,
-        buffered_bytes: Arc<AtomicU64>,
-        writer_done: Arc<AtomicBool>,
-    },
-}
-
-impl SegmentSource {
-    async fn next(&mut self, stop: &CancellationToken) -> Option<SegmentData> {
-        match self {
-            Self::Disk { dir, stem, poll_interval } => { /* existing logic */ }
-            Self::Channel { queue, notify, buffered_bytes, writer_done } => {
-                loop {
-                    // Register interest before checking queue: any later
-                    // `notify_one` becomes the permit this future consumes.
-                    let notified = notify.notified();
-                    tokio::pin!(notified);
-                    notified.as_mut().enable();
-
-                    if let Some(seg) = queue.pop() {
-                        return Some(SegmentData::from_encoded(seg));
-                    }
-                    // Re-pop after observing a shutdown signal: writer
-                    // may have pushed between our pop and this load.
-                    if stop.is_cancelled() || writer_done.load(Acquire) {
-                        return queue.pop().map(SegmentData::from_encoded);
-                    }
-                    notified.await;
-                }
-            }
-        }
-    }
-}
-```
-
-The worker grows a `SegmentSource::Channel` arm alongside the existing `Disk` arm. The channel arm pops from the queue, wraps each `EncodedSegment` into a `SegmentData`, and runs the same processor chain as the disk arm. Per-processor failure wrapping (section 2) lives in a shared helper used by both arms.
+- **Disk:** writer holds `closed_files: VecDeque<(SegmentRef, u64)>`. After every rotation, `evict_oldest` pops the front and calls `Fs::remove_sealed` until the byte budget is satisfied. Identical to today.
+- **Memory:** the channel enforces the byte budget. Push adds the segment, then drops oldest while `queued_bytes` is over `max_total_size`. The ring also has a slot cap (about `max_total_size / 4 KB` plus a bit of headroom) as a safety net for unusually small segments. `closed_files` stays empty.
 
 ### Rejected alternatives
 
-**Queue storage.**
-
-- *`Mutex<VecDeque<EncodedSegment>>`*: works, supports head-removal from both producer (eviction) and consumer. But adds a sync mutex on a path the rest of the crate keeps lock-free for shared queues; doesn't match the dial9 convention.
-- *`crossbeam_queue::SegQueue`*: unbounded, no eviction primitive. Doesn't model drop-oldest.
-- *`tokio::sync::mpsc::Receiver` (segments-as-payload)*: has built-in wakeup but no eviction; would need a side channel.
-- *Hand-rolled ring buffer*: unnecessary given we can use `BoundedQueue`.
-
-**Wakeup primitive.**
-
-- *Sync `mpsc<()>(1)` (`crate::primitives::sync::mpsc`)*: already shuttle-shimmed, but `Receiver::recv()` is blocking and the worker runs on a `new_current_thread` runtime, so blocking it 
-stalls the entire worker (including in-flight sink futures, timeouts, cancellation). Would force a `spawn_blocking` bridge per wait, meaning thread-pool churn plus scheduler hop for a wakeup that fires once per segment.
-- *`tokio::sync::mpsc::channel::<()>(1)`*: async-native but semantically a value queue used for unit signals. Larger surface to shuttle-shim than `Notify`.
-- *Poll the queue on a `tokio::time::sleep` interval*: works, no new primitive, but loses event-driven latency (segments wait up to `poll_interval` after seal).
-
-**Writer-to-worker handoff unit.**
-
-- *Continuous byte stream*: worker consumes a stream with no segment boundary. Doesn't match per-segment metrics, S3 multipart upload, retry semantics, or the existing rotation contract. 
-Also forces every downstream processor to handle partial / out-of-order bytes.
+- **`MemoryWriter` as a sibling `TraceWriter` impl.** Duplicates encoder/rotation/metadata/drain-timer logic, tests still need `TempDir`. `Fs` split moves shared logic up.
+- **`Fs` covering active management AND worker handoff** (single trait with `list_sealed` / `read_sealed` / `watch_seals` / `remove_sealed`). Forces a `Mutex<BTreeMap>` on the seal/pop path, surrendering the lock-free boundary. `SegmentSource` keeps the two concerns separate.
+- **`Fs::Writer` as an associated type.** `dyn Fs` not object-safe with associated types, and `Arc<dyn Fs>` is needed at the recorder/worker boundary. Cost of `Box<dyn Write + Send>`: one `Box::new(File)` per rotation, one vtable call per ~8 KB BufWriter drain. Dominated by the syscall.
+- **Sync `mpsc<()>(1)` for wakeup.** Already shuttle-shimmed, but blocking `recv()` would stall the current-thread worker, `spawn_blocking` per wait churns the thread pool.
+- **`Mutex<VecDeque<MemSealedSegment>>` for queue.** Adds a sync mutex on a path other crate queues keep lock-free.
+- **`crossbeam_queue::SegQueue`.** Unbounded, no eviction primitive.
+- **`tokio::sync::mpsc::Receiver` carrying segments.** Built-in wakeup but no eviction, needs a side channel for overflow.
+- **Writer-to-worker handoff as a continuous byte stream.** Breaks per-segment metrics, S3 multipart upload, retry semantics, the rotation contract, forces every processor to handle partial bytes.
+- **Unified evict-after-seal for both modes.** Loses memory mode's natural ring byte bound and forces a sealed-state mutex.
 
 ---
 
@@ -230,31 +155,37 @@ Also forces every downstream processor to handle partial / out-of-order bytes.
 
 Memory mode reuses the existing pipeline.
 
-The only obstacle is `SegmentData::segment`, today filesystem-coupled (`SealedSegment { path, index }`). Memory mode has no path. We generalize via a sibling type plus enum:
+The only obstacle is `SegmentData::segment`, today typed as `SealedSegment { path, index }` and filesystem-coupled. Memory mode has no real path. `SealedSegment` stays as the disk variant, paired with a new `MemorySegment`, both under a `SegmentRef` enum:
 
 ```rust
-pub struct MemorySegment { pub index: u32 }
+pub struct SealedSegment { pub path: PathBuf, pub index: u32 }
+pub struct MemorySegment { pub index: u32, pub size: u64 }
 
 pub enum SegmentRef {
     Disk(SealedSegment),
     Memory(MemorySegment),
 }
+
+impl SegmentRef {
+    pub fn index(&self) -> u32 { ... }
+    /// Human-readable id for tracing and metric labels. Disk renders
+    /// the path; memory renders `mem://{index}`.
+    pub fn display_id(&self) -> impl std::fmt::Display + '_ { ... }
+}
 ```
 
-`SegmentData::segment()` returns `&SegmentRef`. Existing disk-only processors (`WriteBackProcessor`, the path-logging branch of `S3PipelineUploader`) `match` on the enum. `WriteBackProcessor` paired with a memory writer is rejected by the runtime builder at `build()` time, so this is defense in depth rather than a runtime expectation.
+`SegmentData::segment()` returns `&SegmentRef`. Disk-only call sites (`WriteBackProcessor`, the path-logging branch of `S3PipelineUploader`) match on the enum. `WriteBackProcessor` paired with a memory writer is a compile error via the `PipelineBuilder` typestate (see section 4), so the disk-only `match` arm is defense in depth.
 
-> **Breaking change.** `SegmentData::segment()` return type goes from `&SealedSegment` to `&SegmentRef`. External `SegmentProcessor` impls that called `data.segment().path()` need to match on the enum. Internal processors are updated in this change.
+> **Breaking change.** `SegmentData::segment()` return type goes from `&SealedSegment` to `&SegmentRef`. External `SegmentProcessor` impls that called `data.segment().path()` need to match on the enum or read via `data.payload()`, which the worker has already populated. Internal processors are updated in this change.
 
-### Failure modes: timeout, retry budget, panic
+### Failure modes: retry budget, panic
 
 Apply to every pipeline stage (memory or disk). Worker wraps each processor's `process(...)` future:
 
-- **Per-attempt timeout.** `tokio::time::timeout(attempt_timeout, fut)`. Timeout → `ProcessErrorKind::Transfer { retryable: true }`. Default 30 s; configurable per processor.
-- **Bounded retry budget.** On `retryable: true`, the worker re-runs the stage up to `retry_budget` times before dropping the segment. Default 3. `S3PipelineUploader` already wraps its own
-`CircuitBreaker`, so it's instantiated with `retry_budget = 1`.
-- **Panic isolation.** Stage future runs inside `AssertUnwindSafe(...).catch_unwind()`. Panic → segment dropped, metrics fire, stage instance kept (so transient state like connection pools survives). **Contract for custom processor authors:** a panicked `process(...)` must leave the instance valid for the next call (no held locks, no half-filled buffers, no corrupted state).
+- **Bounded retry budget.** On `retryable: true`, the worker re-runs the stage up to `retry_budget` times before dropping the segment. Default 3. `S3PipelineUploader` wraps its own `CircuitBreaker` and is instantiated with `retry_budget = 1`. Memory mode needs this since segments leave the ring on pop. Without bounded retry, the first transient error would lose the segment.
+- **Panic isolation.** Stage future runs inside `AssertUnwindSafe(...).catch_unwind()`. A panic drops the segment, fires metrics, and keeps the stage instance (so transient state like connection pools survives). **Contract for custom processor authors:** a panicked `process(...)` must leave the instance valid for the next call (no held locks, no half-filled buffers, no corrupted state).
 
-These attach to processors via a `PipelineBuilder::pipe_with_config` variant (or equivalent); built-ins set sane defaults.
+These attach to processors via `PipelineBuilder::pipe_with_config`.
 
 ---
 
@@ -266,43 +197,53 @@ Three byte pools contribute to peak working set:
 
 | Bucket | Owner | Size | Notes |
 |--------|-------|------|-------|
-| Active segment buffer | flush thread | up to `max_segment_size` (user-set) | `Vec<u8>` the encoder writes into; `RawEncoder` is a thin wrapper, no extra overhead |
-| Queued segments | shared queue | up to `max_buffered_bytes` minus active + in-flight | Sealed `EncodedSegment`; `Payload::from_vec` wraps zero-copy |
-| In-flight pipeline data | worker | 1 segment + gzip output | `SymbolizeProcessor` (cpu-profiling only) appends ~5–20% symbol-table chunk; `GzipCompressor` output is ~25–35% of input |
+| Active segment buffer | flush thread | up to `max_segment_size` | `Vec<u8>` inside the encoder. `RawEncoder` is a thin wrapper |
+| Queued sealed segments | `BoundedQueue` ring | up to `max_total_size` | `MemSealedSegment { index, bytes: Bytes }` per slot. `Bytes` is a zero-copy Arc clone. Byte-bounded via `ChannelSender::push` eviction loop |
+| In-flight pipeline data | worker | up to `max_segment_size` + transient stage growth | Pipeline runs serial: at most one segment in-flight. `SymbolizeProcessor` (cpu-profiling only) appends a symbol-table chunk; `GzipCompressor` output is a fraction of input. See follow-up bench (`benches/in_memory_pipeline.rs`, not landed) for the actual ratios on representative workloads. |
 
-Symbol-table and gzip-ratio numbers are placeholders pending the measurement bench.
+Note on interning: per-batch string interning lives on the recording thread, not the writer. Each `ThreadLocalBuffer` resets its encoder on every flush (`Encoder::reset_to_infallible`), so the interner peak is bounded by one batch encode, not a segment's life.
 
-Note on interning: per-batch string interning lives on the recording thread, not the writer. Each `ThreadLocalBuffer` resets its encoder on every flush (`Encoder::reset_to_infallible`), so the interner peak is bounded by one batch encode, not a segment's life. The writer's own `Encoder` (for segment-header metadata) is small and fixed.
+### Peak working set
+
+`max_total_size` bounds the queue only. In-flight bytes are separate (the pipeline is serial, so at most one segment plus stage-internal growth is held outside the queue at any moment).
+
+**Peak memory contract:** `max_total_size (queue) + max_segment_size (in-flight) + max_segment_size (active buffer)`.
+
+Size `max_total_size` so the worker can absorb a 5-10x burst of slowness before drops fire. With 1 MB segments at 60s rotation that means 10 to 15 MB. Steady state is ~3 MB (one active, one in-flight, a small queue).
+
+cpu-profiling adds symbol-table size to in-flight. Conservative rule-of-thumb: budget 2x `max_segment_size` for in-flight when cpu-profiling is on. Bench will surface the actual delta.
 
 ### Comparison to the disk path
 
-The disk path already pays for the active buffer and the in-flight pipeline data: `BufWriter<File>` holds an 8 KB write buffer plus the active file's data in OS page cache, and the worker reads each segment back into a `Vec<u8>` to run the pipeline. So for any disk-backed run, peak per-segment working set is already ~`max_segment_size` + gzip output, the same as the memory path.
-
-What memory mode adds relative to disk is the queued segments: they live in process heap instead of as `.bin` files. For the same total budget, disk lets the OS swap or page out cold pages under pressure; memory mode keeps them pinned in the process. Services with strict working-set ceilings will care. Eviction policy is the same (drop oldest, never block), fires under the same "worker can't keep up" trigger, so the drop window size is identical for a given budget.
-
-`max_buffered_bytes` is a required builder argument. This matches `RotatingWriter::new`'s `max_total_size` / `max_file_size` pattern: storage budgets are environment-specific. The memory path also skips the OS page cache that disk leans on for burst headroom, so the picked number has to absorb bursts on its own.
-
-For a service producing one segment per minute with `max_buffered_bytes = 16 MB` and `max_segment_size = 1 MB`, peak working set is roughly `1 MB (active) + 1 MB (in-flight pipeline) + min(queued, 14 MB)`, which is ~16 MB worst case and ~3 MB at steady state when the worker keeps up.
+The disk path already pays for the active buffer and the in-flight pipeline data (worker reads each segment back into a `Vec<u8>`). Memory mode adds **only** the queued sealed segments: they live in process heap instead of as `.bin` files. Eviction fires under the same "worker can't keep up" trigger in both modes.
 
 ### Byte accounting and drop-oldest
 
-Eviction discipline lives in the queue itself: `BoundedQueue::force_push` drops the oldest segment when the ring is full. Capacity is sized at builder time from `max_buffered_bytes / max_segment_size + headroom`, so the effective byte cap is `capacity × max_segment_size` (slightly looser than the configured budget when segments are smaller than the max, never tighter).
+Two atomic gauges:
 
-`buffered_bytes: Arc<AtomicU64>` is a gauge over **live encoded bytes** (queued + in-flight). It is observability and diagnostics, not the eviction trigger.
+- **`queued_bytes`**: encoded bytes currently in the ring. The eviction-relevant gauge.
+- **`in_flight_bytes`**: encoded bytes currently inside a `SegmentData` between worker pop and pipeline-end drop. Observability only.
 
+The writer is the sole eviction source. The worker only consumes. Concurrent `queue.pop()` between writer eviction and worker consumption is safe because `BoundedQueue` is MPMC-safe, so each slot pops exactly once.
 
-| Event                                                  | `buffered_bytes` change                                 | Notes                                        |
-| ------------------------------------------------------ | ------------------------------------------------------- | -------------------------------------------- |
-| Active buffer fills, encoder grows                     | unchanged                                               | bytes still owned by encoder; not yet sealed |
-| `seal_and_push` → `force_push` accepts (ring not full) | `+= segment_size`                                       | segment in ring                              |
-| `seal_and_push` → `force_push` evicts                  | `+= new_size, -= evicted_size`, `dropped_segments += 1` | net delta depends on sizes                   |
-| Worker pops + pipeline runs                            | unchanged                                               | in-flight, dropped on `SegmentData` drop     |
-| `SegmentData` drops at pipeline end                    | `-= segment_size`                                       | accounting closes                            |
+**Decrement-on-drop spec.** `SegmentData` carries an `accounting: Option<SegmentAccounting>` populated only for Channel-source segments:
 
+```rust
+struct SegmentAccounting {
+    in_flight_bytes: Arc<AtomicU64>,
+    size: u64,
+}
 
-The decrement at `SegmentData` drop runs regardless of pipeline outcome (success, retry-exhaustion, panic). In-flight segments are out of the ring once popped, so they can't be evicted again; they ride to completion and decrement on drop.
+impl Drop for SegmentAccounting {
+    fn drop(&mut self) {
+        self.in_flight_bytes.fetch_sub(self.size, Ordering::AcqRel);
+    }
+}
+```
 
-Stage-internal allocations (`SymbolizeProcessor` appending a symbol table, `GzipCompressor` flattening + compressing) don't update `buffered_bytes`. The gauge tracks writer-emitted bytes; transient pipeline growth dies with `SegmentData` drop.
+For `Dir` (disk) source segments, `accounting` stays `None`. Zero runtime cost on the disk path. Drop fires regardless of pipeline outcome: success, retry exhaustion or panic all drop `SegmentData`. In-flight segments are out of the ring once popped, so they can't be evicted again. They ride to completion and decrement on drop.
+
+Stage-internal allocations (`SymbolizeProcessor` appending a symbol table, `GzipCompressor` flattening and compressing) don't update either gauge. Transient pipeline growth dies with `SegmentData` drop.
 
 Drop signals: `dropped_segments` counter increments per evicted segment (see section 6 metrics catalog), plus a rate-limited `tracing::warn!` so sustained overruns are visible in logs.
 
@@ -310,43 +251,71 @@ Drop signals: `dropped_segments` counter increments per evicted segment (see sec
 
 ## 4. API surface
 
-User passes a `MemoryWriter` into `build_and_start_with_writer` the same way they'd pass a `RotatingWriter`. The runtime builder pulls the consumer-side handle out of the writer via a new trait method on `TraceWriter`:
+Memory mode is one constructor swap. The writer carries the receiver internally, so the runtime builder pulls it during build.
 
 ```rust
-pub trait TraceWriter: Send {
-    // existing methods...
-
-    /// In-memory writers expose a consumer handle so the worker can pop
-    /// sealed segments from the shared queue. Default returns None; only
-    /// memory-mode writers override.
-    fn consumer(&self) -> Option<MemoryConsumer> { None }
-}
-```
-
-`MemoryWriter::consumer` overrides to return `Some(...)`. The runtime builder calls this before moving the writer into the flush thread; if `Some`, it wires the worker's `SegmentSource::Channel` arm.
-
-```rust
-// Memory path, S3 destination
-let writer = MemoryWriter::builder()
-    .max_buffered_bytes(16 * MB)        // required
-    .max_segment_size(1 * MB)           // required (mirrors RotatingWriter)
-    .build()?;
+let writer = RotatingWriter::in_memory(
+    /* max_segment_size */ 1 * MB,
+    /* max_total_size   */ 16 * MB,
+)?;
 let (runtime, guard) = TracedRuntime::builder()
     .with_s3_uploader(s3_config)
-    .build_and_start_with_writer(tokio_builder, writer)?;
+    .build_and_start(tokio_builder, writer)?;
 ```
 
-For custom destinations (GCS, HTTP, etc.) swap `.with_s3_uploader(...)` for `.with_custom_pipeline(|p| p.pipe(MyProcessor).gzip())`. Same shape.
+### Mode handling
 
-`MemoryWriter` builder defaults:
+`RotatingWriter` carries a phantom `Mode` typestate: `RotatingWriter<Disk>` (default) or `RotatingWriter<Memory>`.
+
+```rust
+pub struct RotatingWriter<Mode = Disk> { /* ... */ }
+pub trait WriterMode: sealed::Sealed {}
+pub struct Disk;
+pub struct Memory;
+impl WriterMode for Disk {}
+impl WriterMode for Memory {}
+```
+
+Constructors split:
+
+- `new`, `single_file`, `builder` return `RotatingWriter<Disk>`.
+- `in_memory` returns `RotatingWriter<Memory>`.
+
+Builder constraint:
+
+- `HasTracePath::build_and_start(rt, w: RotatingWriter<Disk>)`. Memory writer here is a compile error.
+- `NoTracePath::build_and_start(rt, w: impl TraceWriter)` stays generic for memory writers, custom writers, `NullWriter`.
+
+#### Preventing misuse
+
+Pipeline mode also enforced at compile time via `PipelineBuilder<DiskReq = NoDiskRequired>`. `.write_back()` transitions to `PipelineBuilder<RequiresDisk>`. Memory-writer entry points constrain `DiskReq = NoDiskRequired`, so attaching `WriteBackProcessor` to a memory writer is a compile error. User-supplied processors that need disk backing opt in via a `DiskBoundProcessor` marker trait and use `pipe_disk_bound(p)` instead of `pipe(p)`.
+
+The runtime builder constructs the worker's `SegmentSource` based on what the writer reports. The writer answers two questions via `TraceWriter` trait hooks:
+
+- `take_pending_receiver(&mut self) -> Option<ChannelReceiver>`: memory-mode writers return `Some` on first call, `None` thereafter. Default impl returns `None`, so non-`RotatingWriter` impls (`NullWriter`, test doubles) need no override.
+- `fs_handle(&self) -> Option<Arc<dyn Fs>>`: already exists for disk-mode source construction.
+
+Source-selection rules:
+
+- `take_pending_receiver()` returns `Some(receiver)` (memory mode): `SegmentSource::Channel { receiver }`.
+- Returns `None`, writer has an `Fs` handle (disk mode): `SegmentSource::Dir { fs: writer.fs_handle(), dir, stem, poll_interval }`. Requires `with_trace_path(...)` was set.
+- Returns `None`, no `Fs` handle (e.g. `NullWriter`): no worker spawned.
+
+### `RotatingWriter::in_memory` defaults
 
 - `rotation_period`: reuses disk's `DEFAULT_ROTATION_PERIOD` (60 s). Caps how long an event can sit in the active buffer when traffic is low.
-- `drain_interval`: internal, not user-facing.
-- `queue_capacity`: derived from `max_buffered_bytes / max_segment_size + headroom` (e.g. 16 / 1 + 2 = 18 slots for the example above). User passes bytes, the builder translates to a slot count for `BoundedQueue`.
+- `drain_interval`: internal.
+- `queue_capacity` (slot-floor): derived from `max_total_size / 4 KB + a bit of headroom`. The user-facing budget is bytes, this slot count is a safety net for unusually small segments.
 
-`BackgroundTaskConfig` itself stays internal; users compose via the runtime builder.
+`in_memory` returns `Err(InvalidInput)` if `max_segment_size > max_total_size`. Disk silently halts in this case after one rotation (`evict_oldest` flips `WriterState::Finished`), but the explicit memory constructor has clearer ergonomics.
 
-**Alternative considered:** A two-step API where the user calls `let consumer = writer.consumer();` and passes the consumer separately via `.with_memory_consumer(consumer)` would also work, but it leaves the door open for passing a consumer and writer from different instances (compiles, fails at runtime). The trait-method approach keeps the consumer pinned to its writer.
+### Rejected alternatives
+
+- **`MemoryPipeline { writer, receiver }` newtype.** Same bundling as putting the slot inside `RotatingWriter`, but with an extra public type.
+- **Make `NoTracePath::build` / `build_and_start` take concrete `RotatingWriter`.** Mirrors `HasTracePath` and avoids the trait extension. Forces users with custom writers to migrate to `_with_writer` variants. Rejected because the trait method approach is non-breaking.
+- **`builder.with_memory_writer(seg, total)` high-level method.** Loses writer-level config knobs (`rotation_period`, etc.) at the builder level, or forces per-knob builder methods.
+- **Downcast via `Any` inside generic `build_with_writer`.** Ugly, breaks under any future writer wrapping.
+- **Returning `(writer, receiver)` and exposing `ChannelReceiver` publicly via `with_segment_receiver`.** Two-step wiring with a public type users can't construct themselves. Mis-wire-prone.
 
 ---
 
@@ -357,70 +326,55 @@ Memory path: anything in the channel or in `SegmentData` at crash time is gone.
 Graceful shutdown for memory mode mirrors disk:
 
 1. Stop the flush thread.
-2. `MemoryWriter::finalize`: seal the active segment, push it to the queue, set `writer_done` (`AtomicBool`, `Release`) so the worker's final empty-queue check sees the writer as done, and call
-  `notify.notify_one()` to wake the worker. Then drop the writer's handles to the queue.
-3. Worker drains the queue and runs each segment through the pipeline.
-4. `TelemetryGuard::graceful_shutdown(timeout)` waits for the worker to exit.
+2. `RotatingWriter::finalize`: seal the active segment via `Fs::seal` (which for `MemFs` pushes onto the ring) and signal `writer_done` on the channel. The worker observes `writer_done` on its next wait and exits its loop after one final drain. (Atomic ordering detailed below.)
+3. `TelemetryGuard::graceful_shutdown(timeout)` waits for the worker to exit.
+
+The disk path follows the same steps with `writer_done` not in play (the worker's existing stop-token-cancelled + drain-once-more logic already handles disk).
+
+**Ordering invariant:** Three sync points, the final segment is always delivered before the worker exits:
+
+1. **Writer seal:** `ChannelSender::push` does `queued_bytes.fetch_add(size, AcqRel)`, then `BoundedQueue::force_push`, which establishes a Release synchronization point on the queued slot. The byte-eviction loop that follows may pop additional slots, but those don't gate the just-pushed slot.
+2. **Writer mark-done:** after the final `seal`, `RotatingWriter::finalize` calls `ShutdownHandle::mark_done`, which does `writer_done.store(true, Release)` then `notify_one`.
+3. **Worker observe + re-drain:** `ChannelReceiver::wait` does `writer_done.load(Acquire)`. Once it observes `true`, the worker exits the wait, the run loop falls through to one final `drain_ready`, and `BoundedQueue::pop` performs the `Acquire` on the slot. This is guaranteed to see step 1's push because the write to `writer_done` (Release) synchronizes-with the load (Acquire), and the queue push happens-before the `mark_done` store on the writer thread.
+
+Lost-wakeup avoidance is handled by the standard `notified() / enable() / re-check writer_done / await` pattern in `ChannelReceiver::wait`: the future is registered before the second `writer_done` load, so any `notify_one` that fires between the first load and the await becomes the permit the await consumes.
 
 ---
 
 ## 6. Testing
 
-Reuse the patterns from the disk path:
+Reuse the patterns from the disk path. The headline change is that **`RotatingWriter` tests can swap `MemFs` in for the `Arc<dyn Fs>` backing store**, dropping `TempDir` for existing cases.
 
-- **Unit.** `MemoryWriter` rotation, eviction-on-budget-overrun, segment count matches expected, `finalize` drains the active segment.
-- **Integration.** Pair `MemoryWriter` with a test `SegmentProcessor` that captures segments into a `Vec<SegmentData>`. Run a workload, confirm bytes decode, confirm event counts match.
-- **S3 integration.** `MemoryWriter` + `S3PipelineUploader` against `s3s` (already used by the disk-path S3 tests). Same assertions.
-- **Stress.** High segment-emission rate against a slow downstream processor. Verify drop-oldest fires, counters increment, the writer never blocks.
-- **Streaming compression.** Golden-file decompression: write a known payload streamed, confirm gunzip output equals the un-streamed payload. Plus a compression-ratio sanity check (within ~5% of batched).
-- **Shuttle.** `BoundedQueue`, atomics, and the `Notify` wakeup go through `crate::primitives::sync` so `--cfg shuttle` builds reuse the existing shim plus the small `primitives::sync::Notify` shim added for this design. Scenarios worth modeling:
-  - Concurrent `force_push` (writer) and `pop` (worker) on the same `BoundedQueue` instance.
-  - Lost-wakeup avoidance
-  - Shutdown race
-  - Eviction under contention (writer's `force_push` returns `Some(evicted)` while worker is mid-pipeline on a separately-popped segment; verify `buffered_bytes` and `dropped_segments` remain consistent across interleavings)
+**Unit coverage.** `Fs` impls (active map transitions, seal pushes/drains correctly, `Bytes` zero-copy), channel ordering and accounting, writer rotation/eviction/metadata against `MemFs` (a small disk-only subset stays on `DiskFs` for rename atomicity + dir scan edge cases), `SegmentSource` both variants.
+
+**Integration.** Memory `RotatingWriter` paired with a test `SegmentProcessor` that captures `SegmentData`. Run a workload, confirm bytes decode and event counts match. S3 integration against `s3s` (already used by the disk-path S3 tests).
+
+**Stress + Shuttle.** High segment-emission rate against a slow downstream processor: verify drop-oldest fires, counters increment, writer never blocks. Shuttle scenarios: concurrent `force_push` / `pop`, shutdown race on `writer_done`, eviction-under-contention accounting, `SegmentData` drop racing with `force_push` eviction (no underflow).
 
 ### Memory regression tests
 
-Memory mode keeps bytes in process heap that the disk path kept on disk, so regressions are easier to introduce and harder to spot. Two layers, both run per-PR:
+Memory mode keeps bytes in process heap that the disk path kept on disk, so regressions are easier to introduce and harder to spot. Two layers to run on PRs:
 
-- **Counter assertions.** Fixed-seed workload against `MemoryWriter`. Assert peak `buffered_bytes` stays within the configured budget, eviction fires when the budget is intentionally tight, queue depth stays bounded. Catches accounting regressions.
-- **Heap baseline.** Same workload under a deterministic heap profiler (e.g. `dhat`), baseline checked into CI. Catches leaks and allocator-side regressions the counters can't see.
+- **Counter assertions.** Fixed-seed workload against a memory `RotatingWriter`. Assert peak `queued_bytes` stays within `max_total_size`, `in_flight_bytes` stays within `max_segment_size` (or higher under cpu-profiling), eviction fires when the budget is intentionally tight, queue depth stays bounded. Catches accounting regressions.
+- **Heap baseline.** Same workload under a deterministic heap profiler (e.g. `dhat`), baseline checked into CI. Catches leaks and allocator-side regressions.
 
-For diagnosis when a gate trips, the upcoming heap profiler (`design/memory-profiling.md`) could be very useful to find where the bytes came from.
+### Metrics
 
-### Metrics catalog
+`RotatingWriter`'s existing `FlushMetrics`, `SegmentProcessMetrics`, and `TlDrainMetrics` cover the writer + worker pipeline for both backends.
 
-Reuses the existing `SegmentProcessMetrics` + per-stage prefix infrastructure (`src/metrics.rs`, `src/background_task/pipeline_metrics.rs`). Existing per-segment fields (`TotalTime`, `{Stage}.Time`, `Panicked`, etc.) are unchanged; see those modules for the authoritative list. This PR adds:
+For memory mode, add four channel-gauge fields to `FlushMetrics` (snapshotted from `ChannelReceiver` once per flush cycle):
 
-**Memory-mode additions.**
+- `QueuedBytes`: encoded bytes currently in the ring. Compare to `max_total_size` to gauge sizing pressure.
+- `InFlightBytes`: encoded bytes in pipeline between worker pop and `SegmentData` drop. Detects stuck/slow processors.
+- `QueueDepth`: current ring slot occupancy.
+- `DroppedSegments`: cumulative segments evicted under byte-budget pressure.
 
+Fields are `Option<u64>` and stay `None` for disk-mode writers, so existing `FlushMetrics` consumers see no change.
 
-| Metric                        | Type    | Description                                                                                                                    |
-| ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `BufferedBytes`               | gauge   | Current `buffered_bytes` (active + queued + in-flight)                                                                         |
-| `QueueDepth`                  | gauge   | segments currently in the ring (requires adding `BoundedQueue::len()`; `ArrayQueue::len` already exists, just not yet exposed) |
-| `DroppedSegments`             | counter | Increments on each `force_push` eviction                                                                                       |
-| `MemoryWriter.SealedSegments` | counter | Successful seal+push events                                                                                                    |
-
-
-**Per-stage failure-mode additions** (`{Stage}` is the processor's `name()`):
-
-
-| Metric                    | Type    | Description                                              |
-| ------------------------- | ------- | -------------------------------------------------------- |
-| `{Stage}.RetryableErrors` | counter | `ProcessErrorKind::Transfer { retryable: true }` returns |
-| `{Stage}.PoisonDrops`     | counter | Segments dropped after `retry_budget` exhaustion         |
-| `{Stage}.Timeouts`        | counter | `attempt_timeout` fires                                  |
-
-
-`BufferedBytes` and `QueueDepth` sample on a low-frequency timer (default 1 s) to avoid hot-path contention; `DroppedSegments` and the per-stage counters are event-driven.
+`ChannelReceiver` also exposes the gauges as direct accessors (`queued_bytes()` etc.) for callers who want to sample at their own cadence.
 
 ---
 
 ## 7. Open questions
 
-**Make `trace_path` / `trace_dir` optional?** Memory mode doesn't use the trace path. Cleanup: turn `BackgroundTaskConfig::trace_path` into `Option<PathBuf>`. Easy non-breaking approach is to keep `trace_dir()` / `trace_stem()` returning `&Path` / `&str` with their existing fallback defaults when the path is missing.
-
-**Disk-vs-memory mutex at the type level.** In this doc the precedence is runtime (memory wins, section 4). We could split the marker chain so calling both is a compile error, but it would double the `(path-state, pipeline-state)` matrix for one mutually-exclusive pair.
-
-**Adaptive sizing:** The current design takes a static `max_buffered_bytes`. We could measure queue depth and let the writer grow/shrink within a configured range, similar to how some allocators auto-tune their arenas. Perhaps container users could benefit more from reading cgroup `memory.max` / `memory.high` as an outer cap. Initially keeping it out of scope for v1 or at least until implementation testing shows workload data. The metrics catalog (`BufferedBytes`, `QueueDepth`, `DroppedSegments`) covers the internal inputs we'd need.
+**Adaptive sizing:** The current design takes a static `max_total_size`. We could measure queue depth and let the writer grow/shrink within a configured range, similar to how some allocators auto-tune their arenas. Perhaps container users could benefit more from reading cgroup `memory.max` / `memory.high` as an outer cap. Initially keeping it out of scope for v1 or at least until implementation testing shows workload data. The metrics catalog (`QueuedBytes`, `QueueDepth`, `DroppedSegments`) covers the internal inputs we'd need.
