@@ -1516,8 +1516,26 @@ pub struct TelemetryCore;
 impl TelemetryCore {
     /// Build a telemetry session. Recording starts disabled; call
     /// [`TelemetryGuard::enable`] to begin recording.
-    #[builder]
+    #[builder(state_mod = telemetry_core_builder)]
     pub fn new(
+        /// The pipeline of [`SegmentProcessor`](crate::background_task::SegmentProcessor)s
+        /// to run on each sealed segment. When empty the background worker
+        /// is not spawned.
+        #[builder(field)]
+        processors: Vec<Box<dyn crate::background_task::SegmentProcessor>>,
+        /// Static segment metadata injected into every rotated segment's
+        /// header. Empty by default; the S3 preset populates it from the
+        /// configured `S3Config` so traces stay self-describing.
+        #[builder(field)]
+        segment_metadata: Vec<(String, String)>,
+        /// S3 upload configuration.
+        #[cfg(feature = "worker-s3")]
+        #[builder(field)]
+        s3_config: Option<crate::background_task::s3::S3Config>,
+        /// Pre-built S3 client.
+        #[cfg(feature = "worker-s3")]
+        #[builder(field)]
+        s3_client: Option<aws_sdk_s3::Client>,
         /// The trace writer (e.g. [`RotatingWriter`], [`NullWriter`]).
         writer: impl TraceWriter + 'static,
         /// Path for trace output. Enables the background worker when any
@@ -1533,16 +1551,6 @@ impl TelemetryCore {
         /// Enable scheduler event capture (Linux only).
         #[cfg(feature = "cpu-profiling")]
         sched_events: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
-        /// The pipeline of [`SegmentProcessor`](crate::background_task::SegmentProcessor)s
-        /// to run on each sealed segment. When empty the background worker
-        /// is not spawned.
-        #[builder(default)]
-        processors: Vec<Box<dyn crate::background_task::SegmentProcessor>>,
-        /// Static segment metadata injected into every rotated segment's
-        /// header. Empty by default; the S3 preset populates it from the
-        /// configured `S3Config` so traces stay self-describing.
-        #[builder(default)]
-        segment_metadata: Vec<(String, String)>,
         /// How often the background worker polls for sealed segments.
         worker_poll_interval: Option<Duration>,
         /// Metrics sink for the flush/worker threads.
@@ -1557,6 +1565,33 @@ impl TelemetryCore {
                 .task_dump_idle_threshold_ns
                 .store(cfg.idle_threshold().as_nanos() as u64, Ordering::Relaxed);
         }
+
+        // Assemble processors from s3_config when provided and no explicit
+        // processors were set.
+        #[allow(unused_mut)]
+        let mut processors = processors;
+        #[allow(unused_mut)]
+        let mut segment_metadata = segment_metadata;
+        #[cfg(feature = "worker-s3")]
+        if let Some(config) = s3_config {
+            if segment_metadata.is_empty() {
+                segment_metadata = config
+                    .as_metadata()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+            }
+            if processors.is_empty() {
+                #[cfg(feature = "cpu-profiling")]
+                if cpu_profiling.is_some() {
+                    processors.push(Box::new(crate::background_task::SymbolizeProcessor));
+                }
+                processors.push(Box::new(crate::background_task::GzipCompressor));
+                processors.push(Box::new(crate::background_task::S3PipelineUploader::new(
+                    config, s3_client,
+                )));
+            }
+        }
+
         #[allow(unused_mut)]
         let mut event_writer = EventWriter::new(Box::new(writer));
 
@@ -1656,6 +1691,38 @@ impl TelemetryCore {
             Some(flush_thread),
             worker,
         ))
+    }
+}
+
+// Custom methods on the generated builder.
+impl<W: TraceWriter, S: telemetry_core_builder::State> TelemetryCoreBuilder<W, S> {
+    /// Configure S3 upload for sealed trace segments.
+    #[cfg(feature = "worker-s3")]
+    pub fn s3_config(mut self, config: crate::background_task::s3::S3Config) -> Self {
+        self.s3_config = Some(config);
+        self
+    }
+
+    /// Provide a pre-built S3 client (for custom credentials or endpoints).
+    #[cfg(feature = "worker-s3")]
+    pub fn s3_client(mut self, client: aws_sdk_s3::Client) -> Self {
+        self.s3_client = Some(client);
+        self
+    }
+
+    /// Set the processor pipeline directly.
+    pub fn processors(
+        mut self,
+        processors: Vec<Box<dyn crate::background_task::SegmentProcessor>>,
+    ) -> Self {
+        self.processors = processors;
+        self
+    }
+
+    /// Set static segment metadata.
+    pub fn segment_metadata(mut self, entries: Vec<(String, String)>) -> Self {
+        self.segment_metadata = entries;
+        self
     }
 }
 
@@ -3407,5 +3474,28 @@ mod tests {
                 "with_s3_uploader should overwrite, not merge"
             );
         }
+    }
+
+    /// Regression test for issue #400: `TelemetryCoreBuilder` must expose
+    /// `.s3_config()` so callers can configure S3 without going through
+    /// `TracedRuntimeBuilder`.
+    #[cfg(feature = "worker-s3")]
+    #[test]
+    fn telemetry_core_builder_s3_config_builds_successfully() {
+        use crate::background_task::s3::S3Config;
+
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("trace.bin");
+        let s3 = S3Config::builder().bucket("b").service_name("s").build();
+
+        let guard = TelemetryCore::builder()
+            .writer(NullWriter)
+            .trace_path(&trace_path)
+            .s3_config(s3)
+            .build()
+            .expect("TelemetryCoreBuilder with s3_config must build");
+
+        assert!(guard.is_enabled());
+        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
     }
 }
