@@ -649,9 +649,9 @@ mod tests {
                 // fd was closed and the slot was reused for an unrelated open
                 // in another thread. That still means our OwnedFd was dropped.
             }
-            Some(now) => panic!(
-                "schedstat fd {fd} leaked after thread exit (still points at {now:?})"
-            ),
+            Some(now) => {
+                panic!("schedstat fd {fd} leaked after thread exit (still points at {now:?})")
+            }
         }
     }
 }
