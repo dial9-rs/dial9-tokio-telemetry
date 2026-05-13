@@ -7,7 +7,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const skillsDir = path.resolve(__dirname, "..", "skills");
+const skillsDir = path.resolve(__dirname, "..", ".symposium", "skills");
 const demoPath = path.join(__dirname, "demo-trace.bin");
 
 // Parse markdown: extract ```javascript blocks with their heading

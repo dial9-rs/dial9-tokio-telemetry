@@ -13,8 +13,8 @@ const { createHistogram } = require('perf_hooks');
 function resolve(name) {
   const sibling = path.resolve(__dirname, name);
   if (fs.existsSync(sibling)) return sibling;
-  // Source tree: skills/dial9-toolkit/scripts/ -> ui/
-  const fromSkills = path.resolve(__dirname, '..', '..', '..', 'ui', name);
+  // Source tree: .symposium/skills/dial9-toolkit/scripts/ -> ui/
+  const fromSkills = path.resolve(__dirname, '..', '..', '..', '..', 'ui', name);
   if (fs.existsSync(fromSkills)) return fromSkills;
   return path.resolve(__dirname, '..', 'ui', name);
 }

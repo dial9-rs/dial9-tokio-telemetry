@@ -272,7 +272,7 @@ async function main() {
   // ── analyzeTraces respects sample option ──
   console.log("\nanalyzeTraces sample:");
   {
-    const { analyzeTraces } = require(path.resolve(__dirname, '..', 'skills', 'dial9-toolkit', 'scripts', 'analyze.js'));
+    const { analyzeTraces } = require(path.resolve(__dirname, '..', '.symposium', 'skills', 'dial9-toolkit', 'scripts', 'analyze.js'));
     const dir = setupDir(6);
     try {
       // Full run to populate cache for all 6 files
@@ -295,7 +295,7 @@ async function main() {
   // ── analyzeTraces respects force option ──
   console.log("\nanalyzeTraces force:");
   {
-    const { analyzeTraces } = require(path.resolve(__dirname, '..', 'skills', 'dial9-toolkit', 'scripts', 'analyze.js'));
+    const { analyzeTraces } = require(path.resolve(__dirname, '..', '.symposium', 'skills', 'dial9-toolkit', 'scripts', 'analyze.js'));
     const dir = setupDir(2);
     try {
       // First run populates cache

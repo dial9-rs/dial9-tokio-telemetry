@@ -629,7 +629,7 @@
 
     const concurrency = (opts.parallel === false) ? 1 : Math.min(os.cpus().length, 32);
     const workerCandidate = path.resolve(__dirname, 'analyze.js');
-    const workerFallback = path.resolve(__dirname, '..', 'skills', 'dial9-toolkit', 'scripts', 'analyze.js');
+    const workerFallback = path.resolve(__dirname, '..', '.symposium', 'skills', 'dial9-toolkit', 'scripts', 'analyze.js');
     const workerScript = fs.existsSync(workerCandidate) ? workerCandidate : workerFallback;
 
     function cachePathFor(file) {

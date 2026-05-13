@@ -9,10 +9,10 @@ const path = require('path');
 function resolve(name) {
   const sibling = path.resolve(__dirname, name);
   if (fs.existsSync(sibling)) return sibling;
-  // When running from skills/dial9-red-flags/scripts/, look for toolkit scripts
+  // When running from .symposium/skills/dial9-red-flags/scripts/, look for toolkit scripts
   const toolkit = path.resolve(__dirname, '..', '..', 'dial9-toolkit', 'scripts', name);
   if (fs.existsSync(toolkit)) return toolkit;
-  return path.resolve(__dirname, '..', '..', '..', 'ui', name);
+  return path.resolve(__dirname, '..', '..', '..', '..', 'ui', name);
 }
 
 const { parseTrace, EVENT_TYPES, deduplicateSamples } = require(resolve('trace_parser.js'));
