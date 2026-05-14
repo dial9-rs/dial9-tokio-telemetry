@@ -84,6 +84,37 @@ async fn main() {
 | `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. |
 | `DIAL9_ROTATION_SECS` | `60` | Wall-clock rotation period in seconds. |
 | `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
+| `DIAL9_MAX_FILE_SIZE_MB` | `max(total / 4, 16)` | Per-file trace segment size in MiB. |
+
+Runtime knobs:
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_TASK_TRACKING_ENABLED` | `true` | Track tasks spawned through dial9 handles. |
+| `DIAL9_RUNTIME_NAME` | unset | Human-readable runtime name in trace metadata. |
+
+S3 upload knobs (`worker-s3` feature required):
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_S3_BUCKET` | unset | Upload sealed trace segments to this bucket. |
+| `DIAL9_SERVICE_NAME` | binary name | Service name used in S3 keys and metadata. |
+| `DIAL9_S3_PREFIX` | unset | Optional S3 object key prefix. |
+
+CPU profiling knobs (`cpu-profiling` feature required):
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_CPU_PROFILE_ENABLED` | `true` on Linux, `false` elsewhere | Enable CPU stack sampling. |
+| `DIAL9_CPU_SAMPLE_HZ` | `99` | CPU sampling frequency in Hz. |
+| `DIAL9_SCHEDULE_PROFILE_ENABLED` | `true` on Linux, `false` elsewhere | Enable per-worker scheduler event capture. |
+
+Task dump knobs (capture requires the `taskdump` feature):
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_TASK_DUMP_ENABLED` | `false` | Capture async task dumps at idle yield points. |
+| `DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS` | `10` | Mean idle duration for task dump sampling. |
 
 Missing variables use defaults. Blank or invalid values emit a warning and fall back to defaults.
 
