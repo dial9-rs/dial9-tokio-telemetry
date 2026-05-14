@@ -76,7 +76,7 @@ async fn main() {
 }
 ```
 
-`from_env()` currently supports the local trace writer knobs:
+`from_env()` supports these local trace writer knobs:
 
 | Name | Default | Meaning |
 | --- | --- | --- |

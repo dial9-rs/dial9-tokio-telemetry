@@ -204,16 +204,18 @@ const BYTES_PER_MIB: u64 = 1024 * 1024;
 const MIN_MAX_FILE_SIZE: u64 = 16 * BYTES_PER_MIB;
 
 trait EnvSource {
-    fn get(&self, name: &str) -> Option<String>;
+    fn get(&self, name: &str) -> Result<String, std::env::VarError>;
 }
 
 struct ProcessEnv;
 
 impl EnvSource for ProcessEnv {
-    fn get(&self, name: &str) -> Option<String> {
-        std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+    fn get(&self, name: &str) -> Result<String, std::env::VarError> {
+        std::env::var(name)
     }
 }
+
+impl EnvSourceParser for ProcessEnv {}
 
 #[derive(Debug)]
 struct ParsedEnvConfig {
@@ -222,129 +224,121 @@ struct ParsedEnvConfig {
     rotation_period: Duration,
     max_total_size: u64,
     max_file_size: u64,
-    warnings: Vec<String>,
 }
 
-fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
-    let mut warnings = Vec::new();
-
-    let enabled = parse_env_bool(env, ENV_DIAL9_ENABLED, DEFAULT_ENABLED, &mut warnings);
-    let trace_dir = PathBuf::from(parse_env_string(
-        env,
-        ENV_DIAL9_TRACE_DIR,
-        DEFAULT_TRACE_DIR,
-        &mut warnings,
-    ));
-    let rotation_secs = parse_env_positive_u64(
-        env,
-        ENV_DIAL9_ROTATION_SECS,
-        DEFAULT_ROTATION_SECS,
-        &mut warnings,
-    );
-    let max_disk_usage_mb = parse_env_positive_u64(
-        env,
-        ENV_DIAL9_MAX_DISK_USAGE_MB,
-        DEFAULT_MAX_DISK_USAGE_MB,
-        &mut warnings,
-    );
-
+fn parse_env_config(env: &impl EnvSourceParser) -> ParsedEnvConfig {
+    let enabled = env.get_bool(ENV_DIAL9_ENABLED, DEFAULT_ENABLED);
+    let trace_dir = PathBuf::from(env.get_string(ENV_DIAL9_TRACE_DIR, DEFAULT_TRACE_DIR));
+    let rotation_secs = env.get_positive_u64(ENV_DIAL9_ROTATION_SECS, DEFAULT_ROTATION_SECS);
+    let max_disk_usage_mb =
+        env.get_positive_u64(ENV_DIAL9_MAX_DISK_USAGE_MB, DEFAULT_MAX_DISK_USAGE_MB);
     let max_total_size = max_disk_usage_mb.saturating_mul(BYTES_PER_MIB);
-    let max_file_size = (max_total_size / 4).max(MIN_MAX_FILE_SIZE);
 
     ParsedEnvConfig {
         enabled,
         trace_dir,
         rotation_period: Duration::from_secs(rotation_secs),
         max_total_size,
-        max_file_size,
-        warnings,
+        max_file_size: derive_max_file_size(max_total_size),
     }
 }
 
-fn parse_env_bool(
-    env: &impl EnvSource,
-    name: &'static str,
-    default: bool,
-    warnings: &mut Vec<String>,
-) -> bool {
-    let Some(value) = env.get(name) else {
-        return default;
-    };
-    let value = value.trim();
-    if value.is_empty() {
-        warnings.push(format!(
-            "dial9: {name} is blank; expected an explicit boolean value; using default {default}"
-        ));
-        return default;
-    }
-
-    match value.to_ascii_lowercase().as_str() {
-        "t" | "true" | "1" | "y" | "yes" | "on" => true,
-        "f" | "false" | "0" | "n" | "no" | "off" => false,
-        _ => {
-            warnings.push(format!(
-                "dial9: {name}={value:?} is invalid; valid values are t,true,1,y,yes,on,f,false,0,n,no,off; using default {default}"
+trait EnvSourceParser: EnvSource {
+    fn get_bool(&self, name: &'static str, default: bool) -> bool {
+        let value = match self.get(name) {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return default,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                self.warn_not_unicode(name, default);
+                return default;
+            }
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            self.warn(format_args!(
+                "dial9: {name} is blank; expected an explicit boolean value; using default {default}"
             ));
-            default
+            return default;
+        }
+
+        match value.to_ascii_lowercase().as_str() {
+            "t" | "true" | "1" | "y" | "yes" | "on" => true,
+            "f" | "false" | "0" | "n" | "no" | "off" => false,
+            _ => {
+                self.warn(format_args!(
+                    "dial9: {name}={value:?} is invalid; valid values are t,true,1,y,yes,on,f,false,0,n,no,off; using default {default}"
+                ));
+                default
+            }
         }
     }
-}
 
-fn parse_env_positive_u64(
-    env: &impl EnvSource,
-    name: &'static str,
-    default: u64,
-    warnings: &mut Vec<String>,
-) -> u64 {
-    let Some(value) = env.get(name) else {
-        return default;
-    };
-    let value = value.trim();
-    if value.is_empty() {
-        warnings.push(format!(
-            "dial9: {name} is blank; expected a positive integer; using default {default}"
-        ));
-        return default;
-    }
-
-    match value.parse::<u64>() {
-        Ok(n) if n > 0 => n,
-        _ => {
-            warnings.push(format!(
-                "dial9: {name}={value:?} is invalid; expected a positive integer; using default {default}"
+    fn get_positive_u64(&self, name: &'static str, default: u64) -> u64 {
+        let value = match self.get(name) {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return default,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                self.warn_not_unicode(name, default);
+                return default;
+            }
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            self.warn(format_args!(
+                "dial9: {name} is blank; expected a positive integer; using default {default}"
             ));
-            default
+            return default;
+        }
+
+        match value.parse::<u64>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                self.warn(format_args!(
+                    "dial9: {name}={value:?} is invalid; expected a positive integer; using default {default}"
+                ));
+                default
+            }
         }
     }
-}
 
-fn parse_env_string(
-    env: &impl EnvSource,
-    name: &'static str,
-    default: &'static str,
-    warnings: &mut Vec<String>,
-) -> String {
-    let Some(value) = env.get(name) else {
-        return default.to_string();
-    };
-    let value = value.trim();
-    if value.is_empty() {
-        warnings.push(format!(
-            "dial9: {name} is blank; expected a non-empty value; using default {default:?}"
-        ));
-        return default.to_string();
+    fn get_string(&self, name: &'static str, default: &'static str) -> String {
+        let value = match self.get(name) {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return default.to_string(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                self.warn_not_unicode(name, default);
+                return default.to_string();
+            }
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            self.warn(format_args!(
+                "dial9: {name} is blank; expected a non-empty value; using default {default:?}"
+            ));
+            return default.to_string();
+        }
+        value.to_string()
     }
-    value.to_string()
-}
 
-fn emit_env_warnings(warnings: &[String]) {
-    for warning in warnings {
+    fn warn_not_unicode(&self, name: &'static str, default: impl fmt::Display) {
+        self.warn(format_args!(
+            "dial9: {name} is not valid Unicode; using default {default}"
+        ));
+    }
+
+    fn warn(&self, message: fmt::Arguments<'_>) {
         if tracing::dispatcher::has_been_set() {
-            tracing::warn!(target: "dial9_telemetry", "{warning}");
+            tracing::warn!(target: "dial9_telemetry", "{message}");
         } else {
-            eprintln!("{warning}");
+            eprintln!("{message}");
         }
     }
+}
+
+fn derive_max_file_size(max_total_size: u64) -> u64 {
+    // Keep size-based rotation as a safety valve: roughly four large segments
+    // fit in the disk budget, but avoid tiny files on very small budgets.
+    (max_total_size / 4).max(MIN_MAX_FILE_SIZE)
 }
 
 fn default_tokio_builder() -> tokio::runtime::Builder {
@@ -356,7 +350,7 @@ fn default_tokio_builder() -> tokio::runtime::Builder {
 impl Dial9Config {
     /// Build a production-oriented config from standard `DIAL9_*` environment variables.
     ///
-    /// Supported variables in this first iteration:
+    /// Supported local trace writer variables:
     ///
     /// | Variable | Default | Meaning |
     /// | --- | --- | --- |
@@ -373,9 +367,8 @@ impl Dial9Config {
         Self::from_env_source(&ProcessEnv)
     }
 
-    fn from_env_source(env: &impl EnvSource) -> Self {
+    fn from_env_source(env: &impl EnvSourceParser) -> Self {
         let parsed = parse_env_config(env);
-        emit_env_warnings(&parsed.warnings);
 
         Self::builder()
             .enabled(parsed.enabled)
@@ -603,6 +596,7 @@ impl<S: dial9_config_builder::IsComplete> Dial9ConfigBuilder<S> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -626,21 +620,40 @@ mod tests {
 
     #[derive(Default)]
     struct FakeEnv {
-        vars: BTreeMap<String, String>,
+        vars: BTreeMap<String, FakeEnvValue>,
+    }
+
+    enum FakeEnvValue {
+        Unicode(String),
+        NonUnicode,
     }
 
     impl FakeEnv {
         fn with(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-            self.vars.insert(name.into(), value.into());
+            self.vars
+                .insert(name.into(), FakeEnvValue::Unicode(value.into()));
+            self
+        }
+
+        fn with_non_unicode(mut self, name: impl Into<String>) -> Self {
+            self.vars.insert(name.into(), FakeEnvValue::NonUnicode);
             self
         }
     }
 
     impl EnvSource for FakeEnv {
-        fn get(&self, name: &str) -> Option<String> {
-            self.vars.get(name).cloned()
+        fn get(&self, name: &str) -> Result<String, std::env::VarError> {
+            match self.vars.get(name) {
+                Some(FakeEnvValue::Unicode(value)) => Ok(value.clone()),
+                Some(FakeEnvValue::NonUnicode) => Err(std::env::VarError::NotUnicode(
+                    OsString::from("not unicode"),
+                )),
+                None => Err(std::env::VarError::NotPresent),
+            }
         }
     }
+
+    impl EnvSourceParser for FakeEnv {}
 
     #[test]
     fn env_defaults_to_disabled_local_traces() {
@@ -651,7 +664,6 @@ mod tests {
         assert_eq!(parsed.rotation_period, Duration::from_secs(60));
         assert_eq!(parsed.max_total_size, 1024 * 1024 * 1024);
         assert_eq!(parsed.max_file_size, 256 * 1024 * 1024);
-        assert!(parsed.warnings.is_empty());
     }
 
     #[test]
@@ -669,7 +681,6 @@ mod tests {
         assert_eq!(parsed.rotation_period, Duration::from_secs(15));
         assert_eq!(parsed.max_total_size, 2048 * 1024 * 1024);
         assert_eq!(parsed.max_file_size, 512 * 1024 * 1024);
-        assert!(parsed.warnings.is_empty());
     }
 
     #[test]
@@ -687,26 +698,18 @@ mod tests {
         assert_eq!(parsed.rotation_period, Duration::from_secs(60));
         assert_eq!(parsed.max_total_size, 1024 * 1024 * 1024);
         assert_eq!(parsed.max_file_size, 256 * 1024 * 1024);
-        assert_eq!(parsed.warnings.len(), 4);
-        assert!(parsed.warnings.iter().any(|w| w.contains("DIAL9_ENABLED")));
-        assert!(
-            parsed
-                .warnings
-                .iter()
-                .any(|w| w.contains("DIAL9_TRACE_DIR"))
+    }
+
+    #[test]
+    fn env_treats_non_unicode_values_as_invalid() {
+        let parsed = parse_env_config(
+            &FakeEnv::default()
+                .with_non_unicode("DIAL9_TRACE_DIR")
+                .with_non_unicode("DIAL9_ROTATION_SECS"),
         );
-        assert!(
-            parsed
-                .warnings
-                .iter()
-                .any(|w| w.contains("DIAL9_ROTATION_SECS"))
-        );
-        assert!(
-            parsed
-                .warnings
-                .iter()
-                .any(|w| w.contains("DIAL9_MAX_DISK_USAGE_MB"))
-        );
+
+        assert_eq!(parsed.trace_dir, PathBuf::from("/tmp/dial9-traces"));
+        assert_eq!(parsed.rotation_period, Duration::from_secs(60));
     }
 
     #[test]
