@@ -154,11 +154,7 @@ mod platform {
         // SAFETY: handler is installed (caller holds Unwinder), and we are
         // not inside a SIGSEGV handler (see Unwinder::capture safety
         // contract).
-        let (frames_written, truncated) = unsafe { unwind(pc, fp, sp, out) };
-        CaptureResult {
-            frames_written,
-            truncated,
-        }
+        unsafe { unwind(pc, fp, sp, out) }
     }
 
     /// Read `(pc, fp, sp)` such that `pc` is the PC to use for frame 0 and

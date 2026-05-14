@@ -19,6 +19,7 @@
 //! aborts the walk instead of crashing.
 
 use super::{SAFE_LOAD_FAULT, load};
+use crate::unwinder::CaptureResult;
 
 // Cap on frames per sample; prevents runaway walks on corrupted FP chains.
 pub const MAX_FRAMES: usize = 128;
@@ -49,21 +50,24 @@ pub(crate) fn strip_pac(addr: usize) -> usize {
 /// Walk the frame-pointer chain starting from the given (pc, fp, sp) triple,
 /// usually obtained from a signal handler's ucontext.
 ///
-/// Returns `(frames_written, truncated)`. `truncated` is `true` if the walk
-/// stopped because the output buffer (or [`MAX_FRAMES`]) was full *and* at
-/// least one additional frame would have been valid. A natural stop (end of
-/// chain, faulty load, implausible pointer) produces `truncated = false`.
+/// `truncated` is `true` if the walk stopped because the output buffer (or
+/// [`MAX_FRAMES`]) was full *and* at least one additional frame would have been
+/// valid. A natural stop (end of chain, faulty load, implausible pointer)
+/// produces `truncated = false`.
 ///
 /// # Safety
 /// - `install_handler` must have been called.
 /// - Should generally be called from a signal handler where the target thread
 ///   is stopped; walking a running thread's stack races with mutations.
-pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> (usize, bool) {
+pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> CaptureResult {
     let limit = out.len().min(MAX_FRAMES);
     if limit == 0 {
         // No room even for the interrupted PC. The walk would have produced
         // at least one frame, so this is truncation.
-        return (0, true);
+        return CaptureResult {
+            frames_written: 0,
+            truncated: true,
+        };
     }
 
     out[0] = pc as u64;
@@ -75,36 +79,57 @@ pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> (u
     loop {
         // Validate current fp before reading from it.
         if fp < stack_lo || fp >= stack_hi {
-            return (n, false);
+            return CaptureResult {
+                frames_written: n,
+                truncated: false,
+            };
         }
         if fp & (core::mem::size_of::<usize>() - 1) != 0 {
-            return (n, false); // misaligned
+            return CaptureResult {
+                frames_written: n,
+                truncated: false,
+            }; // misaligned
         }
 
         let saved_fp = unsafe { load(fp as *const usize) };
         if saved_fp == SAFE_LOAD_FAULT {
-            return (n, false);
+            return CaptureResult {
+                frames_written: n,
+                truncated: false,
+            };
         }
         let ret_addr_slot = (fp + core::mem::size_of::<usize>()) as *const usize;
         let ret_addr = strip_pac(unsafe { load(ret_addr_slot) });
         if ret_addr == SAFE_LOAD_FAULT {
-            return (n, false);
+            return CaptureResult {
+                frames_written: n,
+                truncated: false,
+            };
         }
 
         if !(DEAD_ZONE..=usize::MAX - DEAD_ZONE).contains(&ret_addr) {
-            return (n, false);
+            return CaptureResult {
+                frames_written: n,
+                truncated: false,
+            };
         }
 
         // Frame pointer must advance (stacks grow down -> saved_fp > fp)
         // but not by more than MAX_FRAME_SIZE.
         if saved_fp <= fp || saved_fp - fp > MAX_FRAME_SIZE {
-            return (n, false);
+            return CaptureResult {
+                frames_written: n,
+                truncated: false,
+            };
         }
 
         // We have a valid next frame. If we ran out of room to record it,
         // the walk is truncated.
         if n >= limit {
-            return (n, true);
+            return CaptureResult {
+                frames_written: n,
+                truncated: true,
+            };
         }
 
         out[n] = ret_addr as u64;
@@ -115,11 +140,11 @@ pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> (u
 
 /// Unwind from inside a signal handler given the raw ucontext.
 ///
-/// Returns `(frames_written, truncated)`; see [`unwind`] for details.
+/// See [`unwind`] for details on the return value.
 ///
 /// # Safety
 /// `ucontext` must be the pointer the kernel passed to a SA_SIGINFO handler.
-pub unsafe fn unwind_from_ucontext(ucontext: *mut libc::c_void, out: &mut [u64]) -> (usize, bool) {
+pub unsafe fn unwind_from_ucontext(ucontext: *mut libc::c_void, out: &mut [u64]) -> CaptureResult {
     let (pc, fp, sp) = unsafe { read_pc_fp_sp(ucontext) };
     unsafe { unwind(pc, fp, sp, out) }
 }
@@ -175,7 +200,10 @@ mod tests {
         stack[4] = base + 4 * sz;
 
         let mut out = [0u64; MAX_FRAMES];
-        let (n, truncated) = unsafe { unwind(0x40_0000, base, base, &mut out) };
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind(0x40_0000, base, base, &mut out) };
 
         assert_eq!(n, 3);
         assert!(!truncated);
@@ -188,7 +216,10 @@ mod tests {
     fn frame_zero_is_always_the_interrupted_pc() {
         install();
         let mut out = [0u64; MAX_FRAMES];
-        let (n, truncated) = unsafe { unwind(0xDEAD, 0, 0x1000, &mut out) };
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind(0xDEAD, 0, 0x1000, &mut out) };
         assert_eq!(n, 1);
         assert!(!truncated);
         assert_eq!(out[0], 0xDEAD);
@@ -199,7 +230,10 @@ mod tests {
         install();
         let mut out = [0u64; MAX_FRAMES];
         let sp = 0x7fff_0000_0000usize;
-        let (n, truncated) = unsafe { unwind(0x40_0000, sp + 1, sp, &mut out) };
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind(0x40_0000, sp + 1, sp, &mut out) };
         assert_eq!(n, 1);
         assert!(!truncated);
     }
@@ -209,7 +243,10 @@ mod tests {
         install();
         let mut out = [0u64; MAX_FRAMES];
         let sp = 0x7fff_0000_0000usize;
-        let (n, truncated) = unsafe { unwind(0x40_0000, sp.wrapping_sub(8), sp, &mut out) };
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind(0x40_0000, sp.wrapping_sub(8), sp, &mut out) };
         assert_eq!(n, 1);
         assert!(!truncated);
     }
@@ -225,7 +262,10 @@ mod tests {
         stack[1] = 0x100; // return addr in dead zone (< 0x1000)
 
         let mut out = [0u64; MAX_FRAMES];
-        let (n, truncated) = unsafe { unwind(0x40_0000, base, base, &mut out) };
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind(0x40_0000, base, base, &mut out) };
         assert_eq!(n, 1);
         assert!(!truncated);
     }
@@ -239,7 +279,10 @@ mod tests {
         stack[0] = base + MAX_FRAME_SIZE + 8; // jump exceeds MAX_FRAME_SIZE
 
         let mut out = [0u64; MAX_FRAMES];
-        let (n, truncated) = unsafe { unwind(0x40_0000, base, base, &mut out) };
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind(0x40_0000, base, base, &mut out) };
         assert_eq!(n, 1);
         assert!(!truncated);
     }
@@ -253,7 +296,10 @@ mod tests {
         stack[0] = base; // saved_fp == fp, doesn't advance
 
         let mut out = [0u64; MAX_FRAMES];
-        let (n, truncated) = unsafe { unwind(0x40_0000, base, base, &mut out) };
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind(0x40_0000, base, base, &mut out) };
         assert_eq!(n, 1);
         assert!(!truncated);
     }
@@ -262,7 +308,9 @@ mod tests {
     fn respects_output_buffer_limit() {
         install();
         let mut out = [0u64; 1];
-        let (n, _truncated) = unsafe { unwind(0x40_0000, 0, 0x1000, &mut out) };
+        let CaptureResult {
+            frames_written: n, ..
+        } = unsafe { unwind(0x40_0000, 0, 0x1000, &mut out) };
         assert_eq!(n, 1);
         assert_eq!(out[0], 0x40_0000);
     }
@@ -283,7 +331,10 @@ mod tests {
 
         // Buffer fits only pc + 1 frame, so the 3rd frame is dropped.
         let mut out = [0u64; 2];
-        let (n, truncated) = unsafe { unwind(0x40_0000, base, base, &mut out) };
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind(0x40_0000, base, base, &mut out) };
         assert_eq!(n, 2);
         assert!(
             truncated,
@@ -297,7 +348,10 @@ mod tests {
     fn empty_buffer_reports_truncation() {
         install();
         let mut out: [u64; 0] = [];
-        let (n, truncated) = unsafe { unwind(0x40_0000, 0, 0x1000, &mut out) };
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind(0x40_0000, 0, 0x1000, &mut out) };
         assert_eq!(n, 0);
         assert!(truncated, "empty buffer can always hold more");
     }
@@ -328,7 +382,10 @@ mod tests {
 
         // sp = fp keeps fp in range, page-aligned.
         let mut out = [0u64; MAX_FRAMES];
-        let (n, truncated) = unsafe { unwind(0x40_0000, fp, fp, &mut out) };
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind(0x40_0000, fp, fp, &mut out) };
 
         // Unmap before the asserts so a panic doesn't leak the mapping.
         assert_eq!(unsafe { libc::munmap(guard, ps) }, 0);
@@ -367,7 +424,10 @@ mod tests {
         unsafe { (fp as *mut usize).write(fp + 16) };
 
         let mut out = [0u64; MAX_FRAMES];
-        let (n, truncated) = unsafe { unwind(0x40_0000, fp, fp, &mut out) };
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind(0x40_0000, fp, fp, &mut out) };
 
         // Unmap before the asserts so a panic doesn't leak the mapping.
         assert_eq!(unsafe { libc::munmap(region, 2 * ps) }, 0);

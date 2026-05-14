@@ -194,8 +194,8 @@ extern "C" fn sigprof_handler(
         slot.write(pid, tid, time, cpu, period);
 
         // Unwind into the slot's frame buffer
-        let (count, _truncated) = unwind::unwind_from_ucontext(ucontext, slot.frames_mut());
-        slot.set_num_frames(count as u32);
+        let result = unwind::unwind_from_ucontext(ucontext, slot.frames_mut());
+        slot.set_num_frames(result.frames_written as u32);
 
         slot.commit();
     }
