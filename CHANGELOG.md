@@ -7,11 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.9](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.8...dial9-tokio-telemetry-v0.3.9) - 2026-05-08
+## [0.3.9](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.8...dial9-tokio-telemetry-v0.3.9) - 2026-05-14
+
+### Added
+
+- Instrumented JoinSets and other custom spawns via `spawn_with` ([#392](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/392))
+- Android schedstat support ([#395](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/395)) — thanks @nickrobinson!
 
 ### Fixed
 
-- fix(toolkit): don't pass directory progress callbacks for single-file analyzeTraces ([#384](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/384))
+- Recover from missing `.active` file during rotation ([#399](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/399)): if the active trace file or parent directory is removed externally, the writer now recovers gracefully instead of busy-looping.
+- Bring back old API on core telemetry builder ([#401](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/401))
+- Rate-limit log when drain is failing ([#385](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/385))
+- *(toolkit)* Don't pass directory progress callbacks for single-file analyzeTraces ([#384](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/384))
+- *(test)* Make `test_schedstat_fd_closed_on_thread_exit` not flaky ([#398](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/398))
+- Install pipeline when CPU profiling is enabled ([#404](https://github.com/dial9-rs/dial9/pull/404))
+
+### Other
+
+- Symposium cleanup ([#394](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/394))
+- Update README ([#391](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/391))
 
 
 ## [0.3.8](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.7...dial9-tokio-telemetry-v0.3.8) - 2026-05-08
