@@ -215,7 +215,11 @@ impl EnvSource for ProcessEnv {
     }
 }
 
-impl EnvSourceParser for ProcessEnv {}
+impl<S: EnvSource + ?Sized> EnvSource for &S {
+    fn get(&self, name: &str) -> Result<String, std::env::VarError> {
+        (*self).get(name)
+    }
+}
 
 #[derive(Debug)]
 struct ParsedEnvConfig {
@@ -226,7 +230,9 @@ struct ParsedEnvConfig {
     max_file_size: u64,
 }
 
-fn parse_env_config(env: &impl EnvSourceParser) -> ParsedEnvConfig {
+fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
+    let env = EnvSourceParser::new(env);
+
     let enabled = env.get_bool(ENV_DIAL9_ENABLED, DEFAULT_ENABLED);
     let trace_dir = PathBuf::from(env.get_string(ENV_DIAL9_TRACE_DIR, DEFAULT_TRACE_DIR));
     let rotation_secs = env.get_positive_u64(ENV_DIAL9_ROTATION_SECS, DEFAULT_ROTATION_SECS);
@@ -243,9 +249,17 @@ fn parse_env_config(env: &impl EnvSourceParser) -> ParsedEnvConfig {
     }
 }
 
-trait EnvSourceParser: EnvSource {
+struct EnvSourceParser<S>(S);
+
+impl<S> EnvSourceParser<S> {
+    fn new(source: S) -> Self {
+        Self(source)
+    }
+}
+
+impl<S: EnvSource> EnvSourceParser<S> {
     fn get_bool(&self, name: &'static str, default: bool) -> bool {
-        let value = match self.get(name) {
+        let value = match self.0.get(name) {
             Ok(value) => value,
             Err(std::env::VarError::NotPresent) => return default,
             Err(std::env::VarError::NotUnicode(_)) => {
@@ -274,7 +288,7 @@ trait EnvSourceParser: EnvSource {
     }
 
     fn get_positive_u64(&self, name: &'static str, default: u64) -> u64 {
-        let value = match self.get(name) {
+        let value = match self.0.get(name) {
             Ok(value) => value,
             Err(std::env::VarError::NotPresent) => return default,
             Err(std::env::VarError::NotUnicode(_)) => {
@@ -302,7 +316,7 @@ trait EnvSourceParser: EnvSource {
     }
 
     fn get_string(&self, name: &'static str, default: &'static str) -> String {
-        let value = match self.get(name) {
+        let value = match self.0.get(name) {
             Ok(value) => value,
             Err(std::env::VarError::NotPresent) => return default.to_string(),
             Err(std::env::VarError::NotUnicode(_)) => {
@@ -367,7 +381,7 @@ impl Dial9Config {
         Self::from_env_source(&ProcessEnv)
     }
 
-    fn from_env_source(env: &impl EnvSourceParser) -> Self {
+    fn from_env_source(env: &impl EnvSource) -> Self {
         let parsed = parse_env_config(env);
 
         Self::builder()
@@ -652,8 +666,6 @@ mod tests {
             }
         }
     }
-
-    impl EnvSourceParser for FakeEnv {}
 
     #[test]
     fn env_defaults_to_disabled_local_traces() {
