@@ -54,11 +54,6 @@ impl CpuProfilingConfig {
         self.include_kernel = yes;
         self
     }
-
-    #[cfg(test)]
-    pub(crate) fn test_frequency_hz(&self) -> u64 {
-        self.frequency_hz
-    }
 }
 
 /// Configuration for per-worker sched event capture (context switches).

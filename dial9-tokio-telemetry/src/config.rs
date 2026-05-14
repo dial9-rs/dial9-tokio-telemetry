@@ -42,9 +42,6 @@ pub(crate) trait BuildTracedRuntime: Send {
         tokio_builder: tokio::runtime::Builder,
         writer: RotatingWriter,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>;
-
-    #[cfg(test)]
-    fn test_summary(&self) -> crate::telemetry::recorder::RuntimeBuilderTestSummary;
 }
 
 impl<M: Send + 'static> BuildTracedRuntime for TracedRuntimeBuilder<HasTracePath, M> {
@@ -54,11 +51,6 @@ impl<M: Send + 'static> BuildTracedRuntime for TracedRuntimeBuilder<HasTracePath
         writer: RotatingWriter,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder::<HasTracePath, M>::build_and_start(*self, tokio_builder, writer)
-    }
-
-    #[cfg(test)]
-    fn test_summary(&self) -> crate::telemetry::recorder::RuntimeBuilderTestSummary {
-        TracedRuntimeBuilder::<HasTracePath, M>::test_summary(self)
     }
 }
 
@@ -216,14 +208,11 @@ const ENV_DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS: &str = "DIAL9_TASK_DUMP_IDLE_THRESH
 
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_TRACE_DIR: &str = "/tmp/dial9-traces";
-const DEFAULT_ROTATION_SECS: u64 = 60;
 const DEFAULT_MAX_DISK_USAGE_MB: u64 = 1024;
 const DEFAULT_TASK_TRACKING_ENABLED: bool = true;
 const DEFAULT_CPU_PROFILE_ENABLED: bool = cfg!(target_os = "linux");
-const DEFAULT_CPU_SAMPLE_HZ: u64 = 99;
 const DEFAULT_SCHEDULE_PROFILE_ENABLED: bool = cfg!(target_os = "linux");
 const DEFAULT_TASK_DUMP_ENABLED: bool = false;
-const DEFAULT_TASK_DUMP_IDLE_THRESHOLD_MS: u64 = 10;
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 const MIN_MAX_FILE_SIZE: u64 = 16 * BYTES_PER_MIB;
@@ -248,26 +237,26 @@ impl<S: EnvSource + ?Sized> EnvSource for &S {
 
 #[derive(Debug)]
 struct ParsedEnvConfig {
-    enabled: bool,
-    trace_dir: PathBuf,
-    rotation_period: Duration,
-    max_total_size: u64,
-    max_file_size: u64,
-    task_tracking_enabled: bool,
+    enabled: Option<bool>,
+    trace_dir: Option<PathBuf>,
+    rotation_period: Option<Duration>,
+    max_total_size: Option<u64>,
+    max_file_size: Option<u64>,
+    task_tracking_enabled: Option<bool>,
     runtime_name: Option<String>,
     s3: Option<ParsedS3Config>,
-    cpu_profile_enabled: bool,
-    cpu_sample_hz: u64,
-    schedule_profile_enabled: bool,
-    task_dump_enabled: bool,
-    task_dump_idle_threshold: Duration,
+    cpu_profile_enabled: Option<bool>,
+    cpu_sample_hz: Option<u64>,
+    schedule_profile_enabled: Option<bool>,
+    task_dump_enabled: Option<bool>,
+    task_dump_idle_threshold: Option<Duration>,
 }
 
 #[derive(Debug)]
 #[cfg_attr(not(feature = "worker-s3"), allow(dead_code))]
 struct ParsedS3Config {
     bucket: String,
-    service_name: String,
+    service_name: Option<String>,
     prefix: Option<String>,
 }
 
@@ -276,60 +265,47 @@ struct RuntimeEnvConfig {
     runtime_name: Option<String>,
     cpu_profile_enabled: bool,
     #[cfg_attr(not(feature = "cpu-profiling"), allow(dead_code))]
-    cpu_sample_hz: u64,
+    cpu_sample_hz: Option<u64>,
     schedule_profile_enabled: bool,
     task_dump_enabled: bool,
-    task_dump_idle_threshold: Duration,
+    task_dump_idle_threshold: Option<Duration>,
 }
 
 fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
     let env = EnvSourceParser::new(env);
 
-    let enabled = env.get_bool(ENV_DIAL9_ENABLED, DEFAULT_ENABLED);
-    let trace_dir = PathBuf::from(env.get_string(ENV_DIAL9_TRACE_DIR, DEFAULT_TRACE_DIR));
-    let rotation_secs = env.get_positive_u64(ENV_DIAL9_ROTATION_SECS, DEFAULT_ROTATION_SECS);
-    let max_disk_usage_mb =
-        env.get_positive_u64(ENV_DIAL9_MAX_DISK_USAGE_MB, DEFAULT_MAX_DISK_USAGE_MB);
-    let max_total_size = max_disk_usage_mb.saturating_mul(BYTES_PER_MIB);
+    let max_total_size = env
+        .get_positive_u64(ENV_DIAL9_MAX_DISK_USAGE_MB)
+        .map(|mb| mb.saturating_mul(BYTES_PER_MIB));
     let max_file_size = env
-        .get_optional_positive_u64(ENV_DIAL9_MAX_FILE_SIZE_MB)
-        .map(|mb| mb.saturating_mul(BYTES_PER_MIB))
-        .unwrap_or_else(|| derive_max_file_size(max_total_size));
-    let s3 = env.get_optional_string(ENV_DIAL9_S3_BUCKET).map(|bucket| {
-        let service_name = env
-            .get_optional_string(ENV_DIAL9_SERVICE_NAME)
-            .unwrap_or_else(default_service_name);
-        ParsedS3Config {
+        .get_positive_u64(ENV_DIAL9_MAX_FILE_SIZE_MB)
+        .map(|mb| mb.saturating_mul(BYTES_PER_MIB));
+    let s3 = env
+        .get_string(ENV_DIAL9_S3_BUCKET)
+        .map(|bucket| ParsedS3Config {
             bucket,
-            service_name,
-            prefix: env.get_optional_string(ENV_DIAL9_S3_PREFIX),
-        }
-    });
+            service_name: env.get_string(ENV_DIAL9_SERVICE_NAME),
+            prefix: env.get_string(ENV_DIAL9_S3_PREFIX),
+        });
 
     ParsedEnvConfig {
-        enabled,
-        trace_dir,
-        rotation_period: Duration::from_secs(rotation_secs),
+        enabled: env.get_bool(ENV_DIAL9_ENABLED),
+        trace_dir: env.get_string(ENV_DIAL9_TRACE_DIR).map(PathBuf::from),
+        rotation_period: env
+            .get_positive_u64(ENV_DIAL9_ROTATION_SECS)
+            .map(Duration::from_secs),
         max_total_size,
         max_file_size,
-        task_tracking_enabled: env.get_bool(
-            ENV_DIAL9_TASK_TRACKING_ENABLED,
-            DEFAULT_TASK_TRACKING_ENABLED,
-        ),
-        runtime_name: env.get_optional_string(ENV_DIAL9_RUNTIME_NAME),
+        task_tracking_enabled: env.get_bool(ENV_DIAL9_TASK_TRACKING_ENABLED),
+        runtime_name: env.get_string(ENV_DIAL9_RUNTIME_NAME),
         s3,
-        cpu_profile_enabled: env
-            .get_bool(ENV_DIAL9_CPU_PROFILE_ENABLED, DEFAULT_CPU_PROFILE_ENABLED),
-        cpu_sample_hz: env.get_positive_u64(ENV_DIAL9_CPU_SAMPLE_HZ, DEFAULT_CPU_SAMPLE_HZ),
-        schedule_profile_enabled: env.get_bool(
-            ENV_DIAL9_SCHEDULE_PROFILE_ENABLED,
-            DEFAULT_SCHEDULE_PROFILE_ENABLED,
-        ),
-        task_dump_enabled: env.get_bool(ENV_DIAL9_TASK_DUMP_ENABLED, DEFAULT_TASK_DUMP_ENABLED),
-        task_dump_idle_threshold: Duration::from_millis(env.get_positive_u64(
-            ENV_DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS,
-            DEFAULT_TASK_DUMP_IDLE_THRESHOLD_MS,
-        )),
+        cpu_profile_enabled: env.get_bool(ENV_DIAL9_CPU_PROFILE_ENABLED),
+        cpu_sample_hz: env.get_positive_u64(ENV_DIAL9_CPU_SAMPLE_HZ),
+        schedule_profile_enabled: env.get_bool(ENV_DIAL9_SCHEDULE_PROFILE_ENABLED),
+        task_dump_enabled: env.get_bool(ENV_DIAL9_TASK_DUMP_ENABLED),
+        task_dump_idle_threshold: env
+            .get_positive_u64(ENV_DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS)
+            .map(Duration::from_millis),
     }
 }
 
@@ -342,113 +318,47 @@ impl<S> EnvSourceParser<S> {
 }
 
 impl<S: EnvSource> EnvSourceParser<S> {
-    fn get_bool(&self, name: &'static str, default: bool) -> bool {
-        let value = match self.0.get(name) {
-            Ok(value) => value,
-            Err(std::env::VarError::NotPresent) => return default,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                self.warn_not_unicode(name, default);
-                return default;
-            }
-        };
-        let value = value.trim();
-        if value.is_empty() {
-            self.warn(format_args!(
-                "dial9: {name} is blank; expected an explicit boolean value; using default {default}"
-            ));
-            return default;
-        }
-
-        match value.to_ascii_lowercase().as_str() {
-            "t" | "true" | "1" | "y" | "yes" | "on" => true,
-            "f" | "false" | "0" | "n" | "no" | "off" => false,
-            _ => {
-                self.warn(format_args!(
-                    "dial9: {name}={value:?} is invalid; valid values are t,true,1,y,yes,on,f,false,0,n,no,off; using default {default}"
-                ));
-                default
-            }
-        }
-    }
-
-    fn get_positive_u64(&self, name: &'static str, default: u64) -> u64 {
-        let value = match self.0.get(name) {
-            Ok(value) => value,
-            Err(std::env::VarError::NotPresent) => return default,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                self.warn_not_unicode(name, default);
-                return default;
-            }
-        };
-        let value = value.trim();
-        if value.is_empty() {
-            self.warn(format_args!(
-                "dial9: {name} is blank; expected a positive integer; using default {default}"
-            ));
-            return default;
-        }
-
-        match value.parse::<u64>() {
-            Ok(n) if n > 0 => n,
-            _ => {
-                self.warn(format_args!(
-                    "dial9: {name}={value:?} is invalid; expected a positive integer; using default {default}"
-                ));
-                default
-            }
-        }
-    }
-
-    fn get_string(&self, name: &'static str, default: &'static str) -> String {
-        let value = match self.0.get(name) {
-            Ok(value) => value,
-            Err(std::env::VarError::NotPresent) => return default.to_string(),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                self.warn_not_unicode(name, default);
-                return default.to_string();
-            }
-        };
-        let value = value.trim();
-        if value.is_empty() {
-            self.warn(format_args!(
-                "dial9: {name} is blank; expected a non-empty value; using default {default:?}"
-            ));
-            return default.to_string();
-        }
-        value.to_string()
-    }
-
-    fn get_optional_string(&self, name: &'static str) -> Option<String> {
+    fn get_bool(&self, name: &'static str) -> Option<bool> {
         let value = match self.0.get(name) {
             Ok(value) => value,
             Err(std::env::VarError::NotPresent) => return None,
             Err(std::env::VarError::NotUnicode(_)) => {
-                self.warn_not_unicode(name, "unset");
+                warn_not_unicode(name);
                 return None;
             }
         };
         let value = value.trim();
         if value.is_empty() {
-            self.warn(format_args!(
-                "dial9: {name} is blank; expected a non-empty value; ignoring"
+            warn(format_args!(
+                "dial9: {name} is blank; expected an explicit boolean value; ignoring"
             ));
             return None;
         }
-        Some(value.to_string())
+
+        match value.to_ascii_lowercase().as_str() {
+            "t" | "true" | "1" | "y" | "yes" | "on" => Some(true),
+            "f" | "false" | "0" | "n" | "no" | "off" => Some(false),
+            _ => {
+                warn(format_args!(
+                    "dial9: {name}={value:?} is invalid; valid values are t,true,1,y,yes,on,f,false,0,n,no,off; ignoring"
+                ));
+                None
+            }
+        }
     }
 
-    fn get_optional_positive_u64(&self, name: &'static str) -> Option<u64> {
+    fn get_positive_u64(&self, name: &'static str) -> Option<u64> {
         let value = match self.0.get(name) {
             Ok(value) => value,
             Err(std::env::VarError::NotPresent) => return None,
             Err(std::env::VarError::NotUnicode(_)) => {
-                self.warn_not_unicode(name, "unset");
+                warn_not_unicode(name);
                 return None;
             }
         };
         let value = value.trim();
         if value.is_empty() {
-            self.warn(format_args!(
+            warn(format_args!(
                 "dial9: {name} is blank; expected a positive integer; ignoring"
             ));
             return None;
@@ -457,7 +367,7 @@ impl<S: EnvSource> EnvSourceParser<S> {
         match value.parse::<u64>() {
             Ok(n) if n > 0 => Some(n),
             _ => {
-                self.warn(format_args!(
+                warn(format_args!(
                     "dial9: {name}={value:?} is invalid; expected a positive integer; ignoring"
                 ));
                 None
@@ -465,18 +375,23 @@ impl<S: EnvSource> EnvSourceParser<S> {
         }
     }
 
-    fn warn_not_unicode(&self, name: &'static str, default: impl fmt::Display) {
-        self.warn(format_args!(
-            "dial9: {name} is not valid Unicode; using default {default}"
-        ));
-    }
-
-    fn warn(&self, message: fmt::Arguments<'_>) {
-        if tracing::dispatcher::has_been_set() {
-            tracing::warn!(target: "dial9_telemetry", "{message}");
-        } else {
-            eprintln!("{message}");
+    fn get_string(&self, name: &'static str) -> Option<String> {
+        let value = match self.0.get(name) {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                warn_not_unicode(name);
+                return None;
+            }
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            warn(format_args!(
+                "dial9: {name} is blank; expected a non-empty value; ignoring"
+            ));
+            return None;
         }
+        Some(value.to_string())
     }
 }
 
@@ -486,6 +401,7 @@ fn derive_max_file_size(max_total_size: u64) -> u64 {
     (max_total_size / 4).max(MIN_MAX_FILE_SIZE)
 }
 
+#[cfg(feature = "worker-s3")]
 fn default_service_name() -> String {
     if let Ok(path) = std::env::current_exe()
         && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
@@ -497,16 +413,16 @@ fn default_service_name() -> String {
     "unknown-service".to_string()
 }
 
-#[cfg_attr(
-    all(feature = "cpu-profiling", feature = "worker-s3"),
-    allow(dead_code)
-)]
-fn emit_env_warning(message: fmt::Arguments<'_>) {
+fn warn(message: fmt::Arguments<'_>) {
     if tracing::dispatcher::has_been_set() {
         tracing::warn!(target: "dial9_telemetry", "{message}");
     } else {
         eprintln!("{message}");
     }
+}
+
+fn warn_not_unicode(name: &'static str) {
+    warn(format_args!("dial9: {name} is not valid Unicode; ignoring"));
 }
 
 fn apply_runtime_env<M>(
@@ -519,11 +435,13 @@ fn apply_runtime_env<M>(
     runtime = runtime.with_task_tracking(config.task_tracking_enabled);
 
     if config.task_dump_enabled {
-        runtime = runtime.with_task_dumps(
-            crate::telemetry::TaskDumpConfig::builder()
-                .idle_threshold(config.task_dump_idle_threshold)
+        let task_dump_config = match config.task_dump_idle_threshold {
+            Some(threshold) => crate::telemetry::TaskDumpConfig::builder()
+                .idle_threshold(threshold)
                 .build(),
-        );
+            None => crate::telemetry::TaskDumpConfig::default(),
+        };
+        runtime = runtime.with_task_dumps(task_dump_config);
     }
 
     #[cfg(feature = "cpu-profiling")]
@@ -531,9 +449,11 @@ fn apply_runtime_env<M>(
         use crate::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
 
         if config.cpu_profile_enabled {
-            runtime = runtime.with_cpu_profiling(
-                CpuProfilingConfig::default().frequency_hz(config.cpu_sample_hz),
-            );
+            let cpu_config = match config.cpu_sample_hz {
+                Some(hz) => CpuProfilingConfig::default().frequency_hz(hz),
+                None => CpuProfilingConfig::default(),
+            };
+            runtime = runtime.with_cpu_profiling(cpu_config);
         }
         if config.schedule_profile_enabled {
             runtime = runtime.with_sched_events(SchedEventConfig::default());
@@ -542,7 +462,7 @@ fn apply_runtime_env<M>(
 
     #[cfg(not(feature = "cpu-profiling"))]
     if config.cpu_profile_enabled || config.schedule_profile_enabled {
-        emit_env_warning(format_args!(
+        warn(format_args!(
             "dial9: CPU/schedule profiling requested but `cpu-profiling` feature is not enabled; ignoring"
         ));
     }
@@ -552,17 +472,11 @@ fn apply_runtime_env<M>(
 
 #[cfg(feature = "worker-s3")]
 fn build_s3_config(config: ParsedS3Config) -> crate::background_task::s3::S3Config {
-    match config.prefix {
-        Some(prefix) => crate::background_task::s3::S3Config::builder()
-            .bucket(config.bucket)
-            .service_name(config.service_name)
-            .prefix(prefix)
-            .build(),
-        None => crate::background_task::s3::S3Config::builder()
-            .bucket(config.bucket)
-            .service_name(config.service_name)
-            .build(),
-    }
+    crate::background_task::s3::S3Config::builder()
+        .bucket(config.bucket)
+        .service_name(config.service_name.unwrap_or_else(default_service_name))
+        .maybe_prefix(config.prefix)
+        .build()
 }
 
 fn default_tokio_builder() -> tokio::runtime::Builder {
@@ -614,8 +528,8 @@ impl Dial9Config {
     /// | `DIAL9_TASK_DUMP_ENABLED` | `false` | Capture async task dumps at idle yield points. |
     /// | `DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS` | `10` | Mean idle duration for task dump sampling. |
     ///
-    /// Missing variables use defaults. Blank or invalid values emit a warning
-    /// and fall back to defaults. The returned config is built with
+    /// Missing variables use defaults. Blank, invalid, or non-Unicode values
+    /// emit a warning and are treated as missing. The returned config is built with
     /// [`Dial9ConfigBuilder::build_or_disabled`], so writer setup failures are
     /// logged and downgraded to a plain Tokio runtime.
     pub fn from_env() -> Self {
@@ -639,22 +553,31 @@ impl Dial9Config {
             task_dump_idle_threshold,
         } = parse_env_config(env);
 
+        let max_total_size = max_total_size
+            .unwrap_or_else(|| DEFAULT_MAX_DISK_USAGE_MB.saturating_mul(BYTES_PER_MIB));
+        let max_file_size = max_file_size.unwrap_or_else(|| derive_max_file_size(max_total_size));
+
         let runtime_config = RuntimeEnvConfig {
-            task_tracking_enabled,
+            task_tracking_enabled: task_tracking_enabled.unwrap_or(DEFAULT_TASK_TRACKING_ENABLED),
             runtime_name,
-            cpu_profile_enabled,
+            cpu_profile_enabled: cpu_profile_enabled.unwrap_or(DEFAULT_CPU_PROFILE_ENABLED),
             cpu_sample_hz,
-            schedule_profile_enabled,
-            task_dump_enabled,
+            schedule_profile_enabled: schedule_profile_enabled
+                .unwrap_or(DEFAULT_SCHEDULE_PROFILE_ENABLED),
+            task_dump_enabled: task_dump_enabled.unwrap_or(DEFAULT_TASK_DUMP_ENABLED),
             task_dump_idle_threshold,
         };
 
         let builder = Self::builder()
-            .enabled(enabled)
-            .base_path(trace_dir.join("trace.bin"))
+            .enabled(enabled.unwrap_or(DEFAULT_ENABLED))
+            .base_path(
+                trace_dir
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_TRACE_DIR))
+                    .join("trace.bin"),
+            )
             .max_file_size(max_file_size)
             .max_total_size(max_total_size)
-            .rotation_period(rotation_period);
+            .maybe_rotation_period(rotation_period);
 
         #[cfg(feature = "worker-s3")]
         let builder = match s3 {
@@ -670,7 +593,7 @@ impl Dial9Config {
         #[cfg(not(feature = "worker-s3"))]
         let builder = {
             if s3.is_some() {
-                emit_env_warning(format_args!(
+                warn(format_args!(
                     "dial9: S3 upload requested but `worker-s3` feature is not enabled; ignoring"
                 ));
             }
@@ -955,14 +878,22 @@ mod tests {
     }
 
     #[test]
-    fn env_defaults_to_disabled_local_traces() {
+    fn env_missing_values_are_unset() {
         let parsed = parse_env_config(&FakeEnv::default());
 
-        assert!(!parsed.enabled);
-        assert_eq!(parsed.trace_dir, PathBuf::from("/tmp/dial9-traces"));
-        assert_eq!(parsed.rotation_period, Duration::from_secs(60));
-        assert_eq!(parsed.max_total_size, 1024 * 1024 * 1024);
-        assert_eq!(parsed.max_file_size, 256 * 1024 * 1024);
+        assert_eq!(parsed.enabled, None);
+        assert_eq!(parsed.trace_dir, None);
+        assert_eq!(parsed.rotation_period, None);
+        assert_eq!(parsed.max_total_size, None);
+        assert_eq!(parsed.max_file_size, None);
+        assert_eq!(parsed.task_tracking_enabled, None);
+        assert_eq!(parsed.runtime_name, None);
+        assert!(parsed.s3.is_none());
+        assert_eq!(parsed.cpu_profile_enabled, None);
+        assert_eq!(parsed.cpu_sample_hz, None);
+        assert_eq!(parsed.schedule_profile_enabled, None);
+        assert_eq!(parsed.task_dump_enabled, None);
+        assert_eq!(parsed.task_dump_idle_threshold, None);
     }
 
     #[test]
@@ -975,11 +906,11 @@ mod tests {
                 .with("DIAL9_MAX_DISK_USAGE_MB", "2048"),
         );
 
-        assert!(parsed.enabled);
-        assert_eq!(parsed.trace_dir, PathBuf::from("/var/tmp/dial9"));
-        assert_eq!(parsed.rotation_period, Duration::from_secs(15));
-        assert_eq!(parsed.max_total_size, 2048 * 1024 * 1024);
-        assert_eq!(parsed.max_file_size, 512 * 1024 * 1024);
+        assert_eq!(parsed.enabled, Some(true));
+        assert_eq!(parsed.trace_dir, Some(PathBuf::from("/var/tmp/dial9")));
+        assert_eq!(parsed.rotation_period, Some(Duration::from_secs(15)));
+        assert_eq!(parsed.max_total_size, Some(2048 * 1024 * 1024));
+        assert_eq!(parsed.max_file_size, None);
     }
 
     #[test]
@@ -999,32 +930,53 @@ mod tests {
                 .with("DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS", "25"),
         );
 
-        assert!(!parsed.task_tracking_enabled);
+        assert_eq!(parsed.task_tracking_enabled, Some(false));
         assert_eq!(parsed.runtime_name.as_deref(), Some("api-runtime"));
-        assert_eq!(parsed.max_file_size, 128 * 1024 * 1024);
+        assert_eq!(parsed.max_file_size, Some(128 * 1024 * 1024));
         let s3 = parsed.s3.expect("s3 config should be parsed");
         assert_eq!(s3.bucket, "traces-bucket");
-        assert_eq!(s3.service_name, "checkout");
+        assert_eq!(s3.service_name.as_deref(), Some("checkout"));
         assert_eq!(s3.prefix.as_deref(), Some("prod/traces"));
-        assert!(!parsed.cpu_profile_enabled);
-        assert_eq!(parsed.cpu_sample_hz, 199);
-        assert!(!parsed.schedule_profile_enabled);
-        assert!(parsed.task_dump_enabled);
-        assert_eq!(parsed.task_dump_idle_threshold, Duration::from_millis(25));
+        assert_eq!(parsed.cpu_profile_enabled, Some(false));
+        assert_eq!(parsed.cpu_sample_hz, Some(199));
+        assert_eq!(parsed.schedule_profile_enabled, Some(false));
+        assert_eq!(parsed.task_dump_enabled, Some(true));
+        assert_eq!(
+            parsed.task_dump_idle_threshold,
+            Some(Duration::from_millis(25))
+        );
     }
 
     #[test]
-    fn env_defaults_s3_service_name_when_bucket_is_set() {
+    fn env_allows_s3_bucket_without_service_name() {
         let parsed = parse_env_config(&FakeEnv::default().with("DIAL9_S3_BUCKET", "b"));
 
         let s3 = parsed.s3.expect("s3 config should be parsed");
         assert_eq!(s3.bucket, "b");
-        assert!(!s3.service_name.is_empty());
+        assert_eq!(s3.service_name, None);
         assert_eq!(s3.prefix, None);
     }
 
+    #[cfg(feature = "worker-s3")]
     #[test]
-    fn env_warns_and_uses_defaults_for_blank_or_invalid_values() {
+    fn env_s3_config_defaults_service_name_when_bucket_is_set() {
+        let config = build_s3_config(ParsedS3Config {
+            bucket: "b".to_string(),
+            service_name: None,
+            prefix: None,
+        });
+
+        let metadata: BTreeMap<_, _> = config.as_metadata().collect();
+        assert_eq!(metadata.get("bucket"), Some(&"b"));
+        assert!(
+            metadata
+                .get("service_name")
+                .is_some_and(|service_name| !service_name.is_empty())
+        );
+    }
+
+    #[test]
+    fn env_ignores_blank_or_invalid_values() {
         let parsed = parse_env_config(
             &FakeEnv::default()
                 .with("DIAL9_ENABLED", "maybe")
@@ -1038,15 +990,15 @@ mod tests {
                 .with("DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS", "wat"),
         );
 
-        assert!(!parsed.enabled);
-        assert_eq!(parsed.trace_dir, PathBuf::from("/tmp/dial9-traces"));
-        assert_eq!(parsed.rotation_period, Duration::from_secs(60));
-        assert_eq!(parsed.max_total_size, 1024 * 1024 * 1024);
-        assert_eq!(parsed.max_file_size, 256 * 1024 * 1024);
+        assert_eq!(parsed.enabled, None);
+        assert_eq!(parsed.trace_dir, None);
+        assert_eq!(parsed.rotation_period, None);
+        assert_eq!(parsed.max_total_size, None);
+        assert_eq!(parsed.max_file_size, None);
         assert_eq!(parsed.runtime_name, None);
         assert!(parsed.s3.is_none());
-        assert_eq!(parsed.cpu_sample_hz, 99);
-        assert_eq!(parsed.task_dump_idle_threshold, Duration::from_millis(10));
+        assert_eq!(parsed.cpu_sample_hz, None);
+        assert_eq!(parsed.task_dump_idle_threshold, None);
     }
 
     #[test]
@@ -1057,8 +1009,8 @@ mod tests {
                 .with_non_unicode("DIAL9_ROTATION_SECS"),
         );
 
-        assert_eq!(parsed.trace_dir, PathBuf::from("/tmp/dial9-traces"));
-        assert_eq!(parsed.rotation_period, Duration::from_secs(60));
+        assert_eq!(parsed.trace_dir, None);
+        assert_eq!(parsed.rotation_period, None);
     }
 
     #[test]
@@ -1087,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn env_config_applies_runtime_name_task_tracking_and_task_dumps() {
+    fn env_config_applies_runtime_name_and_task_dumps() {
         let dir = tempfile::tempdir().expect("tempdir");
         let trace_dir = dir.path().to_str().expect("utf8 tempdir");
         let env = FakeEnv::default()
@@ -1099,80 +1051,17 @@ mod tests {
             .with("DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS", "25");
 
         let cfg = Dial9Config::from_env_source(&env);
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        let shared = rt.guard().shared().expect("telemetry should be enabled");
+        let contexts = shared.contexts.lock().unwrap();
 
-        match cfg.0 {
-            Inner::Enabled {
-                runtime_builder, ..
-            } => {
-                let summary = runtime_builder.test_summary();
-                assert_eq!(summary.runtime_name.as_deref(), Some("api-runtime"));
-                assert!(!summary.task_tracking_enabled);
-                assert_eq!(
-                    summary.task_dump_idle_threshold,
-                    Some(Duration::from_millis(25))
-                );
-            }
-            Inner::Disabled { .. } => panic!("expected enabled config"),
-        }
-    }
-
-    #[cfg(feature = "worker-s3")]
-    #[test]
-    fn env_config_applies_s3_uploader() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let trace_dir = dir.path().to_str().expect("utf8 tempdir");
-        let env = FakeEnv::default()
-            .with("DIAL9_ENABLED", "true")
-            .with("DIAL9_TRACE_DIR", trace_dir)
-            .with("DIAL9_S3_BUCKET", " traces-bucket ")
-            .with("DIAL9_SERVICE_NAME", " checkout ")
-            .with("DIAL9_S3_PREFIX", " prod/traces ");
-
-        let cfg = Dial9Config::from_env_source(&env);
-
-        match cfg.0 {
-            Inner::Enabled {
-                runtime_builder, ..
-            } => {
-                let summary = runtime_builder.test_summary();
-                let metadata: std::collections::BTreeMap<_, _> = summary
-                    .segment_metadata
-                    .iter()
-                    .map(|(key, value)| (key.as_str(), value.as_str()))
-                    .collect();
-                assert!(summary.pipeline_is_s3);
-                assert_eq!(metadata.get("bucket"), Some(&"traces-bucket"));
-                assert_eq!(metadata.get("service_name"), Some(&"checkout"));
-                assert_eq!(metadata.get("prefix"), Some(&"prod/traces"));
-            }
-            Inner::Disabled { .. } => panic!("expected enabled config"),
-        }
-    }
-
-    #[cfg(feature = "cpu-profiling")]
-    #[test]
-    fn env_config_applies_cpu_and_scheduler_profiling() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let trace_dir = dir.path().to_str().expect("utf8 tempdir");
-        let env = FakeEnv::default()
-            .with("DIAL9_ENABLED", "true")
-            .with("DIAL9_TRACE_DIR", trace_dir)
-            .with("DIAL9_CPU_PROFILE_ENABLED", "true")
-            .with("DIAL9_CPU_SAMPLE_HZ", "199")
-            .with("DIAL9_SCHEDULE_PROFILE_ENABLED", "true");
-
-        let cfg = Dial9Config::from_env_source(&env);
-
-        match cfg.0 {
-            Inner::Enabled {
-                runtime_builder, ..
-            } => {
-                let summary = runtime_builder.test_summary();
-                assert_eq!(summary.cpu_sample_hz, Some(199));
-                assert!(summary.sched_events_enabled);
-            }
-            Inner::Disabled { .. } => panic!("expected enabled config"),
-        }
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].runtime_name.as_deref(), Some("api-runtime"));
+        assert!(shared.task_dumps_enabled.load(Ordering::Relaxed));
+        assert_eq!(
+            shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed),
+            25_000_000
+        );
     }
 
     #[test]

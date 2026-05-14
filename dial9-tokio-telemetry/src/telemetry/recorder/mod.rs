@@ -972,20 +972,6 @@ enum PipelineConfig {
     Custom(Vec<Box<dyn crate::background_task::SegmentProcessor>>),
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RuntimeBuilderTestSummary {
-    pub(crate) task_tracking_enabled: bool,
-    pub(crate) runtime_name: Option<String>,
-    pub(crate) task_dump_idle_threshold: Option<Duration>,
-    #[cfg(feature = "cpu-profiling")]
-    pub(crate) cpu_sample_hz: Option<u64>,
-    #[cfg(feature = "cpu-profiling")]
-    pub(crate) sched_events_enabled: bool,
-    pub(crate) pipeline_is_s3: bool,
-    pub(crate) segment_metadata: Vec<(String, String)>,
-}
-
 /// Builder for configuring a traced Tokio runtime.
 pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset> {
     enabled: bool,
@@ -1016,32 +1002,6 @@ impl<P, M> std::fmt::Debug for TracedRuntimeBuilder<P, M> {
 
 // Methods available regardless of trace-path or pipeline state.
 impl<P, M> TracedRuntimeBuilder<P, M> {
-    #[cfg(test)]
-    pub(crate) fn test_summary(&self) -> RuntimeBuilderTestSummary {
-        #[cfg(feature = "worker-s3")]
-        let pipeline_is_s3 = matches!(&self.pipeline, PipelineConfig::S3(_));
-        #[cfg(not(feature = "worker-s3"))]
-        let pipeline_is_s3 = false;
-
-        RuntimeBuilderTestSummary {
-            task_tracking_enabled: self.task_tracking_enabled,
-            runtime_name: self.runtime_name.clone(),
-            task_dump_idle_threshold: self
-                .task_dump_config
-                .as_ref()
-                .map(|config| config.idle_threshold()),
-            #[cfg(feature = "cpu-profiling")]
-            cpu_sample_hz: self
-                .cpu_profiling_config
-                .as_ref()
-                .map(|config| config.test_frequency_hz()),
-            #[cfg(feature = "cpu-profiling")]
-            sched_events_enabled: self.sched_event_config.is_some(),
-            pipeline_is_s3,
-            segment_metadata: self.segment_metadata.clone(),
-        }
-    }
-
     /// Set to `false` to build a plain runtime with no telemetry
     /// installed and a dummy [`TelemetryGuard`]. Defaults to `true`.
     ///

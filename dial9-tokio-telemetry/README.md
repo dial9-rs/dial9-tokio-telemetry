@@ -116,7 +116,7 @@ Task dump knobs (capture requires the `taskdump` feature):
 | `DIAL9_TASK_DUMP_ENABLED` | `false` | Capture async task dumps at idle yield points. |
 | `DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS` | `10` | Mean idle duration for task dump sampling. |
 
-Missing variables use defaults. Blank or invalid values emit a warning and fall back to defaults.
+Missing variables use defaults. Blank, invalid, or non-Unicode values emit a warning and are treated as missing.
 
 ## Why dial9-tokio-telemetry?
 
