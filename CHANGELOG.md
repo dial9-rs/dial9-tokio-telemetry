@@ -21,8 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rate-limit log when drain is failing ([#385](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/385))
 - *(toolkit)* Don't pass directory progress callbacks for single-file analyzeTraces ([#384](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/384))
 - *(test)* Make `test_schedstat_fd_closed_on_thread_exit` not flaky ([#398](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/398))
-- Install pipeline when CPU profiling is enabled ([#404[](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/401](https://github.com/dial9-rs/dial9/pull/404))
-
+- Install pipeline when CPU profiling is enabled ([#404](https://github.com/dial9-rs/dial9/pull/404))
+- 
 ### Other
 
 - Symposium cleanup ([#394](https://github.com/dial9-rs/dial9-tokio-telemetry/pull/394))
