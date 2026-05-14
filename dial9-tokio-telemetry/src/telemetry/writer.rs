@@ -502,6 +502,7 @@ impl RotatingWriter {
         self.state = match Self::prepare_segment(writer) {
             Ok(s) => s,
             Err(e) => {
+                let _ = std::fs::remove_file(&new_path);
                 self.state = WriterState::Finished;
                 return Err(e);
             }
