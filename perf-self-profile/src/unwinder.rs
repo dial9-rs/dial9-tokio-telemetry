@@ -7,7 +7,7 @@
 //! Because of this, the unwinder must be "[`install`ed](Unwinder::install)" before
 //! you can use it to [`capture`](Unwinder::capture) a stack.
 //!
-//! The unwinded stacks are only addresses. You must use a symbolizer separately to
+//! The unwound stacks are only addresses. You must use a symbolizer separately to
 //! convert the addresses into function names.
 
 /// Result of a [`Unwinder::capture`] call.
@@ -101,6 +101,8 @@ impl Unwinder {
     ///   (binary compiled with `-C force-frame-pointers=yes`, no code
     ///   currently executing in a prologue/epilogue window where `rbp`
     ///   does not point at a saved-fp slot).
+    // Takes `&self` to prove that `Unwinder::install()` succeeded, even though
+    // no instance data is accessed internally.
     #[inline(never)]
     pub unsafe fn capture(&self, out: &mut [u64]) -> CaptureResult {
         // Debug-only check that our SIGSEGV handler is still the active

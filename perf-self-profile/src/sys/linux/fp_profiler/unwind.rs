@@ -144,7 +144,10 @@ pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> Ca
 ///
 /// # Safety
 /// `ucontext` must be the pointer the kernel passed to a SA_SIGINFO handler.
-pub unsafe fn unwind_from_ucontext(ucontext: *mut libc::c_void, out: &mut [u64]) -> CaptureResult {
+pub(crate) unsafe fn unwind_from_ucontext(
+    ucontext: *mut libc::c_void,
+    out: &mut [u64],
+) -> CaptureResult {
     let (pc, fp, sp) = unsafe { read_pc_fp_sp(ucontext) };
     unsafe { unwind(pc, fp, sp, out) }
 }
