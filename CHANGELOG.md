@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.10](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.9...dial9-tokio-telemetry-v0.3.10) - 2026-05-15
+
+### Added
+
+- add tid to WorkerParkEvent and WorkerUnparkEvent ([#410](https://github.com/dial9-rs/dial9/pull/410))
+
+### Other
+
+- expose public Unwinder::capture API ([#396](https://github.com/dial9-rs/dial9/pull/396))
+
 ## [0.3.9](https://github.com/dial9-rs/dial9-tokio-telemetry/compare/dial9-tokio-telemetry-v0.3.8...dial9-tokio-telemetry-v0.3.9) - 2026-05-14
 
 ### Added
