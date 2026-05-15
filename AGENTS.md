@@ -22,6 +22,38 @@ these rules for all public APIs:
   public type, or changing a trait signature are all breaking. When in doubt,
   keep it private or behind a builder.
 
+## Trace Format Backwards Compatibility
+
+The trace format uses a self-describing schema: each event type's schema is
+written to the wire before any events of that type. Decoders use the schema on
+the wire (not a compiled-in schema) to decode events.
+
+**Rules:**
+
+1. **Adding new fields is always safe** — even non-optional ones. The decoder
+   reads whatever fields the schema declares. Old traces simply won't have the
+   new field in their schema, so it won't appear in the decoded output.
+
+2. **Removing non-optional fields is NOT safe.** Old traces that contain the
+   field will still declare it in their on-wire schema, and the decoder will
+   attempt to read it.
+
+3. **We only care about the JS decoder reading old traces.** Users always have
+   a current decoder (the viewer), but may load old trace files. When you add a
+   new non-optional field, the JS viewer code that accesses it must handle the
+   field being `undefined` (because old traces won't have it):
+
+   ```js
+   // Good — gracefully handles old traces missing the field
+   const workerId = v.worker_id != null ? num(v.worker_id) : 0;
+
+   // Bad — will throw or produce NaN on old traces
+   const workerId = num(v.worker_id);
+   ```
+
+4. **Rust decoder backwards compat is not a concern.** We don't need to worry
+   about old Rust decoders reading new traces.
+
 ## Coding practices
 Avoid dropping an error without logging it. Use `tracing` for logging.
 ```
