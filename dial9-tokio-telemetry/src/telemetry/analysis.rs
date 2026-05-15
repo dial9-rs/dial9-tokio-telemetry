@@ -877,6 +877,7 @@ mod tests {
                 worker_id: WorkerId::from(7usize),
                 local_queue: 3,
                 cpu_time_ns: 11,
+                tid: 0,
             }),
             1,
         );
@@ -903,6 +904,7 @@ mod tests {
                 worker_id,
                 worker_local_queue_depth: 3,
                 cpu_time_nanos: 11,
+                ..
             } if worker_id == WorkerId::from(7usize)
         ));
     }
@@ -987,6 +989,7 @@ mod tests {
                 worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
+                tid: 0,
             },
             TelemetryEvent::QueueSample {
                 timestamp_nanos: 5_000_000,
@@ -998,6 +1001,7 @@ mod tests {
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 0,
+                tid: 0,
             },
         ];
         let idle = detect_idle_workers(&events);
@@ -1101,6 +1105,7 @@ mod tests {
                 worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
+                tid: 0,
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 5_000_000,
@@ -1108,6 +1113,7 @@ mod tests {
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 200_000, // 200us
+                tid: 0,
             },
         ];
         let delays = detect_sched_delays(&events, 100_000); // 100us threshold
@@ -1126,6 +1132,7 @@ mod tests {
                 worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
+                tid: 0,
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 2_000_000,
@@ -1133,6 +1140,7 @@ mod tests {
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 50_000, // 50us
+                tid: 0,
             },
         ];
         let delays = detect_sched_delays(&events, 100_000);
@@ -1147,12 +1155,14 @@ mod tests {
                 worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
+                tid: 0,
             },
             TelemetryEvent::WorkerPark {
                 timestamp_nanos: 1_000_000,
                 worker_id: WorkerId::from(1usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
+                tid: 0,
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 3_000_000,
@@ -1160,6 +1170,7 @@ mod tests {
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 500_000, // 500us
+                tid: 0,
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 4_000_000,
@@ -1167,6 +1178,7 @@ mod tests {
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 10_000, // 10us - below threshold
+                tid: 0,
             },
         ];
         let delays = detect_sched_delays(&events, 100_000);
@@ -1354,6 +1366,7 @@ mod tests {
                 worker_id: WorkerId::from(0usize),
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
+                tid: 0,
             },
             TelemetryEvent::WorkerUnpark {
                 timestamp_nanos: 6_000_000,
@@ -1361,6 +1374,7 @@ mod tests {
                 worker_local_queue_depth: 0,
                 cpu_time_nanos: 0,
                 sched_wait_delta_nanos: 0,
+                tid: 0,
             },
         ];
         let idle = detect_idle_workers(&events);

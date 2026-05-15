@@ -253,6 +253,7 @@ mod tests {
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
             local_queue: 0,
             cpu_time_ns: 0,
+            tid: 0,
         });
         writer
             .write_encoded_batch(&crate::telemetry::collector::Batch {
@@ -292,6 +293,7 @@ mod tests {
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
             local_queue: 0,
             cpu_time_ns: 0,
+            tid: 0,
         });
         writer
             .write_encoded_batch(&crate::telemetry::collector::Batch {
@@ -349,6 +351,7 @@ mod tests {
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
             local_queue: 0,
             cpu_time_ns: 0,
+            tid: 0,
         });
         writer
             .write_encoded_batch(&crate::telemetry::collector::Batch {
@@ -382,6 +385,7 @@ mod tests {
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
             local_queue: 0,
             cpu_time_ns: 0,
+            tid: 0,
         });
         enc.into_inner()
     }

@@ -262,6 +262,7 @@ pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> Wo
         worker_id: resolved.map(|(id, _)| id).unwrap_or(WorkerId::UNKNOWN),
         local_queue: worker_local_queue_depth as u8,
         cpu_time_ns: cpu_time_nanos,
+        tid: crate::telemetry::events::current_tid(),
     }
 }
 
@@ -283,5 +284,6 @@ pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> 
         local_queue: worker_local_queue_depth as u8,
         cpu_time_ns: cpu_time_nanos,
         sched_wait_ns: sched_wait_delta_nanos,
+        tid: crate::telemetry::events::current_tid(),
     }
 }
