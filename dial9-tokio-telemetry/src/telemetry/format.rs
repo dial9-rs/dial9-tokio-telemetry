@@ -141,6 +141,9 @@ pub struct WorkerParkEvent {
     pub local_queue: u8,
     /// Thread CPU time in nanoseconds.
     pub cpu_time_ns: u64,
+    /// OS thread ID of the parking thread. On Linux/Android, the result of gettid();
+    /// on other platforms, a synthetic per-process counter — see `events::current_tid`.
+    pub tid: u32,
 }
 
 /// Wire-format event for a worker unpark.
@@ -157,6 +160,9 @@ pub struct WorkerUnparkEvent {
     pub cpu_time_ns: u64,
     /// Scheduling wait delta in nanoseconds.
     pub sched_wait_ns: u64,
+    /// OS thread ID of the unparking thread. On Linux/Android, the result of gettid();
+    /// on other platforms, a synthetic per-process counter — see `events::current_tid`.
+    pub tid: u32,
 }
 
 #[derive(TraceEvent)]
@@ -400,6 +406,7 @@ pub(crate) fn to_owned_event(
             worker_id: e.worker_id,
             worker_local_queue_depth: e.local_queue as usize,
             cpu_time_nanos: e.cpu_time_ns,
+            tid: e.tid,
         },
         TelemetryEventRef::WorkerUnpark(e) => TelemetryEvent::WorkerUnpark {
             timestamp_nanos: e.timestamp_ns,
@@ -407,6 +414,7 @@ pub(crate) fn to_owned_event(
             worker_local_queue_depth: e.local_queue as usize,
             cpu_time_nanos: e.cpu_time_ns,
             sched_wait_delta_nanos: e.sched_wait_ns,
+            tid: e.tid,
         },
         TelemetryEventRef::QueueSample(e) => TelemetryEvent::QueueSample {
             timestamp_nanos: e.timestamp_ns,
