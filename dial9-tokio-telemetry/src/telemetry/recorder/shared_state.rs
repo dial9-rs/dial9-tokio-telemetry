@@ -57,8 +57,9 @@ pub(crate) struct SharedState {
     /// attributed to the correct worker or blocking-pool bucket at flush time.
     #[cfg(feature = "cpu-profiling")]
     pub(crate) thread_roles: Mutex<HashMap<u32, ThreadRole>>,
+    /// Data sources (CPU profiler, sched profiler, etc.) that the flush thread drains.
     #[cfg(feature = "cpu-profiling")]
-    pub(crate) sched_profiler: Mutex<Option<crate::telemetry::cpu_profile::SchedProfiler>>,
+    pub(crate) sources: Mutex<Vec<Box<dyn super::source::Source>>>,
 }
 
 impl SharedState {
@@ -77,7 +78,7 @@ impl SharedState {
             #[cfg(feature = "cpu-profiling")]
             thread_roles: Mutex::new(HashMap::new()),
             #[cfg(feature = "cpu-profiling")]
-            sched_profiler: Mutex::new(None),
+            sources: Mutex::new(Vec::new()),
         }
     }
 

@@ -143,11 +143,15 @@ fn register_tid_if_needed(global_id: u64, shared: &SharedState) {
             // Start sched event sampling for this worker thread. Deferred from
             // on_thread_start so that only worker threads (not blocking pool
             // threads) open perf fds.
-            if let Ok(mut prof) = shared.sched_profiler.lock()
-                && let Some(ref mut p) = *prof
-                && let Err(e) = p.track_current_thread()
-            {
-                tracing::warn!("failed to start sched profiling for worker thread: {e}");
+            if let Ok(mut sources) = shared.sources.lock() {
+                for source in sources.iter_mut() {
+                    if let Err(e) = source.on_worker_thread_start() {
+                        tracing::warn!(
+                            "failed to start source {} for worker thread: {e}",
+                            source.name()
+                        );
+                    }
+                }
             }
             cell.set(true);
         }

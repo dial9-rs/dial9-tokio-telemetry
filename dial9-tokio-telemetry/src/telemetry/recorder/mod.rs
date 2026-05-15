@@ -1,6 +1,8 @@
 mod event_writer;
 mod runtime_context;
 mod shared_state;
+#[cfg(feature = "cpu-profiling")]
+pub(crate) mod source;
 
 pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
@@ -92,7 +94,7 @@ fn flush_once(
     #[cfg(feature = "cpu-profiling")]
     {
         if shared.is_enabled() {
-            event_writer.flush_cpu(shared);
+            event_writer.flush_sources(shared);
         }
     }
     let cpu_flush_duration = cpu_events_time.elapsed();
@@ -273,10 +275,10 @@ fn register_hooks(
             {
                 let tid = crate::telemetry::events::current_tid();
                 s_stop.thread_roles.lock().unwrap().remove(&tid);
-                if let Ok(mut prof) = s_stop.sched_profiler.lock()
-                    && let Some(ref mut p) = *prof
-                {
-                    p.stop_tracking_current_thread();
+                if let Ok(mut sources) = s_stop.sources.lock() {
+                    for source in sources.iter_mut() {
+                        source.on_thread_stop();
+                    }
                 }
                 dial9_perf_self_profile::unregister_current_thread();
             }
@@ -1611,7 +1613,7 @@ impl TelemetryCore {
         {
             if let Some(ref config) = cpu_profiling {
                 match crate::telemetry::cpu_profile::CpuProfiler::start(config.clone()) {
-                    Ok(sampler) => event_writer.cpu_profiler = Some(sampler),
+                    Ok(sampler) => shared.sources.lock().unwrap().push(Box::new(sampler)),
                     Err(e) => rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to start CPU profiler: {e}");
                     }),
@@ -1619,7 +1621,7 @@ impl TelemetryCore {
             }
             if let Some(sched_cfg) = sched_events {
                 match crate::telemetry::cpu_profile::SchedProfiler::new(sched_cfg) {
-                    Ok(sched) => *shared.sched_profiler.lock().unwrap() = Some(sched),
+                    Ok(sched) => shared.sources.lock().unwrap().push(Box::new(sched)),
                     Err(e) => rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to start scheduler event profiler: {e}");
                     }),

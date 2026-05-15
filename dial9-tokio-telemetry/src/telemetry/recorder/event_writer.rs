@@ -1,24 +1,18 @@
 #[cfg(feature = "cpu-profiling")]
 use super::shared_state::SharedState;
 use crate::telemetry::collector::Batch;
-#[cfg(feature = "cpu-profiling")]
-use crate::telemetry::events::{CpuSampleData, ThreadRole};
-#[cfg(feature = "cpu-profiling")]
-use crate::telemetry::format::WorkerId;
 use crate::telemetry::writer::TraceWriter;
 
 /// Intermediate layer between the recorder and the raw `TraceWriter`.
 ///
-/// Owns the writer and the CPU profiler. Its API is roughly:
+/// Owns the writer. Its API is roughly:
 ///
 /// - `write_raw_event(event)` — encode and write a single event (test only)
-/// - `flush_cpu(shared)` — drain CPU/sched profilers into the trace
+/// - `flush_sources(shared)` — drain data sources into the trace
 /// - `flush()` — flush the underlying writer
 pub(crate) struct EventWriter {
     pub(super) writer: Box<dyn TraceWriter>,
     events_written: u64,
-    #[cfg(feature = "cpu-profiling")]
-    pub(super) cpu_profiler: Option<crate::telemetry::cpu_profile::CpuProfiler>,
 }
 
 impl EventWriter {
@@ -26,8 +20,6 @@ impl EventWriter {
         Self {
             writer,
             events_written: 0,
-            #[cfg(feature = "cpu-profiling")]
-            cpu_profiler: None,
         }
     }
 
@@ -63,57 +55,21 @@ impl EventWriter {
 
     /// Drain CPU/sched profilers and write their events into the trace.
     #[cfg(feature = "cpu-profiling")]
-    pub(crate) fn flush_cpu(&mut self, shared: &SharedState) {
+    pub(crate) fn flush_sources(&mut self, shared: &SharedState) {
+        use super::source::FlushContext;
+
         // Snapshot thread_roles once per flush cycle.
         let roles = shared.thread_roles.lock().unwrap().clone();
 
-        let resolve = |tid: u32| -> WorkerId {
-            match roles.get(&tid) {
-                Some(ThreadRole::Worker(id)) => WorkerId::from(*id),
-                Some(ThreadRole::Blocking) => WorkerId::BLOCKING,
-                None => WorkerId::UNKNOWN,
-            }
+        let ctx = FlushContext {
+            collector: &shared.collector,
+            drain_epoch: &shared.drain_epoch,
+            thread_roles: &roles,
         };
 
-        if let Some(mut profiler) = self.cpu_profiler.take() {
-            profiler.drain(|raw, thread_name| {
-                use crate::telemetry::buffer::record_encodable_event;
-
-                let worker_id = resolve(raw.tid);
-                let data = CpuSampleData {
-                    timestamp_nanos: raw.timestamp_nanos,
-                    worker_id,
-                    tid: raw.tid,
-                    source: raw.source,
-                    callchain: raw.callchain,
-                    thread_name: thread_name.cloned(),
-                    cpu: raw.cpu,
-                };
-                record_encodable_event(&data, &shared.collector, &shared.drain_epoch);
-            });
-            self.cpu_profiler = Some(profiler);
-        }
-
-        {
-            let mut shared_profiler = shared.sched_profiler.lock().unwrap();
-            if let Some(ref mut profiler) = *shared_profiler {
-                profiler.drain(|raw| {
-                    use crate::telemetry::buffer::record_encodable_event;
-
-                    let data = CpuSampleData {
-                        timestamp_nanos: raw.timestamp_nanos,
-                        worker_id: resolve(raw.tid),
-                        tid: raw.tid,
-                        source: raw.source,
-                        callchain: raw.callchain,
-                        // TODO: we should be able to also track thread name here.
-                        // sampler is running on worker threads so no thread name
-                        thread_name: None,
-                        cpu: raw.cpu,
-                    };
-                    record_encodable_event(&data, &shared.collector, &shared.drain_epoch);
-                });
-            }
+        let mut sources = shared.sources.lock().unwrap();
+        for source in sources.iter_mut() {
+            source.flush(&ctx);
         }
     }
 
