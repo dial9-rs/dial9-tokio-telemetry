@@ -48,7 +48,7 @@ jobs:
       # stub `cargo test --all-targets` uses).
       RUSTFLAGS: '--cfg tokio_unstable -C force-frame-pointers=yes --cfg iai_enabled'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: ./.github/actions/iai-bench
         with:
           bencher-token: ${{ secrets.BENCHER_API_TOKEN }}
