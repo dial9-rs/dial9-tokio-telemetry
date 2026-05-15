@@ -5,7 +5,6 @@ use serde::Serialize;
 use std::sync::Arc;
 
 /// Role of a thread known to the telemetry system.
-#[cfg(feature = "cpu-profiling")]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ThreadRole {
     /// A tokio worker thread with the given index.
