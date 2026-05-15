@@ -28,6 +28,7 @@ enum FatEvent {
         worker: u64,
         local_q: usize,
         cpu_ns: u64,
+        tid: u32,
     },
     WorkerUnpark {
         timestamp_ns: u64,
@@ -35,6 +36,7 @@ enum FatEvent {
         local_q: usize,
         cpu_ns: u64,
         sched_wait_ns: u64,
+        tid: u32,
     },
     QueueSample {
         timestamp_ns: u64,
@@ -117,11 +119,13 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             worker_id,
             worker_local_queue_depth,
             cpu_time_nanos,
+            tid,
         } => Some(FatEvent::WorkerPark {
             timestamp_ns: *timestamp_nanos,
             worker: worker_id.as_u64(),
             local_q: *worker_local_queue_depth,
             cpu_ns: *cpu_time_nanos,
+            tid: *tid,
         }),
         TelemetryEvent::WorkerUnpark {
             timestamp_nanos,
@@ -129,12 +133,14 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
             worker_local_queue_depth,
             cpu_time_nanos,
             sched_wait_delta_nanos,
+            tid,
         } => Some(FatEvent::WorkerUnpark {
             timestamp_ns: *timestamp_nanos,
             worker: worker_id.as_u64(),
             local_q: *worker_local_queue_depth,
             cpu_ns: *cpu_time_nanos,
             sched_wait_ns: *sched_wait_delta_nanos,
+            tid: *tid,
         }),
         TelemetryEvent::QueueSample {
             timestamp_nanos,
