@@ -41,7 +41,7 @@ record_event() ──┐
                  ▼
           RotatingWriter
             │
-            ├── Arc<dyn Fs> ── full segment lifecycle
+            ├── Arc<Mode::Fs> ── full segment lifecycle
             │   (DiskFs: real files | MemFs: per-path Vec<u8> + channel)
             │
             └── on seal:
@@ -60,18 +60,17 @@ record_event() ──┐
 
 The hot path (recording, thread-local flush, central collector) does not change. The work is on three pieces:
 
-- A new `Fs` trait with `DiskFs` and `MemFs` impls
+- A new `Fs` trait with `DiskFs` and `MemFs` impls.
 - The in-pipeline carrier (`SegmentRef` enum so processors operate in both modes).
 - Backpressure observability symmetric across both backends (`WorkerCycleMetrics`).
 
 ### The `Fs` trait
 
-Object-safe so `Arc<dyn Fs>` works.
-
 ```rust
 pub trait Fs: Send + Sync + 'static {
     // --- Write side ---
-    fn create(&self, path: &Path) -> io::Result<Box<dyn Write + Send>>;
+    type Writer: Write + Send;
+    fn create(&self, path: &Path) -> io::Result<Self::Writer>;
     /// Seal the active segment. Disk: rename to the path produced by
     /// stripping the `.active` suffix. Memory: drain the active buffer
     /// and push to the internal channel.
@@ -94,7 +93,7 @@ pub trait Fs: Send + Sync + 'static {
     fn take_files(&self) -> TakenFiles;
     /// Wait for new segments to potentially be available. Disk: sleeps
     /// `poll_interval`. Memory: awaits the channel `Notify`.
-    fn wait_for_more<'a>(&'a self, stop: &'a CancellationToken, poll_interval: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+    async fn wait_for_more(&self, stop: &CancellationToken, poll_interval: Duration);
     /// Writer signaled it will produce no more segments. Memory: channel flag. Disk: always false (stop token handles shutdown).
     fn writer_done(&self) -> bool { false }
     /// Writer finalize hook. Memory: sets writer_done + notify.
@@ -127,7 +126,7 @@ Memory mode dedups by construction, each ring slot pops exactly once.
 
 ### Worker loop
 
-The worker holds an `Arc<dyn Fs>` and runs one loop:
+The worker loop is generic over `F: Fs` (monomorphized per backend, confined to the worker module) and runs:
 
 ```rust
 loop {
@@ -147,7 +146,7 @@ loop {
 
 ### `RotatingWriter`
 
-Holds `Arc<dyn Fs>`. Disk constructors wire `DiskFs::from_base_path(&trace_path)`. The memory constructor wires `MemFs::with_capacity(...)`, which owns the internal writer-to-worker channel. The worker reaches the same `Arc<dyn Fs>` via `TraceWriter::fs_handle()`. Constructor split and typestate covered in section 4.
+Holds `Arc<Mode::Fs>`. Disk constructors wire `DiskFs::from_base_path(&trace_path)`. The memory constructor wires `MemFs::with_capacity(...)`, which owns the internal writer-to-worker channel. The recorder builder knows the concrete backend from the typestate and hands the worker its own `Arc<Mode::Fs>`. Constructor split and typestate covered in section 4.
 
 Eviction lives where it is natural:
 
@@ -168,11 +167,10 @@ impl WriterMode for Memory { type Fs = MemFs; }
 
 ### Rejected alternatives
 
-- **`MemoryWriter` as a sibling `TraceWriter` impl.** Duplicates encoder/rotation/metadata/drain-timer logic. Tests still need `TempDir`. Single `RotatingWriter` over `Arc<dyn Fs>` is simpler.
+- **`MemoryWriter` as a sibling `TraceWriter` impl.** Duplicates encoder/rotation/metadata/drain-timer logic. Tests still need `TempDir`. A single `RotatingWriter<Mode>` is simpler.
 - **Split write-side and read-side traits (`Fs` + `SegmentSource`).** Disk read-side is stateful (claim-set dedup) so the state would have to be shared across both traits anyway. Single trait keeps the lifecycle in one place.
 - **Eager payload load in `take_files`.** Reads every unclaimed file into RAM on each scan. First drain after boot or recovery scales with backlog size. Lazy `TakenSegment::load` bounds peak in-flight memory to one segment.
-- **`Fs::Writer` as an associated type.** `dyn Fs` not object-safe with associated types.
-- **`Arc<dyn Fs>` dynamic dispatch everywhere.** A vtable hop per call. Free on `DiskFs` where the syscall dominates, but pure overhead on the `MemFs` hot path. Static dispatch through the Mode typestate (see Backend selection) avoids it without leaking a type parameter.
+- **`Arc<dyn Fs>` dynamic dispatch everywhere.** A vtable hop per call plus a boxed `Write` handle and a boxed wait future. Free on `DiskFs` where the syscall dominates, but pure overhead on the `MemFs` hot path. Static dispatch through the Mode typestate (see Backend selection) avoids it and lets `Fs` use associated types (`Self::Writer`, `async fn`), without leaking a type parameter into the guard or public API.
 - **Sync `mpsc<()>(1)` for wakeup.** Already shuttle-shimmed, but blocking `recv()` would stall the current-thread worker, `spawn_blocking` per wait churns the thread pool.
 - **`Mutex<VecDeque<MemSealedSegment>>` for queue.** Adds a sync mutex on a path other crate queues keep lock-free.
 - **`crossbeam_queue::SegQueue`.** Unbounded, no eviction primitive.
@@ -286,7 +284,7 @@ Drop signals: `dropped_segments` counter increments per evicted segment (see sec
 
 ## 4. API surface
 
-Memory mode is one constructor swap. The writer's `Arc<dyn Fs>` is the only handle the runtime builder needs.
+Memory mode is one constructor swap. The writer carries its concrete `Arc<Mode::Fs>` and the runtime builder spawns the matching worker from it.
 
 ```rust
 let writer = RotatingWriter::in_memory(
@@ -338,7 +336,7 @@ Pipeline mode is also enforced at compile time via `PipelineBuilder<DiskReq = No
 
 ### Rejected alternatives
 
-- **`take_pending_receiver` on `TraceWriter` plus writer-held `pending_receiver: Option<ChannelReceiver>`.** Trait method overridden only on `RotatingWriter` plus a writer field drained once at build time. `MemFs` owns the channel and the worker pulls it via `TraceWriter::fs_handle()`.
+- **`take_pending_receiver` on `TraceWriter` plus writer-held `pending_receiver: Option<ChannelReceiver>`.** Trait method overridden only on `RotatingWriter` plus a writer field drained once at build time. `MemFs` owns the channel and the builder hands the worker the concrete `Arc<MemFs>` directly.
 - **`MemoryPipeline { writer, receiver }` newtype.** Same problem: an extra public type users carry around for a transient setup step.
 - **`builder.with_memory_writer(seg, total)` high-level method.** Loses writer-level config knobs (`rotation_period` etc.) at the builder level or forces per-knob builder methods.
 
@@ -366,7 +364,7 @@ Lost-wakeup avoidance is handled by the standard `notified() / enable() / re-che
 
 ## 6. Testing
 
-Reuse the patterns from the disk path. The headline change is that **`RotatingWriter` tests can swap `MemFs` in for the `Arc<dyn Fs>` backing store**, dropping `TempDir` for existing cases.
+Reuse the patterns from the disk path. The headline change is that **`RotatingWriter` tests can swap `MemFs` in as the `Mode::Fs` backing store**, dropping `TempDir` for existing cases.
 
 **Unit coverage.** `Fs` impls (active map transitions, seal pushes and drains correctly, `Bytes` zero-copy), channel ordering and accounting, claim-set dedup on `DiskFs` (each file dispensed at most once), lazy payload (`TakenSegment::load` defers reads, NotFound between scan and load yields `Err`), writer rotation/eviction/metadata against `MemFs` (small disk-only subset stays on `DiskFs` for rename atomicity and dir-scan edge cases).
 
