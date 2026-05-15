@@ -45,7 +45,7 @@ the wire (not a compiled-in schema) to decode events.
 
    ```js
    // Good — gracefully handles old traces missing the field
-   const workerId = v.worker_id != null ? num(v.worker_id) : 0;
+   const workerId = v.worker_id != null ? num(v.worker_id) : undefined;
 
    // Bad — will throw or produce NaN on old traces
    const workerId = num(v.worker_id);
@@ -55,6 +55,12 @@ the wire (not a compiled-in schema) to decode events.
    about old Rust decoders reading new traces.
 
 ## Coding practices
+
+**Never use `unwrap_or(0)`, `unwrap_or_default()`, or similar "fallback to
+zero/sentinel" patterns.** These hide bugs by silently producing plausible but
+wrong values. Always consider the actual error condition: propagate the error,
+return `Option`, log and skip, or panic if the invariant is truly unrecoverable.
+
 Avoid dropping an error without logging it. Use `tracing` for logging.
 ```
 let _ = ...
