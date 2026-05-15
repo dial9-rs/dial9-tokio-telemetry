@@ -24,10 +24,9 @@ jobs:
     timeout-minutes: 75
     env:
       RUST_BACKTRACE: 1
-      RUSTFLAGS: "--cfg tokio_unstable"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
       - name: Enable perf_event_open and kallsyms
         run: |
