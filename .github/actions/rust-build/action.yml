@@ -12,10 +12,10 @@ inputs:
 runs:
     using: "composite"
     steps:
-        - uses: dtolnay/rust-toolchain@master
+        - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
           with:
               toolchain: ${{ inputs.toolchain }}
-        - uses: Swatinem/rust-cache@v2
+        - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
           with:
               save-if: ${{ inputs.save-if }}
         - name: Enable perf_event_open and kallsyms for tests
