@@ -8,7 +8,7 @@ Let dial9 run with no filesystem dependency. Users with plenty of RAM, or runnin
 
 The existing lifecycle is disk-mediated end to end. Flush thread writes encoded batches into `trace.N.bin.active`, writer renames to `trace.N.bin` on rotation, worker polls the directory every second, reads the file back into memory and runs the processor pipeline.
 
-A single `Fs` trait covers the writer + worker boundary. `DiskFs` wraps `std::fs` for the rotating disk path. `MemFs` keeps active bytes in a per-path `Vec<u8>` map and routes sealed bytes through an internal channel to the worker. The trait covers the full segment lifecycle: write-side (`create`, `seal`, `remove_*`) and read-side (`take_files`, `wait_for_more`, `writer_done`, `mark_writer_done`, `record_writer_eviction`).
+A single `Fs` trait covers the writer + worker boundary. `DiskFs` wraps `std::fs` for the rotating disk path. `MemFs` keeps active bytes in a per-path `Vec<u8>` map and routes sealed bytes through an internal channel to the worker. The trait covers the full segment lifecycle: write-side (`create`, `seal`, `remove_*`) and read-side (`take_files`, `wait_for_more`, `writer_done`, `mark_writer_done`).
 
 **Core principle:** the disk path stays the default and unchanged. Memory mode is one constructor swap on the existing writer builder.
 
@@ -76,11 +76,14 @@ pub trait Fs: Send + Sync + 'static {
     /// stripping the `.active` suffix. Memory: drain the active buffer
     /// and push to the internal channel.
     fn seal(&self, active: &Path, index: u32) -> io::Result<SegmentRef>;
-    /// Eviction-side removal. Disk: unlinks the sealed file plus any
-    /// extension-renamed siblings (e.g. `.gz` from `WriteBackProcessor`)
-    /// and drops the claim entry. Memory: no-op (sealed bytes already
-    /// left `MemFs` via `seal`).
-    fn remove_sealed(&self, seg: &SegmentRef) -> io::Result<()>;
+    /// Remove a sealed segment. `reason` separates writer backpressure
+    /// eviction (counts toward `dropped_segments`) from worker terminal
+    /// cleanup after a non-retryable failure (does not, since that is a
+    /// processing failure tracked via `SegmentProcessMetrics`). Disk:
+    /// unlinks the sealed file plus extension-renamed siblings (e.g.
+    /// `.gz` from `WriteBackProcessor`), drops the claim entry, and
+    /// bumps `dropped_segments` if `reason == Eviction`. Memory: no-op
+    fn remove_sealed(&self, seg: &SegmentRef, reason: RemoveReason) -> io::Result<()>;
     fn remove_active(&self, path: &Path) -> io::Result<()>;
 
     // --- Read side ---
@@ -96,9 +99,16 @@ pub trait Fs: Send + Sync + 'static {
     fn writer_done(&self) -> bool { false }
     /// Writer finalize hook. Memory: sets writer_done + notify.
     fn mark_writer_done(&self) {}
-    /// `RotatingWriter::evict_oldest` hook. Disk: bumps the
-    /// dropped-segments counter surfaced via `TakenFiles`.
-    fn record_writer_eviction(&self) {}
+}
+
+pub enum RemoveReason {
+    /// Writer shed this segment for backpressure (`evict_oldest`).
+    /// Counts toward `dropped_segments`.
+    Eviction,
+    /// Worker removed this after a terminal pipeline state
+    /// (non-retryable failure, retry-budget exhaustion, panic).
+    /// Not a backpressure drop.
+    Terminal,
 }
 ```
 
@@ -141,15 +151,28 @@ Holds `Arc<dyn Fs>`. Disk constructors wire `DiskFs::from_base_path(&trace_path)
 
 Eviction lives where it is natural:
 
-- **Disk:** writer holds `closed_files: VecDeque<(SegmentRef, u64)>`. After every rotation, `evict_oldest` pops the front and calls `Fs::remove_sealed` until the byte budget is satisfied. Identical to today.
+- **Disk:** writer holds `closed_files: VecDeque<(SegmentRef, u64)>`. After every rotation, `evict_oldest` pops the front and calls `Fs::remove_sealed(seg, RemoveReason::Eviction)` until the byte budget is satisfied. The `Eviction` reason bumps `dropped_segments`. Worker terminal cleanup calls `remove_sealed(seg, RemoveReason::Terminal)`, which unlinks without counting (a processing failure, not backpressure).
 - **Memory:** the channel enforces the byte budget. Push adds the segment, then drops oldest while `queued_bytes` is over `max_total_size`. The ring also has a slot cap (about `max_total_size / 4 KB` plus a bit of headroom) as a safety net for unusually small segments. `closed_files` stays empty.
+
+### Backend selection
+
+The writer dispatches to its backend statically through the Mode typestate from section 4. `WriterMode` gains an associated backend type:
+
+```rust
+pub trait WriterMode { type Fs: Fs; }
+impl WriterMode for Disk { type Fs = DiskFs; }
+impl WriterMode for Memory { type Fs = MemFs; }
+```
+
+`RotatingWriter<Mode>` holds `Arc<Mode::Fs>`.
 
 ### Rejected alternatives
 
 - **`MemoryWriter` as a sibling `TraceWriter` impl.** Duplicates encoder/rotation/metadata/drain-timer logic. Tests still need `TempDir`. Single `RotatingWriter` over `Arc<dyn Fs>` is simpler.
 - **Split write-side and read-side traits (`Fs` + `SegmentSource`).** Disk read-side is stateful (claim-set dedup) so the state would have to be shared across both traits anyway. Single trait keeps the lifecycle in one place.
 - **Eager payload load in `take_files`.** Reads every unclaimed file into RAM on each scan. First drain after boot or recovery scales with backlog size. Lazy `TakenSegment::load` bounds peak in-flight memory to one segment.
-- **`Fs::Writer` as an associated type.** `dyn Fs` not object-safe with associated types and `Arc<dyn Fs>` is needed at the recorder/worker boundary. Cost of `Box<dyn Write + Send>`: one `Box::new(File)` per rotation, one vtable call per ~8 KB BufWriter drain. Dominated by the syscall.
+- **`Fs::Writer` as an associated type.** `dyn Fs` not object-safe with associated types.
+- **`Arc<dyn Fs>` dynamic dispatch everywhere.** A vtable hop per call. Free on `DiskFs` where the syscall dominates, but pure overhead on the `MemFs` hot path. Static dispatch through the Mode typestate (see Backend selection) avoids it without leaking a type parameter.
 - **Sync `mpsc<()>(1)` for wakeup.** Already shuttle-shimmed, but blocking `recv()` would stall the current-thread worker, `spawn_blocking` per wait churns the thread pool.
 - **`Mutex<VecDeque<MemSealedSegment>>` for queue.** Adds a sync mutex on a path other crate queues keep lock-free.
 - **`crossbeam_queue::SegQueue`.** Unbounded, no eviction primitive.
@@ -364,7 +387,7 @@ Memory mode keeps bytes in process heap that disk kept on disk. Regressions are 
 
 - `QueuedCount` / `QueuedBytes`: segments visible to the backend but not returned this cycle. Reserved for bounded-take semantics, 0 in steady state today.
 - `InFlightCount` / `InFlightBytes`: segments claimed but not yet released by last-stage cleanup or `remove_sealed`. Rising values mean the pipeline is not shedding work fast enough.
-- `DroppedSegments`: backend-side evictions. Disk: `RotatingWriter::evict_oldest` (via `Fs::record_writer_eviction`). Memory: channel byte-budget plus slot-cap.
+- `DroppedSegments`: backend-side evictions. Disk: `remove_sealed(_, Eviction)` from `evict_oldest`. Memory: channel byte-budget plus slot-cap.
 - `SegmentsDispatched`: segments handed into the pipeline this cycle.
 
 Fires every cycle, drained-empty included, so a stuck pipeline shows climbing `InFlightBytes` with `SegmentsDispatched == 0`. `ChannelReceiver` keeps direct accessors for at-cadence sampling.
