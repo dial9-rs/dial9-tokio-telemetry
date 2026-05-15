@@ -102,6 +102,35 @@ mod supported {
         Ok(())
     }
 
+    /// Check whether our SIGSEGV handler is still the active handler for
+    /// SIGSEGV. Returns `true` if the currently-installed handler matches
+    /// the one we registered in [`install_handler`].
+    ///
+    /// Some other code may install its own SIGSEGV handler after ours,
+    /// either chaining to us or not. This function lets callers detect
+    /// that case so they can reinstall or skip capture.
+    ///
+    /// Performs one `sigaction` syscall; not suitable for hot paths.
+    pub fn handler_is_installed() -> bool {
+        // If we never installed, we cannot be installed.
+        if !HANDLER_INSTALLED.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        // Query current SIGSEGV handler without modifying it.
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: passing a null `act` pointer is valid per POSIX and only
+        // retrieves the current action.
+        let rc = unsafe { libc::sigaction(libc::SIGSEGV, ptr::null(), &mut current) };
+        if rc != 0 {
+            return false;
+        }
+
+        // Compare sa_sigaction function pointer against our handler.
+        let expected = sigsegv_handler as *const () as usize;
+        current.sa_sigaction == expected
+    }
+
     /// SIGSEGV handler for `safe_load`: if the faulting PC is within the
     /// `safe_load_start..safe_load_end` instruction range, it skips the faulting
     /// load, and resumes execution.
@@ -192,4 +221,4 @@ mod supported {
     }
 }
 
-pub use supported::{install_handler, load};
+pub use supported::{handler_is_installed, install_handler, load};

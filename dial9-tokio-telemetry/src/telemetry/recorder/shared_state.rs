@@ -34,6 +34,7 @@ pub(crate) struct SharedState {
     pub(crate) task_dump_idle_threshold_ns: AtomicU64,
     /// Fixed RNG seed for deterministic task dump sampling. Set once at
     /// construction before the `Arc` is shared; read-only thereafter.
+    #[cfg_attr(not(feature = "taskdump"), allow(dead_code))]
     pub(crate) task_dump_rng_seed: Option<u64>,
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
@@ -85,7 +86,7 @@ impl SharedState {
     }
 
     /// Create a wake event. Pragmatic exception: calls `tokio::task::try_id()`
-    /// because `Traced` is inherently tokio-specific.
+    /// because the wake-tracking future is inherently tokio-specific.
     pub(crate) fn create_wake_event(
         &self,
         woken_task_id: TaskId,
@@ -106,7 +107,7 @@ impl SharedState {
     /// provides an [`EventBuffer`] that makes it structurally impossible to
     /// record without checking first. Use `is_enabled()` only for
     /// control-flow decisions that don't directly record events (e.g.
-    /// deciding whether to wrap a waker in `Traced::poll`).
+    /// deciding whether to wrap a waker in wake-tracking polls).
     pub(crate) fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }

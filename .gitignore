@@ -3,5 +3,6 @@
 # except the demo trace
 !dial9-viewer/ui/demo-trace.bin
 target/
+.agents/skills/
 .claude/
 .zed/

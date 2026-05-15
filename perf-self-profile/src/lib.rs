@@ -42,6 +42,7 @@ mod sampler;
 mod symbolize;
 mod sys;
 pub mod tracepoint;
+pub mod unwinder;
 
 pub use offline_symbolize::SymbolTableEntry;
 pub use sampler::{EventSource, Sample, SamplerConfig, SamplingMode};

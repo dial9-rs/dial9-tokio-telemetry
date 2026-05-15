@@ -33,9 +33,9 @@ crate::primitives::thread_local! {
     /// cleared in `on_thread_stop`. Enables [`TelemetryHandle::current`].
     static CURRENT_HANDLE: RefCell<Option<TelemetryHandle>> = const { RefCell::new(None) };
 
-    /// Set by `TelemetryHandle::spawn()` before calling `tokio::spawn()`,
-    /// so the `on_task_spawn` hook can distinguish instrumented from raw spawns.
-    static INSTRUMENTED_SPAWN: Cell<bool> = const { Cell::new(false) };
+    /// Nest count for [`InstrumentedSpawnGuard`]. `on_task_spawn` treats
+    /// any value `> 0` as an instrumented spawn.
+    static INSTRUMENTED_SPAWN: Cell<u32> = const { Cell::new(0) };
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +204,7 @@ fn register_hooks(
             s5.if_enabled(|buf| {
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
-                let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get());
+                let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get()) > 0;
                 let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
                 buf.record_encodable_event(&runtime_context::TaskSpawn {
                     timestamp_ns,
@@ -506,42 +506,75 @@ impl TelemetryHandle {
     {
         match self.traced_handle() {
             Some(traced_handle) => {
-                let _guard = InstrumentedSpawnGuard::set();
-                tokio::spawn(async move {
-                    let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-                    let inner = wrap_task_dumped(future, traced_handle.shared.clone(), task_id);
-                    crate::traced::Traced::new(inner, traced_handle, task_id).await
-                })
+                let _guard = InstrumentedSpawnGuard::enter();
+                tokio::spawn(crate::telemetry::TracedFuture::new(
+                    future,
+                    Some(traced_handle),
+                ))
             }
             None => tokio::spawn(future),
         }
     }
-}
 
-/// If the `taskdump` feature is on, wrap `future` in `TaskDumped<F>`; otherwise
-/// pass through unchanged. Factored so `TelemetryHandle::spawn` stays readable.
-#[cfg(feature = "taskdump")]
-fn wrap_task_dumped<F>(
-    future: F,
-    shared: Arc<crate::telemetry::recorder::SharedState>,
-    task_id: TaskId,
-) -> crate::task_dumped::TaskDumped<F>
-where
-    F: std::future::Future,
-{
-    crate::task_dumped::TaskDumped::new(future, shared, task_id)
-}
-
-#[cfg(not(feature = "taskdump"))]
-fn wrap_task_dumped<F>(
-    future: F,
-    _shared: Arc<crate::telemetry::recorder::SharedState>,
-    _task_id: TaskId,
-) -> F
-where
-    F: std::future::Future,
-{
-    future
+    /// Spawn an instrumented future through a user-supplied spawn function.
+    ///
+    /// `spawn_fn` must synchronously perform a real Tokio spawn (or an
+    /// equivalent operation) before returning; do not defer the future or run
+    /// it with `block_on`. To record the resulting task as instrumented, spawn
+    /// on a dial9-traced runtime with task tracking enabled. The closure's
+    /// return value is forwarded back to the caller, so you can keep the
+    /// [`tokio::task::JoinHandle`], [`tokio::task::AbortHandle`], or whatever
+    /// the spawn function returns.
+    ///
+    /// # Examples
+    ///
+    /// Spawn into a [`tokio::task::JoinSet`]:
+    ///
+    /// ```rust,no_run
+    /// # use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+    /// # use tokio::task::JoinSet;
+    /// # async fn work() {}
+    /// # async fn demo() {
+    /// let handle = TelemetryHandle::current();
+    /// let mut set: JoinSet<()> = JoinSet::new();
+    /// handle.spawn_with(work(), |f| set.spawn(f));
+    /// # }
+    /// ```
+    ///
+    /// Spawn into a [`tokio::task::JoinSet`] on a specific runtime:
+    ///
+    /// ```rust,no_run
+    /// # use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+    /// # use tokio::runtime::Runtime;
+    /// # use tokio::task::JoinSet;
+    /// # async fn work() {}
+    /// # fn demo(runtime: &Runtime) {
+    /// let handle = TelemetryHandle::current();
+    /// let mut set: JoinSet<()> = JoinSet::new();
+    /// handle.spawn_with(work(), |f| set.spawn_on(f, runtime.handle()));
+    /// # }
+    /// ```
+    ///
+    /// [`TracedFuture<F>`]: crate::telemetry::TracedFuture
+    pub fn spawn_with<F, S>(
+        &self,
+        future: F,
+        spawn_fn: impl FnOnce(crate::telemetry::TracedFuture<F>) -> S,
+    ) -> S
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let traced_handle = self.traced_handle();
+        let future = crate::telemetry::TracedFuture::new(future, traced_handle.clone());
+        match traced_handle {
+            Some(_) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                spawn_fn(future)
+            }
+            None => spawn_fn(future),
+        }
+    }
 }
 
 /// Spawn a traced task on the current tokio runtime.
@@ -565,24 +598,24 @@ where
     TelemetryHandle::current().spawn(future)
 }
 
-/// RAII guard that sets `INSTRUMENTED_SPAWN` to `true` on creation and
-/// resets it to `false` on drop, even if `tokio::spawn` panics.
+/// RAII guard that increments `INSTRUMENTED_SPAWN` on creation and
+/// decrements it on drop, even if the protected closure panics.
 struct InstrumentedSpawnGuard;
 
 impl InstrumentedSpawnGuard {
-    fn set() -> Self {
-        INSTRUMENTED_SPAWN.with(|c| c.set(true));
+    fn enter() -> Self {
+        INSTRUMENTED_SPAWN.with(|c| c.set(c.get().saturating_add(1)));
         Self
     }
 }
 
 impl Drop for InstrumentedSpawnGuard {
     fn drop(&mut self) {
-        INSTRUMENTED_SPAWN.with(|c| c.set(false));
+        INSTRUMENTED_SPAWN.with(|c| c.set(c.get().saturating_sub(1)));
     }
 }
 
-/// Handle for spawning wake-tracked futures on a specific runtime.
+/// Handle for spawning instrumented futures on a specific runtime.
 ///
 /// Returned by [`TraceRuntimeCoreBuilder::build`]. Unlike [`TelemetryHandle::spawn`]
 /// which uses `tokio::spawn()` (requiring an ambient runtime context), this type
@@ -606,16 +639,59 @@ impl RuntimeTelemetryHandle {
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        match &self.traced {
-            Some(traced) => {
-                let traced = traced.clone();
-                let _guard = InstrumentedSpawnGuard::set();
-                self.runtime.spawn(async move {
-                    let task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-                    crate::traced::Traced::new(future, traced, task_id).await
-                })
+        match self.traced.clone() {
+            Some(traced_handle) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                self.runtime.spawn(crate::telemetry::TracedFuture::new(
+                    future,
+                    Some(traced_handle),
+                ))
             }
             None => self.runtime.spawn(future),
+        }
+    }
+
+    /// Spawn an instrumented future through a user-supplied spawn function.
+    ///
+    /// Mirrors [`TelemetryHandle::spawn_with`] for callers that already hold a
+    /// [`RuntimeTelemetryHandle`]. `spawn_fn` must synchronously perform a real
+    /// Tokio spawn (or an equivalent operation) before returning; do not defer
+    /// the future or run it with `block_on`. To record the resulting task as
+    /// instrumented, target a dial9-traced runtime with task tracking enabled,
+    /// typically via [`tokio::task::JoinSet::spawn_on`] with the appropriate
+    /// [`tokio::runtime::Handle`].
+    ///
+    /// # Examples
+    ///
+    /// Spawn into a [`tokio::task::JoinSet`] on a specific runtime:
+    ///
+    /// ```rust,no_run
+    /// # use dial9_tokio_telemetry::telemetry::RuntimeTelemetryHandle;
+    /// # use tokio::runtime::Runtime;
+    /// # use tokio::task::JoinSet;
+    /// # async fn work() {}
+    /// # fn demo(runtime: &Runtime, handle: RuntimeTelemetryHandle, set: &mut JoinSet<()>) {
+    /// handle.spawn_with(work(), |f| set.spawn_on(f, runtime.handle()));
+    /// # }
+    /// ```
+    ///
+    /// [`TracedFuture<F>`]: crate::telemetry::TracedFuture
+    pub fn spawn_with<F, S>(
+        &self,
+        future: F,
+        spawn_fn: impl FnOnce(crate::telemetry::TracedFuture<F>) -> S,
+    ) -> S
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let future = crate::telemetry::TracedFuture::new(future, self.traced.clone());
+        match self.traced {
+            Some(_) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                spawn_fn(future)
+            }
+            None => spawn_fn(future),
         }
     }
 }
@@ -1378,7 +1454,7 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
     /// Install telemetry hooks, build the runtime, and reserve worker IDs.
     ///
     /// Returns the runtime and a [`RuntimeTelemetryHandle`] for spawning
-    /// wake-tracked futures via [`RuntimeTelemetryHandle::spawn`].
+    /// instrumented futures via [`RuntimeTelemetryHandle::spawn`].
     pub fn build(
         self,
         mut builder: tokio::runtime::Builder,
@@ -1440,8 +1516,26 @@ pub struct TelemetryCore;
 impl TelemetryCore {
     /// Build a telemetry session. Recording starts disabled; call
     /// [`TelemetryGuard::enable`] to begin recording.
-    #[builder]
+    #[builder(state_mod = telemetry_core_builder)]
     pub fn new(
+        /// The pipeline of [`SegmentProcessor`](crate::background_task::SegmentProcessor)s
+        /// to run on each sealed segment. When empty the background worker
+        /// is not spawned.
+        #[builder(field)]
+        processors: Vec<Box<dyn crate::background_task::SegmentProcessor>>,
+        /// Static segment metadata injected into every rotated segment's
+        /// header. Empty by default; the S3 preset populates it from the
+        /// configured `S3Config` so traces stay self-describing.
+        #[builder(field)]
+        segment_metadata: Vec<(String, String)>,
+        /// S3 upload configuration.
+        #[cfg(feature = "worker-s3")]
+        #[builder(field)]
+        s3_config: Option<crate::background_task::s3::S3Config>,
+        /// Pre-built S3 client.
+        #[cfg(feature = "worker-s3")]
+        #[builder(field)]
+        s3_client: Option<aws_sdk_s3::Client>,
         /// The trace writer (e.g. [`RotatingWriter`], [`NullWriter`]).
         writer: impl TraceWriter + 'static,
         /// Path for trace output. Enables the background worker when any
@@ -1457,16 +1551,6 @@ impl TelemetryCore {
         /// Enable scheduler event capture (Linux only).
         #[cfg(feature = "cpu-profiling")]
         sched_events: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
-        /// The pipeline of [`SegmentProcessor`](crate::background_task::SegmentProcessor)s
-        /// to run on each sealed segment. When empty the background worker
-        /// is not spawned.
-        #[builder(default)]
-        processors: Vec<Box<dyn crate::background_task::SegmentProcessor>>,
-        /// Static segment metadata injected into every rotated segment's
-        /// header. Empty by default; the S3 preset populates it from the
-        /// configured `S3Config` so traces stay self-describing.
-        #[builder(default)]
-        segment_metadata: Vec<(String, String)>,
         /// How often the background worker polls for sealed segments.
         worker_poll_interval: Option<Duration>,
         /// Metrics sink for the flush/worker threads.
@@ -1481,6 +1565,41 @@ impl TelemetryCore {
                 .task_dump_idle_threshold_ns
                 .store(cfg.idle_threshold().as_nanos() as u64, Ordering::Relaxed);
         }
+
+        // Determine the pipeline strategy from the builder fields, then
+        // delegate to `assemble_processors` — the single source of truth for
+        // which processors are used in each configuration.
+        #[allow(unused_mut)]
+        let mut segment_metadata = segment_metadata;
+
+        #[allow(unused_variables)]
+        let pipeline = if !processors.is_empty() {
+            PipelineConfig::Custom(processors)
+        } else {
+            #[cfg(feature = "worker-s3")]
+            if let Some(config) = s3_config {
+                if segment_metadata.is_empty() {
+                    segment_metadata = config
+                        .as_metadata()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect();
+                }
+                PipelineConfig::S3(crate::background_task::S3PipelineUploader::new(
+                    config, s3_client,
+                ))
+            } else {
+                PipelineConfig::Unset
+            }
+            #[cfg(not(feature = "worker-s3"))]
+            PipelineConfig::Unset
+        };
+
+        let processors = assemble_processors(
+            #[cfg(feature = "cpu-profiling")]
+            cpu_profiling.is_some(),
+            pipeline,
+        );
+
         #[allow(unused_mut)]
         let mut event_writer = EventWriter::new(Box::new(writer));
 
@@ -1580,6 +1699,38 @@ impl TelemetryCore {
             Some(flush_thread),
             worker,
         ))
+    }
+}
+
+// Custom methods on the generated builder.
+impl<W: TraceWriter, S: telemetry_core_builder::State> TelemetryCoreBuilder<W, S> {
+    /// Configure S3 upload for sealed trace segments.
+    #[cfg(feature = "worker-s3")]
+    pub fn s3_config(mut self, config: crate::background_task::s3::S3Config) -> Self {
+        self.s3_config = Some(config);
+        self
+    }
+
+    /// Provide a pre-built S3 client (for custom credentials or endpoints).
+    #[cfg(feature = "worker-s3")]
+    pub fn s3_client(mut self, client: aws_sdk_s3::Client) -> Self {
+        self.s3_client = Some(client);
+        self
+    }
+
+    /// Set the processor pipeline directly.
+    pub fn processors(
+        mut self,
+        processors: Vec<Box<dyn crate::background_task::SegmentProcessor>>,
+    ) -> Self {
+        self.processors = processors;
+        self
+    }
+
+    /// Set static segment metadata.
+    pub fn segment_metadata(mut self, entries: Vec<(String, String)>) -> Self {
+        self.segment_metadata = entries;
+        self
     }
 }
 
@@ -2081,6 +2232,23 @@ mod tests {
             Ok(())
         }
     }
+
+    /// Nested `InstrumentedSpawnGuard`s must compose: inner drop must not
+    /// clear the outer scope. Counter, not flag.
+    #[test]
+    fn instrumented_spawn_guard_nests() {
+        assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 0);
+        let outer = InstrumentedSpawnGuard::enter();
+        assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 1);
+        {
+            let _inner = InstrumentedSpawnGuard::enter();
+            assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 2);
+        }
+        assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 1);
+        drop(outer);
+        assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 0);
+    }
+
     #[test]
     fn current_thread_runtime_resolves_worker_ids() {
         let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
@@ -2491,7 +2659,7 @@ mod tests {
             .build_and_attach_to_telemetry(builder_b, &guard)
             .unwrap();
 
-        // Use handle.spawn on runtime B to get Traced waker wrapping → wake events.
+        // Use handle.spawn on runtime B to get wake-tracked wrapping → wake events.
         let handle = guard.handle();
         runtime_b.block_on(async {
             let mut handles = Vec::new();
@@ -2909,7 +3077,7 @@ mod tests {
         drop(runtime);
         drop(guard);
 
-        // Verify wake events were recorded (handle.spawn wraps with Traced)
+        // Verify wake events were recorded (handle.spawn wraps with wake tracking)
         let raw = data.lock().unwrap();
         let events = crate::telemetry::format::decode_events(&raw).unwrap();
         let wake_count = events
@@ -3314,5 +3482,89 @@ mod tests {
                 "with_s3_uploader should overwrite, not merge"
             );
         }
+    }
+
+    /// Regression test for issue #400: `TelemetryCoreBuilder` must expose
+    /// `.s3_config()` so callers can configure S3 without going through
+    /// `TracedRuntimeBuilder`.
+    #[cfg(feature = "worker-s3")]
+    #[test]
+    fn telemetry_core_builder_s3_config_builds_successfully() {
+        use crate::background_task::s3::S3Config;
+
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("trace.bin");
+        let s3 = S3Config::builder().bucket("b").service_name("s").build();
+
+        let guard = TelemetryCore::builder()
+            .writer(NullWriter)
+            .trace_path(&trace_path)
+            .s3_config(s3)
+            .build()
+            .expect("TelemetryCoreBuilder with s3_config must build");
+
+        assert!(guard.is_enabled());
+        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
+    }
+
+    /// Regression test: `TelemetryCore::builder()` with `cpu_profiling` but
+    /// without `s3_config` must auto-wire the processor pipeline (symbolize +
+    /// gzip + write-back) so the background worker is spawned.
+    #[cfg(feature = "cpu-profiling")]
+    #[test]
+    fn telemetry_core_builder_cpu_profiling_auto_wires_processors() {
+        use crate::telemetry::cpu_profile::CpuProfilingConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("trace.bin");
+
+        // Small max_file_size to force rotation quickly.
+        let writer = RotatingWriter::new(&trace_path, 4 * 1024, 10 * 1024 * 1024).unwrap();
+
+        let guard = TelemetryCore::builder()
+            .writer(writer)
+            .trace_path(&trace_path)
+            .cpu_profiling(CpuProfilingConfig::default())
+            .worker_poll_interval(std::time::Duration::from_millis(50))
+            .build()
+            .expect("TelemetryCoreBuilder with cpu_profiling must build");
+
+        guard.enable();
+
+        // Attach a runtime and generate enough events to force segment rotation.
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.worker_threads(2).enable_all();
+        let (runtime, _handle) = guard.trace_runtime("test").build(builder).unwrap();
+
+        runtime.block_on(async {
+            // Generate events to fill the small 4KB segment.
+            for _ in 0..1000 {
+                tokio::task::yield_now().await;
+            }
+            // Give the worker time to process the sealed segment.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(2));
+
+        // After shutdown, the worker should have processed at least one
+        // segment. WriteBackProcessor writes .bin.gz files.
+        let gz_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "gz"))
+            .collect();
+        assert!(
+            !gz_files.is_empty(),
+            "cpu_profiling should auto-wire processors that produce .gz files, \
+             but no .gz files found in {:?}. Files present: {:?}",
+            dir.path(),
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .collect::<Vec<_>>()
+        );
     }
 }

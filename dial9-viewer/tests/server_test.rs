@@ -775,13 +775,10 @@ mod skills_unpack_tests {
         );
     }
 
-    /// Validates repo-local `.agents/skills` definitions that are loaded directly by agents.
+    /// Validates source skill definitions in `dial9-viewer/skills/` have valid frontmatter.
     #[test]
-    fn local_agent_skills_have_valid_frontmatter() {
-        let skills_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join(".agents/skills");
+    fn source_skills_have_valid_frontmatter() {
+        let skills_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
         let mut skill_count = 0;
 
         for entry in std::fs::read_dir(&skills_dir).unwrap() {
@@ -798,8 +795,8 @@ mod skills_unpack_tests {
         }
 
         assert!(
-            skill_count >= 2,
-            "expected at least 2 local agent skills, got {skill_count}"
+            skill_count >= 6,
+            "expected at least 6 source skills, got {skill_count}"
         );
     }
 

@@ -327,12 +327,12 @@ pub(crate) struct CpuSampleData {
 }
 
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn current_tid() -> u32 {
     unsafe { libc::syscall(libc::SYS_gettid) as u32 }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub(crate) fn current_tid() -> u32 {
     // No gettid on non-Linux; use a thread-local counter as a unique ID.
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -425,11 +425,11 @@ pub(crate) fn clock_pair() -> (u64, u64) {
 pub(crate) struct SchedStat {
     pub wait_time_ns: u64,
     /// Raw fd backing this read, exposed for FD-lifecycle tests. Not used in production.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
     fd: std::os::fd::RawFd,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 impl SchedStat {
     /// Read schedstat for the current thread using a cached per-thread file descriptor.
     /// Opening `/proc/self/task/<tid>/schedstat` is done once per thread; subsequent reads
@@ -496,7 +496,7 @@ impl SchedStat {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 impl SchedStat {
     pub(crate) fn read_current() -> std::io::Result<Self> {
         Err(std::io::Error::new(
@@ -607,21 +607,51 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn test_schedstat_fd_closed_on_thread_exit() {
-        // fcntl(fd, F_GETFD) returns -1 with errno=EBADF for closed fds.
-        // SAFETY: F_GETFD with a raw fd is side-effect free.
-        fn fd_is_open(fd: std::os::fd::RawFd) -> bool {
-            unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
+        // We cannot just check `fcntl(fd, F_GETFD) != -1` after the thread
+        // exits: the kernel readily recycles fd numbers, and other tests in the
+        // suite open many files (including their own per-thread schedstat fds)
+        // concurrently. A closed fd may immediately be reused by an unrelated
+        // open in another thread, making a naive open-check flaky.
+        //
+        // Instead, record the path the fd points at (via /proc/self/fd/<fd>)
+        // *inside* the spawned thread, and after join check whether the fd is
+        // either closed or now points at a different file. Each thread opens
+        // schedstat for its own tid, so the captured path
+        // `/proc/self/task/<spawned_tid>/schedstat` is unique to the spawned
+        // thread's open: no other thread will ever open that exact path. If the
+        // fd is still open and still points at it, the OwnedFd was leaked.
+
+        fn fd_target(fd: std::os::fd::RawFd) -> Option<std::path::PathBuf> {
+            std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()
         }
 
-        let fd = std::thread::spawn(|| SchedStat::read_current().unwrap().fd)
-            .join()
-            .unwrap();
+        let (fd, opened_path) = std::thread::spawn(|| {
+            let fd = SchedStat::read_current().unwrap().fd;
+            let path = fd_target(fd).expect("readlink /proc/self/fd/<fd> in live thread");
+            (fd, path)
+        })
+        .join()
+        .unwrap();
 
+        // Sanity-check: confirm we actually captured a schedstat path so the
+        // assertion below is meaningful (rather than passing because we read
+        // the wrong link).
         assert!(
-            !fd_is_open(fd),
-            "schedstat fd {fd} leaked after thread exit"
+            opened_path.to_string_lossy().ends_with("/schedstat"),
+            "expected schedstat path, got {opened_path:?}"
         );
+
+        match fd_target(fd) {
+            None => { /* fd is closed - good. */ }
+            Some(now) if now != opened_path => {
+                // fd was closed and the slot was reused for an unrelated open
+                // in another thread. That still means our OwnedFd was dropped.
+            }
+            Some(now) => {
+                panic!("schedstat fd {fd} leaked after thread exit (still points at {now:?})")
+            }
+        }
     }
 }
