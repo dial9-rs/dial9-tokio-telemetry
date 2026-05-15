@@ -4,12 +4,10 @@ use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::buffer;
 use crate::telemetry::buffer::TlBufferHandle;
 use crate::telemetry::collector::CentralCollector;
-#[cfg(feature = "cpu-profiling")]
 use crate::telemetry::events::ThreadRole;
 use crate::telemetry::format::{QueueSampleEvent, WakeEventEvent};
 use crate::telemetry::task_metadata::TaskId;
 use std::cell::Cell;
-#[cfg(feature = "cpu-profiling")]
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -55,10 +53,8 @@ pub(crate) struct SharedState {
     pub(crate) contexts: Mutex<Vec<Arc<RuntimeContext>>>,
     /// Maps OS tid → thread role so that CPU samples returned from perf can be
     /// attributed to the correct worker or blocking-pool bucket at flush time.
-    #[cfg(feature = "cpu-profiling")]
     pub(crate) thread_roles: Mutex<HashMap<u32, ThreadRole>>,
     /// Data sources (CPU profiler, sched profiler, etc.) that the flush thread drains.
-    #[cfg(feature = "cpu-profiling")]
     pub(crate) sources: Mutex<Vec<Box<dyn super::source::Source>>>,
 }
 
@@ -75,9 +71,7 @@ impl SharedState {
             drain_epoch: AtomicU64::new(0),
             tl_buffers: Mutex::new(Vec::new()),
             contexts: Mutex::new(Vec::new()),
-            #[cfg(feature = "cpu-profiling")]
             thread_roles: Mutex::new(HashMap::new()),
-            #[cfg(feature = "cpu-profiling")]
             sources: Mutex::new(Vec::new()),
         }
     }

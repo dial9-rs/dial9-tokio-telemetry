@@ -1,4 +1,3 @@
-#[cfg(feature = "cpu-profiling")]
 use super::shared_state::SharedState;
 use crate::telemetry::collector::Batch;
 use crate::telemetry::writer::TraceWriter;
@@ -53,12 +52,10 @@ impl EventWriter {
         Ok(())
     }
 
-    /// Drain CPU/sched profilers and write their events into the trace.
-    #[cfg(feature = "cpu-profiling")]
+    /// Drain data sources and write their events into the trace.
     pub(crate) fn flush_sources(&mut self, shared: &SharedState) {
         use super::source::FlushContext;
 
-        // Snapshot thread_roles once per flush cycle.
         let roles = shared.thread_roles.lock().unwrap().clone();
 
         let ctx = FlushContext {

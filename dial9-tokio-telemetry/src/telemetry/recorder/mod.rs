@@ -1,7 +1,6 @@
 mod event_writer;
 mod runtime_context;
 mod shared_state;
-#[cfg(feature = "cpu-profiling")]
 pub(crate) mod source;
 
 pub(crate) use runtime_context::RuntimeContext;
@@ -91,11 +90,8 @@ fn flush_once(
 ) -> FlushStats {
     let events_before = event_writer.events_written();
     let cpu_events_time = std::time::Instant::now();
-    #[cfg(feature = "cpu-profiling")]
-    {
-        if shared.is_enabled() {
-            event_writer.flush_sources(shared);
-        }
+    if shared.is_enabled() {
+        event_writer.flush_sources(shared);
     }
     let cpu_flush_duration = cpu_events_time.elapsed();
 
