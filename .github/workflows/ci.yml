@@ -206,6 +206,37 @@ jobs:
       - name: Run shuttle tests
         run: scripts/test-shuttle.sh
 
+  semver-checks:
+    name: Semver checks
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.event_name == 'pull_request'
+        && !startsWith(github.head_ref, 'release-')
+        && !startsWith(github.head_ref, 'release/')
+      }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@cargo-semver-checks
+      - name: Check semver compliance
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: |
+          cargo semver-checks \
+            -p dial9-trace-format-derive \
+            -p dial9-trace-format \
+            -p dial9-perf-self-profile \
+            -p dial9-macro \
+            -p dial9-tokio-telemetry \
+            -p dial9-viewer
+
   package:
     name: Cargo package
     runs-on: ubuntu-latest

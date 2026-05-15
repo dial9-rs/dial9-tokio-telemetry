@@ -1,6 +1,7 @@
 [workspace]
 git_release_enable = true
 changelog_update = false
+semver_check = true
 
 [[package]]
 name = "dial9-tokio-telemetry"

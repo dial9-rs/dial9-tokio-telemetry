@@ -72,24 +72,35 @@ For other tests, `cargo nextest run` will run all of the normal tests.
 
 ## Doing releases
 
-There is a `.github/workflows/release.yml` workflow that will attempt to use a crates.io release every time the version in the Cargo.toml changes. That is the sanctioned way of doing releases.
+Releases are human-initiated, not automatic. The process has two parts:
 
-The `release.yml` workflow is authorized to publish releases to the dial9 crates via [trusted publishing], no further authorization is needed or desired for normal release publishing.
+### How it works
+
+1. **Release PR (automatic):** On every push to `main`, the `release-pr.yml` workflow runs `release-plz release-pr`, which creates/updates a PR with version bumps and changelog entries based on [conventional commits]. This PR accumulates over time — you can merge many feature PRs before releasing.
+
+2. **Publishing (manual):** When you're ready to release, merge the release PR, then go to **Actions → "Publish release" → Run workflow** and click "Run". The `environment: release` gate requires approval before publishing proceeds.
+
+The `release.yml` workflow is authorized to publish releases to the dial9 crates via [trusted publishing]. No tokens need to be managed.
 
 [trusted publishing]: https://rust-lang.github.io/rfcs/3691-trusted-publishing-cratesio.html
-
-To update the `Cargo.toml` and changelog, use [conventional commits], and in a clean git repo, run the following commands:
-
-```
-cargo install release-plz --locked
-git checkout main && release-plz update
-# before committing, make sure that CHANGELOG.md contains an appropriate changelog
-git commit -a
-```
-
-Then make a new PR for the release and get it approved. The automated release PR generation functionality is not used here.
-
 [conventional commits]: https://www.conventionalcommits.org/en/v1.0.0/
+
+### Step by step
+
+1. Merge your PRs to `main` using conventional commit messages (e.g. `feat:`, `fix:`, `feat!:` for breaking changes).
+2. The release PR will update automatically. Review the changelog and version bumps.
+3. If you need to adjust versions (e.g. force a major bump), edit `Cargo.toml` versions in the release PR before merging.
+4. Merge the release PR.
+5. Go to Actions → "Publish release" → Run workflow → confirm.
+6. A team member approves the deployment in the `release` environment.
+
+### Semver checks
+
+`cargo-semver-checks` runs on every PR as an advisory check. It won't block merge, but if it reports breaking changes, ensure the release PR reflects a major version bump before publishing.
+
+### Breaking changes
+
+You can freely merge breaking changes to `main`. The release PR will accumulate them. Before publishing, verify that `release-plz` has bumped the major version (it runs `semver_check = true` and should do this automatically). If it hasn't, manually adjust the version in the release PR.
 
 ### Publishing a new crate
 
