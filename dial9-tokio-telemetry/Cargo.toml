@@ -79,6 +79,8 @@ _shuttle = [
 ## is a hard compile error from tokio.
 taskdump = ["tokio/taskdump"]
 tracing-layer = ["dep:tracing-subscriber"]
+## Sampled memory allocation profiling via ring buffers.
+memory-profiling = []
 worker-s3 = [
     "dep:aws-sdk-s3-transfer-manager",
     "dep:aws-sdk-s3",
@@ -92,6 +94,7 @@ unstable-events = []
 __nonlinux_all_features = [
     "analysis",
     "cpu-profiling",
+    "memory-profiling",
     "tracing-layer",
     "worker-s3",
 ]
@@ -99,6 +102,7 @@ __nonlinux_all_features = [
 [dev-dependencies]
 dial9-tokio-telemetry = { path = ".", features = [
     "analysis",
+    "memory-profiling",
     "tracing-layer",
     "unstable-events",
     "worker-s3",
@@ -134,6 +138,7 @@ iai-callgrind = "=0.16.1"
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 dial9-tokio-telemetry = { path = ".", features = [
     "cpu-profiling",
+    "memory-profiling",
     "worker-s3",
     "analysis",
     "taskdump",

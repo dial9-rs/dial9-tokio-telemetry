@@ -13,6 +13,8 @@
 pub mod analysis_unstable;
 /// Background worker pipeline for processing sealed trace segments.
 pub mod background_task;
+#[cfg(feature = "memory-profiling")]
+pub(crate) mod memory_profiling;
 pub(crate) mod metrics;
 pub(crate) mod primitives;
 pub(crate) mod rate_limit;
