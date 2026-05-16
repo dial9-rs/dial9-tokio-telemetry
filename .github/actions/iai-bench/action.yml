@@ -23,25 +23,27 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: dtolnay/rust-toolchain@stable
-    - uses: Swatinem/rust-cache@v2
+    - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+      with:
+        toolchain: stable
+    - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
     - name: Install valgrind (cached)
-      uses: awalsh128/cache-apt-pkgs-action@latest
+      uses: awalsh128/cache-apt-pkgs-action@2c09a5e66da6c8016428a2172bd76e5e4f14bb17 # latest
       with:
         packages: valgrind
         version: '1.0'
 
     - name: Cache iai-callgrind-runner
       id: runner_cache
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ~/.cargo/bin/iai-callgrind-runner
         key: iai-runner-${{ inputs.iai-callgrind-version }}
 
     - name: Install cargo-binstall
       if: steps.runner_cache.outputs.cache-hit != 'true'
-      uses: cargo-bins/cargo-binstall@v1.19.1
+      uses: cargo-bins/cargo-binstall@aaa84a43aec4955a42c5ffc65d258961e39f276e # v1.19.1
 
     - name: Install iai-callgrind-runner (prebuilt via binstall)
       if: steps.runner_cache.outputs.cache-hit != 'true'

@@ -6,9 +6,7 @@ permissions:
   id-token: write
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   release-plz-release:
@@ -21,17 +19,19 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
       - name: Authenticate to crates.io
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1
         id: auth
       - name: Run release-plz
         id: release-plz
-        uses: release-plz/action@v0.5.102
+        uses: release-plz/action@7419a2cb1535b9c0e852b4dec626967baf65c022 # v0.5.102
         with:
           command: release
         env:
@@ -66,12 +66,13 @@ jobs:
             archive: zip
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - run: cargo build --release --target ${{ matrix.target }} -p dial9-viewer -p dial9
@@ -102,7 +103,7 @@ jobs:
           Compress-Archive -Path dial9-viewer.exe,dial9.exe -DestinationPath ../../../dial9-viewer-${{ matrix.target }}-${{ steps.version.outputs.version }}.zip
 
       - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           files: dial9-viewer-${{ matrix.target }}-${{ steps.version.outputs.version }}.${{ matrix.archive }}
