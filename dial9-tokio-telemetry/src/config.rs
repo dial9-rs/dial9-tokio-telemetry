@@ -878,7 +878,7 @@ impl<S: dial9_config_builder::IsComplete> Dial9ConfigBuilder<S> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
     use std::ffi::OsString;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -903,7 +903,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeEnv {
-        vars: BTreeMap<String, FakeEnvValue>,
+        vars: HashMap<String, FakeEnvValue>,
     }
 
     enum FakeEnvValue {
@@ -1058,7 +1058,7 @@ mod tests {
             prefix: None,
         });
 
-        let metadata: BTreeMap<_, _> = config.as_metadata().collect();
+        let metadata: HashMap<_, _> = config.as_metadata().collect();
         assert_eq!(metadata.get("bucket"), Some(&"b"));
         assert!(
             metadata
