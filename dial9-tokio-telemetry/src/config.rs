@@ -261,6 +261,36 @@ struct ParsedS3Config {
     prefix: Option<String>,
 }
 
+#[derive(Debug)]
+struct ResolvedEnvConfig {
+    enabled: bool,
+    trace_dir: PathBuf,
+
+    // None means the underlying RotatingWriter builder owns the default.
+    rotation_period: Option<Duration>,
+
+    max_total_size: u64,
+    max_file_size: u64,
+    task_tracking_enabled: bool,
+
+    // Optional config: None means do not set a runtime name.
+    runtime_name: Option<String>,
+
+    // Optional integration: None means do not configure S3 upload.
+    s3: Option<ParsedS3Config>,
+
+    cpu_profile_enabled: bool,
+
+    // None means CpuProfilingConfig::default() owns the sample rate.
+    cpu_sample_hz: Option<u64>,
+
+    schedule_profile_enabled: bool,
+    task_dump_enabled: bool,
+
+    // None means TaskDumpConfig::default() owns the idle threshold.
+    task_dump_idle_threshold: Option<Duration>,
+}
+
 struct RuntimeEnvConfig {
     task_tracking_enabled: bool,
     runtime_name: Option<String>,
@@ -307,6 +337,41 @@ fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
         task_dump_idle_threshold: env
             .get_positive_u64(ENV_DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS)
             .map(Duration::from_millis),
+    }
+}
+
+fn resolve_env_config(parsed: ParsedEnvConfig) -> ResolvedEnvConfig {
+    let max_total_size = parsed
+        .max_total_size
+        .unwrap_or_else(|| DEFAULT_MAX_DISK_USAGE_MB.saturating_mul(BYTES_PER_MIB));
+    let max_file_size = parsed
+        .max_file_size
+        .unwrap_or_else(|| derive_max_file_size(max_total_size));
+
+    ResolvedEnvConfig {
+        enabled: parsed.enabled.unwrap_or(DEFAULT_ENABLED),
+        trace_dir: parsed
+            .trace_dir
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_TRACE_DIR)),
+        rotation_period: parsed.rotation_period,
+        max_total_size,
+        max_file_size,
+        task_tracking_enabled: parsed
+            .task_tracking_enabled
+            .unwrap_or(DEFAULT_TASK_TRACKING_ENABLED),
+        runtime_name: parsed.runtime_name,
+        s3: parsed.s3,
+        cpu_profile_enabled: parsed
+            .cpu_profile_enabled
+            .unwrap_or(DEFAULT_CPU_PROFILE_ENABLED),
+        cpu_sample_hz: parsed.cpu_sample_hz,
+        schedule_profile_enabled: parsed
+            .schedule_profile_enabled
+            .unwrap_or(DEFAULT_SCHEDULE_PROFILE_ENABLED),
+        task_dump_enabled: parsed
+            .task_dump_enabled
+            .unwrap_or(DEFAULT_TASK_DUMP_ENABLED),
+        task_dump_idle_threshold: parsed.task_dump_idle_threshold,
     }
 }
 
@@ -540,7 +605,7 @@ impl Dial9Config {
     }
 
     fn from_env_source(env: &impl EnvSource) -> Self {
-        let ParsedEnvConfig {
+        let ResolvedEnvConfig {
             enabled,
             trace_dir,
             rotation_period,
@@ -554,30 +619,21 @@ impl Dial9Config {
             schedule_profile_enabled,
             task_dump_enabled,
             task_dump_idle_threshold,
-        } = parse_env_config(env);
-
-        let max_total_size = max_total_size
-            .unwrap_or_else(|| DEFAULT_MAX_DISK_USAGE_MB.saturating_mul(BYTES_PER_MIB));
-        let max_file_size = max_file_size.unwrap_or_else(|| derive_max_file_size(max_total_size));
+        } = resolve_env_config(parse_env_config(env));
 
         let runtime_config = RuntimeEnvConfig {
-            task_tracking_enabled: task_tracking_enabled.unwrap_or(DEFAULT_TASK_TRACKING_ENABLED),
+            task_tracking_enabled,
             runtime_name,
-            cpu_profile_enabled: cpu_profile_enabled.unwrap_or(DEFAULT_CPU_PROFILE_ENABLED),
+            cpu_profile_enabled,
             cpu_sample_hz,
-            schedule_profile_enabled: schedule_profile_enabled
-                .unwrap_or(DEFAULT_SCHEDULE_PROFILE_ENABLED),
-            task_dump_enabled: task_dump_enabled.unwrap_or(DEFAULT_TASK_DUMP_ENABLED),
+            schedule_profile_enabled,
+            task_dump_enabled,
             task_dump_idle_threshold,
         };
 
         let builder = Self::builder()
-            .enabled(enabled.unwrap_or(DEFAULT_ENABLED))
-            .base_path(
-                trace_dir
-                    .unwrap_or_else(|| PathBuf::from(DEFAULT_TRACE_DIR))
-                    .join("trace.bin"),
-            )
+            .enabled(enabled)
+            .base_path(trace_dir.join("trace.bin"))
             .max_file_size(max_file_size)
             .max_total_size(max_total_size)
             .maybe_rotation_period(rotation_period);
@@ -897,6 +953,39 @@ mod tests {
         assert_eq!(parsed.schedule_profile_enabled, None);
         assert_eq!(parsed.task_dump_enabled, None);
         assert_eq!(parsed.task_dump_idle_threshold, None);
+    }
+
+    #[test]
+    fn env_resolution_applies_only_from_env_owned_defaults() {
+        let resolved = resolve_env_config(parse_env_config(&FakeEnv::default()));
+        let supported_profiling = cfg!(all(target_os = "linux", feature = "cpu-profiling"));
+
+        assert_eq!(resolved.enabled, DEFAULT_ENABLED);
+        assert_eq!(resolved.trace_dir, PathBuf::from(DEFAULT_TRACE_DIR));
+        assert_eq!(
+            resolved.max_total_size,
+            DEFAULT_MAX_DISK_USAGE_MB * BYTES_PER_MIB
+        );
+        assert_eq!(
+            resolved.max_file_size,
+            derive_max_file_size(resolved.max_total_size)
+        );
+        assert_eq!(
+            resolved.task_tracking_enabled,
+            DEFAULT_TASK_TRACKING_ENABLED
+        );
+        assert_eq!(resolved.cpu_profile_enabled, supported_profiling);
+        assert_eq!(resolved.schedule_profile_enabled, supported_profiling);
+        assert_eq!(resolved.task_dump_enabled, DEFAULT_TASK_DUMP_ENABLED);
+
+        // Optional config/integrations remain absent unless explicitly requested.
+        assert_eq!(resolved.runtime_name, None);
+        assert!(resolved.s3.is_none());
+
+        // Delegated defaults remain unset so their underlying config types own them.
+        assert_eq!(resolved.rotation_period, None);
+        assert_eq!(resolved.cpu_sample_hz, None);
+        assert_eq!(resolved.task_dump_idle_threshold, None);
     }
 
     #[test]
