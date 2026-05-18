@@ -187,6 +187,8 @@ fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent
         TelemetryEvent::TaskSpawn { .. }
         | TelemetryEvent::TaskTerminate { .. }
         | TelemetryEvent::TaskDump { .. }
+        | TelemetryEvent::Alloc { .. }
+        | TelemetryEvent::Free { .. }
         | TelemetryEvent::ThreadNameDef { .. }
         | TelemetryEvent::SegmentMetadata { .. }
         | TelemetryEvent::ClockSync { .. } => None,

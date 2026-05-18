@@ -247,6 +247,8 @@ fn event_type_name(event: &TelemetryEvent) -> &'static str {
         TelemetryEvent::TaskTerminate { .. } => "TaskTerminate",
         TelemetryEvent::CpuSample { .. } => "CpuSample",
         TelemetryEvent::TaskDump { .. } => "TaskDump",
+        TelemetryEvent::Alloc { .. } => "Alloc",
+        TelemetryEvent::Free { .. } => "Free",
         TelemetryEvent::ThreadNameDef { .. } => "ThreadNameDef",
         TelemetryEvent::WakeEvent { .. } => "WakeEvent",
         TelemetryEvent::SegmentMetadata { .. } => "SegmentMetadata",

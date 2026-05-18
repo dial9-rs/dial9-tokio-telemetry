@@ -183,3 +183,86 @@ main().catch((e) => {{ console.error(e); process.exit(1); }});
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn test_js_parser_alloc_free_events() {
+    use dial9_tokio_telemetry::telemetry::{AllocEvent, FreeEvent};
+    use dial9_trace_format::encoder::Encoder;
+
+    let temp_dir = TempDir::new().unwrap();
+    let trace_path = temp_dir.path().join("alloc_trace.bin");
+
+    {
+        let mut enc = Encoder::new();
+        let stack = enc.intern_stack_frames(&[0xAAAA, 0xBBBB, 0xCCCC]).unwrap();
+        enc.write(&AllocEvent {
+            timestamp_ns: 5_000_000,
+            tid: 42,
+            size: 4096,
+            addr: 0xDEAD_BEEF,
+            callchain: stack,
+        })
+        .unwrap();
+        enc.write(&FreeEvent {
+            timestamp_ns: 10_000_000,
+            tid: 7,
+            addr: 0xDEAD_BEEF,
+            size: 4096,
+            alloc_timestamp_ns: 5_000_000,
+        })
+        .unwrap();
+        std::fs::write(&trace_path, enc.finish()).unwrap();
+    }
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let script = format!(
+        r#"
+const {{ parseTrace }} = require("{viewer}/trace_parser.js");
+const fs = require("fs");
+async function main() {{
+    const result = await parseTrace(fs.readFileSync("{trace}"));
+    if (result.allocEvents.length !== 1) {{
+        console.error("expected 1 allocEvent, got " + result.allocEvents.length);
+        process.exit(1);
+    }}
+    const a = result.allocEvents[0];
+    if (a.tid !== 42) {{ console.error("bad tid: " + a.tid); process.exit(1); }}
+    if (a.size !== 4096) {{ console.error("bad size: " + a.size); process.exit(1); }}
+    if (a.callchain.length !== 3) {{ console.error("bad callchain len: " + a.callchain.length); process.exit(1); }}
+
+    if (result.freeEvents.length !== 1) {{
+        console.error("expected 1 freeEvent, got " + result.freeEvents.length);
+        process.exit(1);
+    }}
+    const f = result.freeEvents[0];
+    if (f.tid !== 7) {{ console.error("bad free tid: " + f.tid); process.exit(1); }}
+    if (f.addr !== "3735928559") {{ console.error("bad free addr: " + f.addr); process.exit(1); }}
+    if (f.size !== 4096) {{ console.error("bad free size: " + f.size); process.exit(1); }}
+    if (f.allocTimestampNs !== 5000000) {{ console.error("bad allocTimestampNs: " + f.allocTimestampNs); process.exit(1); }}
+
+    console.log("OK: allocEvents=" + result.allocEvents.length + " freeEvents=" + result.freeEvents.length);
+}}
+main().catch((e) => {{ console.error(e); process.exit(1); }});
+"#,
+        viewer = std::path::Path::new(&manifest_dir)
+            .parent()
+            .unwrap()
+            .join("dial9-viewer")
+            .join("ui")
+            .display(),
+        trace = trace_path.display(),
+    );
+
+    let output = Command::new("node")
+        .args(["-e", &script])
+        .output()
+        .expect("Failed to run node");
+
+    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "JS parser alloc/free test failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

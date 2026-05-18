@@ -219,6 +219,59 @@ pub(crate) struct TaskDumpEvent {
     pub callchain: InternedStackFrames,
 }
 
+/// Wire-format event for a sampled memory allocation.
+///
+/// Emitted from the consolidator (flush thread) for allocations that tripped
+/// the geometric sampling counter. The sampling rate that produced this event
+/// lives in the segment metadata, not on each event.
+#[derive(Debug, TraceEvent)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
+pub struct AllocEvent {
+    /// Wall-clock timestamp in nanoseconds (monotonic).
+    #[traceevent(timestamp)]
+    pub timestamp_ns: u64,
+    /// OS thread ID of the allocating thread. Same source as `WorkerParkEvent.tid`
+    /// and `CpuSampleEvent.tid`. Use this to join against worker park/unpark
+    /// history to recover worker_id when the allocation happened on a tokio
+    /// worker thread.
+    pub tid: u32,
+    /// Allocation size in bytes. The actual size requested by the allocating
+    /// code; the underlying allocator may have rounded up, but that's not
+    /// recorded here.
+    pub size: u64,
+    /// Returned pointer. Only meaningful when liveset tracking is on; otherwise 0.
+    /// Always present so the schema is stable across track_liveset on/off.
+    pub addr: u64,
+    /// Stack at the allocation site. Frame 0 is the most-recent caller.
+    pub callchain: InternedStackFrames,
+}
+
+/// Wire-format event for a deallocation paired with a previously-sampled
+/// `AllocEvent`. Only emitted when liveset tracking is on.
+///
+/// `size` and `alloc_timestamp_ns` are denormalized from the matching
+/// `AllocEvent` so the free stays analytically useful when the corresponding
+/// `AllocEvent` has been evicted by trace rotation. See design §3
+/// "Why denormalize size and alloc_timestamp_ns?" for the rationale.
+#[derive(Debug, TraceEvent)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
+pub struct FreeEvent {
+    /// Wall-clock timestamp in nanoseconds (monotonic) of the free.
+    #[traceevent(timestamp)]
+    pub timestamp_ns: u64,
+    /// OS thread ID of the freeing thread.
+    pub tid: u32,
+    /// Pointer that was freed. Matches a previously-seen `AllocEvent.addr`.
+    pub addr: u64,
+    /// Size of the allocation being freed. Denormalized from the matching
+    /// `AllocEvent` for rotation robustness.
+    pub size: u64,
+    /// Monotonic-ns timestamp of the original `AllocEvent`. Allows leak
+    /// analysis to bucket frees by generation without needing the
+    /// `AllocEvent` in the same (unrotated) trace.
+    pub alloc_timestamp_ns: u64,
+}
+
 /// Wire-format event for a wake notification.
 #[derive(Debug, TraceEvent)]
 pub struct WakeEventEvent {
@@ -291,6 +344,8 @@ pub(crate) enum TelemetryEventRef<'a> {
     TaskTerminate(TaskTerminateEventRef<'a>),
     CpuSample(CpuSampleEventRef<'a>),
     TaskDump(TaskDumpEventRef<'a>),
+    Alloc(AllocEventRef<'a>),
+    Free(FreeEventRef<'a>),
     WakeEvent(WakeEventEventRef<'a>),
     SegmentMetadata(SegmentMetadataEventRef<'a>),
     ClockSync(ClockSyncEventRef<'a>),
@@ -311,6 +366,8 @@ impl<'a> TelemetryEventRef<'a> {
             Self::TaskTerminate(e) => Some(e.timestamp_ns),
             Self::CpuSample(e) => Some(e.timestamp_ns),
             Self::TaskDump(e) => Some(e.timestamp_ns),
+            Self::Alloc(e) => Some(e.timestamp_ns),
+            Self::Free(e) => Some(e.timestamp_ns),
             Self::WakeEvent(e) => Some(e.timestamp_ns),
             Self::SegmentMetadata(e) => Some(e.timestamp_ns),
             Self::ClockSync(e) => Some(e.timestamp_ns),
@@ -364,6 +421,12 @@ pub(crate) fn decode_ref<'a>(
         }
         "TaskDumpEvent" => {
             TelemetryEventRef::TaskDump(TaskDumpEvent::decode(timestamp_ns, fields, field_defs)?)
+        }
+        "AllocEvent" => {
+            TelemetryEventRef::Alloc(AllocEvent::decode(timestamp_ns, fields, field_defs)?)
+        }
+        "FreeEvent" => {
+            TelemetryEventRef::Free(FreeEvent::decode(timestamp_ns, fields, field_defs)?)
         }
         "WakeEventEvent" => {
             TelemetryEventRef::WakeEvent(WakeEventEvent::decode(timestamp_ns, fields, field_defs)?)
@@ -453,6 +516,23 @@ pub(crate) fn to_owned_event(
                 .expect("stack pool entry must exist for TaskDump callchain")
                 .to_vec(),
         },
+        TelemetryEventRef::Alloc(e) => TelemetryEvent::Alloc {
+            timestamp_nanos: e.timestamp_ns,
+            tid: e.tid,
+            size: e.size,
+            addr: e.addr,
+            callchain: stack_pool
+                .get(e.callchain)
+                .expect("stack pool entry must exist for AllocEvent callchain")
+                .to_vec(),
+        },
+        TelemetryEventRef::Free(e) => TelemetryEvent::Free {
+            timestamp_nanos: e.timestamp_ns,
+            tid: e.tid,
+            addr: e.addr,
+            size: e.size,
+            alloc_timestamp_nanos: e.alloc_timestamp_ns,
+        },
         TelemetryEventRef::WakeEvent(e) => TelemetryEvent::WakeEvent {
             timestamp_nanos: e.timestamp_ns,
             waker_task_id: e.waker_task_id,
@@ -471,5 +551,76 @@ pub(crate) fn to_owned_event(
             timestamp_nanos: e.timestamp_ns,
             realtime_nanos: e.realtime_ns,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dial9_trace_format::encoder::Encoder;
+
+    #[test]
+    fn alloc_event_round_trip() {
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        let callchain = enc.intern_stack_frames(&[0x1000, 0x2000, 0x3000]).unwrap();
+        enc.write_infallible(&AllocEvent {
+            timestamp_ns: 123_456_789,
+            tid: 42,
+            size: 4096,
+            addr: 0xDEAD_BEEF_CAFE,
+            callchain,
+        });
+        let buf = enc.into_inner();
+
+        let events = decode_events(&buf).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            TelemetryEvent::Alloc {
+                timestamp_nanos,
+                tid,
+                size,
+                addr,
+                callchain,
+            } => {
+                assert_eq!(*timestamp_nanos, 123_456_789);
+                assert_eq!(*tid, 42);
+                assert_eq!(*size, 4096);
+                assert_eq!(*addr, 0xDEAD_BEEF_CAFE);
+                assert_eq!(callchain, &[0x1000, 0x2000, 0x3000]);
+            }
+            other => panic!("expected Alloc event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn free_event_round_trip() {
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write_infallible(&FreeEvent {
+            timestamp_ns: 999_000_000,
+            tid: 7,
+            addr: 0xCAFE_BABE,
+            size: 2048,
+            alloc_timestamp_ns: 100_000_000,
+        });
+        let buf = enc.into_inner();
+
+        let events = decode_events(&buf).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            TelemetryEvent::Free {
+                timestamp_nanos,
+                tid,
+                addr,
+                size,
+                alloc_timestamp_nanos,
+            } => {
+                assert_eq!(*timestamp_nanos, 999_000_000);
+                assert_eq!(*tid, 7);
+                assert_eq!(*addr, 0xCAFE_BABE);
+                assert_eq!(*size, 2048);
+                assert_eq!(*alloc_timestamp_nanos, 100_000_000);
+            }
+            other => panic!("expected Free event, got {other:?}"),
+        }
     }
 }

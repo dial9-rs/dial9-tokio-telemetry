@@ -196,6 +196,8 @@
     const taskInstrumented = new Map(); // taskId -> bool (true if spawned via TelemetryHandle::spawn)
     const callframeSymbols = new Map();
     const cpuSamples = [];
+    const allocEvents = [];
+    const freeEvents = [];
     const threadNames = new Map();
     const runtimeWorkers = new Map(); // runtime name → [workerId, ...]
     const taskDumps = new Map(); // taskId → [{timestamp, callchain}] sorted by timestamp
@@ -391,6 +393,29 @@
           taskDumps.get(taskId).push({ timestamp: ts, callchain: chain });
           break;
         }
+        case "AllocEvent": {
+          const chain = (v.callchain || []).map(
+            (addr) => "0x" + BigInt(addr).toString(16)
+          );
+          allocEvents.push({
+            timestamp: ts,
+            tid: num(v.tid),
+            size: num(v.size),
+            addr: BigInt(v.addr || 0).toString(),
+            callchain: chain,
+          });
+          break;
+        }
+        case "FreeEvent": {
+          freeEvents.push({
+            timestamp: ts,
+            tid: num(v.tid),
+            addr: BigInt(v.addr || 0).toString(),
+            size: num(v.size),
+            allocTimestampNs: num(v.alloc_timestamp_ns),
+          });
+          break;
+        }
         case "ClockSyncEvent": {
           const real = num(v.realtime_ns);
           if (real > 0) {
@@ -517,6 +542,8 @@
       taskSpawnTimes,
       taskInstrumented,
       cpuSamples,
+      allocEvents,
+      freeEvents,
       callframeSymbols,
       threadNames,
       taskTerminateTimes,

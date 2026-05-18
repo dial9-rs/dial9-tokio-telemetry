@@ -85,6 +85,9 @@ worker-s3 = [
     "dep:aws-config",
     "dep:time",
 ]
+## Removes #[non_exhaustive] from event structs so downstream crates can
+## construct them directly. Unstable: no semver guarantees on new fields.
+unstable-events = []
 ## All features except platform-specific ones (taskdump). Used in CI for non-Linux targets.
 __nonlinux_all_features = [
     "analysis",
@@ -97,6 +100,7 @@ __nonlinux_all_features = [
 dial9-tokio-telemetry = { path = ".", features = [
     "analysis",
     "tracing-layer",
+    "unstable-events",
     "worker-s3",
 ] }
 assert2 = { workspace = true }

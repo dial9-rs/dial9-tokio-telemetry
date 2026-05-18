@@ -286,6 +286,7 @@ async function main() {
           if (actual === '_empty_') return;
           if (doc.endsWith('|null') && (actual === doc.replace('|null', '') || actual === '_null_')) return;
           if (doc === 'number[]' && actual === '[]') return;
+          if (doc === 'unknown[]' && actual === '[]') return;
           deepErrors.push(`${p}: type mismatch (documented: ${doc}, actual: ${actual})`);
           return;
         }

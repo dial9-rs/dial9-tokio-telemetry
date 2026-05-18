@@ -21,8 +21,8 @@ pub use crate::traced::TracedFuture;
 pub use buffer::{Encodable, ThreadLocalEncoder};
 pub use events::{CpuSampleSource, TelemetryEvent, clock_monotonic_ns};
 pub use format::{
-    PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerId, WorkerParkEvent,
-    WorkerUnparkEvent,
+    AllocEvent, FreeEvent, PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerId,
+    WorkerParkEvent, WorkerUnparkEvent,
 };
 pub use recorder::{
     HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset, RuntimeTelemetryHandle,

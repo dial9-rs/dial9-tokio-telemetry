@@ -36,6 +36,8 @@ description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTr
   hasTaskTracking: boolean,              // trace includes task spawn/terminate events
   taskInstrumented: Map<number, boolean>, // task ID → whether task has tracing instrumentation
   taskDumps: Map<number, [{timestamp, callchain}]>, // task ID → async stack captures (sorted by timestamp); see dial9-tokio-telemetry `taskdump` feature
+  allocEvents: AllocEvent[],     // Sampled memory allocations (requires dial9-tokio-telemetry memory-profiling feature)
+  freeEvents: FreeEvent[],       // Deallocations paired with sampled allocs (requires `track_liveset`)
 }
 ```
 
@@ -77,6 +79,26 @@ const EVENT_TYPES = {
 | `tid` | OS thread ID |
 | `source` | 0 = CPU profiling sample, 1 = scheduling (off-CPU) sample |
 | `callchain` | Array of address strings like `"0x55cc6d053893"` |
+
+## AllocEvent fields
+
+| Field | Description |
+|-------|-------------|
+| `timestamp` | Monotonic nanoseconds at the allocation |
+| `tid` | OS thread ID of the allocating thread |
+| `size` | Allocation size in bytes |
+| `addr` | Returned pointer address as a decimal string (BigInt-safe) |
+| `callchain` | Array of address strings like `"0x55cc6d053893"` |
+
+## FreeEvent fields
+
+| Field | Description |
+|-------|-------------|
+| `timestamp` | Monotonic nanoseconds at the free |
+| `tid` | OS thread ID of the freeing thread |
+| `addr` | Pointer that was freed, as a decimal string (BigInt-safe) |
+| `size` | Size of the allocation being freed (denormalized from the matching `AllocEvent`) |
+| `allocTimestampNs` | Monotonic-ns timestamp of the original allocation (denormalized) |
 
 ## Parse options
 
