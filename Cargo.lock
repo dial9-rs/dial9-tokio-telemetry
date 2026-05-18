@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "dial9"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "dial9-viewer",
@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blazesym",
  "criterion",
@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "arc-swap",
  "assert2",
@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "assert2",

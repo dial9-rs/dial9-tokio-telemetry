@@ -4,7 +4,10 @@
 //! configurable frequency. The flush thread drains raw samples; the caller
 //! (EventWriter) maps OS thread IDs to worker IDs via SharedState.thread_roles.
 
-use crate::telemetry::events::{CpuSampleSource, ThreadName};
+use crate::telemetry::buffer::record_encodable_event;
+use crate::telemetry::events::{CpuSampleData, CpuSampleSource, ThreadName};
+use crate::telemetry::format::WorkerId;
+use crate::telemetry::recorder::source::{FlushContext, Source};
 use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, SamplingMode};
 use std::collections::HashMap;
 use std::io;
@@ -177,5 +180,74 @@ impl SchedProfiler {
                 cpu: sample.cpu,
             });
         });
+    }
+}
+
+// ── Source trait implementations ────────────────────────────────────────────
+
+impl Source for CpuProfiler {
+    fn flush(&mut self, ctx: &FlushContext<'_>) {
+        let resolve = |tid: u32| -> WorkerId {
+            match ctx.thread_roles.get(&tid) {
+                Some(crate::telemetry::events::ThreadRole::Worker(id)) => WorkerId::from(*id),
+                Some(crate::telemetry::events::ThreadRole::Blocking) => WorkerId::BLOCKING,
+                None => WorkerId::UNKNOWN,
+            }
+        };
+
+        self.drain(|raw, thread_name| {
+            let worker_id = resolve(raw.tid);
+            let data = CpuSampleData {
+                timestamp_nanos: raw.timestamp_nanos,
+                worker_id,
+                tid: raw.tid,
+                source: raw.source,
+                callchain: raw.callchain,
+                thread_name: thread_name.cloned(),
+                cpu: raw.cpu,
+            };
+            record_encodable_event(&data, ctx.collector, ctx.drain_epoch);
+        });
+    }
+
+    fn name(&self) -> &'static str {
+        "cpu_profile"
+    }
+}
+
+impl Source for SchedProfiler {
+    fn flush(&mut self, ctx: &FlushContext<'_>) {
+        let resolve = |tid: u32| -> WorkerId {
+            match ctx.thread_roles.get(&tid) {
+                Some(crate::telemetry::events::ThreadRole::Worker(id)) => WorkerId::from(*id),
+                Some(crate::telemetry::events::ThreadRole::Blocking) => WorkerId::BLOCKING,
+                None => WorkerId::UNKNOWN,
+            }
+        };
+
+        self.drain(|raw| {
+            let data = CpuSampleData {
+                timestamp_nanos: raw.timestamp_nanos,
+                worker_id: resolve(raw.tid),
+                tid: raw.tid,
+                source: raw.source,
+                callchain: raw.callchain,
+                thread_name: None,
+                cpu: raw.cpu,
+            };
+            record_encodable_event(&data, ctx.collector, ctx.drain_epoch);
+        });
+    }
+
+    fn on_worker_thread_start(&mut self) -> io::Result<()> {
+        self.track_current_thread()
+    }
+
+    fn on_thread_stop(&mut self) {
+        self.stop_tracking_current_thread();
+    }
+
+    fn name(&self) -> &'static str {
+        "sched"
     }
 }

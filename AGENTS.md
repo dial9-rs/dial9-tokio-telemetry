@@ -22,7 +22,45 @@ these rules for all public APIs:
   public type, or changing a trait signature are all breaking. When in doubt,
   keep it private or behind a builder.
 
+## Trace Format Backwards Compatibility
+
+The trace format uses a self-describing schema: each event type's schema is
+written to the wire before any events of that type. Decoders use the schema on
+the wire (not a compiled-in schema) to decode events.
+
+**Rules:**
+
+1. **Adding new fields is always safe** — even non-optional ones. The decoder
+   reads whatever fields the schema declares. Old traces simply won't have the
+   new field in their schema, so it won't appear in the decoded output.
+
+2. **Removing non-optional fields is NOT safe.** Old traces that contain the
+   field will still declare it in their on-wire schema, and the decoder will
+   attempt to read it.
+
+3. **We only care about the JS decoder reading old traces.** Users always have
+   a current decoder (the viewer), but may load old trace files. When you add a
+   new non-optional field, the JS viewer code that accesses it must handle the
+   field being `undefined` (because old traces won't have it):
+
+   ```js
+   // Good — gracefully handles old traces missing the field
+   const workerId = v.worker_id != null ? num(v.worker_id) : undefined;
+
+   // Bad — will throw or produce NaN on old traces
+   const workerId = num(v.worker_id);
+   ```
+
+4. **Rust decoder backwards compat is not a concern.** We don't need to worry
+   about old Rust decoders reading new traces.
+
 ## Coding practices
+
+**Never use `unwrap_or(0)`, `unwrap_or_default()`, or similar "fallback to
+zero/sentinel" patterns.** These hide bugs by silently producing plausible but
+wrong values. Always consider the actual error condition: propagate the error,
+return `Option`, log and skip, or panic if the invariant is truly unrecoverable.
+
 Avoid dropping an error without logging it. Use `tracing` for logging.
 ```
 let _ = ...
@@ -39,6 +77,7 @@ Unguarded logging in loops causes log spam that degrades observability and can i
 ## Running tests
 
 - Always run `cargo nextest run` to run tests
+- Shuttle tests are NOT included in `cargo nextest run`. They require a separate invocation: `./scripts/test-shuttle.sh`. Always run this when modifying code under `#[cfg(all(test, shuttle))]` or the flush/source paths.
 
 ## Ownership
 

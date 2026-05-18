@@ -31,6 +31,7 @@
 //! yield points hit during a capture, with offsets recording each callchain's
 //! start. The buffers are reused across polls.
 
+use crate::sampling::SplitMix64;
 use crate::telemetry::format::TaskDumpEvent;
 use crate::telemetry::recorder::SharedState;
 use crate::telemetry::task_metadata::TaskId;
@@ -46,36 +47,6 @@ use std::task::{Context, Poll};
 
 /// Initial heap reservation for the instruction-pointer buffer on first capture.
 const FRAME_BUF_INITIAL_CAPACITY: usize = 256;
-
-// ─── Minimal PRNG (splitmix64) ──────────────────────────────────────────────
-
-/// Minimal splitmix64 PRNG. Fast, no dependencies, good enough for sampling.
-struct SplitMix64(u64);
-
-impl SplitMix64 {
-    fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
-        z ^ (z >> 31)
-    }
-
-    /// Draw from exponential distribution with given mean (in nanoseconds).
-    /// Returns at least 1 to avoid immediate re-trigger.
-    fn draw_exponential_ns(&mut self, mean_ns: u64) -> i64 {
-        // Generate a uniform float in (0, 1] — avoid exact 0 to prevent ln(0).
-        let u = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
-        let u = if u == 0.0 { f64::MIN_POSITIVE } else { u };
-        let sample = -u.ln() * (mean_ns as f64);
-        // Clamp to at least 1ns so we never immediately re-trigger.
-        (sample as i64).max(1)
-    }
-}
 
 // ─── TaskDumped future wrapper ──────────────────────────────────────────────
 
@@ -121,7 +92,7 @@ impl<F> TaskDumped<F> {
             }
         };
         let mut rng = SplitMix64::new(seed);
-        let next_sample_ns = rng.draw_exponential_ns(sample_mean_ns);
+        let next_sample_ns = rng.draw_exponential(sample_mean_ns) as i64;
         Self {
             inner,
             shared,
@@ -170,7 +141,7 @@ impl<F: Future> Future for TaskDumped<F> {
                 .expect("checked in match above")
                 .get();
             this.frames.emit(this.shared, *this.task_id, ts);
-            *this.next_sample_ns = this.rng.draw_exponential_ns(*this.sample_mean_ns);
+            *this.next_sample_ns = this.rng.draw_exponential(*this.sample_mean_ns) as i64;
         }
         match &result {
             Poll::Ready(_) => {
@@ -314,45 +285,5 @@ impl Encodable for TaskDumpData<'_> {
             task_id: self.task_id,
             callchain: interned_callchain,
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::SplitMix64;
-
-    #[test]
-    fn splitmix64_deterministic() {
-        let mut rng = SplitMix64::new(42);
-        let a = rng.next_u64();
-        let b = rng.next_u64();
-
-        let mut rng2 = SplitMix64::new(42);
-        assert_eq!(a, rng2.next_u64());
-        assert_eq!(b, rng2.next_u64());
-    }
-
-    #[test]
-    fn draw_exponential_ns_mean_is_reasonable() {
-        let mut rng = SplitMix64::new(123);
-        let mean_ns: u64 = 10_000_000; // 10ms
-        let n = 10_000;
-        let sum: f64 = (0..n)
-            .map(|_| rng.draw_exponential_ns(mean_ns) as f64)
-            .sum();
-        let observed_mean = sum / n as f64;
-        // Within 10% of the configured mean.
-        assert!(
-            (observed_mean - mean_ns as f64).abs() < mean_ns as f64 * 0.1,
-            "observed mean {observed_mean} too far from expected {mean_ns}"
-        );
-    }
-
-    #[test]
-    fn draw_exponential_ns_always_positive() {
-        let mut rng = SplitMix64::new(0);
-        for _ in 0..10_000 {
-            assert!(rng.draw_exponential_ns(1_000_000) >= 1);
-        }
     }
 }

@@ -4,12 +4,10 @@ use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::buffer;
 use crate::telemetry::buffer::TlBufferHandle;
 use crate::telemetry::collector::CentralCollector;
-#[cfg(feature = "cpu-profiling")]
 use crate::telemetry::events::ThreadRole;
 use crate::telemetry::format::{QueueSampleEvent, WakeEventEvent};
 use crate::telemetry::task_metadata::TaskId;
 use std::cell::Cell;
-#[cfg(feature = "cpu-profiling")]
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -55,10 +53,9 @@ pub(crate) struct SharedState {
     pub(crate) contexts: Mutex<Vec<Arc<RuntimeContext>>>,
     /// Maps OS tid → thread role so that CPU samples returned from perf can be
     /// attributed to the correct worker or blocking-pool bucket at flush time.
-    #[cfg(feature = "cpu-profiling")]
     pub(crate) thread_roles: Mutex<HashMap<u32, ThreadRole>>,
-    #[cfg(feature = "cpu-profiling")]
-    pub(crate) sched_profiler: Mutex<Option<crate::telemetry::cpu_profile::SchedProfiler>>,
+    /// Data sources (CPU profiler, sched profiler, etc.) that the flush thread drains.
+    pub(crate) sources: Mutex<Vec<Box<dyn super::source::Source>>>,
 }
 
 impl SharedState {
@@ -74,11 +71,14 @@ impl SharedState {
             drain_epoch: AtomicU64::new(0),
             tl_buffers: Mutex::new(Vec::new()),
             contexts: Mutex::new(Vec::new()),
-            #[cfg(feature = "cpu-profiling")]
             thread_roles: Mutex::new(HashMap::new()),
-            #[cfg(feature = "cpu-profiling")]
-            sched_profiler: Mutex::new(None),
+            sources: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Register a data source to be drained by the flush thread each cycle.
+    pub(crate) fn push_source(&self, source: Box<dyn super::source::Source>) {
+        self.sources.lock().unwrap().push(source);
     }
 
     fn timestamp_nanos(&self) -> u64 {
@@ -602,6 +602,40 @@ mod shuttle_tests {
         }
     }
 
+    // ── Mock Source ────────────────────────────────────────────────────
+
+    /// A Source that accumulates events from worker threads and emits them
+    /// during flush. Exercises the Source flush path under shuttle.
+    struct MockSource {
+        pending: Arc<Mutex<Vec<ValidationEvent>>>,
+    }
+
+    impl MockSource {
+        fn new(pending: Arc<Mutex<Vec<ValidationEvent>>>) -> Self {
+            Self { pending }
+        }
+    }
+
+    impl crate::telemetry::recorder::source::Source for MockSource {
+        fn flush(&mut self, ctx: &crate::telemetry::recorder::source::FlushContext<'_>) {
+            let events: Vec<_> = self.pending.lock().unwrap().drain(..).collect();
+            for ev in &events {
+                crate::telemetry::buffer::record_encodable_event(
+                    ev,
+                    ctx.collector,
+                    ctx.drain_epoch,
+                );
+            }
+        }
+
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+
+        // TODO: exercise on_worker_thread_start/on_thread_stop once shuttle
+        // tests include a Tokio runtime.
+    }
+
     // ── Test body ───────────────────────────────────────────────────────
 
     fn test_telemetry_core_pipeline() {
@@ -614,10 +648,17 @@ mod shuttle_tests {
         let next_id = Arc::new(AtomicU64::new(0));
         let segments: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
 
+        // Mock source: worker threads push events here, flush thread drains them.
+        let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
+
         let guard = TelemetryCore::builder()
             .writer(InvariantCheckingWriter::new(segments.clone()))
             .build()
             .unwrap();
+        guard
+            .shared()
+            .unwrap()
+            .push_source(Box::new(MockSource::new(source_pending.clone())));
         guard.enable();
         let handle = guard.handle();
 
@@ -627,6 +668,7 @@ mod shuttle_tests {
                 let h = handle.clone();
                 let next_id = next_id.clone();
                 let expected = expected.clone();
+                let source_pending = source_pending.clone();
                 let thread_id = thread_id as u64;
                 crate::primitives::thread::spawn(move || {
                     let mut rng = shuttle::rand::thread_rng();
@@ -642,7 +684,13 @@ mod shuttle_tests {
                             id,
                         };
                         expected.lock().unwrap().push(ev.clone());
-                        h.record_encodable_event(&ev);
+                        // Randomly choose: emit via handle (TL buffer path)
+                        // or via mock source (flush-thread path).
+                        if rng.gen_range(0u32..2) == 0 {
+                            h.record_encodable_event(&ev);
+                        } else {
+                            source_pending.lock().unwrap().push(ev);
+                        }
                     }
                 })
             })
