@@ -90,9 +90,10 @@ The `release.yml` workflow is authorized to publish releases to the dial9 crates
 1. Merge your PRs to `main` using conventional commit messages (e.g. `feat:`, `fix:`, `feat!:` for breaking changes).
 2. The release PR will update automatically. Review the changelog and version bumps.
 3. If you need to adjust versions (e.g. force a major bump), edit `Cargo.toml` versions in the release PR before merging.
-4. Merge the release PR.
-5. Go to Actions → "Publish release" → Run workflow → confirm.
-6. A team member approves the deployment in the `release` environment.
+4. **Trigger CI:** The release PR is created by `GITHUB_TOKEN`, which means GitHub won't automatically trigger CI workflows on it. Before merging, close and reopen the PR to trigger CI. Wait for the `CI Pass` check to go green.
+5. Merge the release PR.
+6. Go to Actions → "Publish release" → Run workflow → confirm.
+7. A team member approves the deployment in the `release` environment.
 
 ### Semver checks
 
