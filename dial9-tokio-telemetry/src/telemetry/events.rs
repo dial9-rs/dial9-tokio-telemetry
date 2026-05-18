@@ -5,7 +5,6 @@ use serde::Serialize;
 use std::sync::Arc;
 
 /// Role of a thread known to the telemetry system.
-#[cfg(feature = "cpu-profiling")]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ThreadRole {
     /// A tokio worker thread with the given index.
@@ -99,6 +98,8 @@ pub enum TelemetryEvent {
         /// Thread CPU time (nanos) from CLOCK_THREAD_CPUTIME_ID.
         #[serde(rename = "cpu_ns")]
         cpu_time_nanos: u64,
+        /// OS thread ID of the parking thread.
+        tid: u32,
     },
     /// A worker thread unparked (resumed).
     WorkerUnpark {
@@ -117,6 +118,8 @@ pub enum TelemetryEvent {
         /// Scheduling wait delta (nanos) from schedstat.
         #[serde(rename = "sched_wait_ns")]
         sched_wait_delta_nanos: u64,
+        /// OS thread ID of the unparking thread.
+        tid: u32,
     },
     /// Periodic sample of the global task queue depth.
     QueueSample {

@@ -1,6 +1,22 @@
 [workspace]
 git_release_enable = true
 changelog_update = false
+semver_check = true
+pr_body = """
+{% for release in releases %}
+{% if release.title %}
+### {{release.title}}
+{% endif %}
+Package: `{{release.package}}` {{release.previous_version}} -> {{release.next_version}}
+{% if release.changelog %}
+Changes:
+{{release.changelog}}
+{% endif %}
+{% endfor %}
+---
+
+> **Maintainer note:** CI does not trigger automatically on this PR (GitHub limitation with `GITHUB_TOKEN`-created PRs). **Close and reopen** this PR to trigger CI before merging.
+"""
 
 [[package]]
 name = "dial9-tokio-telemetry"
