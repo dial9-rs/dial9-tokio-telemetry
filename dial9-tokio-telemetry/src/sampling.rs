@@ -2,7 +2,7 @@
 //!
 //! Used by the task-dump idle sampler (sampling on nanoseconds) and by the
 //! memory profiler (sampling on bytes). The unit is opaque to the math —
-//! callers pass the mean and treat the returned i64 as a counter in their
+//! callers pass the mean and treat the returned u64 as a counter in their
 //! native unit.
 
 /// Minimal splitmix64 PRNG. Fast, no dependencies, good enough for sampling.
@@ -27,12 +27,12 @@ impl SplitMix64 {
     ///
     /// The unit is whatever the caller treats `mean` as (nanoseconds,
     /// bytes, etc.).
-    pub(crate) fn draw_exponential(&mut self, mean: u64) -> i64 {
+    pub(crate) fn draw_exponential(&mut self, mean: u64) -> u64 {
         // Generate a uniform float in (0, 1] — avoid exact 0 to prevent ln(0).
         let u = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
         let u = if u == 0.0 { f64::MIN_POSITIVE } else { u };
         let sample = -u.ln() * (mean as f64);
-        (sample as i64).max(1)
+        (sample as u64).max(1)
     }
 }
 
