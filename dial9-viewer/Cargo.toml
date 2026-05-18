@@ -1,6 +1,6 @@
 [package]
 name = "dial9-viewer"
-version = "0.3.10"
+version = "0.3.11"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
