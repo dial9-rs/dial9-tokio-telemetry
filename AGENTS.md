@@ -87,3 +87,13 @@ Failing to update it will cause the viewer to fail when loading the demo.
 ## Ways of working
 - After finishing your work use showboat to demonstrate what you have done. include key code, tests, and what was changed.
 - Use a progress doc to keep track of what you are doing. progress docs are just for you. when we are ready for PR, we unstage the progress docs
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `dial9-rs/dial9-tokio-telemetry`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout. See `docs/agents/domain.md`.
