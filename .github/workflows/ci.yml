@@ -212,6 +212,9 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Need full history so cargo-semver-checks can use origin/main as the baseline.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: ${{ env.STABLE_TOOLCHAIN }}
@@ -225,8 +228,14 @@ jobs:
       - name: Check semver compliance
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
+        # Compare against origin/main rather than the latest crates.io release. This
+        # surfaces only breaking changes introduced *by this PR* — accumulated breaks
+        # already on main don't relitigate on every PR. release-plz's own
+        # semver_check (at release time) is the gate that ensures a major bump
+        # before publishing.
         run: |
           cargo semver-checks \
+            --baseline-rev origin/main \
             -p dial9-trace-format-derive \
             -p dial9-trace-format \
             -p dial9-perf-self-profile \
