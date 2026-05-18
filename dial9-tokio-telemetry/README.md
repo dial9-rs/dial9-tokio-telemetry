@@ -60,6 +60,64 @@ async fn main() {
 }
 ```
 
+For zero-code configuration in production, use `Dial9Config::from_env()`:
+
+```rust,no_run
+use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
+
+fn my_config() -> Dial9Config {
+    Dial9Config::from_env()
+}
+
+#[dial9_tokio_telemetry::main(config = my_config)]
+async fn main() {
+    let handle = TelemetryHandle::current();
+    handle.spawn(async { /* wake events tracked when enabled */ }).await.unwrap();
+}
+```
+
+`from_env()` supports these local trace writer knobs:
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_ENABLED` | `false` | Master switch for installing telemetry. |
+| `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. |
+| `DIAL9_ROTATION_SECS` | `60` | Wall-clock rotation period in seconds. |
+| `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
+| `DIAL9_MAX_FILE_SIZE_MB` | `max(total / 4, 16)` | Per-file trace segment size in MiB. |
+
+Runtime knobs:
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_TASK_TRACKING_ENABLED` | `true` | Track tasks spawned through dial9 handles. |
+| `DIAL9_RUNTIME_NAME` | unset | Human-readable runtime name in trace metadata. |
+
+S3 upload knobs (`worker-s3` feature required):
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_S3_BUCKET` | unset | Upload sealed trace segments to this bucket. |
+| `DIAL9_SERVICE_NAME` | binary name | Service name used in S3 keys and metadata. |
+| `DIAL9_S3_PREFIX` | unset | Optional S3 object key prefix. |
+
+CPU profiling knobs (`cpu-profiling` feature required):
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_CPU_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable CPU stack sampling. |
+| `DIAL9_CPU_SAMPLE_HZ` | `99` | CPU sampling frequency in Hz. |
+| `DIAL9_SCHEDULE_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable per-worker scheduler event capture. |
+
+Task dump knobs (capture requires the `taskdump` feature):
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_TASK_DUMP_ENABLED` | `false` | Capture async task dumps at idle yield points. |
+| `DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS` | `10` | Mean idle duration for task dump sampling. |
+
+Missing variables use defaults. Blank, invalid, or non-Unicode values emit a warning and are treated as missing. Some numeric defaults come from the underlying config builders and are listed here as the current `from_env()` behavior.
+
 ## Why dial9-tokio-telemetry?
 
 It can be hard to understand application performance and behavior in async code. dial9 tracks Tokio, operating system and application events to create a detailed, nanosecond-by-nanosecond trace of your application behavior that you can analyze. On Linux, you can capture CPU profiles and kernel scheduling events, so you can see not just _that_ a task was delayed but _what code_ was running on the worker instead.
